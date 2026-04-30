@@ -1,8 +1,12 @@
 # infra/compose.yaml — local dev stack for cloud-browser-webrtc
 #
-# Brings up three services on a shared bridge network so the browser
+# Brings up four services on a shared bridge network so the browser
 # client can reach signaling and signaling can reach Chromium DevTools:
 #
+#   client-build — one-shot node:20-alpine that runs `npm install && npm
+#                  run build` against ../client. Populates ../client/dist
+#                  with bundled main.js + a copy of index.html. Exits 0
+#                  before the client service starts (T40).
 #   chromium   — the T7 + T28 + T31 image. Boots Chromium under Xvfb
 #                with the streamer page (T23) opened as --app; runs
 #                cold-start.sh + idle-watchdog.sh per T31. DevTools
@@ -10,8 +14,8 @@
 #   signaling  — Go WebSocket signaling server (T13). Distroless image,
 #                so no in-container healthcheck (see service block
 #                comment); depending services use service_started.
-#   client     — nginx:alpine serving client/ on :3000 with a runtime-
-#                generated config.js carrying SIGNALING_URL.
+#   client     — nginx:alpine serving ../client/dist on :3000 with a
+#                runtime-generated config.js carrying SIGNALING_URL.
 #
 # Usage (from repo root):
 #   docker compose -f infra/compose.yaml up --build
@@ -31,6 +35,38 @@ networks:
     driver: bridge
 
 services:
+  # T40: one-shot build of the browser client. Without this, the client
+  # service would bind-mount ../client (source) which has index.html
+  # importing ./main.js — but main.js only exists at ../client/dist/
+  # main.js after esbuild runs. We bind-mount the source, write dist/
+  # back to the host, and exit; node_modules lives in a named volume
+  # so the host filesystem isn't polluted with per-arch native binaries
+  # (esbuild ships a CPU-arch-specific binary that would conflict on
+  # macOS+Linux mixed dev).
+  client-build:
+    image: node:20-alpine
+    container_name: cbwrtc-client-build
+    working_dir: /work
+    volumes:
+      - ../client:/work
+      - client_node_modules:/work/node_modules
+    # mkdir before install/build keeps `docker compose up` working on
+    # the very first run, when ../client/dist may not yet exist on the
+    # host (the client service then bind-mounts it).
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        echo "[client-build] mkdir -p dist"
+        mkdir -p dist
+        echo "[client-build] npm install"
+        npm install --no-audit --no-fund
+        echo "[client-build] npm run build"
+        npm run build
+        echo "[client-build] done; ../client/dist is ready"
+    restart: "no"
+
   chromium:
     # Build context is the repo root because the Dockerfile copies
     # capture/streamer-page/ (T28) and infra/* into the image.
@@ -99,12 +135,14 @@ services:
     networks: [cbnet]
     ports:
       - "3000:80"
-    # Bind-mount client/ for live reload during dev. Read-only so the
-    # container can't accidentally write into the source tree. The
-    # generated config.js is written to a tmpfs overlay path inside the
-    # container that's served alongside.
+    # Bind-mount the *built* client/dist for live reload during dev:
+    # esbuild's --watch mode (npm run watch) updates ../client/dist on
+    # disk and nginx serves it directly. Read-only so the container
+    # can't accidentally write into the source tree. The generated
+    # config.js is written to a tmpfs overlay path inside the container
+    # that's served alongside via an alias in the nginx server block.
     volumes:
-      - ../client:/usr/share/nginx/html:ro
+      - ../client/dist:/usr/share/nginx/html:ro
       - client_runtime:/srv/runtime
     environment:
       # Project spec says ws://signaling:8080. That DNS name resolves
@@ -159,7 +197,16 @@ services:
         condition: service_started
       chromium:
         condition: service_healthy
+      # T40: ensure the client bundle is built before nginx tries to
+      # serve it. service_completed_successfully waits for client-build
+      # to exit 0.
+      client-build:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
   client_runtime:
+  # T40: cached node_modules for client-build. Speeds up successive
+  # `compose up` runs and avoids the host filesystem inheriting per-
+  # arch native binaries from inside the container.
+  client_node_modules:
