@@ -1,0 +1,124 @@
+# build/Dockerfile.runtime — Phase 2 runtime image.
+#
+# This is the cb-chromium image once T112+T113 ship cloud_browser_worker.
+# Replaces the v1 stock-Chromium-under-Xvfb shape (current
+# infra/Dockerfile) with our embedder binary that ships the encoder
+# factory (T19 / T35 / T36 / T58 / T63 / T70 / T75 / T83) + the
+# FrameSinkVideoCapturer integration (T55) compiled in.
+#
+# The kaniko sidecar in the K8s build Job (T112) reads this from
+# the build context staged at /work/artifacts/context/ by Step 9 of
+# cb-build.sh and pushes the result to the forgejo registry tagged
+# `cb-chromium:cr<branch>-<sha>` (per the IMAGE_TAG file in the
+# context).
+#
+# Coexistence with infra/Dockerfile:
+#   - infra/Dockerfile builds the Phase 1 image (stock chromium +
+#     getDisplayMedia, T7 / T78 / T86's CBWRTC_USE_FAKE_MEDIA path).
+#     That image stays the dev compose default until Phase 2 lands.
+#   - This Dockerfile builds the Phase 2 image (cloud_browser_worker
+#     embedder, real FrameSinkVideoCapturer, real encoder factory).
+#     Compose flips when T101 §6 first-real-demo gate clears.
+
+# debian:trixie-slim is consistent with the v1 image base (T7) and
+# gives us the runtime libs every Chromium build links against —
+# libnss, libgbm, libfontconfig, libdbus, fonts. Distroless would be
+# smaller but the runtime needs more libs than distroless ships, and
+# debugging is much easier with apt available.
+FROM debian:trixie-slim
+
+# Same supervisord-driven structure as the Phase 1 image (T7) so
+# the rest of infra/ keeps working without per-image conditionals.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+        ca-certificates \
+        supervisor \
+        xvfb \
+        pulseaudio \
+        # Chromium runtime deps — every cloud_browser_worker links
+        # against these since they live in third_party/. If T17's
+        # build env grows new deps, append here in lock-step.
+        libnss3 \
+        libnspr4 \
+        libgbm1 \
+        libdbus-1-3 \
+        libdrm2 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxfixes3 \
+        libxrandr2 \
+        libxkbcommon0 \
+        libpango-1.0-0 \
+        libcairo2 \
+        libasound2 \
+        libatspi2.0-0 \
+        libatk1.0-0 \
+        libatk-bridge2.0-0 \
+        libcups2 \
+        libfontconfig1 \
+        libfreetype6 \
+        fonts-noto-core \
+        fonts-noto-color-emoji \
+        # Diagnostic tools — same set the Phase 1 image carries (T9,
+        # T52). The container is debugged via DevTools but having
+        # curl + xdpyinfo + procps in the image saves an exec the
+        # one time it actually breaks.
+        curl \
+        procps \
+        x11-utils \
+        # supervisord watchdog (T16-followup). python3 + websocket
+        # client are required by infra/lifecycle/idle-watchdog.sh.
+        python3 \
+        python3-websocket \
+        && rm -rf /var/lib/apt/lists/*
+
+# cbuser matches the Phase 1 image so file ownership semantics are
+# consistent across the two images. UID 1000 lines up with the K8s
+# securityContext we ship in browsersessionpool-examples.yaml.
+RUN useradd --create-home --shell /bin/bash --uid 1000 cbuser && \
+    mkdir -p /run/user/1000 /var/log/supervisor /opt/cloud-browser && \
+    chown -R cbuser:cbuser /run/user/1000 /var/log/supervisor /opt/cloud-browser
+
+# The actual binary. Built by cb-build.sh (T113) from the pinned
+# Chromium tree + our patch series + our cloud-browser sources.
+# Copy from the kaniko build context.
+COPY cloud_browser_worker /usr/local/bin/cloud_browser_worker
+RUN chmod +x /usr/local/bin/cloud_browser_worker
+
+# Supervisord glue. The Phase 1 supervisord.conf (T7) launches
+# /usr/bin/chromium via launch-chromium.sh; the Phase 2 path swaps
+# that program block for cloud_browser_worker. Both files are staged
+# into the build context by cb-build.sh Step 9 and copied here so a
+# Phase-1-vs-Phase-2 fleet difference is just an image tag, not a
+# file-layout difference.
+COPY supervisord.conf      /etc/supervisor/supervisord.conf
+COPY launch-chromium.sh    /usr/local/bin/launch-chromium.sh
+RUN chmod +x /usr/local/bin/launch-chromium.sh
+
+# Image-tag metadata for runtime introspection. The kaniko sidecar
+# injects the same value here so `docker inspect` and
+# `cloud_browser_worker --version` both report the same id.
+ARG IMAGE_TAG=unknown
+ENV CB_IMAGE_TAG=${IMAGE_TAG}
+LABEL org.opencontainers.image.source="https://github.com/iggy/cloud-browser-webrtc"
+LABEL org.opencontainers.image.title="cb-chromium"
+LABEL org.opencontainers.image.description="Phase 2 cloud-browser worker — embedder Chromium with encoder factory + FrameSinkVideoCapturer."
+LABEL org.opencontainers.image.version="${IMAGE_TAG}"
+
+# Same network surface as the Phase 1 image: 9222 = DevTools (T9 /
+# T52 socat sidecar territory), 9100 = cb-metrics-sidecar (T38).
+EXPOSE 9222 9100
+
+# /dev/shm sizing matters here too — Chromium's renderer needs more
+# than the 64 MiB Docker default. The compose / K8s spec sets
+# shm_size=1gb; --disable-dev-shm-usage in launch-chromium.sh is the
+# belt-and-braces fallback (T7 / T78).
+HEALTHCHECK --interval=10s --timeout=3s --start-period=45s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:9222/json/version || exit 1
+
+# Run as cbuser; supervisord drops to it via [program] user= directives
+# in supervisord.conf.
+USER cbuser
+WORKDIR /home/cbuser
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
