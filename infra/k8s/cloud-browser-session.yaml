@@ -133,6 +133,14 @@ spec:
     # without giving them write access to all of /tmp.
     - name: x11-socket
       emptyDir: {}
+    # Per-session uploads (T74) — file-bridge writes here, Chromium
+    # reads the file paths via DOM.setFileInputFiles. emptyDir so the
+    # storage is reclaimed when the pod terminates; sized to 2 × the
+    # 100 MiB upload cap to allow at least one concurrent upload plus
+    # whatever the user has attached via past uploads.
+    - name: cb-uploads
+      emptyDir:
+        sizeLimit: 256Mi
 
   # Pod-level resources are summed across containers; we target ~3 CPU
   # / ~5.5GB mem / 2GB ephemeral storage on the request side. Cluster
@@ -178,6 +186,11 @@ spec:
           mountPath: /home/cbuser
         - name: tmp
           mountPath: /tmp
+        # Read-only access to files uploaded by file-bridge (T74).
+        # Chromium reads the on-disk path via DOM.setFileInputFiles.
+        - name: cb-uploads
+          mountPath: /var/lib/cb-uploads
+          readOnly: true
         - name: x11-socket
           mountPath: /tmp/.X11-unix
       resources:
@@ -351,3 +364,41 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+
+    # -------------------------------------------------------------------
+    # file-bridge (T74) — chunk + sha256 + MIME-allowlist file upload
+    # over a "files" data channel. Writes to the per-session
+    # cb-uploads emptyDir, then attaches via DOM.setFileInputFiles.
+    # -------------------------------------------------------------------
+    - name: file-bridge
+      image: ghcr.io/iggy/cloud-browser-webrtc/file-bridge:dev
+      imagePullPolicy: IfNotPresent
+      args:
+        - "--ws-addr=:9400"
+        - "--ws-path=/files"
+        - "--cdp-url=http://127.0.0.1:9222"
+        - "--upload-dir=/var/lib/cb-uploads"
+        # session-id is patched per-session by the controller (T71).
+      ports:
+        - name: files-ws
+          containerPort: 9400
+      volumeMounts:
+        - name: cb-uploads
+          mountPath: /var/lib/cb-uploads
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          # 1.5 × the 100 MiB upload cap to leave room for the in-
+          # memory chunk hash + http.DetectContentType buffer.
+          cpu: "500m"
+          memory: "256Mi"
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532

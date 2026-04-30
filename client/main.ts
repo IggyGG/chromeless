@@ -23,6 +23,7 @@
 //     offer with iceRestart=true (see docs/protocols/reconnect.md).
 
 import { InputChannel } from "./src/input.js";
+import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { fetchTurnConfig } from "./src/turn.js";
 import { prioritizeCodec } from "./src/sdp.js";
 import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src/reconnect.js";
@@ -112,6 +113,11 @@ interface Session {
   stats: StatsSampler | null;
   /** Subscriber detach function for the stats sampler. */
   detachStats: (() => void) | null;
+  /** Set when the streamer has opened the "files" data channel (T74). */
+  filesDc: RTCDataChannel | null;
+  fileUpload: FileUploadChannel | null;
+  /** Per-session detach function for window-level drop listeners. */
+  detachDrop: (() => void) | null;
   /** Has at least one rws "open" fired? Used to distinguish first vs reconnect. */
   hasOpenedOnce: boolean;
 }
@@ -123,9 +129,11 @@ function teardown(reason: string): void {
   log("info", `tearing down: ${reason}`);
   try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.detachStats?.(); } catch { /* ignore */ }
+  try { active.detachDrop?.(); } catch { /* ignore */ }
   try { active.stats?.stop(); } catch { /* ignore */ }
   try { active.dc?.close(); } catch { /* ignore */ }
   try { active.statsDc?.close(); } catch { /* ignore */ }
+  try { active.filesDc?.close(); } catch { /* ignore */ }
   try { active.pc.close(); } catch { /* ignore */ }
   if (active.rws.isConnected()) {
     try {
@@ -163,6 +171,7 @@ function wireDataChannel(dc: RTCDataChannel): void {
   log("ok", `← data channel "${dc.label}" (state=${dc.readyState})`);
   if (dc.label === "input") return wireInputChannel(dc);
   if (dc.label === "stats") return wireStatsChannel(dc);
+  if (dc.label === "files") return wireFilesChannel(dc);
   log("warn", `ignoring unknown data channel label: ${dc.label}`);
 }
 
@@ -171,6 +180,69 @@ function wireStatsChannel(dc: RTCDataChannel): void {
   active.statsDc = dc;
   // Only start emitting frames over the channel once it's open.
   // Subscribers (debug panel) are wired in buildPeerConnection.
+}
+
+/**
+ * Wire the "files" RTCDataChannel for v1 file uploads (T74). When
+ * the user drops a file onto the video element, T46 emits the
+ * drag-drop *events* over the input channel; we then kick off a
+ * content upload over this channel and (on success) the bridge has
+ * already attached the file via DOM.setFileInputFiles.
+ *
+ * For now the upload is gated on a DataTransfer with kind="file"
+ * AND a `target_selector` attribute on the video element (set via
+ * `data-file-target` — defaults to `input[type=file]`). Without a
+ * selector the bridge writes the file to disk but doesn't attach.
+ */
+function wireFilesChannel(dc: RTCDataChannel): void {
+  if (!active) return;
+  active.filesDc = dc;
+  const fc = new FileUploadChannel(dc);
+  active.fileUpload = fc;
+
+  const onDrop = async (e: DragEvent) => {
+    if (!e.dataTransfer || !active || !active.fileUpload) return;
+    const files: File[] = [];
+    for (const item of Array.from(e.dataTransfer.files)) {
+      files.push(item);
+    }
+    if (files.length === 0) return;
+    e.preventDefault();
+    const targetSelector = els.video.dataset["fileTarget"] ?? "input[type=file]";
+    for (const f of files) {
+      log("info", `→ file_upload start`, { name: f.name, size: f.size, type: f.type });
+      try {
+        const handle = active.fileUpload.uploadFile(f, {
+          target_selector: targetSelector,
+          onProgress: (p) => log("info", `file_upload progress`,
+            `${p.bytes_sent}/${p.bytes_total}`),
+        });
+        const r = await handle.done;
+        log("ok", `← file_upload_complete`, r);
+      } catch (err) {
+        if (err instanceof FileUploadError) {
+          log("err", `file_upload error code=${err.code}`, err.message);
+        } else {
+          log("err", "file_upload threw", String(err));
+        }
+      }
+    }
+  };
+  // dragover preventDefault is required for `drop` to fire on the
+  // target. We attach to the window so files dragged anywhere over
+  // the page are captured (matches the user mental model: "drop the
+  // PDF onto my cloud browser" without needing pixel precision).
+  const onDragOver = (e: DragEvent) => {
+    if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
+      e.preventDefault();
+    }
+  };
+  window.addEventListener("dragover", onDragOver);
+  window.addEventListener("drop", onDrop);
+  active.detachDrop = () => {
+    window.removeEventListener("dragover", onDragOver);
+    window.removeEventListener("drop", onDrop);
+  };
 }
 
 function wireInputChannel(dc: RTCDataChannel): void {
@@ -288,15 +360,20 @@ function rebuildPeerConnection(reason: string): void {
   log("info", `rebuilding peer connection: ${reason}`);
   try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.detachStats?.(); } catch { /* ignore */ }
+  try { active.detachDrop?.(); } catch { /* ignore */ }
   try { active.stats?.stop(); } catch { /* ignore */ }
   active.detachInput = null;
   active.detachStats = null;
+  active.detachDrop = null;
   active.stats = null;
   try { active.dc?.close(); } catch { /* ignore */ }
   try { active.statsDc?.close(); } catch { /* ignore */ }
+  try { active.filesDc?.close(); } catch { /* ignore */ }
   active.dc = null;
   active.statsDc = null;
+  active.filesDc = null;
   active.input = null;
+  active.fileUpload = null;
   try { active.pc.close(); } catch { /* ignore */ }
   active.pc = buildPeerConnection();
   els.dc.textContent = "—";
@@ -348,6 +425,7 @@ async function connect(sessionId: string): Promise<void> {
   active = {
     rws, pc: null as unknown as RTCPeerConnection, iceConfig,
     dc: null, input: null, detachInput: null,
+    filesDc: null, fileUpload: null, detachDrop: null,
     statsDc: null, stats: null, detachStats: null,
     hasOpenedOnce: false,
   };
