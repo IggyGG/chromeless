@@ -1,6 +1,11 @@
 module github.com/iggy/cloud-browser-webrtc/capture/cb-metrics-sidecar
 
-go 1.25.5
+// Match signaling/go.mod to keep both modules buildable on the same
+// golang:1.22-alpine builder stage in infra/Dockerfile. The deps in
+// use today (gorilla/websocket v1.5.3, prometheus/client_golang
+// v1.20.5) all build on 1.22; bump this when we actually need a
+// 1.25+ language feature.
+go 1.22
 
 require (
 	github.com/gorilla/websocket v1.5.3
