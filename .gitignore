@@ -1,0 +1,48 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+.pnpm-store/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Go
+*.exe
+*.test
+*.out
+bin/
+vendor/
+
+# C++ / build
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+build/
+out/
+cmake-build-*/
+
+# Docker / infra
+*.pid
+.env
+.env.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Project-specific
+harness/captures/
+tests/artifacts/
