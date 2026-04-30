@@ -133,7 +133,7 @@ spec:
         # Idempotent: re-running on the same Pod refreshes via
         # `git fetch` + `git reset --hard`.
         - name: bootstrap-our-repo
-          image: alpine/git:2.47.0
+          image: alpine/git:v2.45.2
           command:
             - sh
             - -euxc
@@ -229,7 +229,7 @@ spec:
             # nproc=32 on triform-6, which over-subscribes the
             # 30-CPU container cap; gives lto + sccache server headroom.
             - name: NINJA_PARALLELISM
-              value: "28"
+              value: "14"
             # T113 reads SKIP_FETCH=1 to skip the gclient sync on
             # retries. The hostPath dirs survive across Job deletions,
             # so a manual `kubectl set env job/cb-build SKIP_FETCH=1`
@@ -250,11 +250,11 @@ spec:
               value: "80G"
           resources:
             requests:
-              cpu: "30"
-              memory: "120Gi"
+              cpu: "16"
+              memory: "96Gi"
             limits:
-              cpu: "30"
-              memory: "120Gi"
+              cpu: "16"
+              memory: "96Gi"
               ephemeral-storage: "8Gi"
           volumeMounts:
             - name: workdir
