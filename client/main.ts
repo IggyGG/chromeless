@@ -14,6 +14,8 @@
 // actually answers. That is the expected stub behavior — the goal is to
 // validate signaling round-trip and RTCPeerConnection lifecycle wiring.
 
+import { InputChannel } from "./src/input.js";
+
 const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
 
 type Envelope =
@@ -80,6 +82,8 @@ interface Session {
   ws: WebSocket;
   pc: RTCPeerConnection;
   dc: RTCDataChannel;
+  input: InputChannel;
+  detachInput: (() => void) | null;
 }
 
 let active: Session | null = null;
@@ -87,6 +91,7 @@ let active: Session | null = null;
 function teardown(reason: string): void {
   if (!active) return;
   log("info", `tearing down: ${reason}`);
+  try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.dc.close(); } catch { /* ignore */ }
   try { active.pc.close(); } catch { /* ignore */ }
   if (active.ws.readyState === WebSocket.OPEN) {
@@ -144,15 +149,52 @@ async function connect(sessionId: string): Promise<void> {
     }
   };
 
-  // T14: data channel "input" for future input forwarding (mouse/keyboard).
+  // T14/T20: data channel "input" carries the v1 input protocol
+  // documented in docs/protocols/input-channel.md.
   const dc = pc.createDataChannel("input", { ordered: true });
-  dc.onopen    = () => { els.dc.textContent = "open";    log("ok",   "input data-channel open"); };
-  dc.onclose   = () => { els.dc.textContent = "closed";  log("info", "input data-channel closed"); };
+  const input = new InputChannel(dc, {
+    onCoalesce: (n) => log("info", `coalesced ${n} mouse_move`),
+    onError: (err) => log("err", "input send failed", String(err)),
+  });
+  let detach: (() => void) | null = null;
+
+  dc.onopen = () => {
+    els.dc.textContent = "open";
+    log("ok", "input data-channel open");
+    // Attach DOM listeners only once the channel is actually open;
+    // before that we'd just be queueing and dropping.
+    detach = input.attach(els.video, {
+      toContentCoords: (cx, cy, rect) => {
+        // Map page coords into the source video's intrinsic pixel
+        // space, accounting for object-fit: contain. The remote
+        // expects coords in the source coordinate system.
+        const v = els.video;
+        const vw = v.videoWidth || rect.width;
+        const vh = v.videoHeight || rect.height;
+        const scale = Math.min(rect.width / vw, rect.height / vh);
+        const dispW = vw * scale;
+        const dispH = vh * scale;
+        const padX = (rect.width  - dispW) / 2;
+        const padY = (rect.height - dispH) / 2;
+        return {
+          x: Math.max(0, Math.min(vw, ((cx - rect.left) - padX) / scale)),
+          y: Math.max(0, Math.min(vh, ((cy - rect.top)  - padY) / scale)),
+        };
+      },
+    });
+    if (active) active.detachInput = detach;
+  };
+  dc.onclose   = () => {
+    els.dc.textContent = "closed";
+    log("info", "input data-channel closed");
+    detach?.();
+    detach = null;
+  };
   dc.onerror   = (e) => { els.dc.textContent = "error";  log("err",  "input data-channel error", String((e as RTCErrorEvent).error?.message ?? e)); };
   dc.onmessage = (e) => log("info", "← input.message", e.data);
   els.dc.textContent = dc.readyState;
 
-  active = { ws, pc, dc };
+  active = { ws, pc, dc, input, detachInput: null };
 
   ws.addEventListener("open", async () => {
     log("ok", "ws open");
