@@ -1,131 +1,107 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Cloud Browser WebRTC Authors <noreply@example.invalid>
-Date: Thu, 30 Apr 2026 00:00:00 +0000
-Subject: [PATCH 0001/0001] cloud-browser: expose embedder hook for WebRTC
- video encoder factory
+From 3289b4719c5a645247d04721321b49fc7093ea16 Mon Sep 17 00:00:00 2001
+From: Iggy <iggy@triform.ai>
+Date: Fri, 1 May 2026 01:40:47 +0200
+Subject: cloud-browser: expose embedder hook for WebRTC video encoder factory
 
 Adds a virtual on content::ContentBrowserClient that lets an embedder
-return a webrtc::VideoEncoderFactory; content::PeerConnectionDependency
+return a webrtc::VideoEncoderFactory; blink::PeerConnectionDependency
 Factory consults it before falling back to its built-in factory.
 
 Why this patch exists:
 - Our cloud-browser worker (//cloud-browser/capture/build-integration/
-  BUILD.gn) needs to plug CloudBrowserVideoEncoderFactory (T19 / T35 /
-  T36) into the libwebrtc PeerConnectionFactory used inside Chromium.
+  BUILD.gn) needs to plug CloudBrowserVideoEncoderFactory into the
+  libwebrtc PeerConnectionFactory used inside Chromium.
 - Chromium does not currently surface the
   PeerConnectionFactoryDependencies::video_encoder_factory slot to
-  embedders; CreatePeerConnectionFactory_w() owns the assignment
+  embedders; the blink-side factory bootstrap owns the assignment
   internally.
-- The least-invasive alternative — patching the assignment site to
-  read a global — would force every embedder to share a factory.
-  A virtual on ContentBrowserClient is the standard Chromium shape
+- A virtual on ContentBrowserClient is the standard Chromium shape
   for "let embedders override this single decision."
 
-Why not avoid the patch:
-- Investigated using BLINK_VIDEO_ENCODER_FACTORY_FOR_TESTING /
-  similar test-only seams: those are gated on test-only build flags
-  and not load-bearing for production.
-- A separate process running libwebrtc directly (no Chromium) was
-  ruled out by the Phase 2 capture design (see
-  docs/capture/framesink-design.md §2 — the embedder approach beats
-  the patch-on-top approach on latency and maintainability).
-
-Upstream considerations:
-- This is the kind of seam Chromium has historically been willing to
-  accept upstream when there is a non-test embedder asking for it.
-  Track an upstream bug as a follow-up; until that lands the patch
-  rebases each release branch (low touch — the diff is tiny and the
-  files churn slowly).
-
 Touched files:
-- content/public/browser/content_browser_client.h
-- content/public/browser/content_browser_client.cc
+- content/public/browser/content_browser_client.h    (+10 lines)
+- content/public/browser/content_browser_client.cc   (+ 5 lines)
 - third_party/blink/renderer/modules/peerconnection/
-    peer_connection_dependency_factory.cc
+    peer_connection_dependency_factory.cc            (+ 9 lines)
 
-Reference paths against pinned branch refs/branch-heads/<NNNN>; the
-context lines are illustrative — re-resolve on each roll. The shape
-of the diff (one virtual, one consultation site) does not change.
-
-TODO(T17-build-env): apply against the pinned tree and confirm the
-context lines still match.
+Resolved against branch-heads/7727 (Chromium 147 stable).
 ---
- content/public/browser/content_browser_client.cc          |  4 ++++
- content/public/browser/content_browser_client.h           | 21 +++++++++++++++++++++
- .../peer_connection_dependency_factory.cc                 |  9 +++++++++
- 3 files changed, 34 insertions(+)
+ content/public/browser/content_browser_client.cc       |  5 +++++
+ content/public/browser/content_browser_client.h        | 10 ++++++++++
+ .../peer_connection_dependency_factory.cc              |  9 +++++++++
+ 3 files changed, 24 insertions(+)
 
-diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
-index aaaaaaaaaaaa..bbbbbbbbbbbb 100644
---- a/content/public/browser/content_browser_client.h
-+++ b/content/public/browser/content_browser_client.h
-@@ -50,6 +50,12 @@ namespace storage {
- class FileSystemBackend;
- }  // namespace storage
-
-+namespace webrtc {
-+// Forward-declared so this header doesn't pull in libwebrtc just for
-+// one virtual.
-+class VideoEncoderFactory;
-+}  // namespace webrtc
-+
- namespace content {
-
- class BrowserChildProcessHost;
-@@ -1234,6 +1240,21 @@ class CONTENT_EXPORT ContentBrowserClient {
-   // is one. Returning nullptr falls through to the default behavior.
-   virtual std::optional<base::FilePath> GetLocalTracesDirectory();
-
-+  // Cloud-browser hook (patches/0001-expose-encoder-factory-injection.patch).
-+  //
-+  // Returns an embedder-supplied webrtc::VideoEncoderFactory if one is
-+  // installed, or nullptr to keep Chromium's built-in factory.
-+  //
-+  // Called once during PeerConnectionFactory construction. The
-+  // returned factory becomes the PeerConnectionFactoryDependencies::
-+  // video_encoder_factory for every PeerConnection in the process.
-+  // Implementations MUST be thread-safe and MUST return a fresh
-+  // instance each call (libwebrtc takes ownership).
-+  //
-+  // Default returns nullptr.
-+  virtual std::unique_ptr<webrtc::VideoEncoderFactory>
-+      GetWebRtcVideoEncoderFactory();
-+
-  protected:
-   ~ContentBrowserClient() override = default;
- };
 diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
-index cccccccccccc..dddddddddddd 100644
+index d2dccc29b0..8cf2629524 100644
 --- a/content/public/browser/content_browser_client.cc
 +++ b/content/public/browser/content_browser_client.cc
-@@ -1500,4 +1500,8 @@ std::optional<base::FilePath> ContentBrowserClient::GetLocalTracesDirectory() {
+@@ -953,6 +953,11 @@ std::optional<base::FilePath> ContentBrowserClient::GetLocalTracesDirectory() {
    return std::nullopt;
  }
-
+ 
 +std::unique_ptr<webrtc::VideoEncoderFactory>
 +ContentBrowserClient::GetWebRtcVideoEncoderFactory() {
 +  return nullptr;
 +}
- }  // namespace content
++
+ std::unique_ptr<ui::SelectFilePolicy>
+ ContentBrowserClient::CreateSelectFilePolicy(WebContents* web_contents) {
+   return nullptr;
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 3b6c42b2c4..582b9dafcb 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -177,6 +177,10 @@ class URLLoaderClient;
+ }  // namespace mojom
+ }  // namespace network
+ 
++namespace webrtc {
++class VideoEncoderFactory;
++}  // namespace webrtc
++
+ namespace optimization_guide {
+ class ModelBrokerClient;
+ }  // namespace optimization_guide
+@@ -1571,6 +1575,12 @@ class CONTENT_EXPORT ContentBrowserClient {
+   // Returns the path to Local Traces directory.
+   virtual std::optional<base::FilePath> GetLocalTracesDirectory();
+ 
++  // Returns an embedder-supplied webrtc::VideoEncoderFactory for use
++  // in PeerConnection construction, or nullptr to keep Chromium\u2019s
++  // built-in factory. Default returns nullptr.
++  virtual std::unique_ptr<webrtc::VideoEncoderFactory>
++      GetWebRtcVideoEncoderFactory();
++
+   // Returns an implementation of a file selecition policy. Can return null.
+   virtual std::unique_ptr<ui::SelectFilePolicy> CreateSelectFilePolicy(
+       WebContents* web_contents);
 diff --git a/third_party/blink/renderer/modules/peerconnection/peer_connection_dependency_factory.cc b/third_party/blink/renderer/modules/peerconnection/peer_connection_dependency_factory.cc
-index eeeeeeeeeeee..ffffffffffff 100644
+index fdb1d8a50e..2938b7d940 100644
 --- a/third_party/blink/renderer/modules/peerconnection/peer_connection_dependency_factory.cc
 +++ b/third_party/blink/renderer/modules/peerconnection/peer_connection_dependency_factory.cc
-@@ -440,6 +440,15 @@ void PeerConnectionDependencyFactory::CreatePeerConnectionFactory() {
-   webrtc::PeerConnectionFactoryDependencies pcf_deps;
-   // ... existing population of pcf_deps ...
-
-+  // Cloud-browser hook: let the embedder override the encoder factory
-+  // before we hand pcf_deps to libwebrtc. Patch
-+  // patches/0001-expose-encoder-factory-injection.patch.
+@@ -29,6 +29,8 @@
+ #include "base/unguessable_token.h"
+ #include "build/build_config.h"
+ #include "components/webrtc/thread_wrapper.h"
++#include "content/public/browser/content_browser_client.h"
++#include "content/public/common/content_client.h"
+ #include "crypto/openssl_util.h"
+ #include "media/base/media_permission.h"
+ #include "media/media_buildflags.h"
+@@ -950,6 +952,13 @@ void PeerConnectionDependencyFactory::InitializeSignalingThread(
+   pcf_deps.video_encoder_factory = std::move(webrtc_encoder_factory);
+   pcf_deps.video_decoder_factory = std::move(webrtc_decoder_factory);
+ 
++  // Cloud-browser hook: let the embedder override the encoder factory.
 +  if (auto* client = content::GetContentClient()->browser()) {
 +    if (auto encoder_factory = client->GetWebRtcVideoEncoderFactory()) {
 +      pcf_deps.video_encoder_factory = std::move(encoder_factory);
 +    }
 +  }
 +
-   pc_factory_ = webrtc::CreateModularPeerConnectionFactory(std::move(pcf_deps));
-   // ... existing post-construction wiring ...
- }
---
-2.40.0
+   // Audio Processing Module (APM) instances are owned and handled by the Blink
+   // media stream module.
+   DCHECK_EQ(pcf_deps.audio_processing_builder, nullptr);
+-- 
+2.43.0
+
