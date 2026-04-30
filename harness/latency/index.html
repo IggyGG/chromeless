@@ -54,10 +54,12 @@
       user-select: none;
     }
 
-    /* Top-right binary-bar timestamp — a fallback encoding the
-       reconciliation script can read if QR detection misses a frame.
+    /* Top-right binary-bar timestamp — a HUMAN-DIAGNOSTIC display.
        16 bars representing the low 16 bits of the frame counter,
-       black=0 white=1, on a grey background that's neither ON nor OFF. */
+       black=0 white=1, on a grey background that's neither ON nor OFF.
+       reconcile.py does NOT decode these (only the QR is in its read
+       path). They're kept here so a tester reviewing a recording can
+       eyeball "did the frame id advance?" without QR tooling. */
     #bars {
       position: fixed;
       top: 16px;
@@ -203,8 +205,9 @@
     requestAnimationFrame((t) => { lastSwap = t - FLASH_PERIOD_MS; tick(t); });
 
     // ---------------------------------------------------------------
-    // Draw 16-bit binary-bar fallback. Black bar = 0, white = 1.
-    // LSB is leftmost.
+    // Draw the 16-bit binary-bar diagnostic. Black bar = 0, white = 1.
+    // LSB is leftmost. NOT read by reconcile.py — for human-eyeball
+    // debugging only.
     // ---------------------------------------------------------------
     function drawBars(els, value) {
       for (let i = 0; i < els.length; i++) {

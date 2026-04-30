@@ -93,11 +93,19 @@ forms, in roughly decreasing order of robustness:
 1. **QR code (top-left).** Primary path. ~250–350 px square. Holds the
    full payload including a run id and the ON/OFF state, so the
    reconciler can disambiguate flips even if it loses sync.
-2. **Binary bars (top-right).** 16 black/white bars representing the
-   low 16 bits of the frame counter, on a neutral grey background.
-   Fallback when QR detection misses a frame (motion blur, glare,
-   small webcam). The reconciler can read these with simple per-bar
-   thresholding.
+2. **Binary bars (top-right) — *human-diagnostic only*.** 16 black/white
+   bars representing the low 16 bits of the frame counter, on a
+   neutral grey background. **`reconcile.py` does NOT decode these
+   today**; they exist purely so a human reviewing a recording can
+   eyeball "did the frame id advance?" without QR machinery. The bars
+   were originally pitched as an automatic fallback for motion blur /
+   glare / small webcam, but in practice the QR pipeline at error-
+   correction level M handles all the cases we've measured, so we
+   haven't paid the cost of wiring the decoder. If you find a cam
+   setup where QR consistently fails but the bars survive, file an
+   issue — that's the signal to upgrade them from diagnostic to
+   automatic. (See [`reconcile.py`](./reconcile.py) — the bars are
+   not in its read path; QR is the only automated decoder.)
 3. **Human-readable text (bottom-right).** Big, high-contrast,
    monospace. Useful for a tester eyeballing a recording or
    debugging when automated decoding fails.
