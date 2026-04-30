@@ -69,10 +69,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// T90: ScrubAndReturn needs Pod-exec, which client-runtime's
+	// abstract Client doesn't expose. Build a separate executor on
+	// top of the same rest.Config the manager uses.
+	scrubExec, err := reconciler.NewRealScrubExecutor(mgr.GetConfig())
+	if err != nil {
+		logger.Error(err, "unable to build scrub executor; ScrubAndReturn will be unavailable")
+		// Non-fatal: the session reconciler degrades to RecreatePod
+		// when ScrubExec is nil.
+		scrubExec = nil
+	}
+
 	if err := (&reconciler.SessionReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		DefaultPool: defaultPool,
+		ScrubExec:   scrubExec,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to start SessionReconciler")
 		os.Exit(1)

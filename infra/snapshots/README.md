@@ -221,6 +221,65 @@ When you do that on a real Linux runner, paste the resulting numbers
 into the table above and replace "(Numbers are projections...)" with
 "(Numbers measured on <host spec>, <CRIU version>, <date>)".
 
+## ScrubAndReturn vs RecreatePod (T90)
+
+T71's controller ships two `BrowserSessionPool.spec.recyclePolicy`
+options. T68 snapshots interact with each subtly:
+
+| Policy | What happens at session end | Compatible with snapshots? |
+|---|---|---|
+| `RecreatePod` (default) | Pod is deleted; the pool reconciler creates a fresh one. New pod restores from `cb.io/snapshot-id` if set, else cold-starts. | Yes. Each session gets a fresh process-tree-from-snapshot. Highest isolation. |
+| `ScrubAndReturn` | `scrub-pod.sh` wipes user-data-dir + tmp inside the live pod; pod stays alive and goes back to warm. | Yes — but the snapshot only matters at the *original* container boot. Once a pod is in the warm pool, subsequent reuses don't re-restore the snapshot; they just scrub-in-place. |
+
+### Acceptable when
+
+ScrubAndReturn is safe under any of:
+
+1. **Single-tenant pool.** Every session in this pool comes from
+   the same trust boundary (one company, one user, internal-only
+   deploy). The scrub is hygiene, not a security boundary.
+2. **gVisor or Kata + Cloud Hypervisor as the runtime
+   (T44-decided).** The kernel-level state that scrub-pod.sh
+   doesn't reach (page cache, slab caches, Sentry state) lives
+   *inside* the sandbox. The sandbox is the boundary; scrub clears
+   userland.
+3. **Pre-populated tenant-clean snapshot.** If the pool's pods are
+   restored from a `shared/<sha>/` snapshot taken at about:blank
+   (the contract earlier in this doc), AND the controller
+   supplements scrub-pod.sh with a CRIU re-restore at recycle time
+   (Phase 4 work, not implemented today), the pool gets the
+   snapshot-clean property without paying the full pod-recreation
+   cost.
+
+### NOT acceptable when
+
+ScrubAndReturn is **not** safe when:
+
+- The pool serves **mutually distrustful tenants** under bare runc.
+  The `--no-sandbox` Chromium plus a renderer-side compromise can
+  leave kernel-state residue scrub-pod.sh has no path to clear.
+  Tenant N's compromise can reach tenant N+1 through page cache
+  side channels; scrub doesn't touch the kernel.
+- The pool's pods are **stateful by design** (they hold
+  long-lived resources we'd rather not torch). Phase 1's stateless
+  Chromium pods don't fit this; if Phase 4+ adds caching layers
+  inside the pod (e.g., a pre-warmed extension store), reconsider.
+- The pool's `scrub-pod.sh` exit cannot be **trusted under
+  attack**. The controller treats a non-zero exit / missing OK
+  marker as failure and falls back to RecreatePod
+  (`scrub_failed_fallback_recreate` metric). But a *compromised*
+  pod can still print "[scrub] OK" while leaving residue;
+  ScrubAndReturn fundamentally trusts the pod's userland.
+
+The pool examples in
+[`infra/k8s/browsersessionpool-examples.yaml`](../k8s/browsersessionpool-examples.yaml)
+ship both:
+
+- `warm-pool-shared` — `ScrubAndReturn`, single-trust-boundary use.
+- `warm-pool-strict` — `RecreatePod`, untrusted-multi-tenant use.
+
+Pick per pool, not per session — the pool is the unit of trust.
+
 ## Coordination with other tasks
 
 - **T31 (lifecycle):** restore replaces cold-start.sh's role. The

@@ -61,6 +61,13 @@ type SessionReconciler struct {
 	// DefaultPool names the BrowserSessionPool a session falls back to
 	// when spec.poolName is empty.
 	DefaultPool string
+
+	// ScrubExec drives pod-exec for the ScrubAndReturn recycle path
+	// (T90). Nil = ScrubAndReturn is unavailable; the controller
+	// silently degrades to RecreatePod even if a pool requests
+	// ScrubAndReturn. Production main wires NewRealScrubExecutor;
+	// tests inject fakes.
+	ScrubExec ScrubExecutor
 }
 
 // SetupWithManager wires this reconciler into a controller-runtime
@@ -323,18 +330,22 @@ func (r *SessionReconciler) checkIdle(ctx context.Context, sess *cbv1.BrowserSes
 	return reconcile.Result{Requeue: true}, nil
 }
 
-// completeDrain finishes the drain. Today we just delete the bound
-// Pod; the owner-reference + PodGC handles the rest. Phase 3 will add
-// the recycle path (ScrubAndReturn) here.
+// completeDrain finishes the drain. Picks between ScrubAndReturn
+// (pod stays alive, returns to warm) and RecreatePod (pod is
+// deleted; replenishment loop creates a fresh one) per the pool's
+// `spec.recyclePolicy`. T90.
 func (r *SessionReconciler) completeDrain(ctx context.Context, sess *cbv1.BrowserSession) (reconcile.Result, error) {
 	bound, err := r.findBoundPod(ctx, sess)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
 	if bound != nil {
-		if err := r.Delete(ctx, bound); err != nil && !apierrors.IsNotFound(err) {
+		fate, err := r.scrubOrDelete(ctx, bound, sess)
+		if err != nil {
 			return reconcile.Result{}, err
 		}
+		log.FromContext(ctx).Info("session drain complete",
+			"pod", bound.Name, "fate", fate)
 	}
 
 	now := metav1.NewTime(time.Now())

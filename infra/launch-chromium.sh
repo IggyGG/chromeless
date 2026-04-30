@@ -33,6 +33,18 @@
 
 set -eu
 
+# T90: re-source the per-session env on every chromium start so that
+# `supervisorctl restart chromium` after a ScrubAndReturn cycle
+# picks up a fresh SESSION_ID without rebuilding the pod. cold-start.sh
+# writes this file at container boot; scrub-pod.sh deletes it (and a
+# follow-up writer recreates it with new values) before the restart.
+if [ -f /run/cb-session/env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . /run/cb-session/env
+    set +a
+fi
+
 : "${SESSION_ID:=dev}"
 : "${SIGNALING_URL:=ws://signaling:8080/ws}"
 : "${STREAMER_FPS:=30}"

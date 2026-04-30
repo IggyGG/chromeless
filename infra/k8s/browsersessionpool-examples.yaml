@@ -1,0 +1,145 @@
+# infra/k8s/browsersessionpool-examples.yaml — two pools showing
+# T90's recycle-policy trade-off. Apply only one in any given
+# deployment, or apply both with different `spec.template` if you
+# want to route different tenants to different security postures
+# (the controller picks the pool by `BrowserSession.spec.poolName`).
+#
+# These are *examples*: do not apply directly to a real cluster
+# without trimming the placeholder image tags / wiring real values
+# in via your kustomize overlay or Helm values.
+
+# ---------------------------------------------------------------
+# warm-pool-shared — fast path, ScrubAndReturn (T90).
+#
+# Use when: the pool serves a single trust boundary (one tenant, OR
+# anonymous traffic that doesn't carry secrets). Pods come back to
+# the warm pool after a session ends, ~5-15 s vs the 30-45 s cold
+# start. Massive cost saving at scale.
+#
+# DO NOT use for: cross-tenant pools where session N+1 must not see
+# any residue from session N. Even after scrub-pod.sh wipes the
+# user-data-dir, kernel-level state (page cache, slab caches) is
+# not reset — that's the runc + AppArmor + Seccomp trust boundary,
+# which T44's primer says we don't trust against a determined
+# attacker. ScrubAndReturn is safe under gVisor / Kata + Cloud
+# Hypervisor; ambiguous under bare runc; unsafe across mutually
+# distrustful tenants.
+# ---------------------------------------------------------------
+apiVersion: cloud-browser-webrtc.example.com/v1alpha1
+kind: BrowserSessionPool
+metadata:
+  name: warm-pool-shared
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: pool
+    cb.io/recycle-policy: scrub-and-return
+spec:
+  warmReplicas: 5
+  maxSessions: 100
+  maxAgeSeconds: 3600          # cycle warm pods every hour for image rolls
+  recyclePolicy: ScrubAndReturn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: session
+        cb.session/state: warm
+    spec:
+      shareProcessNamespace: true
+      restartPolicy: Always
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: cb-chromium.json
+      containers:
+        - name: cb-chromium
+          image: ghcr.io/iggy/cloud-browser-webrtc/cb-chromium:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: devtools, containerPort: 9222 }
+          env:
+            - { name: STREAMER_FPS, value: "30" }
+            - { name: IDLE_TIMEOUT_S, value: "999999" }
+          resources:
+            requests: { cpu: 1500m, memory: 3Gi, ephemeral-storage: 1Gi }
+            limits:   { cpu: 3000m, memory: 6Gi, ephemeral-storage: 2Gi }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+
+---
+# ---------------------------------------------------------------
+# warm-pool-strict — secure path, RecreatePod (T71 default).
+#
+# Use when: the pool serves untrusted multi-tenant traffic, OR you
+# can't yet make the strong assertion "scrub really wipes
+# everything across the kernel boundary." Pod is destroyed at
+# session end; replenishment loop creates a fresh one. ~30-45 s
+# cold start latency, but the trust boundary is the K8s pod (a
+# fresh kernel-level perspective per tenant).
+#
+# This is the right pool for any deployment that follows
+# docs/research/sandbox-isolation.md's "Phase 3 sandbox decision"
+# guidance under runc + AppArmor + Seccomp.
+# ---------------------------------------------------------------
+apiVersion: cloud-browser-webrtc.example.com/v1alpha1
+kind: BrowserSessionPool
+metadata:
+  name: warm-pool-strict
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: pool
+    cb.io/recycle-policy: recreate-pod
+spec:
+  warmReplicas: 10
+  maxSessions: 200
+  maxAgeSeconds: 3600
+  recyclePolicy: RecreatePod
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: session
+        cb.session/state: warm
+    spec:
+      shareProcessNamespace: true
+      restartPolicy: Always
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: cb-chromium.json
+      containers:
+        - name: cb-chromium
+          image: ghcr.io/iggy/cloud-browser-webrtc/cb-chromium:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: devtools, containerPort: 9222 }
+          env:
+            - { name: STREAMER_FPS, value: "30" }
+            - { name: IDLE_TIMEOUT_S, value: "999999" }
+          resources:
+            requests: { cpu: 1500m, memory: 3Gi, ephemeral-storage: 1Gi }
+            limits:   { cpu: 3000m, memory: 6Gi, ephemeral-storage: 2Gi }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
