@@ -44,21 +44,29 @@ source_set("encoder_factory") {
 }
 
 # ---------------------------------------------------------------------
-# (Stub) capture seam — populated by T47 follow-up.
+# Capture seam — CloudBrowserFrameSinkCapturer (T55).
 #
-# The shape is here today so adding the implementation in T47 does
-# not require restructuring this file.
+# Consumer end of Viz's FrameSinkVideoCapturer Mojo. Hands captured
+# frames to the encoder factory pipeline; see
+# capture/framesink-capturer/README.md for the wire-up.
 # ---------------------------------------------------------------------
 source_set("framesink_capture") {
   sources = [
-    # TODO(T47): add framesink_capturer.{h,cc} + frame_consumer.{h,cc}
-    #           once the design lands as code.
+    "../framesink-capturer/capturer.cc",
+    "../framesink-capturer/capturer.h",
   ]
   deps = [
+    "//base",
+    "//components/viz/common",
     "//components/viz/host",
     "//components/viz/service",
+    "//media",
+    "//media/mojo/common",
+    "//media/mojo/mojom",
+    "//mojo/public/cpp/bindings",
     "//services/viz/privileged/mojom",
-    "//third_party/webrtc/api/video:video_frame",
+    "//third_party/abseil-cpp:absl",
+    "//ui/gfx/geometry",
   ]
 }
 
@@ -118,5 +126,22 @@ test("cloud_browser_encoder_unittests") {
     "//third_party/webrtc/api/video:video_frame",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
     "//third_party/webrtc/test:test_support",
+  ]
+}
+
+# ---------------------------------------------------------------------
+# Unit tests for the FrameSink capturer (T55).
+# ---------------------------------------------------------------------
+test("cloud_browser_framesink_capturer_unittests") {
+  sources = [ "../framesink-capturer/capturer_test.cc" ]
+  deps = [
+    ":framesink_capture",
+    "//base/test:test_support",
+    "//media/mojo/mojom",
+    "//mojo/public/cpp/bindings",
+    "//services/viz/privileged/mojom",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//ui/gfx/geometry",
   ]
 }
