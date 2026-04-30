@@ -307,6 +307,22 @@ function buildPeerConnection(): RTCPeerConnection {
   const { iceConfig, rws } = active;
   const pc = new RTCPeerConnection(iceConfig);
 
+  // T108 — Seed every state display from the freshly-constructed PC.
+  // The on*StateChange handlers only fire on TRANSITIONS, never on
+  // the initial state, so without this seeding a PC that gets stuck
+  // at "new" leaves the index.html placeholder "—" in place. The
+  // distinction matters: "—" means the PC never built; "new" means
+  // it built but didn't advance — completely different debugging.
+  els.conn.textContent = pc.connectionState;
+  els.sig.textContent = pc.signalingState;
+  els.ice.textContent = pc.iceConnectionState;
+  els.iceg.textContent = pc.iceGatheringState;
+  log("info", `pc constructed`, {
+    connectionState: pc.connectionState,
+    signalingState: pc.signalingState,
+    iceServers: iceConfig.iceServers?.length ?? 0,
+  });
+
   pc.onsignalingstatechange = () => { els.sig.textContent = pc.signalingState; log("info", `signalingState=${pc.signalingState}`); };
   pc.oniceconnectionstatechange = () => {
     els.ice.textContent = pc.iceConnectionState;
