@@ -1,0 +1,27 @@
+# cb-build namespace — isolates the Chromium-from-source build job
+# (T112). Lives separately from `cloud-browser-webrtc` (the runtime
+# namespace from T50) because:
+#
+# - The build needs a 500Gi PVC bound to a specific node (triform-6).
+#   Mixing that into the runtime ns pollutes the per-region label
+#   semantics from T94.
+# - Resource quotas / NetworkPolicies for the runtime apps are tighter
+#   than what a Chromium build needs (egress to chromium.googlesource.com,
+#   storage.googleapis.com for Goma artifacts, etc.).
+# - The build job is *one* long-running Job; the runtime ns is a
+#   churning fleet of Pods. Different operational rhythms.
+#
+# T113's cb-build.sh runs inside this ns; T114 (GPU runtime test)
+# stays in the runtime ns where the chromium Pods already live.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cb-build
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: build
+    app.kubernetes.io/part-of: cloud-browser-webrtc
+    # Mark as a build/CI ns so cluster-wide policies (e.g.
+    # "no privileged Pods in runtime namespaces") don't apply here.
+    triform.ai/purpose: build

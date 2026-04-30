@@ -1,0 +1,39 @@
+# pvc-sccache — sccache local-disk cache for the Chromium build.
+#
+# Sized at 100Gi per T17 §5 ("ccache ~30 GB" floor; sccache caches
+# more aggressively because it can also memoise link inputs, so we
+# triple-up to 100Gi to absorb a few full Chromium recompiles before
+# eviction starts hurting us). Smaller is fine but causes thrashing
+# on second-build-from-cold.
+#
+# Why a separate PVC instead of a subdir of chromium-src/sccache:
+#   - cleaning the Chromium tree (`gn clean`, `git clean -fdx`) shouldn't
+#     wipe the cache; that's the entire point of having a cache.
+#   - moving the cache to a different disk later (say, NVMe vs SATA)
+#     becomes a one-line StorageClass swap rather than a tree-shuffle.
+#
+# Same node-pinning reasoning as chromium-src: openebs-hostpath
+# WaitForFirstConsumer + Job nodeName=triform-6.
+#
+# T17 §5 documents an S3 backend as the recommended *production* path.
+# This PVC is the local-disk first stop; once we land an S3 sccache
+# it becomes a hot-cache layer (sccache supports both at once via
+# tiered config). Until then, a single-host cache means a single host
+# gets fast incremental builds.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sccache
+  namespace: cb-build
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: build
+    triform.ai/node: triform-6
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: openebs-hostpath
+  resources:
+    requests:
+      storage: 100Gi

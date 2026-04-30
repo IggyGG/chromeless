@@ -1,0 +1,34 @@
+# kustomization.yaml — `kubectl apply -k` entry point for the
+# Chromium build env on triform-6 (T112).
+#
+# Apply order:
+#   1. namespace.yaml — creates cb-build ns
+#   2. PVCs (both bind on first Pod consumption per
+#      WaitForFirstConsumer)
+#   3. build-job.yaml — Job that runs the build
+#
+# Kustomize handles ordering automatically (Namespace → PVC → Job by
+# resource kind precedence), so the file order in `resources` is
+# documentation rather than load-bearing.
+#
+# The Dockerfile.build-runner is intentionally NOT a resource here —
+# it's an image-build artifact, not a K8s object. See README.md for
+# the build + push step.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cb-build
+
+resources:
+  - namespace.yaml
+  - pvc-chromium-src.yaml
+  - pvc-sccache.yaml
+  - build-job.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/name: cloud-browser-webrtc
+      app.kubernetes.io/part-of: cloud-browser-webrtc
+      app.kubernetes.io/component: build

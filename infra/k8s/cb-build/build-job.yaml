@@ -1,0 +1,238 @@
+# build-job.yaml — Chromium build Job for triform-6 (T112).
+#
+# Drives T113's `build/cb-build.sh` end-to-end on a single Pod
+# scheduled to triform-6. The script handles gclient sync, symlink,
+# patch apply, sccache, gn gen, autoninja, unit tests, and binary
+# packaging. T112's responsibility is the K8s plumbing: PVCs, node
+# pinning, the bootstrap initContainer that gets our repo onto the
+# Pod, env wiring per T113's contract, and resource sizing.
+#
+# Contract with T113 (see ../../../build/cb-build.sh header):
+#   /workspace            — our repo, read-only mount.
+#   /work                 — work-tree root: src/, artifacts/, logs/.
+#   /sccache              — sccache cache.
+#   CB_REPO=/workspace
+#   CB_WORK_ROOT=/work
+#   CHROMIUM_BRANCH_NUMBER=7727 (M147 stable; verify on chromiumdash)
+#   SCCACHE_DIR=/sccache
+#   CB_BUILD_TARGETS=cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests
+#
+# Resources: 30 CPU / 120 GiB on a 32/128 box (per the brief).
+# Headroom for kubelet, sshd, the sccache server, and the linker's
+# RSS spike during the chrome-target link.
+#
+# restartPolicy + backoffLimit: OnFailure + 2 = 3 attempts max. Each
+# retry's bootstrap initContainer is idempotent; the chromium-src
+# PVC survives, so a re-run picks up incrementally. T113's
+# SKIP_FETCH=1 toggle is set on retries so the gclient sync step
+# (which dominates first-run wall-clock) doesn't re-do a populated
+# tree.
+#
+# activeDeadlineSeconds: 8h. T17 §4 cold-build worst case.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cb-build
+  namespace: cb-build
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: build
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 28800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloud-browser-webrtc
+        app.kubernetes.io/component: build
+    spec:
+      restartPolicy: OnFailure
+      # Pin to triform-6: 32 CPU / 128 GiB / openebs-hostpath PVCs.
+      # Both PVCs use WaitForFirstConsumer so they materialise on
+      # whichever node this Pod lands on; nodeName guarantees that's
+      # triform-6.
+      nodeName: triform-6
+      # If a future cluster admin taints triform-6 (maintenance), the
+      # scheduler fails this Pod cleanly rather than picking another
+      # node. Repeating the hostname here makes that a NotReady error
+      # rather than a silent cross-node migration.
+      nodeSelector:
+        kubernetes.io/hostname: triform-6
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        # bootstrap-our-repo: clone our repo into /workspace (the path
+        # T113's cb-build.sh expects via CB_REPO=/workspace), and
+        # chown the work-tree + sccache PVCs to uid 1000 so the
+        # unprivileged builder user can write to them.
+        #
+        # Idempotent: re-running on the same Pod refreshes via
+        # `git fetch` + `git reset --hard`. PVC chown becomes a no-op
+        # on the second run.
+        - name: bootstrap-our-repo
+          image: alpine/git:2.47.0
+          command:
+            - sh
+            - -euxc
+            - |
+              # Clone or refresh our repo at OUR_REPO_REF.
+              if [ ! -d /workspace/.git ]; then
+                git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                  "${OUR_REPO}" /workspace
+              else
+                cd /workspace \
+                  && git fetch --depth 1 origin "${OUR_REPO_REF}" \
+                  && git reset --hard FETCH_HEAD
+              fi
+
+              # Sanity: T113's script must be present.
+              if [ ! -x /workspace/build/cb-build.sh ]; then
+                echo "ERROR: /workspace/build/cb-build.sh missing or not executable" >&2
+                echo "       Check that ${OUR_REPO_REF} contains T113's deliverable." >&2
+                exit 1
+              fi
+
+              # Ensure the runner-user (uid 1000) can write to the
+              # PVCs. PVCs come up root-owned on first use; subsequent
+              # runs are already 1000:1000 and the chown is a no-op.
+              chown -R 1000:1000 /work /sccache /workspace
+
+              # Pre-create T113's expected subdirs (cb-build.sh does
+              # mkdir -p anyway, but doing it here avoids a confusing
+              # permission error if the user-side mkdir lands before
+              # the chown propagates).
+              mkdir -p /work/src/chromium /work/artifacts /work/logs
+              chown -R 1000:1000 /work
+          env:
+            # Forgejo URL for our repo. The forgejo namespace's
+            # registry-pull secret already proves egress to this
+            # host works from triform-6.
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/iggy/cloud-browser-webrtc.git"
+            # Track main by default; set to a tag/SHA for reproducible
+            # builds (`kubectl set env job/cb-build OUR_REPO_REF=v0.2.0`).
+            - name: OUR_REPO_REF
+              value: "main"
+          # Bootstrap needs root briefly to chown PVCs; main container
+          # runs as 1000.
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: build
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.0
+          imagePullPolicy: IfNotPresent
+          # Invoke T113's script directly from the cloned repo. The
+          # earlier brief proposed /work/src/build/cb-build.sh as the
+          # handoff path; T113 placed it at build/cb-build.sh in our
+          # repo and CB_REPO=/workspace, so the actual path is
+          # /workspace/build/cb-build.sh. README.md documents this.
+          command: ["bash", "/workspace/build/cb-build.sh"]
+          env:
+            # Diagnostic only — cb-build.sh derives CB_GIT_SHA from
+            # CB_REPO/.git when this is unset, so we provide it for
+            # `kubectl describe` legibility.
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/iggy/cloud-browser-webrtc.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            # T113 expects branch number, NOT a full ref. M147 stable
+            # tracks 147.0.7727.x — branch 7727. Verify on
+            # chromiumdash.appspot.com/branches before each roll.
+            - name: CHROMIUM_BRANCH_NUMBER
+              value: "7727"
+            # Mount roots — match T113's cb-build.sh defaults so an
+            # operator running the script locally on a dev box doesn't
+            # need to set anything different.
+            - name: CB_REPO
+              value: "/workspace"
+            - name: CB_WORK_ROOT
+              value: "/work"
+            - name: SCCACHE_DIR
+              value: "/sccache"
+            # Build targets. cb-build.sh ships with the same default,
+            # but pinning explicit values here is what `kubectl set env`
+            # operators reach for first when iterating. Override path:
+            #   kubectl -n cb-build set env job/cb-build CB_BUILD_TARGETS="cloud_browser_worker"
+            - name: CB_BUILD_TARGETS
+              value: "cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests"
+            # Ninja parallelism. autoninja's auto-detect picks
+            # nproc=32 on triform-6, which over-subscribes the
+            # 30-CPU container. Cap at 28 so the linker has spare
+            # threads for lto + we don't preempt the sccache server.
+            - name: NINJA_PARALLELISM
+              value: "28"
+            # T113 reads SKIP_FETCH=1 to skip the gclient sync on
+            # retries. The bootstrap initContainer clears any
+            # in-flight gclient state so a retry on a partially-
+            # synced tree continues cleanly. Operators can override
+            # for the rare "wipe and resync" case.
+            - name: SKIP_FETCH
+              value: ""
+            # STUB_MODE=1 short-circuits the heavy steps — useful
+            # for validating Job plumbing without a 4–8h wait.
+            # Default off; flip to "1" for the DoD smoke run.
+            - name: STUB_MODE
+              value: ""
+            # sccache server lifecycle. Idle-timeout 0 keeps the
+            # server alive for the full build (it forks one server
+            # per shell otherwise).
+            - name: SCCACHE_IDLE_TIMEOUT
+              value: "0"
+            - name: SCCACHE_CACHE_SIZE
+              value: "80G"
+          resources:
+            requests:
+              cpu: "30"
+              memory: "120Gi"
+            limits:
+              cpu: "30"
+              memory: "120Gi"
+              ephemeral-storage: "8Gi"
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+              # Read-only: cb-build.sh only reads from CB_REPO. If the
+              # script grows a need to write (e.g., generated headers
+              # cached in-tree), flip to RW + accept that the cloned
+              # tree drifts across runs.
+              readOnly: true
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        # Single PVC holds Chromium tree + artifacts + logs. T113
+        # lays them out as /work/src/chromium, /work/artifacts,
+        # /work/logs — all under the same volume.
+        - name: workdir
+          persistentVolumeClaim:
+            claimName: chromium-src
+        - name: sccache
+          persistentVolumeClaim:
+            claimName: sccache
+        # Our repo lives in an emptyDir — bootstrap initContainer
+        # populates it once, main container reads-only. Survival
+        # across Pod restarts isn't needed; bootstrap is cheap and
+        # idempotent. Sized to fit our repo (a few hundred MB).
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi
