@@ -1,0 +1,452 @@
+// Package integration exercises the v0 signaling server (T13) end-to-end.
+//
+// We build the signaling binary once in TestMain and launch it as a
+// subprocess on a free port for each test. This is the cheapest faithful
+// integration check: the protocol contract under test is the wire
+// behaviour of the actual artifact, not a re-implementation.
+//
+// Contract under test (per signaling/server.go):
+//   - Path: /ws/{session_id}
+//   - First frame establishes peer role via Envelope.From in {"client","browser"}
+//   - Forwarded message types: offer, answer, ice, bye
+//   - Session holds at most one peer per role; duplicates get
+//     ClosePolicyViolation (1008)
+//   - "bye" is forwarded then the sender's connection is closed by the server
+//   - Session is dropped from the hub once both peers have left
+package integration_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+// envelope mirrors signaling/server.go's wire format.
+type envelope struct {
+	Type string          `json:"type"`
+	From string          `json:"from"`
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+// ----- TestMain: build the signaling binary once. -----
+
+var binaryPath string
+
+func TestMain(m *testing.M) {
+	tmpDir, err := os.MkdirTemp("", "signaling-bin-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mktemp: %v\n", err)
+		os.Exit(2)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	binaryPath = filepath.Join(tmpDir, "signaling")
+	// The signaling/ directory is its own Go module, so we have to build
+	// from inside that module — we can't reach across module boundaries
+	// from this test module's view.
+	build := exec.Command("go", "build", "-o", binaryPath, ".")
+	build.Dir = filepath.FromSlash("../../signaling")
+	build.Stdout = os.Stderr
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "go build of signaling/ failed: %v\n", err)
+		os.Exit(2)
+	}
+
+	os.Exit(m.Run())
+}
+
+// ----- helpers -----
+
+// freePort grabs an available TCP port from the kernel and immediately
+// closes the listener. There's a tiny race window before the signaling
+// server claims it; in practice 0% flake locally.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return port
+}
+
+// startServer launches the signaling binary on a free port and waits for
+// /healthz to come up. Server logs are captured and printed via t.Logf
+// only if the test fails (or SIGNALING_TEST_LOGS=1 is set), so passing
+// runs stay quiet. Cleanup is registered with t.Cleanup.
+func startServer(t *testing.T) int {
+	t.Helper()
+	port := freePort(t)
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(binaryPath)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("SIGNALING_PORT=%d", port))
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start signaling: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
+	for {
+		resp, err := http.Get(healthURL)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Logf("--- signaling stdout ---\n%s", stdout.String())
+			t.Logf("--- signaling stderr ---\n%s", stderr.String())
+			t.Fatalf("server failed to come up at %s", healthURL)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+		if t.Failed() || os.Getenv("SIGNALING_TEST_LOGS") == "1" {
+			t.Logf("--- signaling stdout ---\n%s", stdout.String())
+			t.Logf("--- signaling stderr ---\n%s", stderr.String())
+		}
+	})
+
+	return port
+}
+
+// dialPeer connects as `role` for `sessionID` and writes the registration
+// envelope. The first frame both establishes the peer role and (per T13)
+// is forwarded to the other peer if one is already registered.
+func dialPeer(t *testing.T, port int, sessionID string, reg envelope) *websocket.Conn {
+	t.Helper()
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws/%s", port, sessionID)
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial as %s: %v", reg.From, err)
+	}
+	if err := conn.WriteJSON(reg); err != nil {
+		_ = conn.Close()
+		t.Fatalf("write reg as %s: %v", reg.From, err)
+	}
+	return conn
+}
+
+// readEnvelope reads one envelope with a deadline.
+func readEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Duration) envelope {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	var got envelope
+	if err := conn.ReadJSON(&got); err != nil {
+		t.Fatalf("read envelope: %v", err)
+	}
+	return got
+}
+
+func writeEnvelope(t *testing.T, conn *websocket.Conn, env envelope) {
+	t.Helper()
+	if err := conn.WriteJSON(env); err != nil {
+		t.Fatalf("write %s/%s: %v", env.From, env.Type, err)
+	}
+}
+
+// expectClose reads from conn and asserts the server closed it with `code`.
+func expectClose(t *testing.T, conn *websocket.Conn, code int, timeout time.Duration) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	_, _, err := conn.ReadMessage()
+	if err == nil {
+		t.Fatalf("expected close %d, got message", code)
+	}
+	if !websocket.IsCloseError(err, code) {
+		t.Fatalf("expected close %d, got %v", code, err)
+	}
+}
+
+// expectClosed reads from conn and asserts the connection has been closed
+// (any close code or read failure satisfies it). Use when the protocol
+// allows the server to close abruptly without a specific code.
+func expectClosed(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("expected connection closed, got message")
+	}
+}
+
+// ----- tests -----
+
+// TestSignalingRoundtrip exercises the full SDP + ICE forwarding contract
+// in both directions on a single session.
+func TestSignalingRoundtrip(t *testing.T) {
+	port := startServer(t)
+
+	sessID := "rt-roundtrip"
+
+	// Client joins first with a benign warmup frame. No browser yet, so
+	// the server drops the warmup; the client is registered.
+	cli := dialPeer(t, port, sessID, envelope{
+		Type: "ice", From: "client",
+		Data: json.RawMessage(`{"candidate":"client-warmup"}`),
+	})
+	defer cli.Close()
+
+	// Browser joins second. Its registration frame *is* the SDP offer;
+	// it should be forwarded to the now-registered client.
+	brw := dialPeer(t, port, sessID, envelope{
+		Type: "offer", From: "browser",
+		Data: json.RawMessage(`{"sdp":"OFFER-1"}`),
+	})
+	defer brw.Close()
+
+	// 1. SDP offer reaches the client.
+	got := readEnvelope(t, cli, 2*time.Second)
+	if got.Type != "offer" || got.From != "browser" {
+		t.Fatalf("offer envelope: want offer/browser, got %+v", got)
+	}
+	if !bytes.Contains(got.Data, []byte(`"OFFER-1"`)) {
+		t.Fatalf("offer payload: %s", got.Data)
+	}
+
+	// 2. SDP answer reaches the browser.
+	writeEnvelope(t, cli, envelope{
+		Type: "answer", From: "client",
+		Data: json.RawMessage(`{"sdp":"ANSWER-1"}`),
+	})
+	got = readEnvelope(t, brw, 2*time.Second)
+	if got.Type != "answer" || got.From != "client" {
+		t.Fatalf("answer envelope: want answer/client, got %+v", got)
+	}
+	if !bytes.Contains(got.Data, []byte(`"ANSWER-1"`)) {
+		t.Fatalf("answer payload: %s", got.Data)
+	}
+
+	// 3. Three ICE candidates browser→client, in order.
+	for i := 1; i <= 3; i++ {
+		writeEnvelope(t, brw, envelope{
+			Type: "ice", From: "browser",
+			Data: json.RawMessage(fmt.Sprintf(`{"candidate":"b-%d"}`, i)),
+		})
+	}
+	for i := 1; i <= 3; i++ {
+		got = readEnvelope(t, cli, 2*time.Second)
+		if got.Type != "ice" || got.From != "browser" {
+			t.Fatalf("ice b-%d envelope: %+v", i, got)
+		}
+		want := fmt.Sprintf(`"b-%d"`, i)
+		if !bytes.Contains(got.Data, []byte(want)) {
+			t.Fatalf("ice ordering: want %s at slot %d, got %s", want, i, got.Data)
+		}
+	}
+
+	// 4. Three ICE candidates client→browser, in order.
+	for i := 1; i <= 3; i++ {
+		writeEnvelope(t, cli, envelope{
+			Type: "ice", From: "client",
+			Data: json.RawMessage(fmt.Sprintf(`{"candidate":"c-%d"}`, i)),
+		})
+	}
+	for i := 1; i <= 3; i++ {
+		got = readEnvelope(t, brw, 2*time.Second)
+		if got.Type != "ice" || got.From != "client" {
+			t.Fatalf("ice c-%d envelope: %+v", i, got)
+		}
+		want := fmt.Sprintf(`"c-%d"`, i)
+		if !bytes.Contains(got.Data, []byte(want)) {
+			t.Fatalf("ice ordering: want %s at slot %d, got %s", want, i, got.Data)
+		}
+	}
+}
+
+// TestDuplicateRoleRejected asserts that a third connection trying to
+// register as an already-occupied role gets ClosePolicyViolation (1008).
+func TestDuplicateRoleRejected(t *testing.T) {
+	port := startServer(t)
+
+	sessID := "rt-dup"
+
+	cli := dialPeer(t, port, sessID, envelope{
+		Type: "ice", From: "client",
+		Data: json.RawMessage(`{"candidate":"warmup"}`),
+	})
+	defer cli.Close()
+
+	brw := dialPeer(t, port, sessID, envelope{
+		Type: "offer", From: "browser",
+		Data: json.RawMessage(`{"sdp":"OFFER"}`),
+	})
+	defer brw.Close()
+
+	// Drain the offer that the browser's registration sent over.
+	_ = readEnvelope(t, cli, 2*time.Second)
+
+	// Third connection tries to claim "client" — should be rejected.
+	dup := dialPeer(t, port, sessID, envelope{
+		Type: "offer", From: "client",
+		Data: json.RawMessage(`{"sdp":"DUP"}`),
+	})
+	defer dup.Close()
+
+	expectClose(t, dup, websocket.ClosePolicyViolation, 2*time.Second)
+
+	// And the legitimate client did NOT receive the duplicate's frame.
+	_ = cli.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, _, err := cli.ReadMessage(); err == nil {
+		t.Fatal("legitimate client received a stray frame from rejected duplicate")
+	}
+}
+
+// TestByePropagationAndTeardown asserts that "bye" is forwarded to the
+// other peer, the sender's connection is closed by the server, and after
+// both peers are gone the session_id can be reused cleanly.
+func TestByePropagationAndTeardown(t *testing.T) {
+	port := startServer(t)
+
+	sessID := "rt-bye"
+
+	cli := dialPeer(t, port, sessID, envelope{
+		Type: "ice", From: "client",
+		Data: json.RawMessage(`{"candidate":"warmup"}`),
+	})
+	brw := dialPeer(t, port, sessID, envelope{
+		Type: "offer", From: "browser",
+		Data: json.RawMessage(`{"sdp":"OFFER"}`),
+	})
+
+	// Drain the offer.
+	_ = readEnvelope(t, cli, 2*time.Second)
+
+	// Browser says bye.
+	writeEnvelope(t, brw, envelope{Type: "bye", From: "browser"})
+
+	// Client receives bye.
+	got := readEnvelope(t, cli, 2*time.Second)
+	if got.Type != "bye" || got.From != "browser" {
+		t.Fatalf("bye envelope: want bye/browser, got %+v", got)
+	}
+
+	// Server should close the bye-sender's connection (it returns from
+	// readPump after forwarding "bye"). Close-code is unspecified so
+	// just assert the connection is gone.
+	expectClosed(t, brw, 2*time.Second)
+	_ = brw.Close()
+
+	// Disconnect the client too. Now both peers have left; the session
+	// must be eligible for cleanup.
+	_ = cli.Close()
+
+	// Allow the server's read pumps to wind down + dropIfEmpty to fire.
+	time.Sleep(100 * time.Millisecond)
+
+	// Reusing the same session_id must work cleanly — no stale role
+	// registrations, no leftover state.
+	cli2 := dialPeer(t, port, sessID, envelope{
+		Type: "ice", From: "client",
+		Data: json.RawMessage(`{"candidate":"warmup-2"}`),
+	})
+	defer cli2.Close()
+	brw2 := dialPeer(t, port, sessID, envelope{
+		Type: "offer", From: "browser",
+		Data: json.RawMessage(`{"sdp":"OFFER-2"}`),
+	})
+	defer brw2.Close()
+
+	got = readEnvelope(t, cli2, 2*time.Second)
+	if got.Type != "offer" || !bytes.Contains(got.Data, []byte(`"OFFER-2"`)) {
+		t.Fatalf("post-teardown offer: %+v", got)
+	}
+}
+
+// TestSessionIsolation confirms that two simultaneous sessions on the same
+// server do not leak messages between each other.
+func TestSessionIsolation(t *testing.T) {
+	port := startServer(t)
+
+	type pair struct {
+		cli, brw *websocket.Conn
+	}
+
+	mkPair := func(sess string, marker string) pair {
+		cli := dialPeer(t, port, sess, envelope{
+			Type: "ice", From: "client",
+			Data: json.RawMessage(`{"candidate":"warmup"}`),
+		})
+		brw := dialPeer(t, port, sess, envelope{
+			Type: "offer", From: "browser",
+			Data: json.RawMessage(fmt.Sprintf(`{"sdp":"%s"}`, marker)),
+		})
+		// Drain the offer.
+		got := readEnvelope(t, cli, 2*time.Second)
+		if !bytes.Contains(got.Data, []byte(marker)) {
+			t.Fatalf("session %s: warmup offer payload mismatch: %s", sess, got.Data)
+		}
+		return pair{cli: cli, brw: brw}
+	}
+
+	a := mkPair("rt-iso-A", "OFFER-A")
+	defer a.cli.Close()
+	defer a.brw.Close()
+
+	b := mkPair("rt-iso-B", "OFFER-B")
+	defer b.cli.Close()
+	defer b.brw.Close()
+
+	// Have each session do an answer round-trip in parallel; assert the
+	// payload received on each browser matches its own session marker.
+	var wg sync.WaitGroup
+	check := func(p pair, marker string, name string) {
+		defer wg.Done()
+		writeEnvelope(t, p.cli, envelope{
+			Type: "answer", From: "client",
+			Data: json.RawMessage(fmt.Sprintf(`{"sdp":"%s"}`, marker)),
+		})
+		got := readEnvelope(t, p.brw, 2*time.Second)
+		if got.Type != "answer" {
+			t.Errorf("session %s: bad type: %+v", name, got)
+			return
+		}
+		if !bytes.Contains(got.Data, []byte(marker)) {
+			t.Errorf("session %s: cross-talk! payload %s, expected %s", name, got.Data, marker)
+		}
+	}
+	wg.Add(2)
+	go check(a, "ANSWER-A", "A")
+	go check(b, "ANSWER-B", "B")
+	wg.Wait()
+
+	// Final cross-check: B's browser must NOT have seen A's marker, and
+	// vice versa. Above check confirms received payload contains the
+	// expected marker; here we additionally ensure no extra frame is
+	// queued on either side (i.e. no stray cross-talk).
+	for name, conn := range map[string]*websocket.Conn{"A.cli": a.cli, "A.brw": a.brw, "B.cli": b.cli, "B.brw": b.brw} {
+		_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+		if _, _, err := conn.ReadMessage(); err == nil {
+			t.Errorf("%s: unexpected stray frame after isolation check", name)
+		}
+	}
+}

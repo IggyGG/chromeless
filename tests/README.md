@@ -25,7 +25,7 @@ and an opinion about what it costs to run.
            │  Smoke: container & service boot     │  tests/smoke/
            ├──────────────────────────────────────┤
            │  Integration: cross-component        │  tests/integration/
-           │  (signaling↔client, DC round-trip)   │
+           │  (signaling roundtrip, DC, capture)  │
            ├──────────────────────────────────────┤
    fast    │  Unit: per-subproject                │  signaling/, client/,
            │                                      │  capture/, harness/
@@ -47,15 +47,26 @@ Owned by the subproject author; live next to the code they cover.
 unit tests in the same subproject. Unit tests must run on macOS and Linux
 without Docker.
 
-### 1b. Integration tests — cross-component, in-process where possible
+### 1b. Integration tests — cross-component, no container required
 
-Cross-component tests that don't need a running container. Examples:
-signaling↔client SDP/ICE round-trip with a fake peer; data-channel input
-event encode/decode; capture-sidecar handshake with a stubbed Chromium.
+Cross-component checks that need a real built artifact but no Docker — Go
+toolchain (or eventually Node + Python) is enough. Each surface
+(`signaling`, `capture`, the input bridge, …) gets its own subdirectory
+or test file under `tests/integration/`. The subdirectory is its own Go
+module so it can build sibling modules cleanly; see
+[`tests/integration/README.md`](./integration/README.md) for the
+mechanics and conventions.
 
-Location: `tests/integration/` (created when the first integration test lands;
-not present today). Owner: the subproject whose interface is the unit-under-
-test, with `qa-tester` reviewing for cross-cutting coverage.
+Today:
+
+| Surface       | Test file                                    | Covers                                                                 |
+| ------------- | -------------------------------------------- | ---------------------------------------------------------------------- |
+| `signaling/`  | `tests/integration/signaling_roundtrip_test.go` | SDP offer/answer, 3×ICE each direction with ordering, duplicate-role rejection (1008), `bye` propagation + clean teardown, session isolation. T27. |
+| `capture/`    | _(future)_                                   | Capture-sidecar handshake + frame format negotiation.                  |
+| input bridge  | _(future)_                                   | Data-channel input protocol round-trip against the dispatch service.   |
+
+Owner: the subproject whose interface is the unit-under-test, with
+`qa-tester` reviewing for cross-cutting coverage.
 
 ### 1c. Smoke tests — `tests/smoke/`
 
@@ -98,11 +109,12 @@ non-zero with a clear "not implemented" message — so `make` is a single
 discoverable surface and CI can wire to it from day one.
 
 ```sh
-make test-unit      # all subproject unit tests
-make test-smoke     # tests/smoke/ — requires Docker
-make test-harness   # tests/harness/ validation pass; requires loopback rig
-make test-e2e       # tests/e2e/ — Phase 1+
-make test           # = test-unit + test-smoke (the PR gate)
+make test-unit         # all subproject unit tests
+make test-integration  # tests/integration/ — Go toolchain only, no Docker
+make test-smoke        # tests/smoke/ — requires Docker
+make test-harness      # tests/harness/ validation pass; requires loopback rig
+make test-e2e          # tests/e2e/ — Phase 1+
+make test              # = test-unit + test-integration + test-smoke (the PR gate)
 ```
 
 Per-subproject details:
@@ -119,6 +131,9 @@ Per-subproject details:
 
 # smoke — bash, requires Docker
 bash tests/smoke/container-boot.sh
+
+# integration — Go (own module per surface; cd in)
+( cd tests/integration && go test ./... )
 ```
 
 The `make test-unit` aggregator runs whichever of the above subproject

@@ -4,20 +4,21 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help test test-unit test-smoke test-harness test-e2e \
+.PHONY: help test test-unit test-integration test-smoke test-harness test-e2e \
         test-unit-signaling test-unit-client test-unit-harness
 
 help:
 	@echo "Targets:"
-	@echo "  make test           # = test-unit + test-smoke (the PR gate)"
-	@echo "  make test-unit      # all subproject unit tests"
-	@echo "  make test-smoke     # tests/smoke/ — requires Docker"
-	@echo "  make test-harness   # tests/harness/ validation; requires loopback rig"
-	@echo "  make test-e2e       # tests/e2e/ — Phase 1+"
+	@echo "  make test             # = test-unit + test-integration + test-smoke (the PR gate)"
+	@echo "  make test-unit        # all subproject unit tests"
+	@echo "  make test-integration # tests/integration/ — Go toolchain only, no Docker"
+	@echo "  make test-smoke       # tests/smoke/ — requires Docker"
+	@echo "  make test-harness     # tests/harness/ validation; requires loopback rig"
+	@echo "  make test-e2e         # tests/e2e/ — Phase 1+"
 	@echo ""
 	@echo "See tests/README.md for the full testing strategy."
 
-test: test-unit test-smoke
+test: test-unit test-integration test-smoke
 
 # ---- unit ------------------------------------------------------------------
 
@@ -45,6 +46,19 @@ test-unit-harness:
 	  ( cd harness && python -m pytest ); \
 	else \
 	  echo "skip: harness has no Python project yet (T11)"; \
+	fi
+
+# ---- integration -----------------------------------------------------------
+
+# tests/integration/ is its own Go module (it builds the signaling binary
+# from a sibling module), so we cd into it rather than `go test ./...` from
+# the repo root. See tests/integration/README.md.
+test-integration:
+	@if [ -f tests/integration/go.mod ]; then \
+	  echo ">>> go test ./... (tests/integration)"; \
+	  ( cd tests/integration && go test ./... ); \
+	else \
+	  echo "skip: tests/integration/ not populated yet"; \
 	fi
 
 # ---- smoke -----------------------------------------------------------------
