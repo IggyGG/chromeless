@@ -85,7 +85,7 @@ spec:
       # rather than a silent cross-node migration that would lose
       # access to the hostPath dirs.
       nodeSelector:
-        kubernetes.io/hostname: triform-6
+        kubernetes.io/hostname: triform-2
       imagePullSecrets:
         - name: registry-pull
       initContainers:
