@@ -22,6 +22,22 @@ reconciliation script — lives under [`../../harness/`](../../harness/).
   from the sample manifest. T12 deliverable. **Not** a physical-rig
   loopback — that's the operator step in `validation.md` §4.
 
+- **`phase1-baseline.sh`** — operator wrapper for a real-pipeline
+  measurement run (T65). Takes a webcam mp4 + the source-side JSONL
+  + a recording-start epoch ms, runs `reconcile.py`, asserts numbers
+  against the v1 budget for the chosen target (`loopback`/`lan`/`regional`),
+  and persists a baseline JSON under `baselines/phase1-<runId>.json`
+  for future regression comparisons (per the `tests/README.md` ≤5 ms
+  drift rule). Updates the `baselines/phase1-latest.json` symlink on
+  success. See `--help` for full flag set.
+
+- **`baselines/`** — committed JSON snapshots from
+  `phase1-baseline.sh`. Each file is the canonical record of a real
+  measurement run; future PRs assert no >5 ms drift vs
+  `phase1-latest.json`. Empty until the first real Phase 1 measurement
+  run lands — see [`docs/measurements/phase1-loopback-2026-04-30.md`](../../docs/measurements/phase1-loopback-2026-04-30.md)
+  §6 for the gating items (T86 + #96).
+
 - `captures/` — **`.gitignore`d** (covered by repo-level `.gitignore`'s
   `harness/captures/` entry plus test-data policy in
   [`../README.md`](../README.md#5-test-data-and-fixtures)). Webcam
