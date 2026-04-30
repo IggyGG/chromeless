@@ -70,7 +70,7 @@ The decision matrix:
 |-------|----------------------------------|-------------------------------------|-------------------------------|
 | H.264 | Turing+ (T4 / L4 / A10 / H100)   | Intel iHD / AMD Mesa radeonsi       | x264 ultrafast / zerolatency  |
 | HEVC  | Turing+                          | Intel iHD / AMD Mesa radeonsi       | (none in v1)                  |
-| AV1   | Ada Lovelace+ (L4 / L40 / H100)  | Intel Arc / AMD RDNA 3+             | (none in v1; Phase 4 SVT-AV1) |
+| AV1   | Ada Lovelace+ (L4 / L40 / H100)  | Intel Arc / AMD RDNA 3+             | **SVT-AV1 M8** (T75)          |
 | VP9   | (NVENC has no VP9 path)          | Intel iHD only (Mesa drops VP9)     | libvpx VP9                    |
 
 Both probes are cheap session-open + immediate-close on a tiny
@@ -96,8 +96,8 @@ choice.
 - `encoder_factory_stub.cc` — production stub that returns supported
   formats, runs the NVENC probe cache, and routes to SW or HW.
 - `vp9_encoder.{h,cc}` (T35), `h264_encoder.{h,cc}` (T36),
-  `nvenc_encoder.{h,cc}` (T63), `vaapi_encoder.{h,cc}` (T70) — the
-  per-codec implementations.
+  `nvenc_encoder.{h,cc}` (T63), `vaapi_encoder.{h,cc}` (T70),
+  `svtav1_encoder.{h,cc}` (T75) — the per-codec implementations.
 - `bwe_adapter.{h,cc}` (T58) — central BWE-update fan-out wrapped
   around every encoder created by the factory.
 

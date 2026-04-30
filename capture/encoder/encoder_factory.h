@@ -105,6 +105,13 @@ class CloudBrowserVideoEncoderFactory : public webrtc::VideoEncoderFactory {
     bool prefer_vaapi_hevc = false;
     bool prefer_vaapi_av1  = false;
     bool prefer_vaapi_vp9  = false;
+
+    // SVT-AV1 software AV1 (T75). Default ON because SVT-AV1 is the
+    // only software AV1 path that hits realtime on commodity cloud
+    // CPUs — see docs/research/av1-encoders.md (T43). The factory
+    // only instantiates it when AV1 is actually negotiated AND no HW
+    // path took precedence; harmless when AV1 isn't picked.
+    bool enable_svt_av1 = true;
   };
 
   explicit CloudBrowserVideoEncoderFactory(Config config);

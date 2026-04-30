@@ -40,6 +40,13 @@ declare_args() {
   # encode entirely). Same shape as nvenc_sdk_path: empty = HW
   # disabled, encoder still compiles and runs as software-only.
   vaapi_libdir = ""
+
+  # Path to a libSvtAv1Enc install (typically /usr or a checked-out
+  # SVT-AV1 build dir). Empty = SW AV1 disabled — the encoder still
+  # compiles, but ProbeAvailable() returns false and the factory
+  # falls through to whatever lower-priority codec libwebrtc
+  # negotiates. T75.
+  svt_av1_libdir = ""
 }
 
 config("nvenc_sdk") {
@@ -75,6 +82,19 @@ config("vaapi") {
   }
 }
 
+# SVT-AV1 gate (T75). libSvtAv1Enc is BSD-3-Clause and packaged on
+# Debian as `libsvtav1enc-dev`; we link it dynamically. Empty
+# `svt_av1_libdir` = HAS_SVT_AV1 undefined → ProbeAvailable returns
+# false → factory falls through.
+config("svt_av1") {
+  if (svt_av1_libdir != "") {
+    defines = [ "HAS_SVT_AV1=1" ]
+    include_dirs = [ "$svt_av1_libdir/include/svt-av1" ]
+    libs = [ "SvtAv1Enc" ]
+    lib_dirs = [ "$svt_av1_libdir/lib" ]
+  }
+}
+
 source_set("encoder_factory") {
   sources = [
     "../encoder/bwe_adapter.cc",
@@ -85,6 +105,8 @@ source_set("encoder_factory") {
     "../encoder/h264_encoder.h",
     "../encoder/nvenc_encoder.cc",
     "../encoder/nvenc_encoder.h",
+    "../encoder/svtav1_encoder.cc",
+    "../encoder/svtav1_encoder.h",
     "../encoder/vaapi_encoder.cc",
     "../encoder/vaapi_encoder.h",
     "../encoder/vp9_encoder.cc",
@@ -105,6 +127,8 @@ source_set("encoder_factory") {
                                                   # nvenc_sdk_path != "".
     ":vaapi",                                    # T70 — gated on
                                                   # vaapi_libdir != "".
+    ":svt_av1",                                  # T75 — gated on
+                                                  # svt_av1_libdir != "".
     "//build/config/compiler:no_chromium_code",
   ]
 }
@@ -185,6 +209,7 @@ test("cloud_browser_encoder_unittests") {
     "../encoder/bwe_adapter_test.cc",
     "../encoder/h264_encoder_test.cc",
     "../encoder/nvenc_encoder_test.cc",
+    "../encoder/svtav1_encoder_test.cc",
     "../encoder/vaapi_encoder_test.cc",
     "../encoder/vp9_encoder_test.cc",
   ]
@@ -200,6 +225,7 @@ test("cloud_browser_encoder_unittests") {
   ]
   configs += [
     ":nvenc_sdk",
+    ":svt_av1",
     ":vaapi",
   ]
 }
