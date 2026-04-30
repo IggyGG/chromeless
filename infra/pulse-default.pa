@@ -5,13 +5,32 @@
 # daemon startup, so this is the entire bootstrap script — no -F flag in
 # the supervisord command.
 #
-# Goals:
-#   - No host audio. Anything Chromium plays must go to a null device so a
-#     compromised tab can't blast the host speakers.
-#   - A monitor source on the null sink so a future capture sidecar can
-#     read what Chromium plays and push it into the WebRTC peer.
-#   - A null source so getUserMedia(audio) calls during testing get a
-#     valid (silent) input device.
+# Audio routing (see infra/audio-routing.md for the full diagram):
+#
+#     Chromium playback ──> cb_audio (null sink)
+#                             │
+#                             └─ cb_audio.monitor ──┐
+#                                                   │ module-loopback
+#                                                   ▼
+#                              cb_capture (null sink) ──> cb_capture.monitor
+#                                                            │
+#                                            getUserMedia ───┘
+#                                              (default source)
+#
+# The two-sink layout exists so that:
+#   - Chromium's default sink (cb_audio) is a clean playback target.
+#   - The default source (cb_capture.monitor) carries whatever Chromium
+#     just played, which is what `getUserMedia({audio:true})` and the
+#     headless-side capture for `getDisplayMedia({audio:true})` will
+#     read on Linux/PulseAudio.
+#   - Pointing the default source at a *separate* sink's monitor (rather
+#     than cb_audio.monitor directly) avoids a self-feedback loop if any
+#     module ever inadvertently routes captured audio back to the default
+#     sink.
+#
+# `virtual_mic` remains as an explicit silent null-source for tests that
+# specifically want a quiet microphone (e.g. getUserMedia tests that
+# don't want to pick up streamer-page audio).
 #
 # `.fail` makes startup abort if any module fails to load — better to
 # crashloop than to silently run without audio plumbing.
@@ -23,9 +42,24 @@
 ### /run/user/1000/pulse and only cbuser-owned processes can reach it.
 load-module module-native-protocol-unix auth-anonymous=1 socket=/run/user/1000/pulse/native
 
-### Virtual devices — no host audio leaves the container.
-load-module module-null-sink sink_name=virtual_speaker sink_properties=device.description="cbrowser-virtual-speaker"
+### Playback sink Chromium writes into. Named cb_audio per the T24 contract;
+### everything downstream of audio capture refers to this name.
+load-module module-null-sink sink_name=cb_audio sink_properties=device.description="cb-audio-playback"
+
+### Capture sink — receives a loopback of cb_audio.monitor. Its own monitor
+### is what we expose as the default source so getUserMedia/getDisplayMedia
+### audio captures everything Chromium plays.
+load-module module-null-sink sink_name=cb_capture sink_properties=device.description="cb-audio-capture"
+
+### Loopback: cb_audio.monitor -> cb_capture. latency_msec=20 keeps the
+### relay tight without spending CPU on tiny chunks. *_dont_move=true
+### freezes the routing so an external `pactl move-source-output` can't
+### silently break the capture path.
+load-module module-loopback source=cb_audio.monitor sink=cb_capture latency_msec=20 source_dont_move=true sink_dont_move=true
+
+### Optional silent microphone for tests that want a quiet input device
+### independent of whatever cb_audio is playing.
 load-module module-null-source source_name=virtual_mic source_properties=device.description="cbrowser-virtual-mic"
 
-set-default-sink virtual_speaker
-set-default-source virtual_speaker.monitor
+set-default-sink cb_audio
+set-default-source cb_capture.monitor
