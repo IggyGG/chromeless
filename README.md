@@ -116,8 +116,8 @@ Latency is the product. The v1 contract is:
 
 The full, measurable acceptance criteria — resolution, framerate, concurrent
 sessions per host, supported input types — live in
-[`docs/v1-success-criteria.md`](./docs/v1-success-criteria.md) *(coming soon —
-T6)*. Every architectural decision is evaluated against that document.
+[`docs/v1-success-criteria.md`](./docs/v1-success-criteria.md). Every
+architectural decision is evaluated against that document.
 
 Latency is measured, not asserted. The
 [`harness/`](./harness/) directory contains a flashing-color-block page and
