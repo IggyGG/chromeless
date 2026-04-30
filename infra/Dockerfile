@@ -82,6 +82,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         python3 \
+        python3-websocket \
         fonts-noto-core \
         fonts-noto-cjk \
         fonts-noto-color-emoji \

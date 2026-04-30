@@ -28,13 +28,17 @@ IDLE_TIMEOUT_S="${IDLE_TIMEOUT_S:-600}"
 WATCHDOG_GRACE_S="${WATCHDOG_GRACE_S:-60}"
 WATCHDOG_POLL_S="${WATCHDOG_POLL_S:-30}"
 
-# websocket-client is installed once on first need (same approach as
-# tests/smoke/audio-presence.sh — keeps the image free of pip packages
-# that may drift).
+# T53: websocket-client comes from the python3-websocket Debian package
+# installed in infra/Dockerfile. We deliberately do NOT lazy-install
+# via pip — that path failed because python3-pip isn't in the runtime
+# image, and adding it would bloat the image and require network access
+# at container start. Sanity-check that the import works; bail loudly
+# if the package is missing so a broken image fails fast instead of
+# entering a supervisord crash loop.
 if ! /usr/bin/python3 -c "import websocket" 2>/dev/null; then
-    echo "[idle-watchdog] installing websocket-client (pip --break-system-packages)" >&2
-    /usr/bin/python3 -m pip install --quiet --break-system-packages websocket-client \
-        || { echo "[idle-watchdog] FATAL: cannot install websocket-client" >&2; exit 2; }
+    echo "[idle-watchdog] FATAL: python3-websocket missing from image" >&2
+    echo "[idle-watchdog]   add 'python3-websocket' to infra/Dockerfile apt-get install" >&2
+    exit 2
 fi
 
 exec /usr/bin/python3 - "$DEVTOOLS_URL" "$IDLE_TIMEOUT_S" "$WATCHDOG_GRACE_S" "$WATCHDOG_POLL_S" <<'PY'
