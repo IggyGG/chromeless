@@ -1,0 +1,31 @@
+# infra/pulse-default.pa — PulseAudio runtime config for cloud-browser-webrtc
+#
+# This file is COPYed in the Dockerfile to /etc/pulse/default.pa, replacing
+# the Debian default. PulseAudio executes default.pa automatically on
+# daemon startup, so this is the entire bootstrap script — no -F flag in
+# the supervisord command.
+#
+# Goals:
+#   - No host audio. Anything Chromium plays must go to a null device so a
+#     compromised tab can't blast the host speakers.
+#   - A monitor source on the null sink so a future capture sidecar can
+#     read what Chromium plays and push it into the WebRTC peer.
+#   - A null source so getUserMedia(audio) calls during testing get a
+#     valid (silent) input device.
+#
+# `.fail` makes startup abort if any module fails to load — better to
+# crashloop than to silently run without audio plumbing.
+
+.fail
+
+### IPC: native socket inside the cbuser runtime dir. auth-anonymous=1 is
+### safe here because the socket lives at 0700 perms under
+### /run/user/1000/pulse and only cbuser-owned processes can reach it.
+load-module module-native-protocol-unix auth-anonymous=1 socket=/run/user/1000/pulse/native
+
+### Virtual devices — no host audio leaves the container.
+load-module module-null-sink sink_name=virtual_speaker sink_properties=device.description="cbrowser-virtual-speaker"
+load-module module-null-source source_name=virtual_mic source_properties=device.description="cbrowser-virtual-mic"
+
+set-default-sink virtual_speaker
+set-default-source virtual_speaker.monitor
