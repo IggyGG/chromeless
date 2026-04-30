@@ -1,0 +1,272 @@
+# infra/observability/alerts/cb-alerts.yaml — Prometheus alerting rules
+# implementing the SLOs defined in docs/operations/sla.md.
+#
+# Validate locally:
+#   promtool check rules infra/observability/alerts/cb-alerts.yaml
+#
+# Wire-up: add this file as a rule_files entry in your Prometheus
+# server config, OR have the Prometheus Operator's PrometheusRule CRD
+# point at it. The compose `observability` profile's
+# infra/observability/prometheus/prometheus.yml does NOT auto-load
+# this — alerts in dev are noisy and rarely informative; flip on per
+# environment.
+
+groups:
+
+  # =====================================================================
+  # Latency
+  # =====================================================================
+  - name: cloud-browser-webrtc.latency
+    rules:
+      - alert: CBHighRoundTripTime
+        # Alert when median RTT crosses 1.2× the v1 LAN target (100 ms).
+        # `cb_webrtc_round_trip_time_ms` is a per-session gauge; we
+        # quantile across all live sessions to avoid one bad session
+        # flapping the alert.
+        expr: |
+          quantile by (deploy) (0.5, cb_webrtc_round_trip_time_ms) > 120
+        for: 5m
+        labels:
+          severity: warning
+          slo: glass-to-glass-rtt
+        annotations:
+          summary: "median ICE RTT > 120ms (deploy={{ $labels.deploy }})"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+          description: |
+            Median selected-pair RTT crossed 1.2× the LAN target (100 ms).
+            Glass-to-glass latency typically lags RTT by encode + jitter
+            buffer (~30-60 ms on top of RTT). Investigate per-session via
+            cb-session-detail Grafana dashboard; cross-check
+            `cb_webrtc_outbound_qp` for encoder saturation.
+
+      - alert: CBHighRoundTripTimeRegional
+        # 1.2× the regional target (200 ms).
+        expr: |
+          quantile by (deploy) (0.95, cb_webrtc_round_trip_time_ms) > 240
+        for: 10m
+        labels:
+          severity: critical
+          slo: glass-to-glass-rtt
+        annotations:
+          summary: "p95 ICE RTT > 240ms (deploy={{ $labels.deploy }})"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+  # =====================================================================
+  # Encoder / video quality
+  # =====================================================================
+  - name: cloud-browser-webrtc.video
+    rules:
+      - alert: CBEncoderSaturated
+        # Sustained QP > 38 means the encoder is at the quality floor
+        # for the bitrate budget — users see pixelation. Cross-check
+        # bandwidth estimator before declaring "fix the encoder."
+        expr: |
+          avg by (instance) (cb_webrtc_outbound_qp) > 38
+        for: 10m
+        labels:
+          severity: warning
+          slo: encoder-quality
+        annotations:
+          summary: "encoder QP > 38 sustained (instance={{ $labels.instance }})"
+          runbook: "docs/operations/runbook.md#checking-encoder-health"
+
+      - alert: CBDroppedFramesElevated
+        # > 1 dropped frame per second for 5 minutes is way past noise
+        # floor for a 30 fps target.
+        expr: |
+          rate(cb_webrtc_outbound_dropped_frames_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          slo: encoder-quality
+        annotations:
+          summary: "dropped video frames > 1/s (instance={{ $labels.instance }})"
+          runbook: "docs/operations/runbook.md#checking-encoder-health"
+
+      - alert: CBHighPacketLoss
+        expr: |
+          rate(cb_webrtc_remote_inbound_packets_lost_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          slo: network-loss
+        annotations:
+          summary: "remote inbound packet loss > 5/s (instance={{ $labels.instance }})"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+  # =====================================================================
+  # Session assignment latency
+  # =====================================================================
+  - name: cloud-browser-webrtc.assignment
+    rules:
+      - alert: CBSlowWarmAssignment
+        # T50/T71 controller exposes cb_session_assignment_seconds_bucket
+        # split by `path={warm,cold}`. Warm should land < 1 s p95.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(cb_session_assignment_seconds_bucket{path="warm"}[5m]))
+          ) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+          slo: session-assignment-warm
+        annotations:
+          summary: "warm-pool assignment p95 > 1.5 s"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+      - alert: CBSlowColdAssignment
+        # Cold-start path: target 30 s p95. Spec.start_period is 45 s
+        # so anything past 45 means we're slower than the K8s readiness
+        # gate.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(cb_session_assignment_seconds_bucket{path="cold"}[10m]))
+          ) > 45
+        for: 15m
+        labels:
+          severity: warning
+          slo: session-assignment-cold
+        annotations:
+          summary: "cold-start assignment p95 > 45 s"
+          runbook: "docs/operations/runbook.md#scaling"
+
+      - alert: CBAssignmentFailures
+        expr: |
+          rate(cb_session_assignment_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          slo: connection-success-rate
+        annotations:
+          summary: "session assignment failures > 0.1/s"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+  # =====================================================================
+  # Signaling tier health
+  # =====================================================================
+  - name: cloud-browser-webrtc.signaling
+    rules:
+      - alert: CBSignalingAbnormalCloses
+        # Code 1006 = abnormal closure (TCP RST, network drop). 1011 =
+        # server error. A spike means clients are dropping en masse.
+        expr: |
+          sum(rate(cb_signaling_close_total{code=~"1006|1011"}[5m]))
+            / clamp_min(sum(rate(cb_signaling_close_total[5m])), 0.001) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          slo: connection-success-rate
+        annotations:
+          summary: ">20% of signaling closes are abnormal (1006/1011)"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+      - alert: CBAuthFailureBurst
+        # Post-T48: any sustained burst of auth failures suggests a
+        # token signing key drift or an active attack. tenant-bucketed
+        # in the metric per T67.
+        expr: |
+          sum by (reason) (rate(cb_signaling_auth_failures_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          slo: auth-correctness
+        annotations:
+          summary: "auth failures > 1/s (reason={{ $labels.reason }})"
+          runbook: "docs/operations/runbook.md#rotating-secrets"
+
+      - alert: CBSignalingActiveSessionsImbalance
+        # Steady state: active_connections == 2 * active_sessions
+        # (one client + one browser per session). Drift means peers
+        # are slow to disconnect or the role-binding is fraying.
+        expr: |
+          (sum(cb_signaling_active_connections) -
+           2 * sum(cb_signaling_active_sessions)) > 5
+        for: 15m
+        labels:
+          severity: warning
+          slo: connection-success-rate
+        annotations:
+          summary: "signaling active_connections != 2 × active_sessions"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+  # =====================================================================
+  # Resource pressure
+  # =====================================================================
+  - name: cloud-browser-webrtc.resources
+    rules:
+      - alert: CBChromiumCPUExhaustion
+        # > 90% of one core sustained for 10 minutes on a session pod
+        # means software encode is starving the renderer.
+        expr: |
+          avg_over_time(cb_chromium_cpu_pct[10m]) > 90
+        for: 10m
+        labels:
+          severity: warning
+          slo: encoder-quality
+        annotations:
+          summary: "Chromium CPU > 90% sustained (instance={{ $labels.instance }})"
+          runbook: "docs/operations/runbook.md#checking-encoder-health"
+
+      - alert: CBChromiumRSSGrowth
+        # Linear growth in RSS over an hour while CPU is steady ≈
+        # leak. Use rate() over the gauge: not strictly correct semantics
+        # (rate is for counters) but Prometheus accepts it for gauges
+        # and it gives us a per-second growth rate.
+        expr: |
+          rate(cb_chromium_rss_bytes[60m]) > 1024 * 1024
+        for: 30m
+        labels:
+          severity: warning
+          slo: stability
+        annotations:
+          summary: "Chromium RSS growing > 1 MiB/s over 1h (leak suspect)"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+      - alert: CBPoolWarmPodShortage
+        # T71 controller exposes per-pool warm count. Falling far below
+        # target for an extended period means cold-starts dominate.
+        expr: |
+          sum by (pool) (cb_session_pool_warm_count) <
+            on(pool) (sum by (pool) (cb_session_pool_warm_target) * 0.5)
+        for: 10m
+        labels:
+          severity: warning
+          slo: session-assignment-warm
+        annotations:
+          summary: "warm pool below 50% of target (pool={{ $labels.pool }})"
+          runbook: "docs/operations/runbook.md#scaling"
+
+  # =====================================================================
+  # Black-box / endpoint health
+  # =====================================================================
+  - name: cloud-browser-webrtc.endpoints
+    rules:
+      - alert: CBSignalingDown
+        expr: up{job="cb-signaling"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          slo: connection-success-rate
+        annotations:
+          summary: "signaling target down (instance={{ $labels.instance }})"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+      - alert: CBChromiumSidecarDown
+        expr: up{job="cb-chromium"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          slo: stability
+        annotations:
+          summary: "chromium metrics sidecar down (instance={{ $labels.instance }})"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
+
+      - alert: CBTurnIssuerDown
+        expr: up{job="cb-turn-issuer"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          slo: connection-success-rate
+        annotations:
+          summary: "TURN issuer down — clients may fail to obtain TURN credentials"
+          runbook: "docs/operations/runbook.md#rotating-secrets"
