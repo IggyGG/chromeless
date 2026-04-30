@@ -89,6 +89,13 @@ RUN apt-get update \
         fonts-noto-color-emoji \
         fonts-dejavu-core \
         procps \
+        # T81 — webcam/mic passthrough. v4l2loopback-utils gives us
+        # `modprobe v4l2loopback` + the v4l2-ctl binary the v4l2-writer
+        # follow-up will use. The kernel module itself is loaded at
+        # session-pod startup either by a privileged container (compose
+        # dev) or by a host-DaemonSet (production). The image carries
+        # only the userland tools.
+        v4l2loopback-utils \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. After T57, cbuser is the *whole* runtime user — there
@@ -137,6 +144,13 @@ COPY infra/launch-chromium.sh /usr/local/bin/launch-chromium.sh
 # regardless of --remote-debugging-address. See infra/devtools-proxy.sh
 # for the full rationale.
 COPY infra/devtools-proxy.sh /usr/local/bin/devtools-proxy.sh
+
+# T81: passthrough init script — modprobes v4l2loopback in the
+# privileged compose-dev path; no-op on the host-DaemonSet path
+# where /dev/video10 is pre-mounted. See infra/init-passthrough.sh
+# and docs/protocols/webcam-mic-passthrough.md for the deployment
+# shape rationale.
+COPY infra/init-passthrough.sh /usr/local/bin/init-passthrough.sh
 
 # Metrics sidecar binary (T38), built in the metrics-build stage above.
 COPY --from=metrics-build /out/cb-metrics-sidecar /usr/local/bin/cb-metrics-sidecar

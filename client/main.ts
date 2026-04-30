@@ -24,6 +24,7 @@
 
 import { InputChannel } from "./src/input.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
+import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { fetchTurnConfig } from "./src/turn.js";
 import { prioritizeCodec } from "./src/sdp.js";
 import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src/reconnect.js";
@@ -67,6 +68,9 @@ const els = {
   iceg: $<HTMLElement>("state-iceg"),
   conn: $<HTMLElement>("state-conn"),
   dc: $<HTMLElement>("state-dc"),
+  // T81: webcam/mic passthrough toggle. The button is in index.html;
+  // it stays disabled until we have a peer connection up.
+  passthrough: $<HTMLButtonElement>("passthrough-toggle"),
 };
 
 function setStatus(state: "idle" | "connecting" | "connected" | "failed" | "closed", text?: string): void {
@@ -103,6 +107,10 @@ interface Session {
   rws: ReconnectingWebSocket;
   pc: RTCPeerConnection;
   iceConfig: RTCConfiguration;
+  /** Session identifier — also the path segment of /ws/{session_id}. */
+  sessionId: string;
+  /** Tenant identifier from the verified token's `sub` (T48); "" if anonymous. */
+  tenantId: string;
   /** Set when the streamer has opened the "input" data channel. */
   dc: RTCDataChannel | null;
   input: InputChannel | null;
@@ -118,6 +126,9 @@ interface Session {
   fileUpload: FileUploadChannel | null;
   /** Per-session detach function for window-level drop listeners. */
   detachDrop: (() => void) | null;
+  /** T81: camera/mic passthrough controller. Bound to the pc lifetime;
+   *  reset on rebuild. null until enabled by the user. */
+  passthrough: CameraPassthrough | null;
   /** Has at least one rws "open" fired? Used to distinguish first vs reconnect. */
   hasOpenedOnce: boolean;
 }
@@ -130,6 +141,10 @@ function teardown(reason: string): void {
   try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.detachStats?.(); } catch { /* ignore */ }
   try { active.detachDrop?.(); } catch { /* ignore */ }
+  // T81: stop the camera/mic before closing the pc so tracks
+  // actually fire "ended" and the user-agent's recording-active
+  // indicator clears.
+  try { active.passthrough?.disable(); } catch { /* ignore */ }
   try { active.stats?.stop(); } catch { /* ignore */ }
   try { active.dc?.close(); } catch { /* ignore */ }
   try { active.statsDc?.close(); } catch { /* ignore */ }
@@ -145,6 +160,7 @@ function teardown(reason: string): void {
   setStatus("closed");
   els.connect.disabled = false;
   els.connect.textContent = "Connect";
+  setPassthroughButtonState("off", true);
 }
 
 // Map page coords into the source video's intrinsic pixel space,
@@ -307,6 +323,16 @@ function buildPeerConnection(): RTCPeerConnection {
     else if (pc.connectionState === "failed") setStatus("failed");
     else if (pc.connectionState === "disconnected" || pc.connectionState === "closed") setStatus("closed");
     log(pc.connectionState === "failed" ? "err" : "info", `connectionState=${pc.connectionState}`);
+    // T81: enable the passthrough button only while the pc is up.
+    // We don't auto-disable on transient connection drops — the
+    // user still owns the share; teardown / rebuildPeerConnection
+    // are the only paths that actively flip it back to "off".
+    if (pc.connectionState === "connected") {
+      const enabled = active?.passthrough?.getState().enabled ?? false;
+      setPassthroughButtonState(enabled ? "on" : "off", false);
+    } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      setPassthroughButtonState("off", true);
+    }
   };
 
   pc.onicecandidate = (ev) => {
@@ -329,14 +355,21 @@ function buildPeerConnection(): RTCPeerConnection {
   // T42: per-second stats sampler. Subscribers update the debug panel
   // and (when the streamer offers a "stats" channel) emit over the
   // data channel for server-side scraping.
-  const stats = new StatsSampler(pc, { intervalMs: 1000 });
+  // T82: pass session_id + tenant_id through the sampler so the
+  // emitted envelope carries them — the sidecar uses these to label
+  // per-session metrics for T66 dashboards.
+  const stats = new StatsSampler(pc, {
+    intervalMs: 1000,
+    sessionId: active?.sessionId,
+    tenantId:  active?.tenantId,
+  });
   let prev: StatsSample | undefined;
   const detachStats = stats.on((s) => {
     log("info", `stats ${formatSummary(s, prev)}`);
     prev = s;
     if (active?.statsDc?.readyState === "open") {
       try {
-        active.statsDc.send(JSON.stringify({ v: STATS_PROTOCOL_VERSION, t: s.t, sample: s }));
+        active.statsDc.send(JSON.stringify(stats.buildEnvelope(s)));
       } catch { /* ignore */ }
     }
   });
@@ -361,10 +394,16 @@ function rebuildPeerConnection(reason: string): void {
   try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.detachStats?.(); } catch { /* ignore */ }
   try { active.detachDrop?.(); } catch { /* ignore */ }
+  // T81: rebuilds drop the camera/mic too. Per the threat model
+  // §T10, surviving a reconnect with passthrough still active
+  // would be silent re-sharing — we explicitly require a fresh
+  // user click after every pc rebuild.
+  try { active.passthrough?.disable(); } catch { /* ignore */ }
   try { active.stats?.stop(); } catch { /* ignore */ }
   active.detachInput = null;
   active.detachStats = null;
   active.detachDrop = null;
+  active.passthrough = null;
   active.stats = null;
   try { active.dc?.close(); } catch { /* ignore */ }
   try { active.statsDc?.close(); } catch { /* ignore */ }
@@ -377,6 +416,7 @@ function rebuildPeerConnection(reason: string): void {
   try { active.pc.close(); } catch { /* ignore */ }
   active.pc = buildPeerConnection();
   els.dc.textContent = "—";
+  setPassthroughButtonState("off", false);
   maybeExposePcForE2e(active.pc);
 }
 
@@ -424,8 +464,10 @@ async function connect(sessionId: string): Promise<void> {
   // synchronously by buildPeerConnection() once session is set.
   active = {
     rws, pc: null as unknown as RTCPeerConnection, iceConfig,
+    sessionId, tenantId: issued?.sub ?? "",
     dc: null, input: null, detachInput: null,
     filesDc: null, fileUpload: null, detachDrop: null,
+    passthrough: null,
     statsDc: null, stats: null, detachStats: null,
     hasOpenedOnce: false,
   };
@@ -506,6 +548,8 @@ async function connect(sessionId: string): Promise<void> {
               active.statsDc.send(JSON.stringify({
                 v: STATS_PROTOCOL_VERSION,
                 t: Date.now(),
+                session_id: active.sessionId,
+                tenant_id: active.tenantId || "",
                 event: "codec_fallback",
                 data: {
                   preferred: result.preferred,
@@ -562,6 +606,63 @@ els.connect.addEventListener("click", () => {
   const sessionId = els.sessionId.value.trim() || "dev";
   els.connect.textContent = "Disconnect";
   void connect(sessionId);
+});
+
+// ---------- T81: passthrough button ----------
+
+/** Set the passthrough button's visual + disabled state. */
+function setPassthroughButtonState(state: "off" | "pending" | "on", disabled: boolean): void {
+  els.passthrough.dataset["state"] = state;
+  els.passthrough.disabled = disabled;
+  els.passthrough.textContent =
+    state === "on"      ? "Stop sharing"
+    : state === "pending" ? "Requesting…"
+    :                     "Share camera/mic";
+}
+
+els.passthrough.addEventListener("click", async () => {
+  if (!active) return;
+  // Toggle: enable if not yet enabled, disable otherwise. We always
+  // create a fresh CameraPassthrough on enable so the post-rebuild
+  // state (per the threat model) starts from a clean slate.
+  if (active.passthrough && active.passthrough.getState().enabled) {
+    log("info", "passthrough: user clicked stop");
+    active.passthrough.disable();
+    setPassthroughButtonState("off", false);
+    return;
+  }
+  setPassthroughButtonState("pending", true);
+  const cp = new CameraPassthrough(active.pc, {
+    onStateChange: (s) => log("info", "passthrough state",
+      `enabled=${s.enabled} v=${s.videoTrackActive} a=${s.audioTrackActive}`),
+    onNeedRenegotiate: (reason) => {
+      // The streamer (offerer per T34) needs to re-offer with the
+      // new m= sections. Reuse the existing T37 envelope.
+      if (!active) return;
+      try {
+        active.rws.send(JSON.stringify({
+          type: "request_renegotiate", from: "client",
+        } satisfies Envelope));
+        log("info", `→ request_renegotiate (${reason})`);
+      } catch (err) {
+        log("warn", "request_renegotiate send failed", String(err));
+      }
+    },
+    onError: (err) => log("err", `passthrough ${err.code}`, err.message),
+  });
+  try {
+    await cp.enable();
+    if (active) active.passthrough = cp;
+    setPassthroughButtonState("on", false);
+    log("ok", "passthrough enabled");
+  } catch (err) {
+    setPassthroughButtonState("off", false);
+    if (err instanceof PassthroughError) {
+      log("err", `passthrough enable failed [${err.code}]`, err.message);
+    } else {
+      log("err", "passthrough enable threw", String(err));
+    }
+  }
 });
 
 window.addEventListener("beforeunload", () => teardown("page unload"));

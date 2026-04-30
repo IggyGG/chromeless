@@ -141,6 +141,22 @@ spec:
     - name: cb-uploads
       emptyDir:
         sizeLimit: 256Mi
+    # T81 — webcam/mic passthrough sockets. The streamer page writes
+    # raw I420 / S16LE frames to these Unix domain sockets (paths
+    # /run/cb-passthrough/{video,audio}.sock); the v4l2-writer
+    # follow-up reads from them and pushes into /dev/video10 +
+    # PulseAudio. emptyDir is fine because the sockets are
+    # re-created each session and never need to outlive the pod.
+    #
+    # Production deployment relies on the host-DaemonSet shape (see
+    # docs/protocols/webcam-mic-passthrough.md "Shape 2") to load
+    # v4l2loopback once per node and expose /dev/videoN to this pod
+    # via a separate device-claim volume — NOT via emptyDir or
+    # privileged: true. The compose-dev shape is documented in
+    # infra/compose.yaml and is NOT intended for production.
+    - name: cb-passthrough-sockets
+      emptyDir:
+        sizeLimit: 8Mi
 
   # Pod-level resources are summed across containers; we target ~3 CPU
   # / ~5.5GB mem / 2GB ephemeral storage on the request side. Cluster
@@ -193,6 +209,12 @@ spec:
           readOnly: true
         - name: x11-socket
           mountPath: /tmp/.X11-unix
+        # T81 — passthrough socket dir, shared with the streamer page
+        # (which writes from inside Chromium) and the v4l2-writer
+        # follow-up sidecar (which reads). Production deployments
+        # bind /dev/video10 here through a device plugin.
+        - name: cb-passthrough-sockets
+          mountPath: /run/cb-passthrough
       resources:
         requests:
           cpu: "1500m"

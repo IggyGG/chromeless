@@ -31,6 +31,19 @@
   // Each entry is "<scaleResolutionDownBy>[@<maxFramerate>]". Max 3
   // layers per the libwebrtc constraint (and per docs/protocols/simulcast.md).
   const SIMULCAST_ENABLED = (params.get("simulcast") || "").toLowerCase() === "true";
+  // T81: webcam/mic passthrough. Off by default; enabled by the
+  // orchestrator passing ?passthrough=true. When enabled, the
+  // streamer's pc.ontrack handler routes inbound camera + mic
+  // tracks to the v4l2-writer + PulseAudio loopback sockets at:
+  //   PASSTHROUGH_VIDEO_SOCK / PASSTHROUGH_AUDIO_SOCK
+  // (Phase 4 — the v4l2-writer native helper is a follow-up; for
+  // now the streamer wires the track to a hidden <video>/<audio>
+  // for diagnostic visibility and emits a console warning that the
+  // sink isn't yet connected. The wire seam is documented in
+  // docs/protocols/webcam-mic-passthrough.md.)
+  const PASSTHROUGH_ENABLED   = (params.get("passthrough") || "").toLowerCase() === "true";
+  const PASSTHROUGH_VIDEO_SOCK = params.get("passthrough_video_sock") || "/run/cb-passthrough/video.sock";
+  const PASSTHROUGH_AUDIO_SOCK = params.get("passthrough_audio_sock") || "/run/cb-passthrough/audio.sock";
   const SIMULCAST_LAYERS = parseSimulcastLayersParam(params.get("simulcast_layers"));
   // Input-bridge endpoint (T22 / T41). Same container as the streamer
   // (supervisord-managed), bound to loopback. Override via ?input=...
@@ -303,6 +316,26 @@
     }
   }
 
+  // T81 — passthrough sink. Lazily creates a hidden <video>/<audio>
+  // for diagnostic visibility. The actual v4l2-writer / pulse sink
+  // is a Phase 4 follow-up; we keep this seam so the page can route
+  // the inbound MediaStreamTrack into a known place.
+  function ensurePassthroughMediaElement(kind) {
+    const id = `passthrough-${kind}`;
+    let el = document.getElementById(id);
+    if (el) return el;
+    el = document.createElement(kind === "video" ? "video" : "audio");
+    el.id = id;
+    el.autoplay = true;
+    el.playsInline = true;
+    el.muted = kind === "audio"; // we don't want the audio to play locally
+    el.style.position = "fixed";
+    el.style.top = "-9999px";    // off-screen
+    el.style.left = "-9999px";
+    document.body.appendChild(el);
+    return el;
+  }
+
   function teardown(reason) {
     if (!active) return;
     log("info", `tearing down: ${reason}`);
@@ -437,6 +470,66 @@
     // initiated channel — log it for diagnostics.
     pc.ondatachannel = (ev) => {
       log("warn", "unexpected client-initiated data channel", { label: ev.channel.label });
+    };
+
+    // T81: webcam/mic passthrough. The client (per
+    // docs/protocols/webcam-mic-passthrough.md) calls
+    // navigator.mediaDevices.getUserMedia and adds the resulting
+    // video/audio tracks to the existing peer connection. When
+    // they arrive here we route them to the v4l2-writer socket
+    // (video) or the PulseAudio loopback sink (audio).
+    //
+    // Two behaviours, gated on the PASSTHROUGH_ENABLED query param:
+    //   - enabled  → install the passthrough handler. It logs each
+    //                inbound track, captures it for visibility, and
+    //                opens a connection to the per-kind sink socket
+    //                (Phase 4 v4l2-writer native helper — currently
+    //                a documented seam, not implemented).
+    //   - disabled → drop any inbound track immediately by calling
+    //                track.stop() and logging a warning. Per the
+    //                threat model §T2, content from a non-
+    //                passthrough-configured pod must NEVER reach
+    //                the v4l2/pulse loopback.
+    pc.ontrack = (ev) => {
+      const track = ev.track;
+      const kind = track.kind;
+      log("info", "← inbound track", { kind, id: track.id, readyState: track.readyState });
+      if (!PASSTHROUGH_ENABLED) {
+        log("warn", "passthrough not enabled; dropping inbound track", { kind });
+        try { track.stop(); } catch { /* ignore */ }
+        return;
+      }
+      // Choose a socket per kind. The frame format on the wire is
+      // documented in docs/protocols/webcam-mic-passthrough.md.
+      const sock = kind === "video" ? PASSTHROUGH_VIDEO_SOCK
+                : kind === "audio" ? PASSTHROUGH_AUDIO_SOCK
+                : null;
+      if (!sock) {
+        log("warn", "passthrough: unknown track kind; ignoring", { kind });
+        try { track.stop(); } catch { /* ignore */ }
+        return;
+      }
+      // For visibility during dev, attach the track to a hidden
+      // media element. Removing the track from this element on
+      // "ended" is what triggers Chromium to release the underlying
+      // pipeline, which lets v4l2-writer's read loop unblock.
+      const mediaEl = ensurePassthroughMediaElement(kind);
+      mediaEl.srcObject = mediaEl.srcObject instanceof MediaStream
+        ? (mediaEl.srcObject.addTrack(track), mediaEl.srcObject)
+        : new MediaStream([track]);
+
+      track.addEventListener("ended", () => {
+        log("info", "passthrough track ended", { kind, id: track.id });
+        // The v4l2-writer follow-up will close the per-track sink
+        // socket here; today we just log.
+      });
+
+      // The actual sink-write piece (InsertableStreams transform →
+      // Unix socket → v4l2-writer / PulseAudio) is a documented
+      // follow-up. We log the seam so operators know what's
+      // missing and where to look.
+      log("warn", "passthrough sink-write not yet implemented",
+        { kind, sock, todo: "capture/v4l2-writer/ — Phase 4 follow-up" });
     };
 
     // 3. Open the signaling WS.
