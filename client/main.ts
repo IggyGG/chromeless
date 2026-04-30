@@ -1,18 +1,25 @@
 // v0 browser client for cloud-browser-webrtc.
 //
-// Scope (T14):
-//   - Connect to the signaling server from T13 at ws://localhost:8080/ws/{session}.
-//   - Create an RTCPeerConnection with default STUN config.
-//   - Open a data channel "input" for future input forwarding.
-//   - Send a stub SDP offer and wait for an answer.
-//   - Attach any incoming media track to the <video> element.
+// Per docs/capture/path-of-least-resistance.md (T15) and T23, the
+// streamer (capture/streamer-page) holds the media and is therefore
+// the WebRTC offerer. This client is the **answerer**: it opens the
+// signaling websocket, waits for the streamer's offer, replies with an
+// SDP answer, and trickles ICE.
+//
+// Scope:
+//   - Connect to the signaling server (T13) at ws://localhost:8080/ws/{session}.
+//   - Fetch ICE config (T25) before constructing the RTCPeerConnection.
+//   - Wait for `{type: "offer", from: "browser"}` from the streamer.
+//   - createAnswer → prioritizeCodec(VP9) → setLocalDescription → send answer.
+//   - Receive any incoming media tracks via `pc.ontrack`; attach to <video>.
+//   - Receive any incoming data channels via `pc.ondatachannel`. When the
+//     streamer creates the "input" channel, wrap it with InputChannel
+//     (T20) and attach DOM listeners that forward mouse/keyboard.
 //   - Surface signaling/ICE/connection state to the debug panel.
 //
-// Out of scope: there is no real remote source yet (capture is Phase 1).
-// You will see the offer go out and the connection sit in
-// have-local-offer / new-ICE forever unless something on the other end
-// actually answers. That is the expected stub behavior — the goal is to
-// validate signaling round-trip and RTCPeerConnection lifecycle wiring.
+// Out of scope: T37 reconnect logic, T34 follow-up (streamer-side
+// creation of the "input" data channel — until that lands the channel
+// just won't appear and InputChannel stays detached).
 
 import { InputChannel } from "./src/input.js";
 import { fetchTurnConfig } from "./src/turn.js";
@@ -83,8 +90,10 @@ function escapeHtml(s: string): string {
 interface Session {
   ws: WebSocket;
   pc: RTCPeerConnection;
-  dc: RTCDataChannel;
-  input: InputChannel;
+  /** Set when the streamer has created the "input" data channel. */
+  dc: RTCDataChannel | null;
+  /** Set when an InputChannel has been wired up to the dc. */
+  input: InputChannel | null;
   detachInput: (() => void) | null;
 }
 
@@ -94,7 +103,7 @@ function teardown(reason: string): void {
   if (!active) return;
   log("info", `tearing down: ${reason}`);
   try { active.detachInput?.(); } catch { /* ignore */ }
-  try { active.dc.close(); } catch { /* ignore */ }
+  try { active.dc?.close(); } catch { /* ignore */ }
   try { active.pc.close(); } catch { /* ignore */ }
   if (active.ws.readyState === WebSocket.OPEN) {
     try {
@@ -106,6 +115,63 @@ function teardown(reason: string): void {
   setStatus("closed");
   els.connect.disabled = false;
   els.connect.textContent = "Connect";
+}
+
+// Map page coords into the source video's intrinsic pixel space,
+// undoing object-fit:contain. The remote expects coords in the source
+// coordinate system. Reused by the input data channel handler when it
+// arrives.
+function videoContentMapper(cx: number, cy: number, rect: DOMRect): { x: number; y: number } {
+  const v = els.video;
+  const vw = v.videoWidth || rect.width;
+  const vh = v.videoHeight || rect.height;
+  const scale = Math.min(rect.width / vw, rect.height / vh);
+  const dispW = vw * scale;
+  const dispH = vh * scale;
+  const padX = (rect.width  - dispW) / 2;
+  const padY = (rect.height - dispH) / 2;
+  return {
+    x: Math.max(0, Math.min(vw, ((cx - rect.left) - padX) / scale)),
+    y: Math.max(0, Math.min(vh, ((cy - rect.top)  - padY) / scale)),
+  };
+}
+
+function wireInputChannel(dc: RTCDataChannel): void {
+  if (!active) return;
+  els.dc.textContent = dc.readyState;
+  log("ok", `← data channel "${dc.label}" (state=${dc.readyState})`);
+  if (dc.label !== "input") {
+    log("warn", `ignoring unknown data channel label: ${dc.label}`);
+    return;
+  }
+  const input = new InputChannel(dc, {
+    onCoalesce: (n) => log("info", `coalesced ${n} mouse_move`),
+    onError: (err) => log("err", "input send failed", String(err)),
+  });
+  active.dc = dc;
+  active.input = input;
+
+  const attachListeners = () => {
+    if (!active) return;
+    const detach = input.attach(els.video, { toContentCoords: videoContentMapper });
+    active.detachInput = detach;
+  };
+  if (dc.readyState === "open") attachListeners();
+  else dc.addEventListener("open", attachListeners, { once: true });
+
+  dc.addEventListener("close", () => {
+    els.dc.textContent = "closed";
+    log("info", "input data-channel closed");
+    if (active) {
+      active.detachInput?.();
+      active.detachInput = null;
+    }
+  });
+  dc.addEventListener("error", (e) => {
+    els.dc.textContent = "error";
+    log("err", "input data-channel error", String((e as RTCErrorEvent).error?.message ?? e));
+  });
+  dc.addEventListener("message", (e) => log("info", "← input.message", e.data));
 }
 
 async function connect(sessionId: string): Promise<void> {
@@ -122,7 +188,6 @@ async function connect(sessionId: string): Promise<void> {
   log("info", "ice config", iceConfig);
 
   const ws = new WebSocket(wsUrl);
-
   const pc = new RTCPeerConnection(iceConfig);
 
   pc.onsignalingstatechange = () => { els.sig.textContent = pc.signalingState; log("info", `signalingState=${pc.signalingState}`); };
@@ -156,76 +221,23 @@ async function connect(sessionId: string): Promise<void> {
     }
   };
 
-  // T14/T20: data channel "input" carries the v1 input protocol
-  // documented in docs/protocols/input-channel.md.
-  const dc = pc.createDataChannel("input", { ordered: true });
-  const input = new InputChannel(dc, {
-    onCoalesce: (n) => log("info", `coalesced ${n} mouse_move`),
-    onError: (err) => log("err", "input send failed", String(err)),
-  });
-  let detach: (() => void) | null = null;
+  // T34: we no longer createDataChannel("input") on the answerer side.
+  // The streamer (T23 follow-up / T41) will offer the data channel as
+  // part of its SDP; we receive it here.
+  pc.ondatachannel = (ev) => wireInputChannel(ev.channel);
 
-  dc.onopen = () => {
-    els.dc.textContent = "open";
-    log("ok", "input data-channel open");
-    // Attach DOM listeners only once the channel is actually open;
-    // before that we'd just be queueing and dropping.
-    detach = input.attach(els.video, {
-      toContentCoords: (cx, cy, rect) => {
-        // Map page coords into the source video's intrinsic pixel
-        // space, accounting for object-fit: contain. The remote
-        // expects coords in the source coordinate system.
-        const v = els.video;
-        const vw = v.videoWidth || rect.width;
-        const vh = v.videoHeight || rect.height;
-        const scale = Math.min(rect.width / vw, rect.height / vh);
-        const dispW = vw * scale;
-        const dispH = vh * scale;
-        const padX = (rect.width  - dispW) / 2;
-        const padY = (rect.height - dispH) / 2;
-        return {
-          x: Math.max(0, Math.min(vw, ((cx - rect.left) - padX) / scale)),
-          y: Math.max(0, Math.min(vh, ((cy - rect.top)  - padY) / scale)),
-        };
-      },
-    });
-    if (active) active.detachInput = detach;
-  };
-  dc.onclose   = () => {
-    els.dc.textContent = "closed";
-    log("info", "input data-channel closed");
-    detach?.();
-    detach = null;
-  };
-  dc.onerror   = (e) => { els.dc.textContent = "error";  log("err",  "input data-channel error", String((e as RTCErrorEvent).error?.message ?? e)); };
-  dc.onmessage = (e) => log("info", "← input.message", e.data);
-  els.dc.textContent = dc.readyState;
+  active = { ws, pc, dc: null, input: null, detachInput: null };
+  els.dc.textContent = "—";
 
-  active = { ws, pc, dc, input, detachInput: null };
-
-  ws.addEventListener("open", async () => {
+  ws.addEventListener("open", () => {
     log("ok", "ws open");
-    setStatus("connecting", "negotiating");
-
-    // We must add a recv-only transceiver for video so the SDP offer
-    // contains an m= section the server can answer with a real track.
-    pc.addTransceiver("video", { direction: "recvonly" });
-    pc.addTransceiver("audio", { direction: "recvonly" });
-
-    try {
-      const offer = await pc.createOffer();
-      // T30: prefer VP9 first. Pure SDP transform — see
-      // docs/protocols/sdp-munging.md. T34 will move this to apply on
-      // the answer when we flip to answerer-role.
-      const mungedSdp = prioritizeCodec(offer.sdp ?? "", "VP9");
-      await pc.setLocalDescription({ type: offer.type, sdp: mungedSdp });
-      const env: Envelope = { type: "offer", from: "client", data: { type: offer.type, sdp: mungedSdp } };
-      ws.send(JSON.stringify(env));
-      log("ok", "→ offer", { sdpBytes: mungedSdp.length, vp9First: /m=video.*\b\d+\b/.test(mungedSdp) });
-    } catch (err) {
-      log("err", "createOffer failed", String(err));
-      teardown("createOffer failed");
-    }
+    setStatus("connecting", "waiting for offer");
+    // Send a hello so the signaling server learns our role. The
+    // server's protocol requires a valid envelope as the first frame
+    // (offer|answer|ice|bye); a null-data ice frame is the right
+    // no-op — the streamer treats it as "end of candidates" and
+    // ignores it. See signaling/server.go::wsHandler.
+    ws.send(JSON.stringify({ type: "ice", from: "client", data: null } satisfies Envelope));
   });
 
   ws.addEventListener("message", async (ev) => {
@@ -241,17 +253,27 @@ async function connect(sessionId: string): Promise<void> {
       return;
     }
     switch (env.type) {
-      case "answer":
-        log("ok", `← answer`, { sdpBytes: env.data.sdp?.length ?? 0 });
+      case "offer":
+        log("ok", `← offer`, { sdpBytes: env.data.sdp?.length ?? 0 });
         try {
           await pc.setRemoteDescription(env.data);
+          const answer = await pc.createAnswer();
+          // T30 munging applies on the answer now that we are the
+          // answerer (T34). Same pure transform as before.
+          const mungedSdp = prioritizeCodec(answer.sdp ?? "", "VP9");
+          await pc.setLocalDescription({ type: answer.type, sdp: mungedSdp });
+          const reply: Envelope = { type: "answer", from: "client", data: { type: answer.type, sdp: mungedSdp } };
+          ws.send(JSON.stringify(reply));
+          log("ok", `→ answer`, { sdpBytes: mungedSdp.length });
         } catch (err) {
-          log("err", "setRemoteDescription failed", String(err));
+          log("err", "answer pipeline failed", String(err));
+          teardown("answer failed");
         }
         break;
-      case "offer":
-        // Browser-initiated renegotiation — not used in v0, log and ignore.
-        log("warn", `← unexpected offer from ${env.from}`);
+      case "answer":
+        // We are the answerer — receiving an answer is unexpected. Log
+        // and ignore. Renegotiation would be a fresh offer instead.
+        log("warn", `← unexpected answer from ${env.from}`);
         break;
       case "ice":
         if (env.data === null) {
