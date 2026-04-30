@@ -68,11 +68,39 @@ Docker, no webcam rig, no signal-able external deps. Runs on
   the input bridge become testable, add sibling test files (or a new
   `tests/integration/<surface>/` subdir with its own module).
 - No flakiness. The only timing assumption is the 5 s `/healthz` poll
-  on server startup; everything else uses 2 s read deadlines on
+  on server startup; everything else uses generous read deadlines on
   loopback. If a test flakes, treat it as a real bug per the
   [flakiness policy](../README.md#4-quality-bars).
 - The signaling binary is built fresh on every `go test` invocation —
   there is no stale-cache hazard.
+
+### T51: ICE-trickle assertion hardening
+
+Originally each ICE-trickle frame in `TestSignalingRoundtrip` had its
+own 2 s `ReadJSON` deadline. Platform-dev flagged intermittent failures
+under loaded CI; on the local dev machine the test could not be made
+to flake at 500 sequential `-race` runs nor at parallel `GOMAXPROCS=1..4`
+permutations.
+
+The protocol contract holds: TCP + the gorilla/websocket frame writer
+preserve order on a single sender, so the only way a strict
+per-direction-order assertion can fail is one of:
+
+1. The frame did not arrive within the deadline (CI saturation).
+2. The frame arrived but the test goroutine hadn't been scheduled to
+   read it (heavy load + stop-the-world race detector + strict
+   per-frame deadline).
+
+Neither is a hub-side bug. T51's fix replaces the per-frame deadline
+loop with a `drain(conn, n, perFrame, total)` helper that gives each
+individual `ReadJSON` 4 s and the whole batch 8 s, so a single
+slow-scheduled frame doesn't kill the test. The set + per-direction
+ordering assertions are unchanged.
+
+If the flake recurs after this change, escalate: open a follow-up to
+either (a) prove a hub ordering bug with a smaller reproducer, or
+(b) trace which frame went missing via SIGNALING_TEST_LOGS=1 plus
+the metric `cb_signaling_messages_total{type="ice"}`.
 
 ## See also
 

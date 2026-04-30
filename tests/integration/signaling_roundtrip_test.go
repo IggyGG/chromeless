@@ -199,6 +199,32 @@ func expectClosed(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
 	}
 }
 
+// drain reads exactly n envelopes from conn, giving each individual
+// read up to perFrame and the whole batch up to total. Used for ICE
+// trickle assertions where TCP+WebSocket guarantees per-direction
+// ordering but a saturated CI host can stall any one frame.
+//
+// Returns the envelopes in the order received.
+func drain(t *testing.T, conn *websocket.Conn, n int, perFrame, total time.Duration) []envelope {
+	t.Helper()
+	hardStop := time.Now().Add(total)
+	out := make([]envelope, 0, n)
+	for len(out) < n {
+		// Whichever is sooner: per-frame deadline or the batch deadline.
+		dl := time.Now().Add(perFrame)
+		if hardStop.Before(dl) {
+			dl = hardStop
+		}
+		_ = conn.SetReadDeadline(dl)
+		var got envelope
+		if err := conn.ReadJSON(&got); err != nil {
+			t.Fatalf("drain @ %d/%d: %v", len(out), n, err)
+		}
+		out = append(out, got)
+	}
+	return out
+}
+
 // ----- tests -----
 
 // TestSignalingRoundtrip exercises the full SDP + ICE forwarding contract
@@ -246,21 +272,26 @@ func TestSignalingRoundtrip(t *testing.T) {
 		t.Fatalf("answer payload: %s", got.Data)
 	}
 
-	// 3. Three ICE candidates browser→client, in order.
+	// 3. Three ICE candidates browser→client, asserting per-direction
+	//    order. TCP+WebSocket preserves order on a single sender, so
+	//    the answer the cli already wrote can never interleave with
+	//    these. Original test (pre-T51) used a 2s deadline per frame;
+	//    we drain all 3 with a single batch budget. See README.md
+	//    note on T51.
 	for i := 1; i <= 3; i++ {
 		writeEnvelope(t, brw, envelope{
 			Type: "ice", From: "browser",
 			Data: json.RawMessage(fmt.Sprintf(`{"candidate":"b-%d"}`, i)),
 		})
 	}
-	for i := 1; i <= 3; i++ {
-		got = readEnvelope(t, cli, 2*time.Second)
-		if got.Type != "ice" || got.From != "browser" {
-			t.Fatalf("ice b-%d envelope: %+v", i, got)
+	got3 := drain(t, cli, 3, 4*time.Second, 8*time.Second)
+	for i, e := range got3 {
+		if e.Type != "ice" || e.From != "browser" {
+			t.Fatalf("ice b-* envelope at slot %d: %+v", i, e)
 		}
-		want := fmt.Sprintf(`"b-%d"`, i)
-		if !bytes.Contains(got.Data, []byte(want)) {
-			t.Fatalf("ice ordering: want %s at slot %d, got %s", want, i, got.Data)
+		want := fmt.Sprintf(`"b-%d"`, i+1)
+		if !bytes.Contains(e.Data, []byte(want)) {
+			t.Fatalf("ice ordering b→c: want %s at slot %d, got %s", want, i, e.Data)
 		}
 	}
 
@@ -271,14 +302,14 @@ func TestSignalingRoundtrip(t *testing.T) {
 			Data: json.RawMessage(fmt.Sprintf(`{"candidate":"c-%d"}`, i)),
 		})
 	}
-	for i := 1; i <= 3; i++ {
-		got = readEnvelope(t, brw, 2*time.Second)
-		if got.Type != "ice" || got.From != "client" {
-			t.Fatalf("ice c-%d envelope: %+v", i, got)
+	got3 = drain(t, brw, 3, 4*time.Second, 8*time.Second)
+	for i, e := range got3 {
+		if e.Type != "ice" || e.From != "client" {
+			t.Fatalf("ice c-* envelope at slot %d: %+v", i, e)
 		}
-		want := fmt.Sprintf(`"c-%d"`, i)
-		if !bytes.Contains(got.Data, []byte(want)) {
-			t.Fatalf("ice ordering: want %s at slot %d, got %s", want, i, got.Data)
+		want := fmt.Sprintf(`"c-%d"`, i+1)
+		if !bytes.Contains(e.Data, []byte(want)) {
+			t.Fatalf("ice ordering c→b: want %s at slot %d, got %s", want, i, e.Data)
 		}
 	}
 }
