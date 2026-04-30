@@ -79,6 +79,9 @@ type peer struct {
 	conn *websocket.Conn
 	send chan []byte
 	log  *slog.Logger
+	// claims is non-nil iff auth is enabled. Used to enforce role
+	// consistency on subsequent envelopes (T48).
+	claims *Claims
 }
 
 // session holds at most two peers keyed by role.
@@ -206,6 +209,10 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	connLog := h.log.With(slog.String("session_id", sessionID), slog.String("remote", r.RemoteAddr))
 
+	// T48: token may be present as ?token=. We can't verify yet (no
+	// role) — defer until we've read the first envelope.
+	tokenParam := r.URL.Query().Get("token")
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		connLog.Warn("upgrade failed", slog.Any("err", err))
@@ -239,11 +246,28 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// T48: verify the session token now that we know the role.
+	var tokenClaims *Claims
+	if authEnabled() {
+		c, vErr := verifyToken(tokenParam, sessionID, string(first.From))
+		if vErr != nil {
+			connLog.Warn("auth rejected", slog.Any("err", vErr), slog.String("role", string(first.From)))
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, vErr.Error()),
+				time.Now().Add(writeWait))
+			_ = conn.Close()
+			return
+		}
+		tokenClaims = c
+		connLog.Info("auth ok", slog.String("tenant", c.Sub), slog.String("role", c.Role))
+	}
+
 	p := &peer{
-		role: first.From,
-		conn: conn,
-		send: make(chan []byte, sendBuffer),
-		log:  connLog.With(slog.String("role", string(first.From))),
+		role:   first.From,
+		conn:   conn,
+		send:   make(chan []byte, sendBuffer),
+		log:    connLog.With(slog.String("role", string(first.From))),
+		claims: tokenClaims,
 	}
 
 	sess := h.getOrCreate(sessionID)
@@ -371,11 +395,18 @@ func main() {
 	}
 	addr := ":" + port
 
+	// T48: dev issuer must run before initAuth so the env var it
+	// sets is visible. Both are no-ops in production unless the
+	// matching env vars are set.
+	initDevIssuer(logger)
+	initAuth(logger)
+
 	h := newHub(logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/turn-credentials", turnHandler)
+	mux.HandleFunc("/issue-token", devIssuerHandler) // T48 dev only; 404 unless CBWRTC_DEV_ISSUER=1
 	mux.HandleFunc("/ws/", h.wsHandler)
 	mux.Handle("/metrics", metricsHandler()) // T38
 

@@ -27,6 +27,7 @@ import { fetchTurnConfig } from "./src/turn.js";
 import { prioritizeCodec } from "./src/sdp.js";
 import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src/reconnect.js";
 import { StatsSampler, StatsSample, STATS_PROTOCOL_VERSION, formatSummary } from "./src/stats.js";
+import { fetchSessionToken, withToken } from "./src/auth.js";
 
 const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
 
@@ -299,8 +300,21 @@ async function connect(sessionId: string): Promise<void> {
   setStatus("connecting", "ws://");
   els.connect.disabled = true;
 
-  const wsUrl = `${DEFAULT_SIGNALING}/${encodeURIComponent(sessionId)}`;
-  log("info", `dialing signaling`, wsUrl);
+  let wsUrl = `${DEFAULT_SIGNALING}/${encodeURIComponent(sessionId)}`;
+
+  // T48: try to fetch a signed session token. If the issuer endpoint
+  // returns null (not deployed, or 404 in production until you wire
+  // your own issuer), we connect without a token — the signaling
+  // server will reject if `CBWRTC_AUTH_PUBKEY` is set, accept
+  // otherwise.
+  const issued = await fetchSessionToken(sessionId, "client", { signalingBase: DEFAULT_SIGNALING });
+  if (issued) {
+    log("info", `auth token`, { exp: issued.exp, sub: issued.sub });
+    wsUrl = withToken(wsUrl, issued.token);
+  } else {
+    log("info", `no auth token (issuer unavailable; connecting unauthenticated)`);
+  }
+  log("info", `dialing signaling`, wsUrl.replace(/token=[^&]+/, "token=…"));
 
   // Fetch ICE config once. We re-use it across reconnects; if it
   // rotates (TURN-REST in Phase 3), this is the call site that grows a
