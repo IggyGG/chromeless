@@ -263,6 +263,92 @@ def load_source_jsonl(path: Path) -> dict[tuple[str, int], dict]:
 
 
 # ---------------------------------------------------------------------------
+# Nyquist 2× rule (G2)
+# ---------------------------------------------------------------------------
+#
+# Per tests/harness/validation.md §1.1, a tester running with
+#   cam_fps < 2 × flash_freq
+# produces aliased measurements that look superficially valid but are
+# meaningless: the cam misses every other transition and the
+# reconciler emits big spikes with no warning. We surface the warning
+# at runtime so the operator catches the misconfiguration.
+#
+# The check needs two numbers:
+#   - cam_fps   — inferred from per-frame cam_epoch_ms deltas (works
+#                 for both video files and frame directories).
+#   - flash_freq — preferred: from a --jsonl source-side log of every
+#                  emitted flash (authoritative). Fallback: inferred
+#                  from QR-decoded emit_epoch_ms deltas in the
+#                  recording — but note this is the cam-aliased rate,
+#                  not necessarily the true flash rate.
+#
+# Both inferences need a minimum sample size to be trustworthy. We
+# require >= 5 frames before issuing a warning; smaller sample sizes
+# silently skip the check (true for the bundled sample-input self-
+# test, which has only 4 frames).
+def infer_cam_fps_hz(records: list[FlashRecord], min_frames: int = 5) -> float | None:
+    if len(records) < min_frames:
+        return None
+    deltas: list[int] = []
+    prev_cam = records[0].cam_epoch_ms
+    for r in records[1:]:
+        d = r.cam_epoch_ms - prev_cam
+        if d > 0:
+            deltas.append(d)
+        prev_cam = r.cam_epoch_ms
+    if len(deltas) < min_frames - 1:
+        return None
+    median_ms = statistics.median(deltas)
+    if median_ms <= 0:
+        return None
+    return 1000.0 / median_ms
+
+
+def infer_flash_freq_hz_from_records(
+    records: list[FlashRecord], min_frames: int = 5
+) -> float | None:
+    """Fallback inference of flash frequency from QR-decoded emit
+    timestamps in the recording. NOTE: this is the *cam-observed*
+    flash rate, which may be aliased lower than the true rate. Use
+    --jsonl for authoritative inference instead when available."""
+    decoded = [r for r in records if r.emit_epoch_ms is not None]
+    if len(decoded) < min_frames:
+        return None
+    # Distinct emit times in encounter order — collapse multiple
+    # cam frames showing the same flash.
+    distinct: list[int] = []
+    for r in decoded:
+        if not distinct or r.emit_epoch_ms != distinct[-1]:
+            distinct.append(r.emit_epoch_ms)
+    if len(distinct) < min_frames - 1:
+        return None
+    deltas = [b - a for a, b in zip(distinct, distinct[1:]) if b > a]
+    if not deltas:
+        return None
+    median_ms = statistics.median(deltas)
+    if median_ms <= 0:
+        return None
+    return 1000.0 / median_ms
+
+
+def infer_flash_freq_hz_from_jsonl(jsonl_records: list[dict],
+                                   min_records: int = 5) -> float | None:
+    """Authoritative inference of flash frequency from a source-side
+    JSONL log of every emit. Each record carries `epochMs`; consecutive
+    deltas give the period."""
+    epochs = sorted(int(r["epochMs"]) for r in jsonl_records if "epochMs" in r)
+    if len(epochs) < min_records:
+        return None
+    deltas = [b - a for a, b in zip(epochs, epochs[1:]) if b > a]
+    if not deltas:
+        return None
+    median_ms = statistics.median(deltas)
+    if median_ms <= 0:
+        return None
+    return 1000.0 / median_ms
+
+
+# ---------------------------------------------------------------------------
 # Main reconciliation
 # ---------------------------------------------------------------------------
 def reconcile(
@@ -274,6 +360,20 @@ def reconcile(
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     source_index = load_source_jsonl(source_jsonl) if source_jsonl else {}
+    # Keep a flat list of flash records too, for Nyquist inference.
+    source_jsonl_flash_records: list[dict] = []
+    if source_jsonl is not None and source_jsonl.exists():
+        with source_jsonl.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") == "flash":
+                    source_jsonl_flash_records.append(rec)
 
     records: list[FlashRecord] = []
     decoded = 0
@@ -352,6 +452,31 @@ def reconcile(
             "negative_count": sum(1 for x in latencies if x < 0),
         })
 
+    # ---- Nyquist 2× rule (G2) ----
+    cam_fps = infer_cam_fps_hz(records)
+    if source_jsonl_flash_records:
+        flash_freq = infer_flash_freq_hz_from_jsonl(source_jsonl_flash_records)
+        flash_source = "jsonl"
+    else:
+        flash_freq = infer_flash_freq_hz_from_records(records)
+        flash_source = "qr-deltas"
+
+    if cam_fps is not None:
+        summary["cam_fps_hz"] = round(cam_fps, 3)
+    if flash_freq is not None:
+        summary["flash_freq_hz"] = round(flash_freq, 3)
+        summary["flash_freq_source"] = flash_source
+
+    aliased = False
+    if cam_fps is not None and flash_freq is not None:
+        if cam_fps < 2.0 * flash_freq:
+            aliased = True
+            log.warning(
+                "cam_fps=%.3f < 2 × flash_freq=%.3f; results aliased",
+                cam_fps, flash_freq,
+            )
+    summary["aliased_warning"] = aliased
+
     # ---- CSV ----
     csv_path = out_dir / f"{primary_run}-latencies.csv"
     with csv_path.open("w", newline="") as f:
@@ -399,6 +524,15 @@ def reconcile(
         f.write("==============================\n")
         for k, v in summary.items():
             f.write(f"{k}: {v}\n")
+        # The Nyquist warning gets a top-level prefixed line so
+        # operators grepping the summary for "WARN:" find it
+        # regardless of which key it came from. Format is stable;
+        # tests/harness/aliased-warning-baseline.sh greps for it.
+        if aliased:
+            f.write(
+                f"WARN: cam_fps={cam_fps:.3f} < 2 × flash_freq={flash_freq:.3f}; "
+                "results aliased\n"
+            )
 
     summary["csv"] = str(csv_path)
     summary["histogram"] = str(hist_path) if latencies else None
@@ -447,6 +581,12 @@ def main(argv: list[str] | None = None) -> int:
         "--exit-nonzero-if-no-decodes", action="store_true",
         help="Exit with code 3 if zero QR codes decoded (useful in CI).",
     )
+    p.add_argument(
+        "--strict", action="store_true",
+        help="Exit with code 4 when the Nyquist 2× rule "
+        "(cam_fps >= 2 × flash_freq) is violated. By default we "
+        "still emit a WARN line but exit 0.",
+    )
 
     args = p.parse_args(argv)
     logging.basicConfig(
@@ -471,10 +611,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {k:>22}: {v:.3f}")
         else:
             print(f"  {k:>22}: {v}")
+    if summary.get("aliased_warning"):
+        # Mirror the summary-text WARN format on stdout so CI greps
+        # find it whether they read the summary file or stdout.
+        print(
+            f"\nWARN: cam_fps={summary['cam_fps_hz']:.3f} < "
+            f"2 × flash_freq={summary['flash_freq_hz']:.3f}; results aliased"
+        )
     print()
 
     if args.exit_nonzero_if_no_decodes and summary.get("qr_decoded", 0) == 0:
         return 3
+    if args.strict and summary.get("aliased_warning"):
+        return 4
     return 0
 
 
