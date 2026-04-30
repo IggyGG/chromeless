@@ -1,0 +1,6 @@
+{"file": "frame_0001a_keystroke.png", "captureEpochMs": 1736942400000, "kind": "keystroke", "keystrokeId": 1}
+{"file": "frame_0001b_response.png", "captureEpochMs": 1736942400055, "kind": "response", "keystrokeId": 1, "expectedLatencyMs": 55}
+{"file": "frame_0002a_keystroke.png", "captureEpochMs": 1736942400500, "kind": "keystroke", "keystrokeId": 2}
+{"file": "frame_0002b_response.png", "captureEpochMs": 1736942400572, "kind": "response", "keystrokeId": 2, "expectedLatencyMs": 72}
+{"file": "frame_0003a_keystroke.png", "captureEpochMs": 1736942401000, "kind": "keystroke", "keystrokeId": 3}
+{"file": "frame_0003b_response.png", "captureEpochMs": 1736942401089, "kind": "response", "keystrokeId": 3, "expectedLatencyMs": 89}

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Input latency harness</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    /* Black baseline; the page flashes to RESPONSE_COLOR on keydown
+       and decays back to black after the response window expires. */
+    html, body {
+      margin: 0; padding: 0;
+      width: 100vw; height: 100vh;
+      background: #000;
+      color: #fff;
+      font: 600 18px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+      overflow: hidden;
+      cursor: none;
+    }
+    #stage {
+      position: fixed; inset: 0;
+      background: #000;
+      display: flex; align-items: center; justify-content: center;
+    }
+    /* When .responding is set, the entire stage flashes a known color. */
+    #stage.responding { background: var(--response-color, #ffffff); }
+
+    /* QR is drawn into top-left; large for webcam legibility. */
+    #qr {
+      position: fixed; top: 16px; left: 16px;
+      background: #fff; padding: 8px;
+      image-rendering: pixelated;
+    }
+
+    /* Human-readable status, bottom-right. */
+    #status {
+      position: fixed; bottom: 12px; right: 16px;
+      background: rgba(0,0,0,0.55);
+      padding: 6px 12px; border-radius: 4px;
+      pointer-events: none; user-select: none;
+    }
+
+    /* Big centered prompt so the operator knows what to do. */
+    #prompt {
+      pointer-events: none; user-select: none;
+      text-align: center; opacity: 0.85;
+    }
+    #prompt h1 { margin: 0 0 8px; font-size: 32px; font-weight: 700; }
+    #prompt p  { margin: 0; opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <div id="prompt">
+      <h1>Press SPACE to flash</h1>
+      <p>aim the webcam at the keyboard + this screen, then start recording</p>
+    </div>
+  </div>
+  <canvas id="qr" width="280" height="280" aria-hidden="true"></canvas>
+  <div id="status">init…</div>
+
+  <!-- Reuse the vendored QR library from T10. -->
+  <script src="../latency/vendor-qrcode.js"></script>
+  <!-- Reuse the encode-timestamp helper, which already knows how to
+       drawQrInto() a payload. We ship a different payload schema
+       (input-latency v1) but the encoder is generic. -->
+  <script src="../latency/encode-timestamp.js"></script>
+  <script src="page.js"></script>
+</body>
+</html>
