@@ -100,7 +100,10 @@ cmd_apply_patches() {
         if ! (cd "${CHROMIUM_SRC}" && git apply --3way --check "${p}"); then
             die "patch failed pre-check: ${p}"
         fi
-        if ! (cd "${CHROMIUM_SRC}" && git am --keep-non-patch "${p}"); then
+        if ! (cd "${CHROMIUM_SRC}" && git \
+                -c user.email=iggy@triform.ai \
+                -c user.name="Iggy" \
+                am --keep-non-patch "${p}"); then
             die "patch failed to apply: ${p}"
         fi
     done
