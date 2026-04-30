@@ -1,0 +1,47 @@
+# .github/dependabot.yml — cloud-browser-webrtc dependency updates
+#
+# Weekly cadence keeps the noise level reasonable for a Phase 0 repo with
+# a small team. Bump to daily once we have CI confidence and a routine
+# for triaging Dependabot PRs.
+
+version: 2
+updates:
+  # GitHub Actions used in .github/workflows/
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+
+  # Base image (debian:bookworm-slim) and any FROM lines we add later
+  - package-ecosystem: "docker"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "infra"
+
+  # Go signaling server
+  - package-ecosystem: "gomod"
+    directory: "/signaling"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "go"
+
+  # Browser client
+  - package-ecosystem: "npm"
+    directory: "/client"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "client"

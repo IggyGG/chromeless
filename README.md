@@ -1,5 +1,7 @@
 # cloud-browser-webrtc
 
+[![CI](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/ci.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/ci.yml)
+
 **Open-source cloud browser with low-latency WebRTC streaming.**
 
 > **Status:** Phase 0 — foundations. Container, signaling, and harness are
