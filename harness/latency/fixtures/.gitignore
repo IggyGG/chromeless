@@ -1,0 +1,10 @@
+# T109: pre-recorded harness fixtures. Generated on demand via
+# harness/latency/record-y4m.sh, NOT checked in.
+#
+# 30s @ 720p I420 ≈ 150 MiB; 30s @ 1080p ≈ 320 MiB. Either pushes
+# us into git-lfs territory and changes our binary-asset story
+# without enough payoff for "this re-renders deterministically
+# from the page". Operators run record-y4m.sh once per dev box.
+
+*.y4m
+*.yuv

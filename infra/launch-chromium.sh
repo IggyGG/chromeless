@@ -50,6 +50,20 @@ fi
 : "${STREAMER_FPS:=30}"
 : "${STREAMER_PORT:=9000}"
 : "${CBWRTC_USE_FAKE_MEDIA:=}"
+# T109: pre-recorded harness fixture for real T65 numbers. When set,
+# Chromium's synthetic camera reads frames from this y4m file instead
+# of generating the moving green square. Critically, the y4m IS a
+# recording of the harness page's flashing-block + QR output, so
+# reconcile.py sees real per-frame QR codes (the synthetic-media
+# moving-green-square path doesn't carry QRs and produces zero
+# decode rate per qa-tester's T65 finding).
+#
+# The path is the in-container location of the y4m. The compose.yaml
+# bind-mount points /opt/cb-fixtures/ at harness/latency/fixtures/
+# read-only; the same path works in K8s via a hostPath or configMap
+# mount. Generate the y4m via harness/latency/record-y4m.sh — it's
+# NOT checked in (~150 MiB at 720p × 30s would push git-lfs).
+: "${CBWRTC_USE_FAKE_MEDIA_FILE:=}"
 
 STREAMER_ORIGIN="http://localhost:${STREAMER_PORT}"
 STREAMER_URL="${STREAMER_ORIGIN}/streamer/index.html?signal=${SIGNALING_URL}&session=${SESSION_ID}&fps=${STREAMER_FPS}"
@@ -62,11 +76,26 @@ echo "[launch-chromium] url=${STREAMER_URL}" >&2
 # earlier defaults. Logged at startup so docker-compose/k8s logs make
 # the synthetic-media mode obvious — silent fakes are how production
 # accidents happen.
+#
+# T109 layers on top: when CBWRTC_USE_FAKE_MEDIA_FILE points at an
+# existing readable y4m, we additionally pass
+# --use-file-for-fake-video-capture-loop=<path>. The `-loop` suffix
+# (vs the unsuffixed flag) tells Chromium to play the file
+# continuously instead of stopping after one pass — necessary for a
+# 60-second T65 measurement against a 30-second fixture.
 fake_media_arg=""
 if [ "${CBWRTC_USE_FAKE_MEDIA}" = "1" ]; then
     fake_media_arg="--use-fake-device-for-media-stream"
     echo "[launch-chromium] WARNING: CBWRTC_USE_FAKE_MEDIA=1 -> appending ${fake_media_arg}" >&2
-    echo "[launch-chromium] WARNING: synthetic media is for T86 testing only; do not ship this way" >&2
+    echo "[launch-chromium] WARNING: synthetic media is for T86/T109 testing only; do not ship this way" >&2
+    if [ -n "${CBWRTC_USE_FAKE_MEDIA_FILE}" ]; then
+        if [ -r "${CBWRTC_USE_FAKE_MEDIA_FILE}" ]; then
+            fake_media_arg="${fake_media_arg} --use-file-for-fake-video-capture-loop=${CBWRTC_USE_FAKE_MEDIA_FILE}"
+            echo "[launch-chromium] T109: replaying fixture ${CBWRTC_USE_FAKE_MEDIA_FILE}" >&2
+        else
+            echo "[launch-chromium] WARNING: CBWRTC_USE_FAKE_MEDIA_FILE=${CBWRTC_USE_FAKE_MEDIA_FILE} is not readable; falling back to synthetic green square" >&2
+        fi
+    fi
 fi
 
 # T86 direction #1: --auto-select-tab-capture-source-by-title is a

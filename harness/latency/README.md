@@ -181,6 +181,52 @@ Aim the cam at the *client* display, framing so the QR + flashing
 block both fit. Record for at least 60 s for ≥300 transitions
 (see L1/L2 in the v1 success criteria).
 
+### Pre-recorded y4m for cloud-Chromium replay (T109)
+
+The Phase 1 cloud-Chromium container can't run real `getDisplayMedia`
+under Xvfb (T78-followup), so for T65's glass-to-glass measurement
+we drive the synthetic camera with a **pre-recorded y4m of the
+harness page itself**:
+
+```bash
+# One-time on a dev box:
+bash harness/latency/record-y4m.sh
+# → harness/latency/fixtures/harness-loop-720p30.y4m (~150 MiB)
+
+# Then bring up the stack — compose.yaml's CBWRTC_USE_FAKE_MEDIA_FILE
+# default is /opt/cb-fixtures/harness-loop-720p30.y4m, which the
+# bind-mount of harness/latency/fixtures/ makes available.
+docker compose -f infra/compose.yaml up
+```
+
+`infra/launch-chromium.sh` translates the env var into Chromium's
+`--use-file-for-fake-video-capture-loop=<path>` flag (the `-loop`
+variant — without it, Chromium plays the file once then stops).
+
+**Why this exists.** The default synthetic-media moving-green-square
+doesn't carry the harness QR codes, so `reconcile.py` decodes zero
+frames against it (qa-tester's T65 finding). The pre-recorded y4m
+*is* a recording of the harness page's flashing-block + QR output,
+so reconcile.py recovers real per-frame timestamps when the cloud
+Chromium replays it.
+
+**What this is NOT.**
+
+- Not a screen-capture path — the fixture is replayed via the
+  *synthetic camera*, not via `getDisplayMedia` against a real
+  display. Phase 2's `FrameSinkVideoCapturer` (T47/T55) is the
+  durable fix.
+- Not exercising the encode-pipeline-from-real-Viz-frames path —
+  the encoder gets pre-encoded-then-decoded I420 frames from
+  Chromium's synthetic-camera implementation. End-to-end latency
+  numbers from this path include encode + transport + decode but
+  NOT capture; treat them as a lower bound on the real number.
+
+The companion baseline at
+[`tests/harness/y4m-loopback-baseline.sh`](../../tests/harness/y4m-loopback-baseline.sh)
+asserts the fixture itself carries decodable QRs (`qr_decode_rate ≥ 0.5`)
+before declaring the y4m valid for downstream T65 use.
+
 ### Reconcile
 
 ```bash
