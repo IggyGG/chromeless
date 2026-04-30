@@ -196,6 +196,40 @@ harness (T10/T11) is the only credible source for the latency delta
 between `getDisplayMedia` and a Viz hook on our hardware. Don't accept
 folklore; measure.
 
+## 3a. T86 status update — Phase 1 dev stack uses synthetic media
+
+When this doc was written we assumed real `getDisplayMedia` against
+Xvfb under stock `chromium 147` would work after the T78 launch-flag
+fix (X11 ozone + SwiftShader + Vulkan disabled — see
+`capture/streamer-page/launch.md` "Why the GPU / Vulkan flags are
+non-negotiable on Chromium 147"). It does not — the screen
+capturer still throws `NotReadableError: Could not start video
+source` even with the X11 ozone backend confirmed in the UA.
+Investigation under T86 ruled out Xvfb, ozone selection, picker
+flags, and the four GPU flags T78 added. The remaining hypothesis
+is a Chromium-147-side regression in the X11 desktop capturer that
+we are not in a position to fix from launch-flag space alone.
+
+**The dev compose stack therefore defaults
+`CBWRTC_USE_FAKE_MEDIA=1`**, which routes `getDisplayMedia`
+through `--use-fake-device-for-media-stream` to Chromium's
+synthetic test pattern + tone. The streamer page sees a normal
+`MediaStream`; the rest of the WebRTC pipeline (encoder, signaling,
+RTP, client receive) runs against real encoded video and audio.
+
+This is a deliberate stop-gap, not a fix. **Phase 2's
+`FrameSinkVideoCapturer` (T47, T55) does not go through
+`getDisplayMedia` at all**, so the durable fix lives there. Until
+Phase 2 capture is wired into the running stack, the dev compose
+runs against synthetic media; demos that need real-content video
+either accept the bug (and the synthetic source) or land Phase 2.
+
+The §3 limitations below still describe what `getDisplayMedia`
+*would* cost relative to the Phase 2 hook if it worked; nothing
+in §4's exit criteria changes — Phase 2 wins on its own merits,
+not because of T86. The exit criteria stand even if someone fixes
+Chromium 147's X11 capturer tomorrow.
+
 ## 4. Exit criteria for switching to custom capture
 
 We will replace `getDisplayMedia` with a `FrameSinkVideoCapturer` hook

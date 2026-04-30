@@ -90,6 +90,24 @@ services:
       SESSION_ID: dev
       SIGNALING_URL: ws://signaling:8080/ws
       STREAMER_FPS: "30"
+      # T86: route the dev-compose stack through Chromium's synthetic
+      # media source (test pattern + tone) instead of real
+      # getDisplayMedia. Two reasons this is the dev default:
+      #   1. Real getDisplayMedia under Chromium 147 + Xvfb fails with
+      #      `NotReadableError: Could not start video source` even
+      #      after T78's X11+SwiftShader pin (the UA confirms the X11
+      #      ozone backend is in use; the screen capturer's `start`
+      #      step is what's failing). Xvfb itself is fine — see
+      #      supervisord.conf line 42, screen 0 is 1920x1080x24.
+      #   2. Phase 2's FrameSinkVideoCapturer (T47/T55) doesn't go
+      #      through getDisplayMedia at all — it taps Viz directly.
+      #      Spending more cycles fixing the v1 path that Phase 2
+      #      replaces is wrong-shaped work; route around the bug,
+      #      validate the rest of the pipeline, fix it durably in
+      #      Phase 2.
+      # Set to "" (empty) to flip back to real-getDisplayMedia for
+      # diagnostic runs once Phase 2 capture is in place.
+      CBWRTC_USE_FAKE_MEDIA: "1"
     # /dev/shm at default 64m is too small for Chromium tabs; either bump
     # shm_size or rely on the Dockerfile's --disable-dev-shm-usage. Both
     # is belt-and-braces for stability.

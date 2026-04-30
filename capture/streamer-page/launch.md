@@ -137,6 +137,108 @@ once we own the Chromium binary we can pre-disable Vulkan at
 build-time (`use_vulkan = false` in `args.gn`) and skip three of
 these flags.
 
+### T86: the X11+SwiftShader pin alone wasn't enough
+
+Post-T78, qa-tester confirmed via DevTools that the X11 ozone
+backend was actually in use (UA reports `X11; Linux x86_64`) but
+`getDisplayMedia` STILL fails with `NotReadableError`. The fault
+is not in the GPU layer — Vulkan is correctly disabled — but in
+the screen-capturer's `start` step itself. We've ruled out the
+obvious causes:
+
+| Hypothesis                        | Verified                                      |
+|-----------------------------------|-----------------------------------------------|
+| Vulkan still trying               | `chromium.err.log` is clean post-T78.         |
+| Xvfb has no screen                | `supervisord.conf` line 42 sets `-screen 0 1920x1080x24`. |
+| Wrong ozone backend selected      | UA shows `X11; Linux x86_64`. ✓               |
+| Permission picker blocking        | `--use-fake-ui-for-media-stream` set; no picker logs. |
+| Auto-select-source flag wrong     | T86 added `--auto-select-tab-capture-source-by-title` sibling. Same error. |
+| MIT-SHM / RandR extension absent  | (re-validate) Xvfb defaults include both, but worth a `xdpyinfo` audit. |
+
+The remaining hypothesis is that Chromium 147's `DesktopCapturer`
+implementation has a regression specific to capturing from
+software-rendered X11 displays under SwiftShader. This is a
+durable Chromium-side problem; we are not in a position to fix it
+in the launch flag set alone.
+
+### Phase 1 decision: route around with `--use-fake-device-for-media-stream`
+
+`infra/compose.yaml` defaults `CBWRTC_USE_FAKE_MEDIA=1` for the
+dev compose stack. The launch script appends
+`--use-fake-device-for-media-stream` when set, which routes
+`getDisplayMedia` to Chromium's synthetic test pattern + tone
+generator instead of the real X11 screen capturer. The streamer
+page sees a normal `MediaStream`; the rest of the WebRTC pipeline
+(encoder, signaling, RTP, client receive) runs against real
+encoded video and audio.
+
+What this is:
+
+- **A deliberate stop-gap** that unblocks T64 + T65 + every Phase 1
+  end-to-end demo today.
+- **Architecturally aligned with Phase 2.**
+  `docs/capture/path-of-least-resistance.md` (T15) and
+  `docs/capture/framesink-design.md` (T47) commit Phase 2 to a
+  Chromium-internal `FrameSinkVideoCapturer` hook that does NOT go
+  through `getDisplayMedia`. Spending more cycles fixing v1's
+  `getDisplayMedia` path for Chromium 147+Xvfb is fixing a thing
+  Phase 2 replaces.
+
+What this is not:
+
+- **NOT a fix.** Real screen capture is broken; we routed around
+  it. If the prod stack ever flips this to `0`, we hit the same
+  `NotReadableError`.
+- **NOT a substitute for real-content demos.** Stakeholder demos
+  that show "real cloud browsing" require either flipping back to
+  real `getDisplayMedia` (and accepting the bug) OR landing the
+  Phase 2 capture path.
+
+To flip back for diagnostic runs:
+
+```bash
+CBWRTC_USE_FAKE_MEDIA= docker compose -f infra/compose.yaml up --build
+```
+
+(empty string ≠ unset for the `[ "${VAR}" = "1" ]` shell test;
+either works to disable.)
+
+### Diagnostic procedure when getDisplayMedia is the suspect
+
+For the next time something in this area breaks. Run inside the
+container:
+
+```bash
+# 1. Confirm Xvfb is presenting a renderable screen.
+docker compose -f infra/compose.yaml exec chromium \
+    sh -c 'DISPLAY=:99 xrandr 2>&1 || true'
+#   Expect: "Screen 0: minimum 1920 x 1080, current 1920 x 1080,
+#            maximum 1920 x 1080" or similar.
+#   If "no screens" / "0x0": Xvfb didn't start. Check
+#   /var/log/supervisor/xvfb.err.log.
+
+# 2. Confirm the ozone backend that took effect.
+docker compose -f infra/compose.yaml exec chromium \
+    sh -c 'curl -s http://127.0.0.1:9222/json/version | grep -i user-agent'
+#   Expect a UA containing "X11; Linux".
+
+# 3. Confirm getDisplayMedia was the failure point and capture the
+#    error name (NotReadableError, NotAllowedError, etc.).
+#    streamer.js post-T78 surfaces err.name + err.message + UA in
+#    one log line — open the streamer page log via DevTools or
+#    /var/log/supervisor/chromium.log.
+
+# 4. Probe whether window.pc was reached (i.e., did getDisplayMedia
+#    succeed and the failure is downstream).
+#    The T69 hook puts pc on window unconditionally. If
+#    typeof window.pc === 'undefined', the failure is at or before
+#    the getDisplayMedia call.
+docker compose -f infra/compose.yaml exec chromium \
+    sh -c 'curl -s "http://127.0.0.1:9222/json/list" | head'
+#   Then connect a DevTools/Runtime.evaluate via the listed
+#   webSocketDebuggerUrl and probe `typeof window.pc`.
+```
+
 ## Supervisord program block (sketch)
 
 ```ini
