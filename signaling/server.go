@@ -84,45 +84,62 @@ type peer struct {
 	claims *Claims
 }
 
+// anonymousTenant is the tenant id used when auth is disabled. T67 keys
+// every session by (tenant, session_id); when there's no token there's
+// no tenant claim, so we collapse all anonymous traffic into a single
+// namespace and warn loudly via the auth-disabled startup log.
+const anonymousTenant = "_anonymous"
+
+// sessionKey is the composite map key — tenant first, then session id.
+// Pre-T67 the key was just session_id; this turns "two tenants both
+// running 'demo'" from a cross-talk into two independent rooms.
+type sessionKey struct {
+	tenant string
+	id     string
+}
+
 // session holds at most two peers keyed by role.
 type session struct {
-	id    string
-	mu    sync.Mutex
-	peers map[peerRole]*peer
+	id     string
+	tenant string
+	mu     sync.Mutex
+	peers  map[peerRole]*peer
 }
 
 // hub owns all live sessions.
 type hub struct {
 	mu       sync.Mutex
-	sessions map[string]*session
+	sessions map[sessionKey]*session
 	log      *slog.Logger
 }
 
 func newHub(log *slog.Logger) *hub {
 	return &hub{
-		sessions: make(map[string]*session),
+		sessions: make(map[sessionKey]*session),
 		log:      log,
 	}
 }
 
-// getOrCreate returns the session for id, creating it if absent.
-func (h *hub) getOrCreate(id string) *session {
+// getOrCreate returns the session for (tenant, id), creating it if absent.
+func (h *hub) getOrCreate(tenant, id string) *session {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	s, ok := h.sessions[id]
+	k := sessionKey{tenant: tenant, id: id}
+	s, ok := h.sessions[k]
 	if !ok {
-		s = &session{id: id, peers: make(map[peerRole]*peer, 2)}
-		h.sessions[id] = s
-		recordSessionCreated() // T38 metrics
+		s = &session{id: id, tenant: tenant, peers: make(map[peerRole]*peer, 2)}
+		h.sessions[k] = s
+		recordSessionCreated(tenant) // T38/T67 metrics
 	}
 	return s
 }
 
 // dropIfEmpty removes the session if both peers have left.
-func (h *hub) dropIfEmpty(id string) {
+func (h *hub) dropIfEmpty(tenant, id string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	s, ok := h.sessions[id]
+	k := sessionKey{tenant: tenant, id: id}
+	s, ok := h.sessions[k]
 	if !ok {
 		return
 	}
@@ -130,8 +147,8 @@ func (h *hub) dropIfEmpty(id string) {
 	empty := len(s.peers) == 0
 	s.mu.Unlock()
 	if empty {
-		delete(h.sessions, id)
-		recordSessionDropped() // T38 metrics
+		delete(h.sessions, k)
+		recordSessionDropped(tenant) // T38/T67 metrics
 	}
 }
 
@@ -142,7 +159,7 @@ func (s *session) register(p *peer) error {
 	defer s.mu.Unlock()
 	if existing, ok := s.peers[p.role]; ok {
 		_ = existing
-		return fmt.Errorf("role %q already present in session %s", p.role, s.id)
+		return fmt.Errorf("role %q already present in session %s/%s", p.role, s.tenant, s.id)
 	}
 	s.peers[p.role] = p
 	return nil
@@ -247,7 +264,11 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// T48: verify the session token now that we know the role.
+	// T67: extract the tenant id from the token claim. When auth is
+	// disabled, fall back to anonymousTenant — every connection in
+	// that mode shares the same namespace (matching pre-T67 behaviour).
 	var tokenClaims *Claims
+	tenantID := anonymousTenant
 	if authEnabled() {
 		c, vErr := verifyToken(tokenParam, sessionID, string(first.From))
 		if vErr != nil {
@@ -259,8 +280,10 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tokenClaims = c
+		tenantID = c.Sub
 		connLog.Info("auth ok", slog.String("tenant", c.Sub), slog.String("role", c.Role))
 	}
+	connLog = connLog.With(slog.String("tenant", tenantID))
 
 	p := &peer{
 		role:   first.From,
@@ -270,18 +293,18 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 		claims: tokenClaims,
 	}
 
-	sess := h.getOrCreate(sessionID)
+	sess := h.getOrCreate(tenantID, sessionID)
 	if err := sess.register(p); err != nil {
 		p.log.Warn("rejecting duplicate role", slog.Any("err", err))
 		_ = conn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()),
 			time.Now().Add(writeWait))
 		_ = conn.Close()
-		h.dropIfEmpty(sessionID)
+		h.dropIfEmpty(tenantID, sessionID)
 		return
 	}
 	p.log.Info("peer joined")
-	recordPeerRegistered(p.role) // T38 metrics
+	recordPeerRegistered(p.role, tenantID) // T38/T67 metrics
 
 	// Forward the first envelope before starting pumps.
 	if _, ok := validTypes[first.Type]; ok {
@@ -299,8 +322,8 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	p.readPump(sess, done)
 
 	sess.unregister(p)
-	recordPeerUnregistered(p.role) // T38 metrics; pairs with the Inc above
-	h.dropIfEmpty(sessionID)
+	recordPeerUnregistered(p.role, tenantID) // T38/T67 metrics; pairs with the Inc above
+	h.dropIfEmpty(tenantID, sessionID)
 	p.log.Info("peer left")
 }
 

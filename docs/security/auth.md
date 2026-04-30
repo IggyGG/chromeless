@@ -44,6 +44,55 @@ typically run with auth disabled.
 | `role_mismatch` | `role` claim does not match the connection's role   |
 | `tenant_missing` | `sub` claim is empty                               |
 
+## Tenant namespacing (T67)
+
+Sessions are keyed by `(tenant_id, session_id)`, not by `session_id`
+alone. The `tenant_id` comes from the verified token's `sub` claim
+(see [Claims](#token-claims)).
+
+What this gives us:
+
+- Two tenants can both run a session called `demo` without
+  cross-talking. The hub treats them as fully independent rooms.
+- A token issued for `tenant-A` can never be used to read
+  `tenant-B`'s offer/answer/ICE. Even if the URL paths are identical
+  (`/ws/demo`), the server-side hub key differs.
+
+What it doesn't give us:
+
+- Resource isolation. Both tenants still share the same hub goroutine
+  pool and the same ICE/STUN/TURN config. Phase 3 orchestration
+  (separate K8s namespaces, separate TURN servers per tenant) is the
+  durable answer.
+- Quota or rate-limiting per tenant. Add in T67-followup if/when a
+  noisy tenant becomes a real problem.
+
+### Anonymous fallback
+
+When auth is disabled (`CBWRTC_AUTH_PUBKEY` unset), every connection
+is bucketed into `tenant_id = "_anonymous"`. This preserves the
+pre-T67 single-namespace behaviour for dev / CI runs that don't run
+the issuer. The startup warning log
+(`auth disabled: CBWRTC_AUTH_PUBKEY is unset; any caller can connect`)
+already telegraphs the implication; T67 doesn't add a second log,
+just a metric label.
+
+### Metrics cardinality
+
+`cb_signaling_active_sessions{tenant}`,
+`cb_signaling_active_connections{role,tenant}`, and
+`cb_signaling_sessions_total{tenant}` carry the tenant id as a label.
+To prevent Prometheus cardinality explosion (a malicious or buggy
+client could cycle tenant ids), the server caps **distinct
+non-anonymous tenants** at 100. The 101st distinct tenant and beyond
+get bucketed under the synthetic `_other` label. The cap is in
+`signaling/metrics.go::tenantLabelCap`; bump it when scaling demands
+it (Phase 3 scale targets typically push this to a few thousand,
+backed by a separate-process metrics aggregator rather than the cap).
+
+The anonymous tenant is exempt from the cap, so an auth-disabled
+deployment always has its own clean bucket.
+
 ## Threat model
 
 What this protects against:

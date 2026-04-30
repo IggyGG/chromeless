@@ -80,6 +80,21 @@ If the streamer is **not** running, the client will sit at
 until `setRemoteDescription` is called, so the debug panel stays
 quiet — that's normal.
 
+## Tenancy (T67)
+
+The signaling server keys sessions by `(tenant_id, session_id)`. The
+**tenant_id is taken from the verified session token** (`sub` claim,
+T48), so the client doesn't need to send it explicitly — it's
+already inside the JWT that `client/src/auth.ts` fetches and threads
+through `?token=`. Two tenants both running session `dev` won't
+cross-talk; see `docs/security/auth.md#tenant-namespacing-t67` for
+the namespacing policy.
+
+When auth is disabled (`CBWRTC_AUTH_PUBKEY` unset on the server),
+all connections share the synthetic `_anonymous` tenant. That
+matches the pre-T67 single-namespace behaviour, which is what
+`go run ./signaling` gives you out of the box.
+
 ## SDP munging
 
 T30's `prioritizeCodec(sdp, "VP9")` is applied to **the answer**, not

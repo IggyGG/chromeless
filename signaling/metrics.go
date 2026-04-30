@@ -1,14 +1,23 @@
 // Package main — metrics.go
 //
 // T38: Prometheus metrics for the signaling server.
+// T67: per-tenant cardinality with a 100-distinct-tenant cap.
 //
 // We expose:
 //
-//	cb_signaling_sessions_total            counter
-//	cb_signaling_messages_total{type}      counter (vec)
-//	cb_signaling_close_total{code}         counter (vec)
-//	cb_signaling_active_sessions           gauge
-//	cb_signaling_active_connections{role}  gauge (vec)
+//	cb_signaling_sessions_total{tenant}            counter
+//	cb_signaling_messages_total{type}              counter (vec)
+//	cb_signaling_close_total{code}                 counter (vec)
+//	cb_signaling_active_sessions{tenant}           gauge
+//	cb_signaling_active_connections{role,tenant}   gauge (vec)
+//
+// Tenant cardinality control:
+//   We track up to `tenantLabelCap` distinct tenant ids; everything
+//   beyond that is bucketed as "_other". This keeps Prometheus from
+//   exploding into N-thousand series when an attacker (or a buggy
+//   client) starts cycling tenant ids. The `_anonymous` tenant is
+//   exempt from the cap — it always gets its own bucket so
+//   auth-disabled deployments stay legible.
 //
 // All metrics register against prometheus.DefaultRegisterer, so
 // promhttp.Handler() picks them up automatically. server.go calls the
@@ -26,17 +35,64 @@ package main
 import (
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// tenantLabelCap is the max distinct (non-anonymous) tenant labels
+// we'll emit. Beyond it we bucket as "_other".
+const tenantLabelCap = 100
+
+const (
+	tenantOverflow = "_other"
+)
+
 var (
-	mSessionsTotal = promauto.NewCounter(prometheus.CounterOpts{
+	// tenantBucketMu guards seenTenants below. We lookup-then-insert
+	// per metric record, so contention is per-record on a sync.Map-style
+	// structure; a plain Mutex is fine for the v1 traffic pattern.
+	tenantBucketMu sync.RWMutex
+	seenTenants    = make(map[string]struct{}, tenantLabelCap)
+)
+
+// labelTenant returns the tenant id we should attach to a metric for
+// `t`. Returns:
+//   - t itself when t is anonymousTenant or already in the seen set,
+//     or when the seen set has room.
+//   - tenantOverflow when we've hit the cap and t is unseen.
+//
+// Anonymous never counts toward the cap.
+func labelTenant(t string) string {
+	if t == anonymousTenant {
+		return t
+	}
+	tenantBucketMu.RLock()
+	if _, ok := seenTenants[t]; ok {
+		tenantBucketMu.RUnlock()
+		return t
+	}
+	tenantBucketMu.RUnlock()
+
+	tenantBucketMu.Lock()
+	defer tenantBucketMu.Unlock()
+	if _, ok := seenTenants[t]; ok {
+		return t
+	}
+	if len(seenTenants) >= tenantLabelCap {
+		return tenantOverflow
+	}
+	seenTenants[t] = struct{}{}
+	return t
+}
+
+var (
+	mSessionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "cb_signaling_sessions_total",
-		Help: "Total number of signaling sessions ever created.",
-	})
+		Help: "Total number of signaling sessions ever created, by tenant.",
+	}, []string{"tenant"})
 
 	mMessagesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "cb_signaling_messages_total",
@@ -48,15 +104,15 @@ var (
 		Help: "Total websocket close events, by close code.",
 	}, []string{"code"})
 
-	mActiveSessions = promauto.NewGauge(prometheus.GaugeOpts{
+	mActiveSessions = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cb_signaling_active_sessions",
-		Help: "Number of currently-live signaling sessions.",
-	})
+		Help: "Number of currently-live signaling sessions, by tenant.",
+	}, []string{"tenant"})
 
 	mActiveConnections = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cb_signaling_active_connections",
-		Help: "Number of currently-live websocket connections, by peer role.",
-	}, []string{"role"})
+		Help: "Number of currently-live websocket connections, by peer role and tenant.",
+	}, []string{"role", "tenant"})
 )
 
 // metricsHandler is the http.Handler exposing /metrics in Prometheus
@@ -66,24 +122,25 @@ func metricsHandler() http.Handler {
 }
 
 // recordSessionCreated is called when a new session is added to the hub.
-func recordSessionCreated() {
-	mSessionsTotal.Inc()
-	mActiveSessions.Inc()
+func recordSessionCreated(tenant string) {
+	t := labelTenant(tenant)
+	mSessionsTotal.WithLabelValues(t).Inc()
+	mActiveSessions.WithLabelValues(t).Inc()
 }
 
 // recordSessionDropped is called when a session is removed from the hub.
-func recordSessionDropped() {
-	mActiveSessions.Dec()
+func recordSessionDropped(tenant string) {
+	mActiveSessions.WithLabelValues(labelTenant(tenant)).Dec()
 }
 
 // recordPeerRegistered is called after a peer joins a session.
-func recordPeerRegistered(role peerRole) {
-	mActiveConnections.WithLabelValues(string(role)).Inc()
+func recordPeerRegistered(role peerRole, tenant string) {
+	mActiveConnections.WithLabelValues(string(role), labelTenant(tenant)).Inc()
 }
 
 // recordPeerUnregistered is called when a peer leaves a session.
-func recordPeerUnregistered(role peerRole) {
-	mActiveConnections.WithLabelValues(string(role)).Dec()
+func recordPeerUnregistered(role peerRole, tenant string) {
+	mActiveConnections.WithLabelValues(string(role), labelTenant(tenant)).Dec()
 }
 
 // recordMessageForwarded is called when an envelope is relayed to its
@@ -105,10 +162,14 @@ func recordClose(code int) {
 // series are absent until the first event, which would make the
 // metrics-presence smoke (T38) flaky.
 func init() {
-	for _, t := range []string{"offer", "answer", "ice", "bye"} {
+	for _, t := range []string{"offer", "answer", "ice", "bye", "request_renegotiate"} {
 		mMessagesTotal.WithLabelValues(t)
 	}
 	mCloseTotal.WithLabelValues("0")
-	mActiveConnections.WithLabelValues(string(roleClient))
-	mActiveConnections.WithLabelValues(string(roleBrowser))
+	// Pre-register anonymous tenant so /metrics is well-formed in
+	// auth-disabled deployments (the dev/test default).
+	mSessionsTotal.WithLabelValues(anonymousTenant)
+	mActiveSessions.WithLabelValues(anonymousTenant)
+	mActiveConnections.WithLabelValues(string(roleClient), anonymousTenant)
+	mActiveConnections.WithLabelValues(string(roleBrowser), anonymousTenant)
 }
