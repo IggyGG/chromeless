@@ -1,0 +1,16 @@
+{
+  "name": "cloud-browser-webrtc-client",
+  "version": "0.0.1",
+  "private": true,
+  "description": "v0 browser client — signaling round-trip + stub RTCPeerConnection",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild main.ts --bundle --format=esm --target=es2022 --sourcemap --outfile=dist/main.js && node copy-html.mjs",
+    "watch": "esbuild main.ts --bundle --format=esm --target=es2022 --sourcemap --outfile=dist/main.js --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.23.1",
+    "typescript": "5.5.4"
+  }
+}
