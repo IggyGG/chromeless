@@ -300,6 +300,20 @@ function rebuildPeerConnection(reason: string): void {
   try { active.pc.close(); } catch { /* ignore */ }
   active.pc = buildPeerConnection();
   els.dc.textContent = "—";
+  maybeExposePcForE2e(active.pc);
+}
+
+// E2E hook (tests/e2e/03-receives-video-track.spec.ts). Gated on
+// `?e2e=1` so production users — who hit this same URL — never get
+// the active PC pinned to window. The streamer-page (capture/streamer-
+// page) exposes its PC unconditionally on `window.pc` because that
+// page is privileged and only loaded by the in-container chromium;
+// this client page is end-user-reachable, so we opt in.
+function maybeExposePcForE2e(pc: RTCPeerConnection): void {
+  if (new URLSearchParams(location.search).get("e2e") === "1") {
+    (window as unknown as { __cbwrtc_pc?: RTCPeerConnection })
+      .__cbwrtc_pc = pc;
+  }
 }
 
 async function connect(sessionId: string): Promise<void> {
@@ -339,6 +353,7 @@ async function connect(sessionId: string): Promise<void> {
   };
   active.pc = buildPeerConnection();
   els.dc.textContent = "—";
+  maybeExposePcForE2e(active.pc);
 
   rws.on("stateChange", (next, prev, info) => {
     log("info", `signaling ${prev}→${next}`, info.attempt > 0 ? { attempt: info.attempt, retryInMs: info.nextDelayMs } : undefined);

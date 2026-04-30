@@ -212,6 +212,13 @@
     }
     try { active.ws.close(); } catch { /* ignore */ }
     active = null;
+    // Drop the window hooks so the watchdog sees state=null and starts
+    // its idle countdown on a torn-down session — without this clear,
+    // a closed PC's connectionState ("closed") is in the watchdog's
+    // idle set anyway, but explicit cleanup avoids surprising the
+    // T33 / T42 introspection paths.
+    try { delete window.pc; delete window.signalingWs; }
+    catch { window.pc = undefined; window.signalingWs = undefined; }
     // Phase 1 lifecycle: when the WS is gone, we are done. Supervisord
     // will restart Chromium for the next session (per T15 design).
     setTimeout(() => location.replace("about:blank"), 200);
@@ -241,6 +248,18 @@
     // 2. Build the peer connection and attach tracks.
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+
+    // Expose the live PeerConnection on window so:
+    //   * infra/lifecycle/idle-watchdog.sh can poll
+    //     `window.pc.connectionState` via DevTools Runtime.evaluate
+    //     to decide whether the session is active. Without this hook
+    //     the watchdog reports state=null on every tick and tombstones
+    //     the container after IDLE_TIMEOUT_S regardless of activity.
+    //   * Phase 1 / T33 E2E specs can introspect getReceivers() etc.
+    // The streamer page is privileged (only the cloud-browser worker
+    // ever loads it; remote pages cannot navigate here), so exposing
+    // the PC on window has no cross-origin implications.
+    window.pc = pc;
 
     pc.onsignalingstatechange   = () => log("info", `signalingState=${pc.signalingState}`);
     pc.oniceconnectionstatechange = () => {
@@ -275,6 +294,10 @@
     const wsUrl = `${SIGNALING_URL}/${encodeURIComponent(SESSION_ID)}`;
     log("info", "dialing signaling", wsUrl);
     const ws = new WebSocket(wsUrl);
+    // Same window-exposure rationale as window.pc above. The watchdog
+    // doesn't currently inspect ws state but other diagnostics
+    // (T42 stats panel, manual debugging) benefit from a stable hook.
+    window.signalingWs = ws;
 
     active = { ws, pc, stream, inputRelay: null };
 
