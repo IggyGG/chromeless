@@ -36,6 +36,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -58,6 +59,10 @@ type Claims struct {
 	Exp  int64  `json:"exp"`
 	Iat  int64  `json:"iat"`
 	Nbf  int64  `json:"nbf,omitempty"`
+	// Jti (T89) — opaque token identifier used by the denylist for
+	// per-token revocation. Optional: pre-T89 tokens omit it; the
+	// denylist still works as tenant-wide.
+	Jti  string `json:"jti,omitempty"`
 }
 
 // authConfig is mutated only by initAuth(); read-only after init.
@@ -107,7 +112,7 @@ func initAuth(logger *slog.Logger) {
 	globalAuth = authConfig{enabled: true, pubKey: ed25519.PublicKey(decoded)}
 	logger.Info("auth enabled (Ed25519)")
 	// Pre-register label combos so /metrics is well-formed at boot.
-	for _, r := range []string{"missing", "malformed", "bad_signature", "expired", "not_yet_valid", "sid_mismatch", "role_mismatch", "tenant_missing"} {
+	for _, r := range []string{"missing", "malformed", "bad_signature", "expired", "not_yet_valid", "sid_mismatch", "role_mismatch", "tenant_missing", "revoked"} {
 		mAuthFailures.WithLabelValues(r)
 	}
 }
@@ -174,6 +179,35 @@ func verifyToken(token, expectedSid, expectedRole string) (*Claims, error) {
 		return nil, fmt.Errorf("role mismatch: token=%q caller=%q", c.Role, expectedRole)
 	}
 	return &c, nil
+}
+
+// checkRevoked is called by wsHandler after verifyToken succeeds. It
+// consults the global denylist for either a tenant-wide ban or a
+// (tenant, jti) ban on this specific token.
+//
+// Failure mode: if the denylist backend errors (e.g., Redis
+// unreachable), we fail OPEN (return nil) and let the connection
+// proceed. The denylist is a defence-in-depth layer on top of token
+// expiry; refusing connects on every Redis hiccup would cause more
+// outages than it prevents. The error is logged separately so an
+// operator can spot misbehaving infrastructure.
+func checkRevoked(ctx context.Context, c *Claims, log *slog.Logger) (revoked bool, err error) {
+	if c == nil || globalDenylist == nil {
+		return false, nil
+	}
+	hit, err := globalDenylist.Contains(ctx, c.Sub, c.Jti)
+	if err != nil {
+		log.Warn("denylist lookup failed; failing open",
+			slog.String("tenant", c.Sub),
+			slog.String("jti", c.Jti),
+			slog.Any("err", err))
+		return false, err
+	}
+	if hit {
+		mAuthFailures.WithLabelValues("revoked").Inc()
+		return true, nil
+	}
+	return false, nil
 }
 
 // recordRoleMismatch is called when a subsequent envelope's `from`

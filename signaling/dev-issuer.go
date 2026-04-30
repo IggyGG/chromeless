@@ -25,6 +25,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,17 @@ import (
 	"sync"
 	"time"
 )
+
+// newJTI returns a fresh, opaque token identifier (T89). 16 random bytes
+// → 32 hex chars. Collisions are statistically impossible across the
+// token-issuance volumes we expect; the denylist treats jti as opaque.
+func newJTI() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
 
 const (
 	devIssuerEnv = "CBWRTC_DEV_ISSUER"
@@ -96,6 +108,11 @@ func devIssuerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
+	jti, err := newJTI()
+	if err != nil {
+		http.Error(w, "jti gen: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	c := Claims{
 		Sub: tenant,
 		Sid: sid,
@@ -103,6 +120,7 @@ func devIssuerHandler(w http.ResponseWriter, r *http.Request) {
 		Iat: now.Unix(),
 		Nbf: now.Add(-30 * time.Second).Unix(),
 		Exp: now.Add(devTokenTTL).Unix(),
+		Jti: jti,
 	}
 	tok := signToken(globalDevIssuer.priv, c)
 	w.Header().Set("Content-Type", "application/json")

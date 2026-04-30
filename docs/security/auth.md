@@ -93,6 +93,105 @@ backed by a separate-process metrics aggregator rather than the cap).
 The anonymous tenant is exempt from the cap, so an auth-disabled
 deployment always has its own clean bucket.
 
+## Revocation (T89)
+
+Two layered mechanisms; both are on by default in any production
+deployment that follows this guide. Either alone is enough for most
+threat models.
+
+### 1. Short-TTL refresh (the common case)
+
+Issue tokens with `exp` 5–15 minutes out, not hours. Clients refresh
+before expiry via `client/src/auth.ts::TokenRefresher`, which
+re-calls `/issue-token` `refreshLeadMs` (default 60 s) before `exp`.
+
+Operational story: revoking a tenant means **stopping the issuer
+from minting fresh tokens** for them. Within one refresh cycle every
+active session naturally falls off — no signaling-side state, no
+denylist sync, no CRDT shenanigans. This handles the vast majority
+of revocation cases (off-boarding, tenant disable, plan downgrade)
+because in practice you control the issuer. The denylist below
+exists for the cases where you need to break in-flight tokens
+faster than the next refresh.
+
+If the refresh fetch itself fails (issuer 5xx, transient network),
+`TokenRefresher` retries every 30 s and keeps the previous token
+live in the meantime — signaling will reject when the previous
+token's `exp` actually elapses.
+
+### 2. Denylist (the emergency case)
+
+For "kill this tenant's connections within seconds, don't wait for
+TTL," signaling consults a denylist on every authenticated connect.
+Two backends:
+
+- **`StaticDenylist`** — in-memory set, seeded from
+  `CBWRTC_DENYLIST` (CSV of `tenant` or `tenant:jti` entries).
+  Single-process, lost on restart. Fine for dev, CI, and small
+  deployments where the admin endpoint is the only writer and the
+  fleet is one signaling pod.
+- **`RedisDenylist`** — shared set in Redis (key
+  `cb:auth:denylist:tenants` for tenant-wide bans;
+  `cb:auth:denylist:jtis` for per-token bans, value `tenant:jti`).
+  Multiple signaling replicas converge on the same revocation
+  state. Configured via `CBWRTC_DENYLIST_REDIS_ADDR`.
+
+Lookup semantics:
+
+- A tenant in `cb:auth:denylist:tenants` blocks every token for that
+  tenant, regardless of `jti`. Use this for "this tenant is
+  compromised" or "off-boarding."
+- A `tenant:jti` in `cb:auth:denylist:jtis` blocks one specific
+  token. Use when you want to surgically kill a leaked token but
+  keep the tenant's other sessions alive.
+
+Both lookups use a hard 100 ms timeout and **fail open** on Redis
+errors — a Redis outage must not stall connect on every retry. The
+counter `cb_signaling_auth_failures_total{reason="revoked"}`
+exposes successful denylist hits; a separate WARN log captures
+backend errors.
+
+### Admin endpoint
+
+`POST /admin/revoke` writes to whichever backend `initDenylist`
+chose. Wire format:
+
+```jsonc
+POST /admin/revoke HTTP/1.1
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{ "tenant": "alice", "jti": "abc123" (optional), "reason": "stolen" }
+```
+
+The admin token is signed by a **separate Ed25519 keypair**
+(`CBWRTC_ADMIN_PUBKEY`, distinct from `CBWRTC_AUTH_PUBKEY`) and
+must carry `role: "admin"`. The endpoint is registered only when
+that pubkey env is set; in its absence the path returns 404.
+Operationally:
+
+1. Generate a fresh admin keypair (separate from session keypair).
+2. `CBWRTC_ADMIN_PUBKEY=<base64-pub>` on the signaling deployment.
+3. Run an issuer for admin tokens behind whatever gate your ops
+   team uses (kubectl SSO, sudo workflow, etc.). The dev issuer
+   does NOT mint admin tokens; that is deliberate.
+
+`jti` omitted → tenant-wide ban; `jti` present → per-token ban.
+Both paths return:
+
+```jsonc
+{ "ok": true, "tenant": "alice", "jti": "abc123", "scope": "jti" }
+```
+
+### Why both
+
+Short-TTL covers the planned revocations and is zero-state on the
+signaling side. The denylist is defence-in-depth for the moments
+when "it's compromised, kill it now" matters more than "nice
+property of statelessness." Either mechanism on its own would be
+enough for most teams; both together is roughly as much complexity
+as either alone and meaningfully tighter.
+
 ## Threat model
 
 What this protects against:

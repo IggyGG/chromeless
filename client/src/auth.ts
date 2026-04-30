@@ -71,6 +71,122 @@ export function withToken(wsUrl: string, token: string): string {
   return `${wsUrl}${sep}token=${encodeURIComponent(token)}`;
 }
 
+/**
+ * T89: short-TTL refresh manager.
+ *
+ * Pairs with the signaling server's token revocation story: tokens
+ * are issued with short `exp` (5–15 minutes) and refreshed proactively
+ * before they expire. That way revocation by simply ceasing-to-issue
+ * (the common case — off-boarding, tenant disable) takes effect within
+ * a refresh interval without any explicit denylist hit, and the
+ * denylist itself only needs to handle in-flight tokens.
+ *
+ * Usage:
+ *
+ *   const refresher = new TokenRefresher(sessionId, "client", { signalingBase });
+ *   await refresher.start();              // initial fetch
+ *   const tok = refresher.current();      // current token; auto-rolled
+ *
+ * The refresher does NOT mutate the websocket URL on its own — the
+ * caller decides what to do when a refresh produces a new token. In
+ * v1 the answerer-role client only attaches the token at connect
+ * time, so a fresh token only matters on the next reconnect (T37).
+ * Phase-3 push-notify-based revocation can wire `onRefresh` to call
+ * `pc.setConfiguration` or trigger an explicit reconnect.
+ */
+export class TokenRefresher {
+  private readonly sessionId: string;
+  private readonly role: "client" | "browser";
+  private readonly opts: FetchTokenOptions;
+  private readonly leadMs: number;
+  private readonly setTimeoutFn: (cb: () => void, ms: number) => number;
+  private readonly clearTimeoutFn: (id: number) => void;
+  private readonly nowFn: () => number;
+  private token: IssuedToken | null = null;
+  private timer: number | null = null;
+  private stopped = false;
+  private listeners = new Set<(t: IssuedToken) => void>();
+
+  constructor(
+    sessionId: string,
+    role: "client" | "browser",
+    opts: FetchTokenOptions & {
+      /**
+       * Refresh this many ms before `exp`. Defaults to 60_000 (1 min).
+       * Must be smaller than the issuer's TTL or refresh fires
+       * after expiry.
+       */
+      refreshLeadMs?: number;
+      /** Override scheduler (tests). */
+      setTimeout?: (cb: () => void, ms: number) => number;
+      clearTimeout?: (id: number) => void;
+      now?: () => number;
+    } = {},
+  ) {
+    this.sessionId = sessionId;
+    this.role = role;
+    this.opts = opts;
+    this.leadMs = opts.refreshLeadMs ?? 60_000;
+    this.setTimeoutFn = opts.setTimeout ?? ((cb, ms) => globalThis.setTimeout(cb, ms) as unknown as number);
+    this.clearTimeoutFn = opts.clearTimeout ?? ((id) => globalThis.clearTimeout(id));
+    this.nowFn = opts.now ?? Date.now;
+  }
+
+  /** Subscribe to refresh events. Returns a detach function. */
+  onRefresh(listener: (t: IssuedToken) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  /** Returns the current cached token, or null before start(). */
+  current(): IssuedToken | null { return this.token; }
+
+  /**
+   * Initial fetch. Returns the issued token (or null on failure).
+   * Schedules the next refresh.
+   */
+  async start(): Promise<IssuedToken | null> {
+    this.stopped = false;
+    const tok = await fetchSessionToken(this.sessionId, this.role, this.opts);
+    this.token = tok;
+    if (tok) this.schedule(tok);
+    return tok;
+  }
+
+  /** Cancel the next refresh and stop the loop. */
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== null) {
+      this.clearTimeoutFn(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private schedule(tok: IssuedToken): void {
+    if (this.stopped) return;
+    if (this.timer !== null) this.clearTimeoutFn(this.timer);
+    // exp is unix-seconds; nowFn is wall-clock ms.
+    const expMs = tok.exp * 1000;
+    const delay = Math.max(1_000, expMs - this.leadMs - this.nowFn());
+    this.timer = this.setTimeoutFn(() => { void this.refresh(); }, delay);
+  }
+
+  private async refresh(): Promise<void> {
+    if (this.stopped) return;
+    this.timer = null;
+    const tok = await fetchSessionToken(this.sessionId, this.role, this.opts);
+    if (!tok) {
+      // Refresh failed; retry in 30s. Caller will see the stale token
+      // until it actually expires; signaling will reject when it does.
+      this.timer = this.setTimeoutFn(() => { void this.refresh(); }, 30_000);
+      return;
+    }
+    this.token = tok;
+    for (const l of this.listeners) l(tok);
+    this.schedule(tok);
+  }
+}
+
 // ---------- internals ----------
 
 function resolveURL(base: string, path: string, qs: Record<string, string>): string {

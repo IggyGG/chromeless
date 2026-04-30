@@ -267,6 +267,7 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	// T67: extract the tenant id from the token claim. When auth is
 	// disabled, fall back to anonymousTenant — every connection in
 	// that mode shares the same namespace (matching pre-T67 behaviour).
+	// T89: after verify, consult the denylist for a (tenant, jti) hit.
 	var tokenClaims *Claims
 	tenantID := anonymousTenant
 	if authEnabled() {
@@ -279,9 +280,20 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close()
 			return
 		}
+		// T89: deny revoked tokens. We fail-open on denylist errors.
+		revoked, _ := checkRevoked(r.Context(), c, connLog)
+		if revoked {
+			connLog.Warn("auth rejected: revoked",
+				slog.String("tenant", c.Sub), slog.String("jti", c.Jti))
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token revoked"),
+				time.Now().Add(writeWait))
+			_ = conn.Close()
+			return
+		}
 		tokenClaims = c
 		tenantID = c.Sub
-		connLog.Info("auth ok", slog.String("tenant", c.Sub), slog.String("role", c.Role))
+		connLog.Info("auth ok", slog.String("tenant", c.Sub), slog.String("role", c.Role), slog.String("jti", c.Jti))
 	}
 	connLog = connLog.With(slog.String("tenant", tenantID))
 
@@ -423,6 +435,10 @@ func main() {
 	// matching env vars are set.
 	initDevIssuer(logger)
 	initAuth(logger)
+	// T89: revocation denylist + admin endpoint. Both are
+	// independently env-gated; either or both may be disabled.
+	deny := initDenylist(logger)
+	initAdmin(logger)
 
 	h := newHub(logger)
 
@@ -430,6 +446,11 @@ func main() {
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/turn-credentials", turnHandler)
 	mux.HandleFunc("/issue-token", devIssuerHandler) // T48 dev only; 404 unless CBWRTC_DEV_ISSUER=1
+	if adminEnabled() {
+		// T89: only register the route when the admin pubkey is set.
+		// "Forgot to configure auth" should be 404, not anonymous.
+		mux.HandleFunc("/admin/revoke", adminRevokeHandler(deny, logger))
+	}
 	mux.HandleFunc("/ws/", h.wsHandler)
 	mux.Handle("/metrics", metricsHandler()) // T38
 

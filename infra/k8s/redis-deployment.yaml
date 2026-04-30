@@ -1,0 +1,137 @@
+# Redis backing the T89 auth-revocation denylist.
+#
+# Single-replica StatefulSet with an emptyDir-backed PV for v1 dev
+# deploys. Suitable for "I want to demo revocation across two
+# signaling pods" and not much more — there is no replication, no
+# AOF/RDB tuning, no auth, no TLS. The signaling-side fail-open
+# semantics (denylist.go: redis-error → return false) means losing
+# this pod degrades gracefully into "no in-flight revocation,"
+# while normal token expiry still works.
+#
+# For prod:
+#   - AWS: ElastiCache for Redis (Standard tier, encryption-at-rest,
+#     transit-encryption with token auth). Set
+#     CBWRTC_DENYLIST_REDIS_ADDR=<elasticache-endpoint>:6379
+#     CBWRTC_DENYLIST_REDIS_PASS=<from secrets manager>
+#     in the signaling Deployment.
+#   - GCP: Memorystore for Redis (Standard tier).
+#   - On-prem: bitnami/redis Helm chart with Sentinel — replace this
+#     manifest entirely; the StatefulSet+Service shape here is
+#     deliberately minimal so it doesn't compete with a real chart.
+#
+# Cross-references:
+#   - signaling/denylist.go: storage shape (key names, set semantics).
+#   - signaling/denylist_redis.go: client adapter wiring.
+#   - docs/security/auth.md "Revocation (T89)": operational story.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: cb-denylist-redis
+  namespace: cloud-browser
+  labels:
+    app: cb-denylist-redis
+    component: auth
+spec:
+  type: ClusterIP
+  clusterIP: None # headless: pod-DNS resolves directly to the pod
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  selector:
+    app: cb-denylist-redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cb-denylist-redis
+  namespace: cloud-browser
+  labels:
+    app: cb-denylist-redis
+    component: auth
+spec:
+  serviceName: cb-denylist-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cb-denylist-redis
+  template:
+    metadata:
+      labels:
+        app: cb-denylist-redis
+        component: auth
+    spec:
+      # Run unprivileged. Redis itself drops root via its image's
+      # entrypoint when configured below; we still set securityContext
+      # to make the intent obvious to the reviewer.
+      securityContext:
+        runAsUser: 999          # redis user in the upstream image
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: redis
+          image: redis:7.4-alpine # pinned minor; bump deliberately.
+          args:
+            - redis-server
+            - --save
+            - ""                  # disable RDB snapshotting
+            - --appendonly
+            - "no"                # no AOF either; revocation is short-lived
+            - --maxmemory
+            - 64mb
+            - --maxmemory-policy
+            - allkeys-lru
+            - --tcp-backlog
+            - "128"
+            - --timeout
+            - "300"               # idle client timeout; signaling reconnects fast
+          ports:
+            - name: redis
+              containerPort: 6379
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      # emptyDir is intentional for v1: revocation entries don't
+      # survive a node reboot, but signaling fails-open and clients
+      # short-TTL renew anyway. Replace with a PersistentVolumeClaim
+      # template when you actually want durability.
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# Patch fragment for the signaling Deployment — apply via kustomize
+# overlay or by hand-editing infra/k8s/signaling-deployment.yaml's
+# `env`. Putting it here keeps the wiring documented.
+#
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: cb-signaling
+#   namespace: cloud-browser
+# spec:
+#   template:
+#     spec:
+#       containers:
+#         - name: signaling
+#           env:
+#             - name: CBWRTC_DENYLIST_REDIS_ADDR
+#               value: cb-denylist-redis.cloud-browser.svc.cluster.local:6379

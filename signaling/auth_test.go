@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -188,5 +189,61 @@ func TestSignAndVerifyRoundtrip(t *testing.T) {
 		if _, err := verifyToken(tok, "sess", role); err != nil {
 			t.Fatalf("role=%s: %v", role, err)
 		}
+	}
+}
+
+// ---------- T89 revocation ----------
+
+func TestCheckRevoked_NotInDenylist(t *testing.T) {
+	prev := globalDenylist
+	globalDenylist = NewStaticDenylist()
+	t.Cleanup(func() { globalDenylist = prev })
+	revoked, err := checkRevoked(context.Background(), &Claims{Sub: "alice", Jti: "abc"}, quietLogger())
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if revoked {
+		t.Error("clean denylist should not revoke")
+	}
+}
+
+func TestCheckRevoked_TenantWide(t *testing.T) {
+	d := NewStaticDenylist()
+	_ = d.AddTenant(context.Background(), "alice", "compromised")
+	prev := globalDenylist
+	globalDenylist = d
+	t.Cleanup(func() { globalDenylist = prev })
+
+	revoked, _ := checkRevoked(context.Background(), &Claims{Sub: "alice", Jti: "anyJtiAtAll"}, quietLogger())
+	if !revoked {
+		t.Error("tenant-wide ban should match any jti for the tenant")
+	}
+	revoked, _ = checkRevoked(context.Background(), &Claims{Sub: "bob", Jti: "abc"}, quietLogger())
+	if revoked {
+		t.Error("ban on alice should not catch bob")
+	}
+}
+
+func TestCheckRevoked_PerJTI(t *testing.T) {
+	d := NewStaticDenylist()
+	_ = d.AddJTI(context.Background(), "alice", "stolen-token", "")
+	prev := globalDenylist
+	globalDenylist = d
+	t.Cleanup(func() { globalDenylist = prev })
+
+	revoked, _ := checkRevoked(context.Background(), &Claims{Sub: "alice", Jti: "stolen-token"}, quietLogger())
+	if !revoked {
+		t.Error("the specific jti should be blocked")
+	}
+	revoked, _ = checkRevoked(context.Background(), &Claims{Sub: "alice", Jti: "different"}, quietLogger())
+	if revoked {
+		t.Error("a different jti for the same tenant should pass")
+	}
+}
+
+func TestCheckRevoked_NilClaims(t *testing.T) {
+	revoked, err := checkRevoked(context.Background(), nil, quietLogger())
+	if revoked || err != nil {
+		t.Errorf("nil claims: revoked=%v err=%v want false/nil", revoked, err)
 	}
 }
