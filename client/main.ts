@@ -31,6 +31,7 @@ import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src
 import { StatsSampler, StatsSample, STATS_PROTOCOL_VERSION, formatSummary } from "./src/stats.js";
 import { fetchSessionToken, withToken } from "./src/auth.js";
 import { classifyNegotiation, describeOutcome } from "./src/codec-negotiate.js";
+import { estimateConnectionQuality, type ProbeResult } from "./src/probe.js";
 
 // Codec preference list, top-first. The first entry must match the
 // codec we ask `prioritizeCodec` to lead with on the answer SDP, so
@@ -44,7 +45,8 @@ type Envelope =
   | { type: "answer"; from: "client" | "browser"; data: RTCSessionDescriptionInit }
   | { type: "ice";    from: "client" | "browser"; data: RTCIceCandidateInit | null }
   | { type: "bye";    from: "client" | "browser"; data?: undefined }
-  | { type: "request_renegotiate"; from: "client" | "browser"; data?: null };
+  | { type: "request_renegotiate"; from: "client" | "browser"; data?: null }
+  | { type: "probe_result"; from: "client" | "browser"; data: ProbeResult }; // T102
 
 type LogLevel = "info" | "ok" | "warn" | "err";
 
@@ -459,6 +461,15 @@ async function connect(sessionId: string): Promise<void> {
   const iceConfig = await fetchTurnConfig(DEFAULT_SIGNALING);
   log("info", "ice config", iceConfig);
 
+  // T102: pre-call connection-quality probe. Best-effort — null on any
+  // failure. Run in parallel with the WS dial below by stashing the
+  // promise; we await it inside the `open` handler before sending
+  // the probe_result envelope.
+  const probePromise: Promise<ProbeResult | null> = estimateConnectionQuality({
+    signalingBase: DEFAULT_SIGNALING,
+    ...(issued?.token ? { authToken: issued.token } : {}),
+  }).catch(() => null);
+
   const rws = new ReconnectingWebSocket(wsUrl);
   // Stash a placeholder pc so the active record is well-typed; replaced
   // synchronously by buildPeerConnection() once session is set.
@@ -494,6 +505,22 @@ async function connect(sessionId: string): Promise<void> {
     }
     // Hello frame so signaling learns our role.
     rws.send(JSON.stringify({ type: "ice", from: "client", data: null } satisfies Envelope));
+
+    // T102: ship the probe result *after* the hello so the streamer
+    // sees `probe_result` only on a registered session. Best-effort —
+    // null result silently skips emission.
+    void probePromise.then((probe) => {
+      if (!probe) {
+        log("info", "probe: no result (skipping probe_result envelope)");
+        return;
+      }
+      log("ok", "probe", probe);
+      rws.send(JSON.stringify({
+        type: "probe_result",
+        from: "client",
+        data: probe,
+      } satisfies Envelope));
+    });
   });
 
   rws.on("underlyingClose", (ev) => {
@@ -589,6 +616,12 @@ async function connect(sessionId: string): Promise<void> {
         // log and rely on the streamer's own ICE restart machinery;
         // if it re-offers, our offer handler picks it up.
         log("info", `← request_renegotiate from ${env.from} (no-op for answerer; awaiting fresh offer)`);
+        break;
+      case "probe_result":
+        // The client is the only legit sender of probe_result; if the
+        // streamer ever loops one back, just ignore — we already used
+        // ours to seed the streamer.
+        log("info", `← probe_result from ${env.from} (ignored on client)`);
         break;
     }
   });

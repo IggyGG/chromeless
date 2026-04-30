@@ -69,6 +69,7 @@ var validTypes = map[string]struct{}{
 	"ice":                 {},
 	"bye":                 {},
 	"request_renegotiate": {}, // T37: peer asks the offerer to redo SDP w/ ICE restart.
+	"probe_result":        {}, // T102: client → streamer connection-quality hint.
 }
 
 // ----- session hub -----
@@ -553,7 +554,8 @@ func main() {
 		mux.HandleFunc("/admin/revoke", adminRevokeHandler(deny, logger))
 	}
 	mux.HandleFunc("/ws/", h.wsHandler)
-	mux.Handle("/metrics", metricsHandler()) // T38
+	mux.HandleFunc("/probe", probeHandler(logger)) // T102
+	mux.Handle("/metrics", metricsHandler())       // T38
 
 	srv := &http.Server{
 		Addr:              addr,

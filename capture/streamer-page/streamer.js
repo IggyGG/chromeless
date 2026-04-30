@@ -368,6 +368,57 @@
     setTimeout(() => location.replace("about:blank"), 200);
   }
 
+  // T102: seed encoder ceiling from the client's pre-call probe.
+  // The client measured RTT + rough up/down throughput before
+  // negotiation; we use min(uplink,downlink) × 0.8 as a starting
+  // maxBitrate, clamped to [200 kbps, 8 Mbps]. libwebrtc's BWE
+  // continues to adjust from this seed during the session.
+  async function applyProbeResult(probe) {
+    if (!active || !probe) return;
+    const ul = Number(probe.uplink_kbps);
+    const dl = Number(probe.downlink_kbps);
+    if (!Number.isFinite(ul) || !Number.isFinite(dl) || ul <= 0 || dl <= 0) {
+      log("warn", "probe_result: bad numbers", probe);
+      return;
+    }
+    const target = Math.min(ul, dl) * 0.8 * 1000; // kbps→bps
+    const maxBitrate = Math.max(200_000, Math.min(8_000_000, Math.round(target)));
+    const sender = active.pc.getSenders().find((s) => s.track?.kind === "video");
+    if (!sender) {
+      log("warn", "probe_result: no video sender yet (deferring not implemented; likely raced offer)");
+      return;
+    }
+    try {
+      const params = sender.getParameters();
+      // Preserve existing simulcast layout (T77/T83): scale every layer's
+      // maxBitrate proportionally to the probe ceiling so layer-relative
+      // ratios stay intact. With one encoding the math collapses to
+      // setting that single layer's cap.
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      const existingMax = params.encodings.reduce(
+        (acc, e) => Math.max(acc, e.maxBitrate ?? 0), 0,
+      );
+      for (const enc of params.encodings) {
+        if (existingMax > 0 && enc.maxBitrate) {
+          enc.maxBitrate = Math.round(enc.maxBitrate * (maxBitrate / existingMax));
+        } else {
+          enc.maxBitrate = maxBitrate;
+        }
+      }
+      await sender.setParameters(params);
+      log("ok", "probe_result applied", {
+        rtt_ms: probe.rtt_ms,
+        uplink_kbps: ul,
+        downlink_kbps: dl,
+        encoderCapBps: maxBitrate,
+      });
+    } catch (err) {
+      log("warn", "setParameters from probe_result failed", String(err));
+    }
+  }
+
   async function start() {
     log("info", "streamer boot", { signaling: SIGNALING_URL, session: SESSION_ID, fps: FRAMERATE });
 
@@ -627,6 +678,12 @@
         case "bye":
           log("info", "← bye from client");
           teardown("client said bye");
+          break;
+        case "probe_result":
+          // T102: client measured up/down throughput before negotiation;
+          // seed the encoder ceiling so the first few seconds aren't
+          // degraded while libwebrtc's BWE ramps up.
+          applyProbeResult(env.data);
           break;
         default:
           log("warn", "← unknown type", env.type);
