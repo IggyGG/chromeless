@@ -26,6 +26,7 @@ import { InputChannel } from "./src/input.js";
 import { fetchTurnConfig } from "./src/turn.js";
 import { prioritizeCodec } from "./src/sdp.js";
 import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src/reconnect.js";
+import { StatsSampler, StatsSample, STATS_PROTOCOL_VERSION, formatSummary } from "./src/stats.js";
 
 const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
 
@@ -98,6 +99,12 @@ interface Session {
   dc: RTCDataChannel | null;
   input: InputChannel | null;
   detachInput: (() => void) | null;
+  /** Set when the streamer has opened the "stats" data channel. */
+  statsDc: RTCDataChannel | null;
+  /** Stats sampler — created with the pc, lives until pc rebuild. */
+  stats: StatsSampler | null;
+  /** Subscriber detach function for the stats sampler. */
+  detachStats: (() => void) | null;
   /** Has at least one rws "open" fired? Used to distinguish first vs reconnect. */
   hasOpenedOnce: boolean;
 }
@@ -108,7 +115,10 @@ function teardown(reason: string): void {
   if (!active) return;
   log("info", `tearing down: ${reason}`);
   try { active.detachInput?.(); } catch { /* ignore */ }
+  try { active.detachStats?.(); } catch { /* ignore */ }
+  try { active.stats?.stop(); } catch { /* ignore */ }
   try { active.dc?.close(); } catch { /* ignore */ }
+  try { active.statsDc?.close(); } catch { /* ignore */ }
   try { active.pc.close(); } catch { /* ignore */ }
   if (active.rws.isConnected()) {
     try {
@@ -141,14 +151,24 @@ function videoContentMapper(cx: number, cy: number, rect: DOMRect): { x: number;
   };
 }
 
+function wireDataChannel(dc: RTCDataChannel): void {
+  if (!active) return;
+  log("ok", `← data channel "${dc.label}" (state=${dc.readyState})`);
+  if (dc.label === "input") return wireInputChannel(dc);
+  if (dc.label === "stats") return wireStatsChannel(dc);
+  log("warn", `ignoring unknown data channel label: ${dc.label}`);
+}
+
+function wireStatsChannel(dc: RTCDataChannel): void {
+  if (!active) return;
+  active.statsDc = dc;
+  // Only start emitting frames over the channel once it's open.
+  // Subscribers (debug panel) are wired in buildPeerConnection.
+}
+
 function wireInputChannel(dc: RTCDataChannel): void {
   if (!active) return;
   els.dc.textContent = dc.readyState;
-  log("ok", `← data channel "${dc.label}" (state=${dc.readyState})`);
-  if (dc.label !== "input") {
-    log("warn", `ignoring unknown data channel label: ${dc.label}`);
-    return;
-  }
   const input = new InputChannel(dc, {
     onCoalesce: (n) => log("info", `coalesced ${n} mouse_move`),
     onError: (err) => log("err", "input send failed", String(err)),
@@ -225,7 +245,33 @@ function buildPeerConnection(): RTCPeerConnection {
     }
   };
 
-  pc.ondatachannel = (ev) => wireInputChannel(ev.channel);
+  pc.ondatachannel = (ev) => wireDataChannel(ev.channel);
+
+  // T42: per-second stats sampler. Subscribers update the debug panel
+  // and (when the streamer offers a "stats" channel) emit over the
+  // data channel for server-side scraping.
+  const stats = new StatsSampler(pc, { intervalMs: 1000 });
+  let prev: StatsSample | undefined;
+  const detachStats = stats.on((s) => {
+    log("info", `stats ${formatSummary(s, prev)}`);
+    prev = s;
+    if (active?.statsDc?.readyState === "open") {
+      try {
+        active.statsDc.send(JSON.stringify({ v: STATS_PROTOCOL_VERSION, t: s.t, sample: s }));
+      } catch { /* ignore */ }
+    }
+  });
+  if (active) {
+    active.stats = stats;
+    active.detachStats = detachStats;
+  }
+  // Start sampling once connection is up; pc.onconnectionstatechange handles it.
+  const prevConnState = pc.onconnectionstatechange;
+  pc.onconnectionstatechange = (ev) => {
+    if (typeof prevConnState === "function") prevConnState.call(pc, ev);
+    if (pc.connectionState === "connected") stats.start();
+    else if (pc.connectionState === "closed" || pc.connectionState === "failed") stats.stop();
+  };
 
   return pc;
 }
@@ -234,9 +280,15 @@ function rebuildPeerConnection(reason: string): void {
   if (!active) return;
   log("info", `rebuilding peer connection: ${reason}`);
   try { active.detachInput?.(); } catch { /* ignore */ }
+  try { active.detachStats?.(); } catch { /* ignore */ }
+  try { active.stats?.stop(); } catch { /* ignore */ }
   active.detachInput = null;
+  active.detachStats = null;
+  active.stats = null;
   try { active.dc?.close(); } catch { /* ignore */ }
+  try { active.statsDc?.close(); } catch { /* ignore */ }
   active.dc = null;
+  active.statsDc = null;
   active.input = null;
   try { active.pc.close(); } catch { /* ignore */ }
   active.pc = buildPeerConnection();
@@ -261,7 +313,9 @@ async function connect(sessionId: string): Promise<void> {
   // synchronously by buildPeerConnection() once session is set.
   active = {
     rws, pc: null as unknown as RTCPeerConnection, iceConfig,
-    dc: null, input: null, detachInput: null, hasOpenedOnce: false,
+    dc: null, input: null, detachInput: null,
+    statsDc: null, stats: null, detachStats: null,
+    hasOpenedOnce: false,
   };
   active.pc = buildPeerConnection();
   els.dc.textContent = "—";
