@@ -1,0 +1,114 @@
+# infra/host-daemonset.yaml — node-level v4l2loopback module loader (T92).
+#
+# Per docs/protocols/webcam-mic-passthrough.md "Shape 2" (the
+# production-deployable shape), v4l2loopback is loaded once per
+# **node** by this DaemonSet. Session pods bind one of the
+# pre-allocated /dev/videoN devices via a host-path mount and
+# remain non-privileged.
+#
+# This is the boundary T81's threat model §T6 calls out: the
+# DaemonSet IS privileged because modprobe needs CAP_SYS_MODULE,
+# but the per-tenant session pods that consume the loaded devices
+# stay non-privileged — a compromise of one session can't cross
+# back into the host or into another tenant's session.
+#
+# Operator note: this DaemonSet is OPTIONAL. Clusters not running
+# camera/mic passthrough don't need to deploy it. The presence of
+# /dev/videoN on a node is what tells session pods passthrough is
+# available; absent the DaemonSet, pods fall back to gracefully
+# disabling the passthrough button (T81's UA-side gating).
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cb-passthrough-loader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: cb-passthrough-loader
+    app.kubernetes.io/part-of: cloud-browser-webrtc
+    cb.passthrough/role: node-loader
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cb-passthrough-loader
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cb-passthrough-loader
+        cb.passthrough/role: node-loader
+    spec:
+      # Node selector: only deploy onto nodes whose pool is
+      # explicitly designated for cloud-browser sessions. Nodes
+      # outside this pool don't get v4l2loopback loaded — they
+      # also don't run sessions, so it's the right scope.
+      nodeSelector:
+        cb.cloudbrowser/role: session
+      hostPID: false
+      hostNetwork: false
+      tolerations:
+        # If the session-pool nodes use a taint to keep general
+        # workloads off, we tolerate it.
+        - key: cb.cloudbrowser/dedicated
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: loader
+          image: ghcr.io/iggy/cloud-browser-webrtc/cb-passthrough-loader:dev
+          imagePullPolicy: IfNotPresent
+          # The loader is a tiny image whose entrypoint is a
+          # shell script that:
+          #   1. modprobes v4l2loopback once with N pre-allocated
+          #      devices /dev/video10..video10+N-1, card label
+          #      "Cloud Browser Camera N".
+          #   2. tails forever (sleep infinity) so the DaemonSet
+          #      stays Running and kubelet doesn't restart it.
+          #   3. on SIGTERM, rmmod v4l2loopback (best-effort).
+          # That script is bundled in the image at
+          # /usr/local/bin/cb-load-v4l2.sh.
+          env:
+            - name: CB_PASSTHROUGH_DEVICES
+              value: "8"   # one device per max concurrent session per node
+            - name: CB_PASSTHROUGH_VIDEO_NR
+              value: "10"  # /dev/video10..video17
+          securityContext:
+            # privileged: true is REQUIRED for modprobe v4l2loopback.
+            # This privilege is bounded to the loader; session pods
+            # stay non-privileged.
+            privileged: true
+            # Run as root within the privileged container — modprobe
+            # rejects non-root callers regardless of CAP_SYS_MODULE.
+            runAsUser: 0
+          volumeMounts:
+            # The host's /lib/modules so we can find the
+            # v4l2loopback.ko that matches the running kernel. This
+            # path may be different on container-optimized OS
+            # variants; document operator-specific overrides in
+            # the deployment runbook.
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            # /dev so the newly-created /dev/videoN devices land
+            # somewhere session pods can pick them up via a
+            # host-path mount.
+            - name: dev
+              mountPath: /dev
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      volumes:
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1

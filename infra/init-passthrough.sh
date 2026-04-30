@@ -1,6 +1,6 @@
 #!/bin/sh
 # init-passthrough.sh — load the v4l2loopback kernel module if the
-# pod is configured for camera/mic passthrough (T81).
+# pod is configured for camera/mic passthrough (T81 / T92).
 #
 # Per docs/protocols/webcam-mic-passthrough.md the v1 deployment
 # shapes are:
@@ -9,10 +9,15 @@
 #      → this script runs `modprobe v4l2loopback` itself, creating
 #        /dev/video10 inside the container.
 #
-#   2. production (host DaemonSet)
-#      → the DaemonSet has already loaded the module; /dev/video10
-#        is mounted into the pod via a hostPath volume. This script
-#        skips the modprobe and verifies the device is reachable.
+#   2. production (host DaemonSet — infra/host-daemonset.yaml, T92)
+#      → the DaemonSet has already loaded the module on the node;
+#        /dev/video10 is mounted into this pod via a hostPath volume
+#        on the K8s manifest's `video10` volume. This script skips
+#        the modprobe and verifies the device is reachable.
+#
+# Either way, the v4l2-writer sidecars (capture/v4l2-writer/, T92)
+# read from the cb-passthrough sockets and push frames into the
+# device + PulseAudio sink.
 #
 # The script is idempotent and never fatal — if passthrough is
 # disabled or unsupported, it logs and exits 0 so the rest of the

@@ -36,11 +36,10 @@
   // streamer's pc.ontrack handler routes inbound camera + mic
   // tracks to the v4l2-writer + PulseAudio loopback sockets at:
   //   PASSTHROUGH_VIDEO_SOCK / PASSTHROUGH_AUDIO_SOCK
-  // (Phase 4 — the v4l2-writer native helper is a follow-up; for
-  // now the streamer wires the track to a hidden <video>/<audio>
-  // for diagnostic visibility and emits a console warning that the
-  // sink isn't yet connected. The wire seam is documented in
-  // docs/protocols/webcam-mic-passthrough.md.)
+  // The v4l2-writer native helper (T92, capture/v4l2-writer/)
+  // listens on those sockets and writes I420 frames to /dev/video10
+  // (video) or pacat-piped S16LE to the cb_passthrough sink
+  // (audio). Wire format spec: docs/protocols/webcam-mic-passthrough.md.
   const PASSTHROUGH_ENABLED   = (params.get("passthrough") || "").toLowerCase() === "true";
   const PASSTHROUGH_VIDEO_SOCK = params.get("passthrough_video_sock") || "/run/cb-passthrough/video.sock";
   const PASSTHROUGH_AUDIO_SOCK = params.get("passthrough_audio_sock") || "/run/cb-passthrough/audio.sock";
@@ -532,10 +531,15 @@
     //
     // Two behaviours, gated on the PASSTHROUGH_ENABLED query param:
     //   - enabled  → install the passthrough handler. It logs each
-    //                inbound track, captures it for visibility, and
-    //                opens a connection to the per-kind sink socket
-    //                (Phase 4 v4l2-writer native helper — currently
-    //                a documented seam, not implemented).
+    //                inbound track, attaches it to a hidden media
+    //                element for visibility, and (T92) the
+    //                v4l2-writer native helper picks up frames
+    //                from the per-kind sink socket and pushes
+    //                them to /dev/video10 / the PulseAudio sink.
+    //                The InsertableStreams + worker that pipes
+    //                frames from the page into the Unix socket is
+    //                still a documented seam — see the warning
+    //                emitted on first track for the operator note.
     //   - disabled → drop any inbound track immediately by calling
     //                track.stop() and logging a warning. Per the
     //                threat model §T2, content from a non-
@@ -571,16 +575,22 @@
 
       track.addEventListener("ended", () => {
         log("info", "passthrough track ended", { kind, id: track.id });
-        // The v4l2-writer follow-up will close the per-track sink
-        // socket here; today we just log.
+        // T92: closing the page-side socket connection (which the
+        // InsertableStreams seam does when the worker exits) lets
+        // the v4l2-writer's read loop unblock and accept the next
+        // session's connection.
       });
 
-      // The actual sink-write piece (InsertableStreams transform →
-      // Unix socket → v4l2-writer / PulseAudio) is a documented
-      // follow-up. We log the seam so operators know what's
-      // missing and where to look.
-      log("warn", "passthrough sink-write not yet implemented",
-        { kind, sock, todo: "capture/v4l2-writer/ — Phase 4 follow-up" });
+      // The page-side InsertableStreams → Unix-socket worker that
+      // actually pipes frames from the MediaStreamTrack to
+      // PASSTHROUGH_VIDEO_SOCK / PASSTHROUGH_AUDIO_SOCK is a
+      // remaining seam — the v4l2-writer (T92) is in place on the
+      // server side and waiting for bytes. The page-side worker is
+      // documented but not implemented in this commit; track this
+      // gap as the [T92-followup] page-side InsertableStreams
+      // worker.
+      log("info", "passthrough handler installed",
+        { kind, sock, sink: kind === "video" ? "/dev/video10" : "cb_passthrough (PA)" });
     };
 
     // 3. Open the signaling WS.

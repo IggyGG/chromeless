@@ -5,7 +5,8 @@
 > documented here is for compose / single-node development only.
 >
 > **Owner:** `platform-dev` (this doc + client + streamer ontrack).
-> Native v4l2-writer helper is a documented follow-up.
+> Native v4l2-writer helper is implemented — see
+> [`capture/v4l2-writer/`](../../capture/v4l2-writer/) (T92).
 
 This doc describes how the local user's camera and microphone reach
 the cloud Chromium tab so a page like Google Meet inside the cloud
@@ -76,8 +77,8 @@ The worker:
 2. Writes each frame to a Unix domain socket
    (`/run/cb-passthrough/video.sock` and `…/audio.sock`).
 
-A native helper (`capture/v4l2-writer/`, **TODO follow-up**)
-listens on those sockets and writes:
+A native helper ([`capture/v4l2-writer/`](../../capture/v4l2-writer/),
+T92) listens on those sockets and writes:
 - Video frames into a `v4l2loopback` device (`/dev/video10` by
   default) using `VIDIOC_S_FMT` + `write(2)`.
 - Audio frames into a PulseAudio null-sink that's exposed as a
@@ -106,8 +107,9 @@ so the writer can call `VIDIOC_S_FMT` once.
 Audio frame body is **interleaved S16LE** at 48 kHz mono /
 2-channel; the init header is `MAGIC(4) | sample_rate(4) | channels(4) | reserved(4)`.
 
-Both magic constants are documented in `capture/v4l2-writer/README.md`
-(when that ships).
+Both magic constants are also documented in
+[`capture/v4l2-writer/README.md`](../../capture/v4l2-writer/README.md)
+(T92).
 
 ---
 

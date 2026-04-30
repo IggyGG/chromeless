@@ -424,3 +424,84 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+
+    # -------------------------------------------------------------------
+    # T92 — v4l2-writer (video) — consumes the streamer-page →
+    # /run/cb-passthrough/video.sock frame stream and writes I420
+    # frames into the host-DaemonSet-loaded /dev/video10 (T81 + T92).
+    # The session pod is NOT privileged; the v4l2loopback module
+    # was loaded once per node by infra/host-daemonset.yaml
+    # (cb-passthrough-loader). gid 44 = "video" group; combined with
+    # the device's mode 0666 set by the loader, this lets the
+    # unprivileged sidecar write to /dev/video10 without
+    # CAP_SYS_ADMIN or device-cgroup tweaks.
+    # -------------------------------------------------------------------
+    - name: v4l2-writer-video
+      image: ghcr.io/iggy/cloud-browser-webrtc/v4l2-writer:dev
+      imagePullPolicy: IfNotPresent
+      args:
+        - "--mode=video"
+        - "--socket=/run/cb-passthrough/video.sock"
+        - "--device=/dev/video10"
+      volumeMounts:
+        - name: cb-passthrough-sockets
+          mountPath: /run/cb-passthrough
+        - name: video10
+          mountPath: /dev/video10
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "32Mi"
+        limits:
+          cpu: "300m"
+          memory: "96Mi"
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 44   # "video" — matches the Dockerfile USER gid.
+
+    # -------------------------------------------------------------------
+    # T92 — v4l2-writer (audio) — consumes the streamer-page →
+    # /run/cb-passthrough/audio.sock frame stream and writes S16LE
+    # samples to the cb_passthrough PulseAudio sink (loaded by
+    # infra/pulse-default.pa, T24). Uses pacat under the hood.
+    # -------------------------------------------------------------------
+    - name: v4l2-writer-audio
+      image: ghcr.io/iggy/cloud-browser-webrtc/v4l2-writer:dev
+      imagePullPolicy: IfNotPresent
+      args:
+        - "--mode=audio"
+        - "--socket=/run/cb-passthrough/audio.sock"
+        - "--pulse-sink=cb_passthrough"
+      env:
+        # Point pacat at the PulseAudio daemon running in the
+        # chromium container. The native socket is at PA's per-
+        # runtime-dir location; the chromium container exposes it
+        # via a shared `run` volume.
+        - name: PULSE_SERVER
+          value: "unix:/run/pulse/native"
+      volumeMounts:
+        - name: cb-passthrough-sockets
+          mountPath: /run/cb-passthrough
+        - name: run
+          mountPath: /run/pulse
+          subPath: pulse
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "32Mi"
+        limits:
+          cpu: "200m"
+          memory: "64Mi"
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
