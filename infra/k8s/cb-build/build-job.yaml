@@ -306,17 +306,18 @@ spec:
         # regression. /data on the pinned build node holds chromium-
         # src + sccache. T119-followup repointed from triform-6
         # (eviction-loop on root-fs DiskPressure under shared tenancy)
-        # to triform-2 (1.4T /data on /dev/mapper/vg0-data, healthier
-        # root fs, existing 29 GB chromium-src at /data/cb-build-t2).
+        # to triform-2 (1.4T /mnt/data on /dev/mapper/vg0-data — note that
+        # /data on triform-2 is the small ROOT fs, NOT the big LVM;
+        # the hostPath therefore mounts /mnt/data/cb-build-t2/...).
         # DirectoryOrCreate ensures kubelet creates the subdir if
         # absent. The host-permissions initContainer chowns to 1000.
         - name: workdir
           hostPath:
-            path: /data/cb-build-t2/chromium-src
+            path: /mnt/data/cb-build-t2/chromium-src
             type: DirectoryOrCreate
         - name: sccache
           hostPath:
-            path: /data/cb-build-t2/sccache
+            path: /mnt/data/cb-build-t2/sccache
             type: DirectoryOrCreate
         # Our repo lives in an emptyDir — bootstrap initContainer
         # populates it once, main container reads-only. Survival
