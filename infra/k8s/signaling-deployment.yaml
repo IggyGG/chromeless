@@ -1,0 +1,207 @@
+# infra/k8s/signaling-deployment.yaml — signaling tier
+#
+# Deployment + Service + Ingress + HPA + ServiceMonitor.
+#
+# Phase-3 sizing: 3 baseline replicas, scale to 20 on CPU. The
+# signaling server is stateless (in-memory hub per pod, sessions live
+# in a single connection — peers reconnect to a different pod and
+# rejoin a fresh session if their pod evicts). For real fan-out
+# across replicas we'd need a shared session map (Redis or NATS); see
+# T48 / Phase 3 multi-tenancy work.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: signaling
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: signaling
+automountServiceAccountToken: false
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signaling
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: signaling
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloud-browser-webrtc
+      app.kubernetes.io/component: signaling
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloud-browser-webrtc
+        app.kubernetes.io/component: signaling
+      annotations:
+        # Prometheus pod-discovery scrape config (some setups use this
+        # in addition to / instead of ServiceMonitor).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: signaling
+      automountServiceAccountToken: false
+      containers:
+        - name: signaling
+          image: ghcr.io/iggy/cloud-browser-webrtc/signaling:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SIGNALING_PORT
+              value: "8080"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          # The signaling image is gcr.io/distroless/static — no shell.
+          # If you need to debug, kubectl debug the pod with an
+          # ephemeral container.
+      # Spread replicas across nodes / zones so a node failure can't
+      # take all signaling capacity at once.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: signaling
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signaling
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: signaling
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: signaling
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  # Sticky sessions on cookieless WebSockets — clientIP affinity keeps
+  # a peer's reconnects on the same pod when possible. Critical for
+  # the in-memory hub design.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+
+---
+# Public ingress. Replace cluster-issuer / hostname / tls-secret with
+# your environment values. cert-manager.io annotations shown for the
+# common case; if you use ACM + ALB on EKS, swap to the AWS load
+# balancer controller annotations.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: signaling
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: signaling
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # WebSocket support: nginx-ingress and most ingresses pass through
+    # the Upgrade/Connection headers automatically when the backend
+    # speaks HTTP/1.1, but some need an explicit hint.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - signaling.example.com
+      secretName: signaling-tls
+  rules:
+    - host: signaling.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: signaling
+                port:
+                  number: 8080
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: signaling
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: signaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: signaling
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

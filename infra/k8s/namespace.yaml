@@ -1,0 +1,19 @@
+# infra/k8s/namespace.yaml — cloud-browser-webrtc namespace
+#
+# Everything Phase-3 lives in this namespace so it's easy to teardown
+# and easy to reason about per-tenant network policies. The namespace
+# carries pod-security labels so a misconfigured pod can't escape into
+# privileged territory.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    # Pod Security Standards (replace PSP). Restricted is what we want
+    # eventually; baseline gets us through the v1 deploy where we still
+    # need shareProcessNamespace + the chromium suid sandbox helper.
+    # Re-evaluate after T44's sandbox decision.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

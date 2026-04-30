@@ -1,0 +1,197 @@
+# infra/k8s/turn-deployment.yaml — coturn TURN/STUN server
+#
+# This manifest exists for completeness. **For production we strongly
+# recommend a managed TURN service (Cloudflare TURN, metered.ca,
+# Twilio).** TURN-on-K8s is operationally painful because:
+#
+#   - TURN needs a wide UDP port range (49152-65535 by default) for
+#     relay allocations. K8s NodePort services are restricted to
+#     30000-32767, so NodePort is a non-starter.
+#   - LoadBalancer Services with UDP support exist but vary by cloud:
+#     GCP supports UDP, AWS NLB supports UDP since 2020, Azure LB
+#     supports UDP. Each has port-range gotchas.
+#   - The simplest deployment is hostNetwork=true on a small pool of
+#     dedicated TURN nodes with ALL the right UDP ports open in the
+#     node firewall. That's what this manifest does.
+#
+# See docs/ice-and-turn.md (T25) for the design rationale.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: turn-rest-secret
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: turn
+type: Opaque
+stringData:
+  # Replace at deploy time. The signaling server's /turn-credentials
+  # endpoint signs short-lived TURN-REST credentials with this secret;
+  # coturn validates them via use-auth-secret + static-auth-secret.
+  # Generate with: openssl rand -hex 32
+  static-auth-secret: "REPLACE_AT_DEPLOY_TIME_WITH_HEX_32"
+  realm: "turn.example.com"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coturn-config
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: turn
+data:
+  # See https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf
+  # for the full reference. Trimmed to the bits we actually want.
+  turnserver.conf: |
+    listening-port=3478
+    tls-listening-port=5349
+    fingerprint
+    use-auth-secret
+    # static-auth-secret and realm are injected via env from the Secret
+    # using the standard $ENV{NAME} substitution coturn supports.
+    static-auth-secret=$ENV{TURN_STATIC_AUTH_SECRET}
+    realm=$ENV{TURN_REALM}
+    no-multicast-peers
+    # Don't relay to internal infra: drop RFC1918 destinations.
+    denied-peer-ip=10.0.0.0-10.255.255.255
+    denied-peer-ip=172.16.0.0-172.31.255.255
+    denied-peer-ip=192.168.0.0-192.168.255.255
+    denied-peer-ip=169.254.0.0-169.254.255.255
+    no-tlsv1
+    no-tlsv1_1
+    # Relay port range. Wide range == better concurrency. Confirm node
+    # firewall allows this whole range.
+    min-port=49152
+    max-port=65535
+    log-file=stdout
+    no-stdout-log
+    simple-log
+    # External relay IP comes from the node's external IP. Fill via an
+    # init container that resolves it from the cloud metadata service
+    # in production; left as a TODO here.
+    # external-ip=
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: coturn
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: turn
+spec:
+  serviceName: coturn
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloud-browser-webrtc
+      app.kubernetes.io/component: turn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloud-browser-webrtc
+        app.kubernetes.io/component: turn
+    spec:
+      # hostNetwork: true is required so coturn can use the node's
+      # full UDP range without K8s NodePort restrictions. Pin to a
+      # dedicated node pool via nodeSelector + taints in production.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      containers:
+        - name: coturn
+          image: coturn/coturn:4.6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TURN_STATIC_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: turn-rest-secret
+                  key: static-auth-secret
+            - name: TURN_REALM
+              valueFrom:
+                secretKeyRef:
+                  name: turn-rest-secret
+                  key: realm
+          args:
+            - "-c"
+            - "/etc/coturn/turnserver.conf"
+          ports:
+            - name: stun-udp
+              containerPort: 3478
+              protocol: UDP
+              hostPort: 3478
+            - name: stun-tcp
+              containerPort: 3478
+              protocol: TCP
+              hostPort: 3478
+            - name: turns
+              containerPort: 5349
+              protocol: TCP
+              hostPort: 5349
+          volumeMounts:
+            - name: config
+              mountPath: /etc/coturn
+              readOnly: true
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            tcpSocket:
+              port: stun-tcp
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # coturn doesn't need NET_BIND_SERVICE since 3478/5349
+              # are >1024.
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: config
+          configMap:
+            name: coturn-config
+
+---
+# Headless Service for the StatefulSet. With hostNetwork pods, this is
+# mostly a service-discovery convenience for any in-cluster client
+# that wants to enumerate TURN replicas (e.g., the signaling server's
+# /turn-credentials endpoint, which mints client-facing TURN URLs).
+apiVersion: v1
+kind: Service
+metadata:
+  name: coturn
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: turn
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: turn
+  ports:
+    - name: stun-udp
+      port: 3478
+      targetPort: stun-udp
+      protocol: UDP
+    - name: stun-tcp
+      port: 3478
+      targetPort: stun-tcp
+      protocol: TCP
+    - name: turns
+      port: 5349
+      targetPort: turns
+      protocol: TCP

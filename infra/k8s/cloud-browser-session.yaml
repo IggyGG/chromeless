@@ -1,0 +1,307 @@
+# infra/k8s/cloud-browser-session.yaml — Pod spec for one cloud-browser
+# session.
+#
+# T50 Phase 3 prep: this is the *template* the (future) session
+# controller will use to materialise individual session Pods. Today it
+# is a standalone Pod manifest that's hand-applicable for testing —
+# `kubectl apply -f cloud-browser-session.yaml` brings up one session.
+#
+# A session Pod runs five cooperating containers in a shared network
+# and PID namespace:
+#
+#   cb-chromium         the T7 + T28 + T31 image without the metrics
+#                       sidecar binary; runs Xvfb + PulseAudio +
+#                       streamer-static + Chromium under supervisord.
+#                       DevTools on :9222, streamer-static on :9000.
+#   cb-metrics-sidecar  T38 sidecar exposing /metrics on :9100. Uses
+#                       /proc to aggregate Chromium CPU/RSS, hence the
+#                       Pod-wide shareProcessNamespace below.
+#   input-bridge        T22 server-side input dispatch; relays the
+#                       streamer's "input" data channel into Chromium
+#                       DevTools Input.dispatchMouseEvent / KeyEvent.
+#   cursor-watcher      T26 sidecar that polls Chromium for cursor
+#                       shape/position metadata and forwards to the
+#                       data channel.
+#   clipboard-bridge    T32 sidecar that wires X11 clipboard into the
+#                       client via a data channel.
+#
+# Security knobs:
+#   shareProcessNamespace=true        cb-metrics-sidecar needs /proc
+#                                     visibility into chromium PIDs;
+#                                     this widens trust inside the
+#                                     pod but the pod is a single
+#                                     tenant unit anyway. See T44 for
+#                                     the cross-pod story.
+#   runtimeClassName: gvisor          (commented; decision deferred to
+#                                     Phase 3 per T44's matrix)
+#   readOnlyRootFilesystem            on every sidecar where possible.
+#                                     cb-chromium needs writable root
+#                                     because chromium spawns helpers
+#                                     and writes a profile dir.
+#
+# Image registry placeholder: we use ghcr.io/iggy/cloud-browser-webrtc
+# throughout. The actual registry path will land when we publish.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cb-session-template
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: session
+    cb.session/state: warm
+spec:
+  # Phase 3 isolation lever. Uncomment after the runtimeClass is
+  # installed cluster-wide. See docs/research/sandbox-isolation.md.
+  # runtimeClassName: gvisor
+
+  shareProcessNamespace: true
+  restartPolicy: Always
+
+  # Cluster-internal DNS for signaling. Keep clusterFirst so the pod
+  # uses the cluster's DNS resolver; Phase-3 prod can layer per-tenant
+  # DNS via NetworkPolicy + a sidecar resolver.
+  dnsPolicy: ClusterFirst
+
+  # Don't auto-mount the default ServiceAccount token: nothing in this
+  # pod talks to the K8s API. The session controller will mint a
+  # dedicated, no-permission SA when it starts using the K8s API.
+  automountServiceAccountToken: false
+
+  # /dev/shm: Chromium needs more than the default 64M. emptyDir with
+  # medium=Memory backs it with tmpfs at the size we set in compose
+  # via shm_size.
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+    # Per-session env file written by cold-start.sh; readable by all
+    # containers because it lives at /run/cb-session/env.
+    - name: cb-session
+      emptyDir:
+        sizeLimit: 1Mi
+    # Chromium user data dir. emptyDir so it dies with the Pod — no
+    # cross-tenant leak via persistent storage.
+    - name: chromium-userdata
+      emptyDir:
+        sizeLimit: 512Mi
+    # PulseAudio / X11 sockets shared between cb-chromium and the
+    # cursor-watcher / input-bridge sidecars when they need the
+    # display.
+    - name: x11-socket
+      emptyDir: {}
+    - name: pulse-runtime
+      emptyDir: {}
+
+  # Pod-level resources are summed across containers; we target ~3 CPU
+  # / ~5.5GB mem / 2GB ephemeral storage on the request side. Cluster
+  # autoscaling provisions accordingly.
+  containers:
+
+    # -------------------------------------------------------------------
+    # cb-chromium — main browser process tree (Xvfb + PulseAudio +
+    # streamer-static + Chromium under supervisord).
+    # -------------------------------------------------------------------
+    - name: cb-chromium
+      image: ghcr.io/iggy/cloud-browser-webrtc/chromium:dev
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: SESSION_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: SIGNALING_URL
+          # cluster-internal Service; see signaling-deployment.yaml
+          value: "ws://signaling.cloud-browser-webrtc.svc.cluster.local:8080/ws"
+        - name: STREAMER_FPS
+          value: "30"
+        # Disable the watchdog when running under the cluster
+        # controller; cluster-side idle handling is the controller's
+        # job (see session-controller-design.md). Pod-level watchdog
+        # would race the controller.
+        - name: IDLE_TIMEOUT_S
+          value: "999999"
+      ports:
+        - name: devtools
+          containerPort: 9222
+        - name: streamer
+          containerPort: 9000
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: cb-session
+          mountPath: /run/cb-session
+        - name: chromium-userdata
+          mountPath: /home/cbuser/.config/chromium
+        - name: x11-socket
+          mountPath: /tmp/.X11-unix
+        - name: pulse-runtime
+          mountPath: /run/user/1000/pulse
+      resources:
+        requests:
+          cpu: "1500m"
+          memory: "3Gi"
+          ephemeral-storage: "1Gi"
+        limits:
+          cpu: "3000m"
+          memory: "6Gi"
+          ephemeral-storage: "2Gi"
+      readinessProbe:
+        httpGet:
+          path: /json/version
+          port: devtools
+        initialDelaySeconds: 15
+        periodSeconds: 5
+        failureThreshold: 6
+      livenessProbe:
+        httpGet:
+          path: /json/version
+          port: devtools
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        failureThreshold: 3
+      securityContext:
+        # Chromium spawns helper processes and writes user-data-dir.
+        readOnlyRootFilesystem: false
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+
+    # -------------------------------------------------------------------
+    # cb-metrics-sidecar — Prometheus /metrics on :9100 (T38).
+    # -------------------------------------------------------------------
+    - name: cb-metrics-sidecar
+      image: ghcr.io/iggy/cloud-browser-webrtc/metrics-sidecar:dev
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: DEVTOOLS_URL
+          value: "http://127.0.0.1:9222"
+        - name: METRICS_LISTEN
+          value: ":9100"
+        - name: POLL_INTERVAL_S
+          value: "10"
+      ports:
+        - name: metrics
+          containerPort: 9100
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: metrics
+        periodSeconds: 10
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+
+    # -------------------------------------------------------------------
+    # input-bridge (T22) — relays input events from the streamer page's
+    # data channel into Chromium DevTools.
+    #
+    # Default ws-addr is 9100, which collides with cb-metrics-sidecar
+    # in the shared pod network namespace. We override to :9200 here.
+    # Follow-up: bake the override into the input-bridge default once
+    # T38 + T22 ship together in the same image.
+    # -------------------------------------------------------------------
+    - name: input-bridge
+      image: ghcr.io/iggy/cloud-browser-webrtc/input-bridge:dev
+      imagePullPolicy: IfNotPresent
+      args:
+        - "--ws-addr=:9200"
+        - "--metrics-addr=:9101"
+        - "--cdp-url=http://127.0.0.1:9222"
+      ports:
+        - name: input-ws
+          containerPort: 9200
+        - name: input-metrics
+          containerPort: 9101
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+
+    # -------------------------------------------------------------------
+    # cursor-watcher (T26) — polls Chromium for cursor metadata and
+    # pushes events to the input-bridge ws sink.
+    # -------------------------------------------------------------------
+    - name: cursor-watcher
+      image: ghcr.io/iggy/cloud-browser-webrtc/cursor-watcher:dev
+      imagePullPolicy: IfNotPresent
+      args:
+        - "--cdp-url=http://127.0.0.1:9222"
+        - "--sink-url=ws://127.0.0.1:9200/cursor"
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+
+    # -------------------------------------------------------------------
+    # clipboard-bridge (T32) — wires X11 clipboard <-> client clipboard
+    # through a data channel.
+    # -------------------------------------------------------------------
+    - name: clipboard-bridge
+      image: ghcr.io/iggy/cloud-browser-webrtc/clipboard-bridge:dev
+      imagePullPolicy: IfNotPresent
+      args:
+        - "--ws-addr=:9300"
+        - "--display=:99"
+      ports:
+        - name: clipboard-ws
+          containerPort: 9300
+      env:
+        - name: DISPLAY
+          value: ":99"
+      volumeMounts:
+        - name: x11-socket
+          mountPath: /tmp/.X11-unix
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000

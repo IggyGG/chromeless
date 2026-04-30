@@ -1,0 +1,28 @@
+# infra/k8s/kustomization.yaml — entry point for `kubectl apply -k .`
+#
+# This is the base; overlays for {dev, staging, prod} land in
+# infra/k8s/overlays/<env>/ and patch the bits that vary per cluster
+# (Ingress hostname, TLS issuer, replica counts, image tags, the TURN
+# secret).
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cloud-browser-webrtc
+
+resources:
+  - namespace.yaml
+  - signaling-deployment.yaml
+  - turn-deployment.yaml
+  # cloud-browser-session.yaml is the *template* the session
+  # controller will use to materialise Pods at runtime. Including it
+  # here applies a single example Pod for kubectl-apply testing; in
+  # production it lives inside the controller code, not the kustomize
+  # bundle.
+  - cloud-browser-session.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/name: cloud-browser-webrtc
+      app.kubernetes.io/part-of: cloud-browser-webrtc
