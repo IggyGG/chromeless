@@ -50,6 +50,16 @@ metadata:
     app.kubernetes.io/name: cloud-browser-webrtc
     app.kubernetes.io/component: session
     cb.session/state: warm
+  annotations:
+    # T68: optional CRIU snapshot to restore from at startup. Empty (or
+    # unset) means "cold-start the pod normally". The session
+    # controller (T50) reads this annotation to decide between
+    # cold-start and the snapshot fast path; the value is a
+    # content-sha matching a directory under
+    # /var/lib/cb-snapshots/shared/<sha>/ on the node. See
+    # infra/snapshots/README.md for the full design and threat model
+    # (especially the "must be tenant-clean" contract).
+    cb.io/snapshot-id: ""
 spec:
   # Phase 3 isolation lever. Uncomment after the runtimeClass is
   # installed cluster-wide. See docs/research/sandbox-isolation.md.
