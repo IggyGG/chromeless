@@ -29,6 +29,7 @@ vendor/
 *.so
 *.dylib
 build/
+!docs/build/
 out/
 cmake-build-*/
 
