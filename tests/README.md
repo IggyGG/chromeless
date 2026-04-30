@@ -92,14 +92,18 @@ The harness is **infrastructure**, not a passing/failing test. It produces
 numbers; the **validation** layer is what asserts those numbers are
 trustworthy. See §6 below.
 
-### 1e. End-to-end tests — `tests/e2e/` (future, post-Phase 1)
+### 1e. End-to-end tests — `tests/e2e/` (Playwright)
 
-Drive a real browser client against a real container with a real signaling
-server, and assert user-visible properties (page renders, click reaches
-remote tab, audio is audible, clipboard sync works). Not present in Phase 0.
-Pre-work for the directory and the runner shape lands with **T16** (Phase 0
-exit gate demo); the directory is created when the first true E2E lands in
-Phase 1.
+Drive a real browser client against a real container with a real
+signaling server and assert user-visible properties: the client loads,
+signaling completes, the input data channel opens, a video receiver
+shows up, etc. Scaffolded by **T33** (Playwright + TypeScript). Today
+spec 01 (signaling handshake reaches the documented stub state) is
+active; specs 02–03 are written and `test.skip`'d pending **T34**
+("flip T14 client to answerer role"), so they un-skip with a one-line
+edit when the negotiation flow is correct. Mechanics, run procedures,
+and the un-skip checklist live in
+[`tests/e2e/README.md`](./e2e/README.md).
 
 ## 2. Run procedures
 

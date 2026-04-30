@@ -85,10 +85,15 @@ test-harness:
 
 # ---- e2e -------------------------------------------------------------------
 
+# Playwright E2E (T33). Heavyweight: needs Docker for the compose stack
+# and a one-time `npx playwright install --with-deps chromium` to pull
+# the browser binaries. Not in the default `make test` PR gate — see
+# tests/README.md. Use `npm install --silent` so first-run output stays
+# manageable; subsequent runs are no-ops.
 test-e2e:
-	@if [ -d tests/e2e ] && [ -n "$$(ls -A tests/e2e 2>/dev/null)" ]; then \
-	  echo "TODO: wire E2E runner (Phase 1+)"; \
-	  exit 1; \
+	@if [ -f tests/e2e/package.json ]; then \
+	  echo ">>> playwright test (tests/e2e)"; \
+	  ( cd tests/e2e && npm install --silent --no-audit --no-fund && npm run test:e2e ); \
 	else \
 	  echo "skip: tests/e2e/ not populated yet (Phase 1+)"; \
 	fi
