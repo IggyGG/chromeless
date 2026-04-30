@@ -99,11 +99,40 @@ type sessionKey struct {
 }
 
 // session holds at most two peers keyed by role.
+//
+// T96: `recent` is the replay buffer that fixes the "streamer's offer
+// is lost when no client peer is connected yet" race. Whenever a peer
+// forwards a replayable envelope (offer/answer/request_renegotiate),
+// we keep the most recent one per (sender role, type). When the
+// counterpart peer joins, register() replays whatever is buffered.
+//
+// Bounded by design: max 2 roles × 3 replayable types = 6 envelopes
+// per session, regardless of throughput. ICE is intentionally NOT
+// replayable: it's a stream where pre-join candidates are stale by
+// the time the new peer arrives, and the streamer continues to
+// trickle post-join candidates anyway.
 type session struct {
 	id     string
 	tenant string
 	mu     sync.Mutex
 	peers  map[peerRole]*peer
+	recent map[peerRole]map[string][]byte
+}
+
+// replayableTypes lists the envelope types whose most-recent value is
+// buffered for a future-joining peer. The slice doubles as the replay
+// order — offer must come before answer must come before
+// request_renegotiate so the receiver can build its peer connection
+// state in the right order.
+var replayableTypes = []string{"offer", "answer", "request_renegotiate"}
+
+func isReplayable(envType string) bool {
+	for _, t := range replayableTypes {
+		if t == envType {
+			return true
+		}
+	}
+	return false
 }
 
 // hub owns all live sessions.
@@ -127,7 +156,12 @@ func (h *hub) getOrCreate(tenant, id string) *session {
 	k := sessionKey{tenant: tenant, id: id}
 	s, ok := h.sessions[k]
 	if !ok {
-		s = &session{id: id, tenant: tenant, peers: make(map[peerRole]*peer, 2)}
+		s = &session{
+			id:     id,
+			tenant: tenant,
+			peers:  make(map[peerRole]*peer, 2),
+			recent: make(map[peerRole]map[string][]byte, 2), // T96 replay buffer
+		}
 		h.sessions[k] = s
 		recordSessionCreated(tenant) // T38/T67 metrics
 	}
@@ -154,15 +188,55 @@ func (h *hub) dropIfEmpty(tenant, id string) {
 
 // register attempts to add p to the session. Returns an error if the role
 // slot is already taken.
-func (s *session) register(p *peer) error {
+//
+// T96: after registering, replay any buffered envelopes from the OTHER
+// peer. This handles the "streamer joined and offered before the
+// client connected" race — the offer is buffered, replayed when the
+// client peer arrives. Replay happens under the same mutex so a
+// concurrent forward() to the same peer cannot interleave with the
+// replay (the new peer sees buffered envelopes first, then live).
+//
+// Replay only fires once per role-join. Subsequent live envelopes
+// arrive via forward() in the normal way.
+//
+// Returns the count of replayed envelopes (informational; for the
+// caller's structured log).
+func (s *session) register(p *peer) (replayed int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.peers[p.role]; ok {
 		_ = existing
-		return fmt.Errorf("role %q already present in session %s/%s", p.role, s.tenant, s.id)
+		return 0, fmt.Errorf("role %q already present in session %s/%s", p.role, s.tenant, s.id)
 	}
 	s.peers[p.role] = p
-	return nil
+
+	// T96: replay buffered envelopes from the counterpart. Replay
+	// order matches replayableTypes (offer before answer before
+	// renegotiate) so the receiver builds its peer connection state
+	// in the right order.
+	other := p.role.other()
+	if buf, ok := s.recent[other]; ok {
+		for _, t := range replayableTypes {
+			raw, has := buf[t]
+			if !has {
+				continue
+			}
+			select {
+			case p.send <- raw:
+				replayed++
+			default:
+				// New peer's send buffer is somehow already full —
+				// shouldn't happen at register time (the writePump
+				// hasn't started yet, but the channel has capacity).
+				// Drop the replay rather than block; live forwards
+				// will hit the same buffer and surface the same
+				// problem with a better diagnostic.
+				p.log.Warn("send buffer full during replay; dropping",
+					slog.String("type", t))
+			}
+		}
+	}
+	return replayed, nil
 }
 
 // unregister removes p from the session.
@@ -175,8 +249,27 @@ func (s *session) unregister(p *peer) {
 }
 
 // forward sends raw to the peer in role; returns false if no such peer.
-func (s *session) forward(role peerRole, raw []byte) bool {
+//
+// T96: when envType is replayable, the most recent raw is also kept
+// in the sender's slot of the replay buffer so that a later-joining
+// counterpart receives it on register(). The buffer keeps a single
+// envelope per (sender, type) — no growth.
+func (s *session) forward(role peerRole, envType string, raw []byte) bool {
 	s.mu.Lock()
+	if isReplayable(envType) {
+		sender := role.other()
+		buf, ok := s.recent[sender]
+		if !ok {
+			buf = make(map[string][]byte, len(replayableTypes))
+			s.recent[sender] = buf
+		}
+		// Copy raw because the caller's underlying buffer may be
+		// reused across reads. Cheap (offers are ~5 KiB) and avoids a
+		// data race with the read pump's next ReadMessage.
+		dup := make([]byte, len(raw))
+		copy(dup, raw)
+		buf[envType] = dup
+	}
 	target, ok := s.peers[role]
 	s.mu.Unlock()
 	if !ok {
@@ -306,7 +399,8 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess := h.getOrCreate(tenantID, sessionID)
-	if err := sess.register(p); err != nil {
+	replayed, err := sess.register(p)
+	if err != nil {
 		p.log.Warn("rejecting duplicate role", slog.Any("err", err))
 		_ = conn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()),
@@ -315,13 +409,17 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 		h.dropIfEmpty(tenantID, sessionID)
 		return
 	}
-	p.log.Info("peer joined")
+	if replayed > 0 {
+		p.log.Info("peer joined (replayed buffered envelopes)", slog.Int("replayed", replayed))
+	} else {
+		p.log.Info("peer joined")
+	}
 	recordPeerRegistered(p.role, tenantID) // T38/T67 metrics
 
 	// Forward the first envelope before starting pumps.
 	if _, ok := validTypes[first.Type]; ok {
 		recordMessageForwarded(first.Type) // T38 metrics
-		if !sess.forward(p.role.other(), raw) {
+		if !sess.forward(p.role.other(), first.Type, raw) {
 			p.log.Debug("no peer for first frame yet", slog.String("type", first.Type))
 		}
 	} else {
@@ -380,8 +478,8 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			}
 		}
 		recordMessageForwarded(env.Type) // T38 metrics
-		if !sess.forward(p.role.other(), raw) {
-			p.log.Debug("no counterpart yet", slog.String("type", env.Type))
+		if !sess.forward(p.role.other(), env.Type, raw) {
+			p.log.Debug("no counterpart yet (buffered if replayable)", slog.String("type", env.Type))
 		}
 		if env.Type == "bye" {
 			return
@@ -430,6 +528,9 @@ func main() {
 	}
 	addr := ":" + port
 
+	// T93: read CBWRTC_REGION first so every metric Set/Inc on the
+	// startup path picks up the correct label.
+	initRegion(logger)
 	// T48: dev issuer must run before initAuth so the env var it
 	// sets is visible. Both are no-ops in production unless the
 	// matching env vars are set.
