@@ -8,10 +8,12 @@ runtime.
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Base image: Debian bookworm-slim + Chromium + Xvfb + PulseAudio (null sink) + python3 + supervisord. |
-| `supervisord.conf` | Process supervisor config; starts Xvfb → PulseAudio → streamer-static → Chromium in that order. |
+| `supervisord.conf` | Process supervisor; starts Xvfb → PulseAudio → streamer-static → Chromium → idle-watchdog. |
 | `pulse-default.pa` | PulseAudio bootstrap script, copied to `/etc/pulse/default.pa`. Two null sinks (cb_audio playback + cb_capture intermediary) plus a loopback — see `audio-routing.md`. |
 | `launch-chromium.sh` | Wrapper invoked by supervisord; expands `SESSION_ID` / `SIGNALING_URL` / `STREAMER_FPS` into the streamer URL then execs Chromium with the full T28 flag list. |
 | `audio-routing.md` | Topology + manual smoke procedure for the in-container audio path. |
+| `lifecycle/` | Container session lifecycle (T31): `entrypoint.sh`, `cold-start.sh`, `idle-watchdog.sh`, `restart.sh`, `README.md`. |
+| `compose.yaml` | Local dev stack: real signaling (T13) + chromium with lifecycle wiring + nginx-served client. |
 
 ## Build
 

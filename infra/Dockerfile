@@ -94,7 +94,16 @@ COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
 # /streamer/index.html resolves to the page chromium-dev shipped.
 COPY capture/streamer-page/ /opt/cloud-browser/streamer/
 COPY infra/launch-chromium.sh /usr/local/bin/launch-chromium.sh
-RUN chmod +x /usr/local/bin/launch-chromium.sh \
+
+# Lifecycle scripts (T31): entrypoint chain, per-boot setup, idle
+# watchdog, manual restart. See infra/lifecycle/README.md.
+COPY infra/lifecycle/ /usr/local/lib/cloud-browser/lifecycle/
+RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bin/entrypoint.sh \
+ && ln -sf /usr/local/lib/cloud-browser/lifecycle/cold-start.sh    /usr/local/bin/cold-start.sh \
+ && ln -sf /usr/local/lib/cloud-browser/lifecycle/idle-watchdog.sh /usr/local/bin/idle-watchdog.sh \
+ && ln -sf /usr/local/lib/cloud-browser/lifecycle/restart.sh       /usr/local/bin/restart.sh \
+ && chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh \
+ && chmod +x /usr/local/bin/launch-chromium.sh \
  && chown -R cbuser:cbuser /opt/cloud-browser
 
 EXPOSE 9222 8080
@@ -106,6 +115,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -fsS http://127.0.0.1:9222/json/version >/dev/null || exit 1
 
 # dumb-init as PID 1 so SIGTERM/SIGINT propagate to supervisord and the
-# child tree, and zombies get reaped if a Chromium helper crashes.
-ENTRYPOINT ["/usr/bin/dumb-init", "--"]
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+# child tree, and zombies get reaped if a Chromium helper crashes. The
+# lifecycle entrypoint runs cold-start.sh, sources the resolved session
+# env, then execs supervisord (T31).
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/usr/local/bin/entrypoint.sh"]

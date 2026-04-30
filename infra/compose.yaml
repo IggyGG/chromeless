@@ -3,9 +3,13 @@
 # Brings up three services on a shared bridge network so the browser
 # client can reach signaling and signaling can reach Chromium DevTools:
 #
-#   chromium   — the T7 base image, DevTools on :9222
-#   signaling  — Go WebSocket signaling server (T13); mocked here with
-#                netcat until T13 lands. See TODO below.
+#   chromium   — the T7 + T28 + T31 image. Boots Chromium under Xvfb
+#                with the streamer page (T23) opened as --app; runs
+#                cold-start.sh + idle-watchdog.sh per T31. DevTools
+#                on :9222.
+#   signaling  — Go WebSocket signaling server (T13). Distroless image,
+#                so no in-container healthcheck (see service block
+#                comment); depending services use service_started.
 #   client     — nginx:alpine serving client/ on :3000 with a runtime-
 #                generated config.js carrying SIGNALING_URL.
 #
@@ -55,35 +59,36 @@ services:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9222/json/version"]
       interval: 10s
       timeout: 3s
-      start_period: 30s
+      # Cold-start.sh + Xvfb + Pulse + streamer-static + Chromium need
+      # a generous grace on the first boot.
+      start_period: 45s
       retries: 3
+    depends_on:
+      # streamer page tries to dial signaling immediately at --app load,
+      # so we want signaling at least started before chromium boots.
+      signaling:
+        condition: service_started
     restart: unless-stopped
 
-  # TODO(T13): replace this mock with `build: ../signaling` once
-  # webrtc-dev lands the Go WebSocket server. The mock listens on 8080
-  # so depends_on healthchecks pass and the client can fail-fast in a
-  # recognisable way (raw TCP, not a real WS upgrade).
+  # Real signaling service (T13 + T31 sub-A). Built from signaling/.
+  # The signaling image is gcr.io/distroless/static — no shell, no
+  # busybox, no curl — so we can't author a healthcheck command that
+  # runs *inside* the container without modifying webrtc-dev's
+  # Dockerfile. Chromium and client therefore depend on
+  # `condition: service_started` rather than service_healthy.
+  # If/when signaling grows a healthcheck (e.g. a CGO-free static probe
+  # binary copied alongside /signaling), upgrade those depends_on.
   signaling:
-    image: alpine:3.19
+    build:
+      context: ../signaling
+      dockerfile: Dockerfile
+    image: cloud-browser-webrtc-signaling:dev
     container_name: cbwrtc-signaling
     networks: [cbnet]
     ports:
       - "8080:8080"
-    command:
-      - sh
-      - -c
-      - |
-        apk add --no-cache busybox-extras >/dev/null && \
-        echo "[signaling-mock] T13 placeholder; nc -lk -p 8080" && \
-        exec nc -lk -p 8080
-    healthcheck:
-      # nc successfully bound to 8080 -> the port answers a TCP SYN.
-      # `nc -z` exits 0 if the port is open. busybox-extras provides nc.
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080 || exit 1"]
-      interval: 5s
-      timeout: 2s
-      start_period: 10s
-      retries: 3
+    environment:
+      SIGNALING_PORT: "8080"
     restart: unless-stopped
 
   client:
@@ -146,8 +151,10 @@ services:
       start_period: 5s
       retries: 3
     depends_on:
+      # See the signaling service block: distroless image can't host an
+      # in-container healthcheck, so we settle for service_started here.
       signaling:
-        condition: service_healthy
+        condition: service_started
       chromium:
         condition: service_healthy
     restart: unless-stopped
