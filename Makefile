@@ -13,7 +13,7 @@ help:
 	@echo "  make test-unit        # all subproject unit tests"
 	@echo "  make test-integration # tests/integration/ — Go toolchain only, no Docker"
 	@echo "  make test-smoke       # tests/smoke/ — requires Docker"
-	@echo "  make test-harness     # tests/harness/ validation; requires loopback rig"
+	@echo "  make test-harness     # tests/harness/ reconciler regression check (hermetic; needs Python harness deps)"
 	@echo "  make test-e2e         # tests/e2e/ — Phase 1+"
 	@echo ""
 	@echo "See tests/README.md for the full testing strategy."
