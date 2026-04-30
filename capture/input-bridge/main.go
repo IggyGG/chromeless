@@ -79,6 +79,12 @@ type mouseWheelData struct {
 	Mode int `json:"mode"`
 	X    int `json:"x"`
 	Y    int `json:"y"`
+	// v1.1 fields. Optional; pre-T62 clients omit them and the
+	// bridge falls through to the legacy "every event is changed"
+	// behaviour.
+	DeltaMode string `json:"delta_mode,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	Momentum  bool   `json:"momentum,omitempty"`
 }
 type keyData struct {
 	Code string `json:"code"`
@@ -455,6 +461,15 @@ type dispatcher struct {
 	touchMu      sync.Mutex
 	activeTouches map[int]touchPoint
 
+	// wheelMu guards the per-session wheel gesture state. The
+	// protocol's phase machine (start | changed | end) lets the
+	// bridge synthesize a final zero-delta CDP wheel at end-of-
+	// momentum so Chromium's compositor flushes its decay.
+	// Concurrent wheels (rare in single-tenant) don't interleave
+	// because each gesture's `start` resets the flag.
+	wheelMu        sync.Mutex
+	wheelInGesture bool
+
 	metrics *metrics
 }
 
@@ -531,11 +546,56 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return d.fail(env.Type, fmt.Errorf("mouse_wheel: %w", err))
 		}
-		// CDP expects pixel deltas; our protocol carries deltaMode
-		// (0=pixel,1=line,2=page). Approximate non-pixel modes — Phase 2
-		// will replace with proper line-height-aware scrolling.
+		// v1.1 phase machine: track the wheel gesture state and use
+		// it to drive end-of-momentum dispatch. The protocol's
+		// `delta_mode` string supersedes the numeric `mode` when both
+		// are present (per the spec's "Servers SHOULD prefer this").
+		mode := data.Mode
+		switch data.DeltaMode {
+		case "pixel":
+			mode = 0
+		case "line":
+			mode = 1
+		case "page":
+			mode = 2
+		}
+
+		// Track per-dispatcher phase so concurrent gestures don't
+		// interleave. v1.0 clients omit `phase`; we treat that as
+		// "changed" with no end-synthesis.
+		switch data.Phase {
+		case "start":
+			d.wheelMu.Lock()
+			d.wheelInGesture = true
+			d.wheelMu.Unlock()
+		case "end":
+			// Translate phase=end to a final zero-delta CDP wheel so
+			// Chromium's compositor flushes any momentum decay.
+			params := map[string]any{
+				"type":      "mouseWheel",
+				"x":         data.X,
+				"y":         data.Y,
+				"button":    "none",
+				"deltaX":    0.0,
+				"deltaY":    0.0,
+				"modifiers": 0,
+				// pointerType helps Chromium classify the synthetic
+				// frame as part of a mouse gesture.
+				"pointerType": "mouse",
+			}
+			_, err := d.cdp.Send(ctx, "Input.dispatchMouseEvent", params)
+			d.wheelMu.Lock()
+			d.wheelInGesture = false
+			d.wheelMu.Unlock()
+			return d.fail(env.Type, err)
+		}
+
+		// CDP expects pixel deltas; protocol carries the line/page
+		// scaling intent. Approximate non-pixel modes the same way the
+		// pre-T62 bridge did (16 px/line, 800 px/page) — Phase 2 will
+		// replace with line-height-aware scrolling.
 		dx, dy := float64(data.DX), float64(data.DY)
-		switch data.Mode {
+		switch mode {
 		case 1:
 			dx *= 16
 			dy *= 16

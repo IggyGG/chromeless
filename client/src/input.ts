@@ -46,7 +46,17 @@ export type InputType =
 
 export interface MouseMoveData { x: number; y: number; }
 export interface MouseButtonData { button: 0 | 1 | 2 | 3 | 4; action: "down" | "up"; x: number; y: number; }
-export interface MouseWheelData { dx: number; dy: number; mode: 0 | 1 | 2; x: number; y: number; }
+// v1.1 — phase machine for scroll inertia.
+export type WheelPhase = "start" | "changed" | "end" | null;
+export type WheelDeltaMode = "pixel" | "line" | "page";
+
+export interface MouseWheelData {
+  dx: number; dy: number; mode: 0 | 1 | 2; x: number; y: number;
+  // Optional v1.1 fields. Servers without phase handling can ignore.
+  delta_mode?: WheelDeltaMode;
+  phase?: WheelPhase;
+  momentum?: boolean;
+}
 export interface KeyData { code: string; key: string; mods: number; }
 export interface CompositionData { data: string; }
 export interface ClipboardPasteData { text: string; }
@@ -136,15 +146,30 @@ export interface InputChannelOptions {
   onCoalesce?: (droppedCount: number) => void;
   /** Called when send() throws. */
   onError?: (err: unknown, env: InputEnvelope) => void;
+  // ----- v1.1 wheel-inertia tuning -----
+  /** Quiet window after the last non-zero wheel before we synthesize phase=end. Default 150 ms. */
+  wheelEndDelayMs?: number;
+  /** Inter-event gap below which a wheel is considered momentum (heuristic). Default 100 ms. */
+  wheelMomentumGapMs?: number;
+  /** Deferred-task scheduler for wheel-end synthesis. Override for tests. Default setTimeout. */
+  setTimer?: (cb: () => void, ms: number) => unknown;
+  /** Cancel a deferred task scheduled by setTimer. Default clearTimeout. */
+  clearTimer?: (id: unknown) => void;
 }
 
 const DEFAULT_COALESCE_THRESHOLD = 4;
 const DEFAULT_BUFFERED_THRESHOLD = 64 * 1024;
+const DEFAULT_WHEEL_END_DELAY_MS = 150;
+const DEFAULT_WHEEL_MOMENTUM_GAP_MS = 100;
 
 export class InputChannel {
   private readonly ch: SendableChannel;
-  private readonly opts: Required<Pick<InputChannelOptions, "coalesceThreshold" | "bufferedAmountThreshold" | "now">> &
-    Pick<InputChannelOptions, "raf" | "cancelRaf" | "onCoalesce" | "onError">;
+  private readonly opts: Required<Pick<InputChannelOptions,
+      "coalesceThreshold" | "bufferedAmountThreshold" | "now"
+      | "wheelEndDelayMs" | "wheelMomentumGapMs">> &
+    Pick<InputChannelOptions,
+      "raf" | "cancelRaf" | "onCoalesce" | "onError"
+      | "setTimer" | "clearTimer">;
   private seq = 0;
   /** Queue of pending mouse_move data; only the last one is kept after coalesce. */
   private pendingMove: MouseMoveData | null = null;
@@ -152,6 +177,12 @@ export class InputChannel {
   private pendingDragOver: DragOverData | null = null;
   /** Queue of pending touch_move data per identifier; latest wins per finger. */
   private pendingTouchMoves = new Map<number, TouchMoveData>();
+  // v1.1 wheel-phase state. Reset to "idle" by emitWheelEnd().
+  private wheelPhase: "idle" | "active" = "idle";
+  private wheelLastEventNow = 0;
+  private wheelPrevAbsDelta = 0;
+  private wheelEndTimerId: unknown = null;
+  private wheelLastPos = { x: 0, y: 0, mode: 0 as 0 | 1 | 2 };
   /** Queue of non-coalescable envelopes. Flushed in order on rAF tick. */
   private pendingOther: InputEnvelope[] = [];
   private rafId: number | null = null;
@@ -163,10 +194,14 @@ export class InputChannel {
       coalesceThreshold: opts.coalesceThreshold ?? DEFAULT_COALESCE_THRESHOLD,
       bufferedAmountThreshold: opts.bufferedAmountThreshold ?? DEFAULT_BUFFERED_THRESHOLD,
       now: opts.now ?? Date.now,
+      wheelEndDelayMs: opts.wheelEndDelayMs ?? DEFAULT_WHEEL_END_DELAY_MS,
+      wheelMomentumGapMs: opts.wheelMomentumGapMs ?? DEFAULT_WHEEL_MOMENTUM_GAP_MS,
       ...(opts.raf !== undefined ? { raf: opts.raf } : {}),
       ...(opts.cancelRaf !== undefined ? { cancelRaf: opts.cancelRaf } : {}),
       ...(opts.onCoalesce !== undefined ? { onCoalesce: opts.onCoalesce } : {}),
       ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
+      ...(opts.setTimer !== undefined ? { setTimer: opts.setTimer } : {}),
+      ...(opts.clearTimer !== undefined ? { clearTimer: opts.clearTimer } : {}),
     };
   }
 
@@ -191,7 +226,83 @@ export class InputChannel {
   }
 
   sendMouseWheel(dx: number, dy: number, mode: 0 | 1 | 2, x: number, y: number): void {
-    this.enqueue("mouse_wheel", { dx: Math.round(dx), dy: Math.round(dy), mode, x: Math.round(x), y: Math.round(y) });
+    const now = this.opts.now();
+    const rdx = Math.round(dx);
+    const rdy = Math.round(dy);
+    const rx  = Math.round(x);
+    const ry  = Math.round(y);
+    const absDelta = Math.abs(rdx) + Math.abs(rdy);
+    const isZero = absDelta === 0;
+
+    // Determine phase. Zero-delta events from outside this class
+    // (rare) are forwarded as `changed` if a gesture is active,
+    // otherwise dropped as no-ops — they have no semantic content
+    // outside the phase machine.
+    let phase: WheelPhase;
+    if (this.wheelPhase === "idle") {
+      if (isZero) {
+        // No active gesture and a zero delta — nothing to forward.
+        return;
+      }
+      phase = "start";
+      this.wheelPhase = "active";
+      this.wheelPrevAbsDelta = 0;
+    } else {
+      phase = "changed";
+    }
+
+    // Momentum heuristic: events that arrive within
+    // wheelMomentumGapMs of the previous one AND whose magnitude is
+    // smaller than the previous magnitude are likely OS-generated
+    // momentum frames, not user-driven. The first event of a gesture
+    // is never momentum.
+    const gap = now - this.wheelLastEventNow;
+    const momentum = phase === "changed"
+      && gap > 0 && gap < this.opts.wheelMomentumGapMs
+      && absDelta > 0
+      && absDelta < this.wheelPrevAbsDelta;
+
+    this.wheelLastEventNow = now;
+    this.wheelPrevAbsDelta = absDelta;
+    this.wheelLastPos = { x: rx, y: ry, mode };
+
+    this.enqueue("mouse_wheel", {
+      dx: rdx, dy: rdy, mode, x: rx, y: ry,
+      delta_mode: deltaModeName(mode),
+      phase,
+      momentum,
+    });
+
+    // Reset / arm the end-of-gesture synthesizer. wheelEndDelayMs of
+    // quiet → emit a phase=end zero-delta envelope.
+    this.cancelWheelEndTimer();
+    const setTimer = this.opts.setTimer ?? ((cb: () => void, ms: number) =>
+      globalThis.setTimeout(cb, ms));
+    this.wheelEndTimerId = setTimer(() => this.emitWheelEnd(), this.opts.wheelEndDelayMs);
+  }
+
+  private cancelWheelEndTimer(): void {
+    if (this.wheelEndTimerId === null || this.wheelEndTimerId === undefined) return;
+    const clearTimer = this.opts.clearTimer ?? ((id: unknown) =>
+      globalThis.clearTimeout(id as number));
+    clearTimer(this.wheelEndTimerId);
+    this.wheelEndTimerId = null;
+  }
+
+  /** Synthesize the end-of-gesture envelope. Public for tests so
+   *  they can fire it deterministically via the injected setTimer. */
+  emitWheelEnd(): void {
+    if (this.wheelPhase !== "active") return;
+    const { x, y, mode } = this.wheelLastPos;
+    this.wheelPhase = "idle";
+    this.wheelPrevAbsDelta = 0;
+    this.wheelEndTimerId = null;
+    this.enqueue("mouse_wheel", {
+      dx: 0, dy: 0, mode, x, y,
+      delta_mode: deltaModeName(mode),
+      phase: "end",
+      momentum: false,
+    });
   }
 
   sendKeyDown(code: string, key: string, mods: number): void {
@@ -599,6 +710,11 @@ export class InputChannel {
       this.opts.onError?.(err, env);
     }
   }
+}
+
+/** Map a numeric `WheelEvent.deltaMode` to the protocol's string alias. */
+function deltaModeName(mode: 0 | 1 | 2): WheelDeltaMode {
+  return mode === 0 ? "pixel" : mode === 1 ? "line" : "page";
 }
 
 /** Map DOM MouseEvent.button to protocol button id. */

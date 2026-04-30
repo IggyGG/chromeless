@@ -774,6 +774,156 @@ func intsEqual(a, b []int) bool {
 	return true
 }
 
+// ---------------------------------------------------------------------------
+// 5. Wheel inertia (v1.1 / T62)
+// ---------------------------------------------------------------------------
+
+// wheelDispatchEvents extracts the deltaX/deltaY from each
+// Input.dispatchMouseEvent(type=mouseWheel) call recorded by the fake.
+type wheelEvent struct {
+	dx, dy      float64
+	x, y        int
+	pointerType string // empty unless explicitly set (we set it on phase=end)
+}
+
+func collectWheelEvents(calls []recordedCall) []wheelEvent {
+	out := []wheelEvent{}
+	for _, c := range calls {
+		if c.Method != "Input.dispatchMouseEvent" {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(c.Params, &p)
+		if p["type"] != "mouseWheel" {
+			continue
+		}
+		ev := wheelEvent{}
+		if v, ok := p["deltaX"].(float64); ok {
+			ev.dx = v
+		}
+		if v, ok := p["deltaY"].(float64); ok {
+			ev.dy = v
+		}
+		if v, ok := p["x"].(float64); ok {
+			ev.x = int(v)
+		}
+		if v, ok := p["y"].(float64); ok {
+			ev.y = int(v)
+		}
+		if v, ok := p["pointerType"].(string); ok {
+			ev.pointerType = v
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+func TestDispatchWheelPhaseEndDispatchesZeroDelta(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	envs := []string{
+		// Three real wheel deltas, then phase=end zero-delta.
+		`{"v":1,"type":"mouse_wheel","t":1,"seq":0,"data":{"dx":0,"dy":-120,"mode":0,"x":50,"y":60,"delta_mode":"pixel","phase":"start","momentum":false}}`,
+		`{"v":1,"type":"mouse_wheel","t":2,"seq":1,"data":{"dx":0,"dy":-100,"mode":0,"x":50,"y":60,"delta_mode":"pixel","phase":"changed","momentum":false}}`,
+		`{"v":1,"type":"mouse_wheel","t":3,"seq":2,"data":{"dx":0,"dy":-50,"mode":0,"x":50,"y":60,"delta_mode":"pixel","phase":"changed","momentum":true}}`,
+		`{"v":1,"type":"mouse_wheel","t":4,"seq":3,"data":{"dx":0,"dy":0,"mode":0,"x":50,"y":60,"delta_mode":"pixel","phase":"end","momentum":false}}`,
+	}
+	for _, raw := range envs {
+		env, err := parseEnvelope([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if err := disp.Dispatch(ctx, env); err != nil {
+			t.Errorf("dispatch %s: %v", env.Type, err)
+		}
+	}
+
+	wheels := collectWheelEvents(f.Calls())
+	if len(wheels) != 4 {
+		t.Fatalf("expected 4 wheel CDP events, got %d: %+v", len(wheels), wheels)
+	}
+	// First three carry the real deltas; last is zero-delta.
+	if wheels[0].dy != -120 || wheels[1].dy != -100 || wheels[2].dy != -50 {
+		t.Errorf("delta passthrough mismatch: %+v", wheels)
+	}
+	if wheels[3].dx != 0 || wheels[3].dy != 0 {
+		t.Errorf("phase=end should be zero-delta: %+v", wheels[3])
+	}
+	if wheels[3].pointerType != "mouse" {
+		t.Errorf("phase=end should set pointerType=mouse, got %q", wheels[3].pointerType)
+	}
+	if wheels[3].x != 50 || wheels[3].y != 60 {
+		t.Errorf("phase=end should preserve last position, got x=%d y=%d", wheels[3].x, wheels[3].y)
+	}
+}
+
+func TestDispatchWheelDeltaModeStringWins(t *testing.T) {
+	// When both numeric `mode` and string `delta_mode` are present, the
+	// bridge must prefer the string per the spec's "SHOULD prefer".
+	// We fire a wheel with mode=0 (pixel) but delta_mode="line"; the
+	// CDP deltaY should reflect the line scaling (16×).
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	env, _ := parseEnvelope([]byte(
+		`{"v":1,"type":"mouse_wheel","t":1,"seq":0,"data":{"dx":0,"dy":-3,"mode":0,"x":0,"y":0,"delta_mode":"line","phase":"start"}}`))
+	_ = disp.Dispatch(ctx, env)
+
+	wheels := collectWheelEvents(f.Calls())
+	if len(wheels) != 1 {
+		t.Fatalf("got %d wheels, want 1", len(wheels))
+	}
+	// dy=-3 lines × 16 px/line = -48 px.
+	if wheels[0].dy != -48 {
+		t.Errorf("delta_mode=line should multiply by 16; got dy=%v want -48", wheels[0].dy)
+	}
+}
+
+func TestDispatchWheelLegacyClientNoPhase(t *testing.T) {
+	// A v1.0 client emits no phase / no delta_mode. The bridge MUST
+	// translate it as a legacy "changed" wheel — same as before T62.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	env, _ := parseEnvelope([]byte(
+		`{"v":1,"type":"mouse_wheel","t":1,"seq":0,"data":{"dx":0,"dy":-120,"mode":0,"x":10,"y":20}}`))
+	if err := disp.Dispatch(ctx, env); err != nil {
+		t.Fatalf("legacy wheel dispatch: %v", err)
+	}
+	wheels := collectWheelEvents(f.Calls())
+	if len(wheels) != 1 || wheels[0].dy != -120 {
+		t.Errorf("legacy wheel pass-through failed: %+v", wheels)
+	}
+	if wheels[0].pointerType != "" {
+		t.Errorf("legacy wheel should NOT set pointerType, got %q", wheels[0].pointerType)
+	}
+}
+
 func TestParseFlags(t *testing.T) {
 	cfg, err := parseFlags([]string{"--source", "ws", "--ws-addr", "127.0.0.1:9999"})
 	if err != nil {

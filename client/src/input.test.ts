@@ -170,7 +170,9 @@ describe("InputChannel", () => {
 
     // Non-coalescable events (wheel) flush before mouse_move.
     expect(ch.sent[0]!.type).toBe("mouse_wheel");
-    expect(ch.sent[0]!.data).toEqual({ dx: 0, dy: -121, mode: 0, x: 1, y: 3 });
+    // T62 added optional v1.1 fields (delta_mode, phase, momentum)
+    // — assert the original required fields rather than full equality.
+    expect(ch.sent[0]!.data).toMatchObject({ dx: 0, dy: -121, mode: 0, x: 1, y: 3 });
     expect(ch.sent[1]!.type).toBe("mouse_move");
     expect(ch.sent[1]!.data).toEqual({ x: 10, y: 21 });
   });
@@ -187,6 +189,223 @@ describe("InputChannel", () => {
 
     expect(errs).toHaveLength(1);
     expect((errs[0] as Error).message).toBe("boom");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.1 — wheel phase machine + scroll inertia
+// ---------------------------------------------------------------------------
+
+/** Manual-drive scheduler for setTimer/clearTimer. Lets tests fire the
+ *  end-of-gesture timer deterministically. */
+function manualTimer(): {
+  setTimer: (cb: () => void, _ms: number) => unknown;
+  clearTimer: (id: unknown) => void;
+  fire: () => boolean;  // returns true if a timer fired
+  pending: number;
+} {
+  const queue: Array<{ id: number; cb: () => void; cancelled: boolean }> = [];
+  let nextId = 1;
+  return {
+    setTimer: (cb: () => void, _ms: number) => {
+      const id = nextId++;
+      queue.push({ id, cb, cancelled: false });
+      return id;
+    },
+    clearTimer: (id: unknown) => {
+      const e = queue.find(e => e.id === id);
+      if (e) e.cancelled = true;
+    },
+    fire: () => {
+      // Find the first non-cancelled timer; fire it; mark cancelled.
+      const e = queue.find(x => !x.cancelled);
+      if (!e) return false;
+      e.cancelled = true;
+      e.cb();
+      return true;
+    },
+    get pending() { return queue.filter(e => !e.cancelled).length; },
+  };
+}
+
+describe("InputChannel wheel inertia (v1.1)", () => {
+  it("first wheel event is phase=start; subsequent are phase=changed", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    let now = 1000;
+    const ic = new InputChannel(ch, {
+      now: () => now, raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+    });
+
+    ic.sendMouseWheel(0, -120, 0, 100, 100);
+    now += 16;
+    ic.sendMouseWheel(0, -100, 0, 100, 100);
+    now += 16;
+    ic.sendMouseWheel(0, -80, 0, 100, 100);
+    sched.tick();
+
+    const wheels = ch.sent.filter(e => e.type === "mouse_wheel");
+    expect(wheels).toHaveLength(3);
+    expect((wheels[0]!.data as { phase: string }).phase).toBe("start");
+    expect((wheels[1]!.data as { phase: string }).phase).toBe("changed");
+    expect((wheels[2]!.data as { phase: string }).phase).toBe("changed");
+  });
+
+  it("delta_mode passes through pixel/line/page", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    const ic = new InputChannel(ch, {
+      raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+    });
+
+    ic.sendMouseWheel(0, -1, 0, 0, 0);  sched.tick();
+    ic.emitWheelEnd();                   sched.tick();
+    ic.sendMouseWheel(0, -1, 1, 0, 0);  sched.tick();
+    ic.emitWheelEnd();                   sched.tick();
+    ic.sendMouseWheel(0, -1, 2, 0, 0);  sched.tick();
+    sched.tick();
+
+    const modes = ch.sent
+      .filter(e => e.type === "mouse_wheel" && (e.data as { phase: string }).phase !== "end")
+      .map(e => (e.data as { delta_mode: string }).delta_mode);
+    expect(modes).toEqual(["pixel", "line", "page"]);
+  });
+
+  it("end-of-gesture timer fires a phase=end zero-delta envelope", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    const ic = new InputChannel(ch, {
+      raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+    });
+
+    ic.sendMouseWheel(0, -120, 0, 50, 60);
+    sched.tick();
+    expect(t.pending).toBe(1);  // timer armed
+
+    // Fire the timer manually — simulates 150 ms of quiet.
+    expect(t.fire()).toBe(true);
+    sched.tick();
+
+    const wheels = ch.sent.filter(e => e.type === "mouse_wheel");
+    expect(wheels).toHaveLength(2);
+    const endEnv = wheels[1]!;
+    expect((endEnv.data as { phase: string }).phase).toBe("end");
+    expect((endEnv.data as { dx: number; dy: number }).dx).toBe(0);
+    expect((endEnv.data as { dx: number; dy: number }).dy).toBe(0);
+    // End preserves the last-known position + mode.
+    expect((endEnv.data as { x: number; y: number }).x).toBe(50);
+    expect((endEnv.data as { x: number; y: number }).y).toBe(60);
+  });
+
+  it("new wheel event before timer fires re-arms (no spurious end)", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    const ic = new InputChannel(ch, {
+      raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+    });
+
+    ic.sendMouseWheel(0, -120, 0, 0, 0);
+    ic.sendMouseWheel(0, -100, 0, 0, 0);
+    ic.sendMouseWheel(0, -80, 0, 0, 0);
+    sched.tick();
+
+    // Only one timer should be active (the previous ones were cancelled).
+    expect(t.pending).toBe(1);
+
+    // Firing it fires phase=end exactly once.
+    t.fire();
+    sched.tick();
+    const ends = ch.sent.filter(e => e.type === "mouse_wheel"
+      && (e.data as { phase: string }).phase === "end");
+    expect(ends).toHaveLength(1);
+  });
+
+  it("after end, the next wheel event is phase=start again", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    const ic = new InputChannel(ch, {
+      raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+    });
+
+    ic.sendMouseWheel(0, -120, 0, 0, 0);  sched.tick();
+    t.fire(); sched.tick();
+    ic.sendMouseWheel(0, -100, 0, 0, 0);  sched.tick();
+
+    const wheels = ch.sent.filter(e => e.type === "mouse_wheel");
+    const phases = wheels.map(e => (e.data as { phase: string }).phase);
+    expect(phases).toEqual(["start", "end", "start"]);
+  });
+
+  it("flags decaying-magnitude tail events as momentum", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    let now = 1000;
+    const ic = new InputChannel(ch, {
+      now: () => now, raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+      wheelMomentumGapMs: 100,
+    });
+
+    // User drives 3 hard scrolls...
+    ic.sendMouseWheel(0, -300, 0, 0, 0);
+    now += 16;  // tight gap, but first event is phase=start (never momentum)
+    ic.sendMouseWheel(0, -200, 0, 0, 0);  // changed; magnitude smaller; gap small → momentum
+    now += 16;
+    ic.sendMouseWheel(0, -100, 0, 0, 0);  // changed; smaller still → momentum
+    now += 16;
+    ic.sendMouseWheel(0, -50, 0, 0, 0);   // changed; smaller still → momentum
+    sched.tick();
+
+    const wheels = ch.sent.filter(e => e.type === "mouse_wheel");
+    const momentum = wheels.map(e => (e.data as { momentum: boolean }).momentum);
+    // start is always non-momentum; subsequent decaying-magnitude are momentum.
+    expect(momentum).toEqual([false, true, true, true]);
+  });
+
+  it("does NOT flag growing-magnitude as momentum", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    let now = 1000;
+    const ic = new InputChannel(ch, {
+      now: () => now, raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+    });
+    ic.sendMouseWheel(0, -50, 0, 0, 0);
+    now += 16;
+    ic.sendMouseWheel(0, -100, 0, 0, 0);   // growing → user-driven
+    now += 16;
+    ic.sendMouseWheel(0, -200, 0, 0, 0);   // growing → user-driven
+    sched.tick();
+
+    const wheels = ch.sent.filter(e => e.type === "mouse_wheel");
+    const momentum = wheels.map(e => (e.data as { momentum: boolean }).momentum);
+    expect(momentum).toEqual([false, false, false]);
+  });
+
+  it("zero-delta wheel without an active gesture is dropped", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const t = manualTimer();
+    const ic = new InputChannel(ch, {
+      raf: sched.raf, cancelRaf: sched.cancel,
+      setTimer: t.setTimer, clearTimer: t.clearTimer,
+    });
+    ic.sendMouseWheel(0, 0, 0, 0, 0);
+    sched.tick();
+    expect(ch.sent.filter(e => e.type === "mouse_wheel")).toHaveLength(0);
+    expect(t.pending).toBe(0);
   });
 });
 

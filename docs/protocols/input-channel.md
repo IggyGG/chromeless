@@ -13,8 +13,10 @@ T14. The server-side dispatcher that consumes this stream is T22
 > - **v1.1** — Added `drag_start`, `drag_over`, `drag_end`, `drop` event
 >   types for drag-and-drop (T45/T46). Added `touch_start`, `touch_move`,
 >   `touch_end`, `touch_cancel` for mobile-client touch input (T56).
->   Wire `v` stays at `1`; v1 clients/servers ignore unknown types per
->   the original spec.
+>   Extended `mouse_wheel` with optional `delta_mode`, `phase`, and
+>   `momentum` fields for scroll-inertia fidelity (T62). Wire `v` stays
+>   at `1`; v1 clients/servers ignore unknown types and unknown
+>   optional fields per the original spec.
 
 ---
 
@@ -96,15 +98,50 @@ double-click timing rules.
 ### `mouse_wheel`
 
 ```jsonc
-{ "dx": 0, "dy": -120, "mode": 0, "x": 612, "y": 401 }
+{ "dx": 0, "dy": -120, "mode": 0,
+  "delta_mode": "pixel", "phase": "start", "momentum": false,
+  "x": 612, "y": 401 }
 ```
 
-| field   | type | values                                                          |
-|---------|------|-----------------------------------------------------------------|
-| `dx`    | int  | horizontal delta                                                |
-| `dy`    | int  | vertical delta (negative = up, matching `WheelEvent.deltaY`)    |
-| `mode`  | int  | `0` pixel, `1` line, `2` page (`WheelEvent.deltaMode`)          |
-| `x`,`y` | int  | content-space coords (cursor position when wheel fired)         |
+| field         | type    | values                                                          |
+|---------------|---------|-----------------------------------------------------------------|
+| `dx`          | int     | horizontal delta                                                |
+| `dy`          | int     | vertical delta (negative = up, matching `WheelEvent.deltaY`)    |
+| `mode`        | int     | `0` pixel, `1` line, `2` page (`WheelEvent.deltaMode`)          |
+| `delta_mode`  | string? | `"pixel"` \| `"line"` \| `"page"` — string alias for `mode`. (v1.1) Servers SHOULD prefer this over `mode` when both are present. |
+| `phase`       | string? | `"start"` \| `"changed"` \| `"end"` \| `null`. (v1.1) Servers without inertia handling MAY ignore. See [Wheel phase machine](#wheel-phase-machine). |
+| `momentum`    | bool?   | `true` for OS-generated momentum frames (after the user lifted their finger), `false` otherwise. (v1.1) Heuristic on the client. |
+| `x`,`y`       | int     | content-space coords (cursor position when wheel fired)         |
+
+#### Wheel phase machine
+
+A trackpad scroll on macOS / a smooth-scroll device produces a
+sequence shaped like:
+
+```
+   user finger   :  ─────╲
+                          ╲
+                           ╲ ─ ─ ─ ─ ─ ─ ─ (deltas decay during
+                            ╲               momentum after lift)
+                             ╲ _ _ _
+   wire phase    :  start changed changed changed end
+   momentum      :  false  false   true     true   false
+```
+
+- **`start`** — first non-zero wheel event after a quiet period
+  (gesture begin). The client also resets the momentum heuristic
+  state at this boundary.
+- **`changed`** — subsequent non-zero events in the same gesture.
+- **`end`** — synthesized final event with `dx=dy=0`, emitted ~150
+  ms after the last non-zero event. Lets the server flush its
+  momentum-decay state.
+- `null` (or omitted) — a v1.0 client that doesn't track phase. The
+  server treats these as `"changed"`.
+
+`mouse_wheel` events MAY be coalesced **within the same phase** (e.g.
+two `phase=changed` deltas in one rAF tick can sum into one envelope).
+Coalescing across phase boundaries is forbidden — `start` and `end`
+are semantic boundary markers.
 
 ### `key_down` / `key_up`
 
