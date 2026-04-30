@@ -139,9 +139,17 @@ spec:
             - -euxc
             - |
               # Clone or refresh our repo at OUR_REPO_REF.
+              # Forgejo instance has REQUIRE_SIGNIN_VIEW=true so anon
+              # clones return HTTP 401 even for repos flagged public. Inject
+              # creds into the URL at clone time, then scrub them from the
+              # stored remote so post-clone git ops don't carry tokens in
+              # args/logs. FORGEJO_USERNAME + FORGEJO_PASSWORD come from
+              # the forgejo-credentials Secret (mirrored from flux-system).
+              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
               if [ ! -d /workspace/.git ]; then
                 git clone --depth 1 --branch "${OUR_REPO_REF}" \
-                  "${OUR_REPO}" /workspace
+                  "${AUTH_REPO}" /workspace
+                git -C /workspace remote set-url origin "${OUR_REPO}"
               else
                 cd /workspace \
                   && git fetch --depth 1 origin "${OUR_REPO_REF}" \
@@ -168,6 +176,22 @@ spec:
             # builds (`kubectl set env job/cb-build OUR_REPO_REF=v0.2.0`).
             - name: OUR_REPO_REF
               value: "main"
+            # Creds for cloning private/internal Forgejo repos. The
+            # forgejo-credentials Secret holds username + password
+            # (Forgejo PAT). Same Secret pattern used by flux-system
+            # for tf-multiverse / tf-alchemy / tf-isolator pulls;
+            # mirrored into cb-build ns. When the PAT rotates, all
+            # consuming namespaces need updating.
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
           # Bootstrap also needs root briefly to write under /work
           # (which we just chown'd — but the workspace emptyDir is
           # root-owned at first, and the post-chown of /work/src etc.
