@@ -360,6 +360,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("/turn-credentials", turnHandler)
 	mux.HandleFunc("/ws/", h.wsHandler)
 
 	srv := &http.Server{

@@ -15,6 +15,7 @@
 // validate signaling round-trip and RTCPeerConnection lifecycle wiring.
 
 import { InputChannel } from "./src/input.js";
+import { fetchTurnConfig } from "./src/turn.js";
 
 const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
 
@@ -112,11 +113,16 @@ async function connect(sessionId: string): Promise<void> {
 
   const wsUrl = `${DEFAULT_SIGNALING}/${encodeURIComponent(sessionId)}`;
   log("info", `dialing signaling`, wsUrl);
+
+  // Fetch ICE config from the signaling server (T25) before constructing
+  // the peer connection. fetchTurnConfig falls back to public STUN on
+  // any error so the client still has a chance of working.
+  const iceConfig = await fetchTurnConfig(DEFAULT_SIGNALING);
+  log("info", "ice config", iceConfig);
+
   const ws = new WebSocket(wsUrl);
 
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
-  });
+  const pc = new RTCPeerConnection(iceConfig);
 
   pc.onsignalingstatechange = () => { els.sig.textContent = pc.signalingState; log("info", `signalingState=${pc.signalingState}`); };
   pc.oniceconnectionstatechange = () => {
