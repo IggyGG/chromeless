@@ -1,0 +1,57 @@
+# gn args for the cloud-browser worker (Phase 2).
+#
+# This file is the single source of truth for our build configuration.
+# It mirrors the recommended args from docs/build/chromium-from-source.md
+# §2 (T17) — keep that doc and this file aligned at every roll.
+#
+# TODO(T17-build-env): exercise this on a Linux box with depot_tools.
+# Until then, treat as design-by-spec.
+#
+# Use:
+#   gn gen out/cb-release \
+#       --args='import("//cloud-browser/capture/build-integration/args.gn")'
+
+# ---- Mode ------------------------------------------------------------
+is_debug                 = false
+is_official_build        = false   # `true` is for shipping artifacts;
+                                    # ours is a server worker.
+is_component_build       = false   # one binary, simpler deploy.
+
+# ---- Symbols / size --------------------------------------------------
+symbol_level             = 1       # crash-grade only; level-2 ~doubles
+                                    # disk and we don't ship as a
+                                    # debugger target.
+blink_symbol_level       = 0
+v8_symbol_level          = 0
+strip_debug_info         = false   # leave for now; revisit when we ship.
+
+# ---- Trim ------------------------------------------------------------
+enable_nacl              = false
+enable_widevine          = false
+enable_remoting          = false   # we are remoting; we don't need
+                                    # Chromium's own remoting subsystem.
+use_cups                 = false
+optimize_webui           = true
+
+# ---- Codecs (in-page playback + our encoder factory) ----------------
+proprietary_codecs       = true
+ffmpeg_branding          = "Chrome"
+rtc_use_h264             = true
+rtc_include_tests        = false
+enable_libaom            = true
+enable_dav1d_decoder     = true
+
+# ---- Headless / server-shaped ---------------------------------------
+use_ozone                = true
+ozone_platform_headless  = true
+ozone_platform_x11       = true    # Phase 1 still uses Xvfb.
+ozone_platform_wayland   = false
+
+# ---- Toolchain -------------------------------------------------------
+treat_warnings_as_errors = false   # rolls hurt less.
+clang_use_chrome_plugins = true
+use_sysroot              = true
+
+# ---- Build cache (per docs/build/chromium-from-source.md §5) --------
+# Set when sccache is on the PATH. Uncomment in CI / build hosts:
+# cc_wrapper             = "sccache"

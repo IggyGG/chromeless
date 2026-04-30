@@ -1,0 +1,122 @@
+# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#
+# gn target for the Phase-2 cloud-browser worker binary.
+#
+# This binary embeds Chromium (browser process), instantiates
+# HostFrameSinkManager + a FrameSinkVideoCapturer (T47), routes the
+# captured frames into libwebrtc with our CloudBrowserVideoEncoderFactory
+# (T19 / T35 / T36) plugged in, and runs the WebRTC sender side of the
+# pipeline.
+#
+# Layout assumes this repo is symlinked into the Chromium src/ tree at
+# //cloud-browser. The encoder sources still live at //cloud-browser/
+# capture/encoder/...; this BUILD.gn references them via that path.
+#
+# TODO(T17-build-env): exercise this on a Linux box with depot_tools.
+
+import("//build/config/features.gni")
+import("//build/config/sanitizers/sanitizers.gni")
+
+# ---------------------------------------------------------------------
+# Encoder factory + per-codec wrappers.
+#
+# Linkable on its own so unit tests in capture/encoder/*_test.cc can
+# pick it up without dragging in the worker binary's main().
+# ---------------------------------------------------------------------
+source_set("encoder_factory") {
+  sources = [
+    "../encoder/encoder_factory.h",
+    "../encoder/encoder_factory_stub.cc",
+    "../encoder/h264_encoder.cc",
+    "../encoder/h264_encoder.h",
+    "../encoder/vp9_encoder.cc",
+    "../encoder/vp9_encoder.h",
+  ]
+  deps = [
+    "//third_party/abseil-cpp:absl",
+    "//third_party/libvpx:libvpx",     # VP9 (T35).
+    "//third_party/webrtc/api/video_codecs:video_codecs_api",
+    "//third_party/webrtc/modules/video_coding",
+    "//third_party/x264:x264",         # H.264 (T36).
+    # TODO(T43): //third_party/svt_av1 once AV1 lands.
+  ]
+  configs += [ "//build/config/compiler:no_chromium_code" ]
+}
+
+# ---------------------------------------------------------------------
+# (Stub) capture seam — populated by T47 follow-up.
+#
+# The shape is here today so adding the implementation in T47 does
+# not require restructuring this file.
+# ---------------------------------------------------------------------
+source_set("framesink_capture") {
+  sources = [
+    # TODO(T47): add framesink_capturer.{h,cc} + frame_consumer.{h,cc}
+    #           once the design lands as code.
+  ]
+  deps = [
+    "//components/viz/host",
+    "//components/viz/service",
+    "//services/viz/privileged/mojom",
+    "//third_party/webrtc/api/video:video_frame",
+  ]
+}
+
+# ---------------------------------------------------------------------
+# Embedder glue — our ContentBrowserClient subclass that overrides
+# the virtual added by patches/0001-expose-encoder-factory-injection.
+# patch.
+# ---------------------------------------------------------------------
+source_set("embedder") {
+  sources = [
+    "cloud_browser_main.cc",
+    "cloud_browser_main.h",
+    "content_browser_client.cc",
+    "content_browser_client.h",
+  ]
+  deps = [
+    ":encoder_factory",
+    ":framesink_capture",
+    "//base",
+    "//content/public/app",
+    "//content/public/browser",
+  ]
+}
+
+# ---------------------------------------------------------------------
+# The binary itself.
+# ---------------------------------------------------------------------
+executable("cloud_browser_worker") {
+  sources = [ "cloud_browser_worker_main.cc" ]
+  deps = [
+    ":embedder",
+    "//content:sandbox_helper_linux",
+  ]
+  # cloud_browser_worker is a Linux-server binary; we don't carry mac/
+  # win configs.
+  if (!is_linux) {
+    assert(false, "cloud_browser_worker is Linux-only (Phase 2 scope)")
+  }
+}
+
+# ---------------------------------------------------------------------
+# Unit tests for the encoder factory wrappers.
+#
+# These are gtest-based and link against //third_party/webrtc/test —
+# T17's pinned branch's libwebrtc test deps. Until the build env runs,
+# this is design-by-spec (matches the TODO marker in each *_test.cc).
+# ---------------------------------------------------------------------
+test("cloud_browser_encoder_unittests") {
+  sources = [
+    "../encoder/h264_encoder_test.cc",
+    "../encoder/vp9_encoder_test.cc",
+  ]
+  deps = [
+    ":encoder_factory",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//third_party/webrtc/api/video:video_frame",
+    "//third_party/webrtc/api/video_codecs:video_codecs_api",
+    "//third_party/webrtc/test:test_support",
+  ]
+}
