@@ -90,15 +90,31 @@ RUN apt-get update \
         procps \
  && rm -rf /var/lib/apt/lists/*
 
-# Non-root user. Chromium and PulseAudio run as cbuser; supervisord stays
-# as root so it can write to /var/log/supervisor and manage the runtime
-# directory, then drops privs per [program:*] block via user=.
+# Non-root user. After T57, cbuser is the *whole* runtime user — there
+# is no privilege drop in supervisord; PID 1 (dumb-init), entrypoint.sh,
+# cold-start.sh, supervisord, and every [program:*] all run as cbuser.
+# That removes a class of bugs (root supervisord -> non-root child)
+# and lets us run with --user 1000 / runAsNonRoot: true cleanly.
+#
+# Writable directories that MUST be cbuser-owned in the image fs (so a
+# plain `docker run --read-only` works) and re-created by cold-start.sh
+# at container start (so K8s emptyDir overlays don't strand us with an
+# empty /run):
+#   /home/cbuser              chromium profile, history, supervisor pid
+#   /home/cbuser/.config/chromium     chromium user-data-dir
+#   /run/user/1000/pulse              PulseAudio native socket
+#   /run/supervisor                   supervisord socket + pid file
+#   /run/cb-session                   cold-start.sh writes id + env
+#   /var/log/supervisor               program logs
+# Everything else under / is read-only — see infra/security-hardening.md.
 RUN groupadd --gid 1000 cbuser \
  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash cbuser \
  && mkdir -p /run/user/1000/pulse \
+             /run/supervisor \
+             /run/cb-session \
              /home/cbuser/.config/chromium \
              /var/log/supervisor \
- && chown -R cbuser:cbuser /run/user/1000 /home/cbuser \
+ && chown -R cbuser:cbuser /run/user/1000 /run/supervisor /run/cb-session /home/cbuser /var/log/supervisor \
  && chmod 0700 /run/user/1000
 
 # PulseAudio script: null sink only, no host audio. We *replace* the
@@ -129,6 +145,14 @@ RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bi
  && chmod +x /usr/local/bin/launch-chromium.sh \
  && chown -R cbuser:cbuser /opt/cloud-browser
 
+# T57: seccomp profile. COPYing into the image lets `docker run
+# --security-opt seccomp=/etc/cb-seccomp.json` work without an external
+# file. K8s reads seccomp from the kubelet's seccomp dir
+# (/var/lib/kubelet/seccomp/) so this image-baked file is informational
+# for K8s; the deploy step has to install it on each node. See
+# infra/security-hardening.md.
+COPY infra/seccomp/cb-chromium.json /etc/cb-seccomp.json
+
 EXPOSE 9222 8080 9100
 
 # DevTools exposes /json/version as soon as Chromium accepts connections,
@@ -136,6 +160,10 @@ EXPOSE 9222 8080 9100
 # PulseAudio + Chromium time to come up cleanly on a cold container.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -fsS http://127.0.0.1:9222/json/version >/dev/null || exit 1
+
+# T57: drop to cbuser as the default runtime user. RUN steps above
+# needed root for apt-get and chown; nothing past this line should.
+USER cbuser
 
 # dumb-init as PID 1 so SIGTERM/SIGINT propagate to supervisord and the
 # child tree, and zombies get reaped if a Chromium helper crashes. The

@@ -58,6 +58,24 @@ spec:
   shareProcessNamespace: true
   restartPolicy: Always
 
+  # T57: pod-level security posture. Every container also sets its own
+  # securityContext so a future container addition can't accidentally
+  # default itself back to root. fsGroup=1000 makes emptyDir mounts
+  # cbuser-writable (group ownership 1000, mode 0775).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      # Localhost = the kubelet's seccomp dir
+      # (/var/lib/kubelet/seccomp/cb-chromium.json). Deploys must
+      # install the JSON on every node before this pod will start.
+      # See infra/security-hardening.md "K8s seccomp install".
+      type: Localhost
+      localhostProfile: cb-chromium.json
+
   # Cluster-internal DNS for signaling. Keep clusterFirst so the pod
   # uses the cluster's DNS resolver; Phase-3 prod can layer per-tenant
   # DNS via NetworkPolicy + a sidecar resolver.
@@ -68,30 +86,42 @@ spec:
   # dedicated, no-permission SA when it starts using the K8s API.
   automountServiceAccountToken: false
 
-  # /dev/shm: Chromium needs more than the default 64M. emptyDir with
-  # medium=Memory backs it with tmpfs at the size we set in compose
-  # via shm_size.
+  # T57: every writable path under / needs a volume since
+  # readOnlyRootFilesystem: true on every container. /run is one
+  # emptyDir for everything supervisord/pulse/cb-session need;
+  # cold-start.sh re-creates the subdirs at startup.
   volumes:
+    # /dev/shm: Chromium needs more than the default 64M. emptyDir with
+    # medium=Memory backs it with tmpfs at the size we set in compose
+    # via shm_size.
     - name: dshm
       emptyDir:
         medium: Memory
         sizeLimit: 1Gi
-    # Per-session env file written by cold-start.sh; readable by all
-    # containers because it lives at /run/cb-session/env.
-    - name: cb-session
+    # /run: supervisord socket + pid, pulse runtime, cb-session env.
+    # tmpfs-backed so it doesn't burn ephemeral storage budget.
+    - name: run
       emptyDir:
-        sizeLimit: 1Mi
-    # Chromium user data dir. emptyDir so it dies with the Pod — no
-    # cross-tenant leak via persistent storage.
-    - name: chromium-userdata
+        medium: Memory
+        sizeLimit: 64Mi
+    # /var/log/supervisor: program logs. Bytes-on-disk; small.
+    - name: supervisor-log
+      emptyDir:
+        sizeLimit: 64Mi
+    # /home/cbuser: chromium config + profile + caches. Sized for one
+    # session's worth of state.
+    - name: home
       emptyDir:
         sizeLimit: 512Mi
-    # PulseAudio / X11 sockets shared between cb-chromium and the
-    # cursor-watcher / input-bridge sidecars when they need the
-    # display.
+    # /tmp: general-purpose. Nothing in the image puts large files
+    # here; 64Mi is plenty.
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
+    # X11 socket dir — Xvfb writes /tmp/.X11-unix/X99. Lives separate
+    # from /tmp so we can mount it in containers that need the display
+    # without giving them write access to all of /tmp.
     - name: x11-socket
-      emptyDir: {}
-    - name: pulse-runtime
       emptyDir: {}
 
   # Pod-level resources are summed across containers; we target ~3 CPU
@@ -130,14 +160,16 @@ spec:
       volumeMounts:
         - name: dshm
           mountPath: /dev/shm
-        - name: cb-session
-          mountPath: /run/cb-session
-        - name: chromium-userdata
-          mountPath: /home/cbuser/.config/chromium
+        - name: run
+          mountPath: /run
+        - name: supervisor-log
+          mountPath: /var/log/supervisor
+        - name: home
+          mountPath: /home/cbuser
+        - name: tmp
+          mountPath: /tmp
         - name: x11-socket
           mountPath: /tmp/.X11-unix
-        - name: pulse-runtime
-          mountPath: /run/user/1000/pulse
       resources:
         requests:
           cpu: "1500m"
@@ -161,9 +193,11 @@ spec:
         initialDelaySeconds: 60
         periodSeconds: 30
         failureThreshold: 3
+      # T57: cb-chromium is now read-only-root just like every other
+      # container in the pod. Chromium writes to /home/cbuser, /run,
+      # /tmp — all volume mounts above. The whole rootfs is RO.
       securityContext:
-        # Chromium spawns helper processes and writes user-data-dir.
-        readOnlyRootFilesystem: false
+        readOnlyRootFilesystem: true
         allowPrivilegeEscalation: false
         capabilities:
           drop: ["ALL"]
@@ -290,6 +324,8 @@ spec:
       volumeMounts:
         - name: x11-socket
           mountPath: /tmp/.X11-unix
+        - name: tmp
+          mountPath: /tmp
       resources:
         requests:
           cpu: "50m"

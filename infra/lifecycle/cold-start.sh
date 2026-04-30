@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # infra/lifecycle/cold-start.sh — per-container-boot setup. Runs from the
-# entrypoint chain BEFORE supervisord starts, as root (PID 1 inherits
-# root from docker run / dumb-init).
+# entrypoint chain BEFORE supervisord starts, as cbuser (T57: the whole
+# entrypoint chain is non-root since we set USER cbuser in the
+# Dockerfile).
 #
-# Responsibilities (T31):
-#   1. Clear stale Chromium user-data-dir so each container session
-#      starts from a fresh profile. Without this, a container that
-#      tombstones and respawns under the same docker volume mount would
-#      inherit cached pages, cookies, and Service Worker state from the
-#      previous session.
-#   2. Generate a SESSION_ID if the env didn't supply one. The id is
-#      written to /run/cb-session/id (and, with other resolved env
+# Responsibilities:
+#   1. (T57) Re-create writable directories that may have been wiped by
+#      K8s emptyDir overlays at /run, /var/log/supervisor, /home/cbuser.
+#      In a plain `docker run` these are pre-created in the image fs by
+#      the Dockerfile; mkdir -p is a no-op there.
+#   2. (T31) Clear stale Chromium user-data-dir so each container
+#      session starts from a fresh profile.
+#   3. (T31) Generate a SESSION_ID if the env didn't supply one. The id
+#      is written to /run/cb-session/id (and, with other resolved env
 #      values, to /run/cb-session/env) so the watchdog and supervisord
 #      programs can see the same value.
-#   3. Echo resolved values so `docker logs <container>` is greppable.
+#   4. Echo resolved values so `docker logs <container>` is greppable.
 
 set -eu
 
@@ -24,13 +26,27 @@ SESSION_ENV_FILE="$SESSION_DIR/env"
 
 echo "[cold-start] booting cloud-browser-webrtc container" >&2
 
+# --- 0. K8s emptyDir overlay safety net (T57) -----------------------------
+# These dirs are pre-created in the image fs (see Dockerfile), but a K8s
+# Pod with `readOnlyRootFilesystem: true` mounts emptyDir at /run,
+# /var/log/supervisor, /home/cbuser. Those mounts arrive empty and
+# overlay our chowned dirs — supervisord then can't bind its socket and
+# pulse can't open its runtime dir. Re-create here, idempotently.
+mkdir -p /run/supervisor \
+         /run/user/1000/pulse \
+         /run/cb-session \
+         /var/log/supervisor \
+         /home/cbuser/.config/chromium
+chmod 0700 /run/user/1000
+
 # --- 1. stale profile cleanup ---------------------------------------------
+# We're cbuser; the dir is owned by cbuser; rm + mkdir works without
+# the previous chown step.
 if [ -d "$USER_DATA_DIR" ]; then
     echo "[cold-start] clearing stale user-data-dir at $USER_DATA_DIR" >&2
     rm -rf "$USER_DATA_DIR"
 fi
 mkdir -p "$USER_DATA_DIR"
-chown -R cbuser:cbuser "$USER_DATA_DIR"
 
 # --- 2. resolve session env -----------------------------------------------
 mkdir -p "$SESSION_DIR"
