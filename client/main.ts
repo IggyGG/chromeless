@@ -16,6 +16,7 @@
 
 import { InputChannel } from "./src/input.js";
 import { fetchTurnConfig } from "./src/turn.js";
+import { prioritizeCodec } from "./src/sdp.js";
 
 const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
 
@@ -213,10 +214,14 @@ async function connect(sessionId: string): Promise<void> {
 
     try {
       const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      const env: Envelope = { type: "offer", from: "client", data: { type: offer.type, sdp: offer.sdp ?? "" } };
+      // T30: prefer VP9 first. Pure SDP transform — see
+      // docs/protocols/sdp-munging.md. T34 will move this to apply on
+      // the answer when we flip to answerer-role.
+      const mungedSdp = prioritizeCodec(offer.sdp ?? "", "VP9");
+      await pc.setLocalDescription({ type: offer.type, sdp: mungedSdp });
+      const env: Envelope = { type: "offer", from: "client", data: { type: offer.type, sdp: mungedSdp } };
       ws.send(JSON.stringify(env));
-      log("ok", "→ offer", { sdpBytes: offer.sdp?.length ?? 0 });
+      log("ok", "→ offer", { sdpBytes: mungedSdp.length, vp9First: /m=video.*\b\d+\b/.test(mungedSdp) });
     } catch (err) {
       log("err", "createOffer failed", String(err));
       teardown("createOffer failed");
