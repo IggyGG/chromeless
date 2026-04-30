@@ -83,6 +83,7 @@ RUN apt-get update \
         curl \
         python3 \
         python3-websocket \
+        socat \
         fonts-noto-core \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
@@ -131,6 +132,12 @@ COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
 COPY capture/streamer-page/ /opt/cloud-browser/streamer/
 COPY infra/launch-chromium.sh /usr/local/bin/launch-chromium.sh
 
+# T52: small socat sidecar that bridges container_eth0:9222 ->
+# 127.0.0.1:9222 because Chromium 147 binds DevTools to loopback
+# regardless of --remote-debugging-address. See infra/devtools-proxy.sh
+# for the full rationale.
+COPY infra/devtools-proxy.sh /usr/local/bin/devtools-proxy.sh
+
 # Metrics sidecar binary (T38), built in the metrics-build stage above.
 COPY --from=metrics-build /out/cb-metrics-sidecar /usr/local/bin/cb-metrics-sidecar
 
@@ -143,6 +150,7 @@ RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bi
  && ln -sf /usr/local/lib/cloud-browser/lifecycle/restart.sh       /usr/local/bin/restart.sh \
  && chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh \
  && chmod +x /usr/local/bin/launch-chromium.sh \
+ && chmod +x /usr/local/bin/devtools-proxy.sh \
  && chown -R cbuser:cbuser /opt/cloud-browser
 
 # T57: seccomp profile. COPYing into the image lets `docker run
