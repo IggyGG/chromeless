@@ -183,14 +183,32 @@ block both fit. Record for at least 60 s for ≥300 transitions
 
 ### Reconcile
 
-*(Coming with T11.)*
-
 ```bash
 python3 reconcile.py \
     --jsonl ../captures/<runId>.jsonl \
     --video cam.mp4 \
-    --out  report-<runId>.html
+    --out  report-<runId>
 ```
+
+### Sink lag stats (--jsonl only)
+
+When `--jsonl` is provided, the reconciler computes the page→sink
+WebSocket delivery time from `sinkRecvEpochMs - emitEpochMs` per
+record and surfaces three percentiles in the summary:
+
+| field              | healthy LAN target | what high values mean                                        |
+| ------------------ | ------------------ | ------------------------------------------------------------ |
+| `sink_lag_p50_ms`  | < 5 ms             | typical delivery latency                                     |
+| `sink_lag_p95_ms`  | < 20 ms            | tail latency; > 20 ms = the sink path is slow                |
+| `sink_lag_max_ms`  | < 100 ms           | one-shot worst case                                          |
+
+If the p95 exceeds 20 ms, the JSONL-side `epochMs` is **not** an
+authoritative source of truth — prefer the QR-payload `epochMs`
+(which is the page-side value baked into the frame itself) for any
+analysis where a few ms of skew matters. Reconcile.py's current
+"authoritative_emit" preference (JSONL beats QR) was a working
+default when T11 shipped; in poor-network conditions you may want to
+flip it. See [`tests/harness/validation.md`](../../tests/harness/validation.md) §3.
 
 ## Physical setup
 

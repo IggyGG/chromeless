@@ -1,16 +1,16 @@
-{"type": "flash", "frameId": 1, "state": "ON", "epochMs": 1736942500000, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 2, "state": "OFF", "epochMs": 1736942500100, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 3, "state": "ON", "epochMs": 1736942500200, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 4, "state": "OFF", "epochMs": 1736942500300, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 5, "state": "ON", "epochMs": 1736942500400, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 6, "state": "OFF", "epochMs": 1736942500500, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 7, "state": "ON", "epochMs": 1736942500600, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 8, "state": "OFF", "epochMs": 1736942500700, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 9, "state": "ON", "epochMs": 1736942500800, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 10, "state": "OFF", "epochMs": 1736942500900, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 11, "state": "ON", "epochMs": 1736942501000, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 12, "state": "OFF", "epochMs": 1736942501100, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 13, "state": "ON", "epochMs": 1736942501200, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 14, "state": "OFF", "epochMs": 1736942501300, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 15, "state": "ON", "epochMs": 1736942501400, "runId": "sample-aliased"}
-{"type": "flash", "frameId": 16, "state": "OFF", "epochMs": 1736942501500, "runId": "sample-aliased"}
+{"type": "flash", "frameId": 1, "state": "ON", "epochMs": 1736942500000, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500001, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 2, "state": "OFF", "epochMs": 1736942500100, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500102, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 3, "state": "ON", "epochMs": 1736942500200, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500203, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 4, "state": "OFF", "epochMs": 1736942500300, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500304, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 5, "state": "ON", "epochMs": 1736942500400, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500405, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 6, "state": "OFF", "epochMs": 1736942500500, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500506, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 7, "state": "ON", "epochMs": 1736942500600, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500607, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 8, "state": "OFF", "epochMs": 1736942500700, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500708, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 9, "state": "ON", "epochMs": 1736942500800, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500809, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 10, "state": "OFF", "epochMs": 1736942500900, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942500910, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 11, "state": "ON", "epochMs": 1736942501000, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942501011, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 12, "state": "OFF", "epochMs": 1736942501100, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942501112, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 13, "state": "ON", "epochMs": 1736942501200, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942501213, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 14, "state": "OFF", "epochMs": 1736942501300, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942501314, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 15, "state": "ON", "epochMs": 1736942501400, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942501415, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}
+{"type": "flash", "frameId": 16, "state": "OFF", "epochMs": 1736942501500, "runId": "sample-aliased", "sinkRecvEpochMs": 1736942501516, "sinkRecvIso": "2025-01-15T12:00:00.000Z"}

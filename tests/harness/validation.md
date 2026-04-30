@@ -221,6 +221,8 @@ Hard pass/fail on:
 | `negative_count`  | == 0                           | Clocks aren't aligned. Re-NTP and re-run. |
 | `frames_seen`     | ≥ 60 × cam_fps × duration_s × 0.95 | Frame drops. Could be USB transfer, AE chase, or recorder backpressure. |
 | `min_ms`          | strictly positive               | Negative `min` overrides every other check. Skew. |
+| `aliased_warning` | == False                       | cam_fps < 2 × flash_freq — the run is aliased. Re-shoot at higher cam fps or lower flash freq. (T60) |
+| `sink_lag_p95_ms` | < 20 ms (LAN), < 50 ms (regional) | The page→sink WebSocket is backed up. Cross-check by comparing JSONL `epochMs` against QR-encoded `epochMs` for the same flash; prefer the QR if they diverge. (T61) |
 
 ### 3.2 Per-target ranges
 

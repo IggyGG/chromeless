@@ -452,6 +452,35 @@ def reconcile(
             "negative_count": sum(1 for x in latencies if x < 0),
         })
 
+    # ---- Sink lag stats (G3) ----
+    #
+    # server-sink.py stamps sinkRecvEpochMs on every record it writes,
+    # so we can recover how long the page→sink WebSocket delivery took.
+    # A healthy LAN run should show p50 < 5 ms, p95 < 20 ms; anything
+    # higher means the sink path is slow and the QR-payload epochMs is
+    # closer to ground truth than the JSONL-side epochMs.
+    sink_lags = [
+        int(r["sinkRecvEpochMs"]) - int(r["epochMs"])
+        for r in source_jsonl_flash_records
+        if "sinkRecvEpochMs" in r and "epochMs" in r
+    ]
+    if sink_lags:
+        sl_sorted = sorted(sink_lags)
+        sl_n = len(sl_sorted)
+
+        def sl_pct(p):
+            if sl_n == 1:
+                return float(sl_sorted[0])
+            k = (sl_n - 1) * (p / 100.0)
+            f = int(k)
+            c = min(f + 1, sl_n - 1)
+            return sl_sorted[f] + (sl_sorted[c] - sl_sorted[f]) * (k - f)
+
+        summary["sink_lag_count"]  = sl_n
+        summary["sink_lag_p50_ms"] = float(sl_pct(50))
+        summary["sink_lag_p95_ms"] = float(sl_pct(95))
+        summary["sink_lag_max_ms"] = float(sl_sorted[-1])
+
     # ---- Nyquist 2× rule (G2) ----
     cam_fps = infer_cam_fps_hz(records)
     if source_jsonl_flash_records:
