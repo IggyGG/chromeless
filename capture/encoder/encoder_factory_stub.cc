@@ -24,10 +24,42 @@
 #include "api/video_codecs/video_encoder.h"
 #include "capture/encoder/bwe_adapter.h"
 #include "capture/encoder/h264_encoder.h"
+#include "capture/encoder/nvenc_encoder.h"
 #include "capture/encoder/vp9_encoder.h"
 
 namespace cloud_browser {
 namespace {
+
+// Per-codec NVENC availability is probed once at process startup
+// (the probe opens + immediately closes a tiny session, see
+// NvencEncoder::ProbeAvailable). The cache is process-wide because
+// the underlying GPU/driver capability does not change at runtime.
+//
+// nullopt = "not yet probed"; bool = probe outcome.
+struct NvencCache {
+  absl::optional<bool> h264;
+  absl::optional<bool> hevc;
+  absl::optional<bool> av1;
+};
+
+NvencCache& MutableNvencCache() {
+  static NvencCache cache;
+  return cache;
+}
+
+bool NvencAvailable(const std::string& codec) {
+  auto& cache = MutableNvencCache();
+  absl::optional<bool>* slot =
+      (codec == "H264")  ? &cache.h264 :
+      (codec == "HEVC")  ? &cache.hevc :
+      (codec == "AV1")   ? &cache.av1  : nullptr;
+  if (!slot) return false;
+  if (!slot->has_value()) {
+    *slot = NvencEncoder::ProbeAvailable(codec);
+  }
+  return slot->value();
+}
+
 
 // Tiny placeholder VideoEncoder that satisfies the type but refuses to
 // run. It exists so callers that try to instantiate an encoder before
@@ -125,6 +157,24 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
   // the remote agreed to; the SDP layer normalizes "profile-level-id"
   // to lowercase before we see it.
   if (format.name == "H264" && config_.enable_h264) {
+    // Runtime selection: prefer NVENC HW when (a) caller asked, AND
+    // (b) the per-codec probe succeeded. Probe failure silently
+    // falls back to the x264 SW wrapper — every host always has a
+    // working H.264 path.
+    if (config_.prefer_nvenc_h264 && NvencAvailable("H264")) {
+      NvencEncoderConfig cfg;
+      cfg.codec_type = "H264";
+      cfg.intra_refresh_period_frames = config_.intra_refresh
+          ? std::max(1, config_.gop_length_frames / 4)
+          : 60;
+      auto it = format.parameters.find("profile-level-id");
+      if (it != format.parameters.end() && it->second.size() == 6) {
+        cfg.profile_level_id = it->second;
+      }
+      cfg.low_latency_tag = config_.zero_latency;
+      return WrapWithBweAdapter(std::make_unique<NvencEncoder>(cfg),
+                                 config_.bwe_adapter);
+    }
     H264EncoderConfig cfg;
     cfg.intra_refresh_period_frames = config_.intra_refresh
         ? std::max(1, config_.gop_length_frames / 4)

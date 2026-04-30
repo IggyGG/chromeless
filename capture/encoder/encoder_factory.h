@@ -86,6 +86,15 @@ class CloudBrowserVideoEncoderFactory : public webrtc::VideoEncoderFactory {
     // libwebrtc BWE updates to all active encoders. Owned by the
     // caller; must outlive every encoder this factory produces.
     BweAdapter* bwe_adapter = nullptr;
+
+    // HW-encoder preferences (T63). When true and the runtime probe
+    // succeeds, the factory hands back an NvencEncoder instead of
+    // the SW wrapper for that codec. SW always remains the fallback
+    // — see capture/encoder/README.md for the runtime-selection
+    // rule.
+    bool prefer_nvenc_h264 = false;
+    bool prefer_nvenc_hevc = false;
+    bool prefer_nvenc_av1  = false;
   };
 
   explicit CloudBrowserVideoEncoderFactory(Config config);
