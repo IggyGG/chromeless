@@ -24,6 +24,14 @@
   const SIGNALING_URL = params.get("signal") || "ws://signaling:8080/ws";
   const SESSION_ID    = params.get("session") || "dev";
   const FRAMERATE     = Number(params.get("fps") || "30");
+  // T77: simulcast support. Off by default; enable with ?simulcast=true.
+  // The default ladder is 1× / 0.5× / 0.25× scale, with the bottom
+  // layer also halving FPS. Override via:
+  //   ?simulcast_layers=1,0.5,0.25@15
+  // Each entry is "<scaleResolutionDownBy>[@<maxFramerate>]". Max 3
+  // layers per the libwebrtc constraint (and per docs/protocols/simulcast.md).
+  const SIMULCAST_ENABLED = (params.get("simulcast") || "").toLowerCase() === "true";
+  const SIMULCAST_LAYERS = parseSimulcastLayersParam(params.get("simulcast_layers"));
   // Input-bridge endpoint (T22 / T41). Same container as the streamer
   // (supervisord-managed), bound to loopback. Override via ?input=...
   // for tests that run the bridge elsewhere.
@@ -64,6 +72,25 @@
   }
   function safeStringify(v) {
     try { return JSON.stringify(v); } catch { return String(v); }
+  }
+
+  // T77: parse a "1,0.5,0.25@15" comma list into [{rid, scale, fps?}].
+  // Empty/null input → the default 3-layer ladder.
+  function parseSimulcastLayersParam(raw) {
+    const def = [
+      { rid: "layer0", scale: 1, fps: undefined,        maxBitrate: 4_000_000 },
+      { rid: "layer1", scale: 2, fps: undefined,        maxBitrate: 1_500_000 },
+      { rid: "layer2", scale: 4, fps: 15,               maxBitrate:   400_000 },
+    ];
+    if (!raw) return def;
+    const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0 || parts.length > 3) return def;
+    return parts.map((p, i) => {
+      const [scaleStr, fpsStr] = p.split("@");
+      const scale = 1 / Number(scaleStr); // CSS-y "1, 0.5, 0.25" → 1, 2, 4
+      const fps = fpsStr !== undefined ? Number(fpsStr) : undefined;
+      return { rid: `layer${i}`, scale, fps };
+    });
   }
 
   // -------- session ---------------------------------------------------
@@ -325,13 +352,64 @@
         audioTracks: stream.getAudioTracks().length,
       });
     } catch (err) {
-      log("err", "getDisplayMedia failed — check Chromium auto-grant flags", String(err));
+      // The most common failure modes here, in order of how often we
+      // see them, plus where the rationale lives:
+      //
+      //   * NotAllowedError — auto-grant flags missing (see launch.md
+      //     "Chromium command line", §"Auto-grant getDisplayMedia").
+      //   * NotReadableError — Vulkan / GPU / ozone init failed and
+      //     left the screen capturer broken (see launch.md
+      //     "Why the GPU / Vulkan flags are non-negotiable on
+      //     Chromium 147"; T78-followup).
+      //   * NotFoundError — Xvfb display isn't running (check
+      //     supervisord's [program:xvfb]).
+      //
+      // We surface enough information that the next debugging
+      // session doesn't start by re-querying DevTools.
+      const detail = {
+        name: err && err.name ? err.name : "(unknown)",
+        message: err && err.message ? err.message : String(err),
+        ua: navigator.userAgent,
+      };
+      log("err", "getDisplayMedia failed — see launch.md for flag rationale",
+          detail);
       throw err;
     }
 
     // 2. Build the peer connection and attach tracks.
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+
+    // T77: simulcast — configure 3 encoding layers on the video sender
+    // BEFORE createOffer so libwebrtc bakes the rid + simulcast lines
+    // into the offer SDP. No-op when ?simulcast=true is not set.
+    if (SIMULCAST_ENABLED) {
+      try {
+        const videoSender = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (!videoSender) {
+          log("warn", "simulcast requested but no video sender available");
+        } else {
+          const sp = videoSender.getParameters();
+          sp.encodings = SIMULCAST_LAYERS.map((l) => {
+            const e = { rid: l.rid, scaleResolutionDownBy: l.scale, active: true };
+            if (l.fps !== undefined) e.maxFramerate = l.fps;
+            if (l.maxBitrate !== undefined) e.maxBitrate = l.maxBitrate;
+            return e;
+          });
+          await videoSender.setParameters(sp);
+          log("ok", "simulcast configured", {
+            layers: sp.encodings.map((e) => ({
+              rid: e.rid, scale: e.scaleResolutionDownBy,
+              maxFps: e.maxFramerate ?? null, maxBps: e.maxBitrate ?? null,
+            })),
+          });
+        }
+      } catch (err) {
+        // setParameters errors are non-fatal — we drop back to single-stream.
+        log("warn", "simulcast setParameters failed; falling back to single layer",
+            String(err));
+      }
+    }
 
     // Expose the live PeerConnection on window so:
     //   * infra/lifecycle/idle-watchdog.sh can poll

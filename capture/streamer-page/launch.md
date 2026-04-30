@@ -54,7 +54,33 @@ spelling drifts.
 chromium \
   --no-first-run \
   --no-default-browser-check \
-  --disable-features=TranslateUI,MediaRouter \
+  \
+  # Disable the features that fight the headless-Xvfb capture path on
+  # Chromium 147+. T78-followup: without `Vulkan` in the disable
+  # list, vkCreateInstance fails inside the GPU process (no Vulkan
+  # driver inside Xvfb) and the failure cascades into the screen
+  # capturer, surfacing as `NotReadableError: Could not start video
+  # source` from getDisplayMedia. VaapiVideoDecodeLinuxGL is disabled
+  # for the same reason — VAAPI isn't available under Xvfb.
+  --disable-features=TranslateUI,MediaRouter,Vulkan,VaapiVideoDecodeLinuxGL \
+  \
+  # Force the X11 ozone backend explicitly. Without this, Chromium
+  # 147 sometimes picks the headless ozone backend even when
+  # --display=:99 is set, and the headless backend cannot drive the
+  # screen capturer for getDisplayMedia. T78-followup.
+  --ozone-platform=x11 \
+  \
+  # Software GL via ANGLE/SwiftShader. The Xvfb display has no real
+  # GPU; ANGLE+SwiftShader is the supported software path that lets
+  # the compositor (and therefore the screen capturer) keep working
+  # without a Vulkan driver. T78-followup.
+  --use-gl=angle \
+  --use-angle=swiftshader-webgl \
+  \
+  # Xvfb has no real vsync; let Chromium drive the compositor at the
+  # configured framerate without waiting on a non-existent vsync
+  # signal. T78-followup.
+  --disable-gpu-vsync \
   \
   # Display + audio
   --window-size=1920,1080 \
@@ -78,6 +104,38 @@ chromium \
   # Open the streamer as an "app" (no chrome chrome).
   --app="http://localhost:9000/streamer/index.html?signal=ws://signaling:8080/ws&session=dev&fps=30"
 ```
+
+### Why the GPU / Vulkan flags are non-negotiable on Chromium 147
+
+This was T78-followup. On a stock `chromium 147` package running
+under Xvfb, the diagnostics on the running container were:
+
+```
+$ tail /var/log/supervisor/chromium.err.log
+...
+vkCreateInstance failed with VK_ERROR_INCOMPATIBLE_DRIVER
+...
+$ # streamer page log
+10:15:57.404 ERR  getDisplayMedia failed — check Chromium auto-grant flags
+                 NotReadableError: Could not start video source
+```
+
+The cause: Chromium 147 tries the Vulkan path first inside the GPU
+process. Vulkan init fails (Xvfb has no Vulkan driver), and the
+failure leaves the screen capturer in a state where the desktop
+source cannot be opened — even though the auto-grant flags
+correctly bypass the permission picker. The error propagates to
+the page as `NotReadableError`.
+
+The fix is the four flags above (`--disable-features=Vulkan,...`,
+`--ozone-platform=x11`, `--use-gl=angle --use-angle=swiftshader-webgl`,
+`--disable-gpu-vsync`) — together they pin Chromium to the
+software-rendered X11 path that has no Vulkan dependency.
+
+The Phase-2 from-source build (T17 / T49) will likely revisit this:
+once we own the Chromium binary we can pre-disable Vulkan at
+build-time (`use_vulkan = false` in `args.gn`) and skip three of
+these flags.
 
 ## Supervisord program block (sketch)
 

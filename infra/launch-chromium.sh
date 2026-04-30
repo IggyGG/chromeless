@@ -42,7 +42,11 @@ exec /usr/bin/chromium \
   --user-data-dir=/home/cbuser/.config/chromium \
   --no-first-run \
   --no-default-browser-check \
-  --disable-features=TranslateUI,MediaRouter \
+  --disable-features=TranslateUI,MediaRouter,Vulkan,VaapiVideoDecodeLinuxGL \
+  --ozone-platform=x11 \
+  --use-gl=angle \
+  --use-angle=swiftshader-webgl \
+  --disable-gpu-vsync \
   --window-size=1920,1080 \
   --window-position=0,0 \
   --autoplay-policy=no-user-gesture-required \
