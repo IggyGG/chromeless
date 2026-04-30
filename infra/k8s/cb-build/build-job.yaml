@@ -259,7 +259,16 @@ spec:
             # so a manual `kubectl set env job/cb-build SKIP_FETCH=1`
             # before re-applying skips the multi-hour fetch.
             - name: SKIP_FETCH
-              value: ""
+              # Sidesteps gclient sync — the existing 34 GB checkout at
+              # /mnt/data/cb-build-t2/chromium-src is already at
+              # branch-heads/7727 (HEAD 2731573cc6) from the earlier
+              # successful 411-sec sync. Tonight's gclient run wedged
+              # mid-fetch (TCP connection died, git stuck in read()),
+              # so skip the validation and run STEP 2-9 against
+              # the on-disk tree. Flip back to "" once the network-
+              # reliability issue with chromium.googlesource.com
+              # is investigated.
+              value: "1"
             # STUB_MODE=1 short-circuits the heavy steps — useful
             # for validating Job plumbing without a 4–8h wait.
             # Default off; flip to "1" for the DoD smoke run.
