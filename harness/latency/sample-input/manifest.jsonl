@@ -1,0 +1,4 @@
+{"file": "frame_0001.png", "captureEpochMs": 1736942400042, "expectedEmitEpochMs": 1736942400000, "expectedLatencyMs": 42}
+{"file": "frame_0002.png", "captureEpochMs": 1736942401047, "expectedEmitEpochMs": 1736942401000, "expectedLatencyMs": 47}
+{"file": "frame_0003.png", "captureEpochMs": 1736942402051, "expectedEmitEpochMs": 1736942402000, "expectedLatencyMs": 51}
+{"file": "frame_0004.png", "captureEpochMs": 1736942403088, "expectedEmitEpochMs": 1736942403000, "expectedLatencyMs": 88}

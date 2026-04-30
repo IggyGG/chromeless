@@ -125,7 +125,7 @@ Latency is measured, not asserted. The
 [`harness/`](./harness/) directory contains a flashing-color-block page and
 reconciliation script: a webcam points at the client screen, the page emits
 timestamped color transitions, and we recover glass-to-glass latency from the
-captured video. See [`harness/README.md`](./harness/) *(coming soon — T10)*
+captured video. See [`harness/latency/README.md`](./harness/latency/README.md)
 for the methodology.
 
 ---
