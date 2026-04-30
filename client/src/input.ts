@@ -37,7 +37,12 @@ export type InputType =
   | "drag_start"
   | "drag_over"
   | "drag_end"
-  | "drop";
+  | "drop"
+  // v1.1 — multi-touch. See docs/protocols/input-channel.md.
+  | "touch_start"
+  | "touch_move"
+  | "touch_end"
+  | "touch_cancel";
 
 export interface MouseMoveData { x: number; y: number; }
 export interface MouseButtonData { button: 0 | 1 | 2 | 3 | 4; action: "down" | "up"; x: number; y: number; }
@@ -58,6 +63,18 @@ export interface DragOverData  { x: number; y: number; }
 export interface DropData      { x: number; y: number; types: string[]; items: DragItem[]; }
 export interface DragEndData   { success: boolean; }
 
+// v1.1 — touch payload shapes.
+export interface TouchStartData {
+  identifier: number; x: number; y: number;
+  radius_x: number; radius_y: number; force: number; twist: number;
+}
+export interface TouchMoveData {
+  identifier: number; x: number; y: number;
+  radius_x: number; radius_y: number; force: number; twist: number;
+}
+export interface TouchEndData    { identifier: number; }
+export interface TouchCancelData { identifier: number; }
+
 export type InputData =
   | MouseMoveData
   | MouseButtonData
@@ -69,6 +86,10 @@ export type InputData =
   | DragOverData
   | DropData
   | DragEndData
+  | TouchStartData
+  | TouchMoveData
+  | TouchEndData
+  | TouchCancelData
   | Record<string, never>;
 
 export interface InputEnvelope {
@@ -129,6 +150,8 @@ export class InputChannel {
   private pendingMove: MouseMoveData | null = null;
   /** Queue of pending drag_over data; only the last one is kept after coalesce. */
   private pendingDragOver: DragOverData | null = null;
+  /** Queue of pending touch_move data per identifier; latest wins per finger. */
+  private pendingTouchMoves = new Map<number, TouchMoveData>();
   /** Queue of non-coalescable envelopes. Flushed in order on rAF tick. */
   private pendingOther: InputEnvelope[] = [];
   private rafId: number | null = null;
@@ -219,6 +242,57 @@ export class InputChannel {
 
   sendDragEnd(success: boolean): void {
     this.enqueue("drag_end", { success });
+  }
+
+  // v1.1 — touch senders. touch_move coalesces per identifier (latest
+  // position wins per finger); touch_start/end/cancel are not coalesced.
+
+  sendTouchStart(t: TouchStartData): void {
+    this.enqueue("touch_start", {
+      identifier: t.identifier,
+      x: Math.round(t.x), y: Math.round(t.y),
+      radius_x: Math.max(1, Math.round(t.radius_x)),
+      radius_y: Math.max(1, Math.round(t.radius_y)),
+      force: t.force, twist: Math.round(t.twist),
+    });
+  }
+
+  sendTouchMove(t: TouchMoveData): void {
+    if (this.ch.bufferedAmount > this.opts.bufferedAmountThreshold) {
+      this.droppedSinceLastFlush++;
+    }
+    if (this.pendingTouchMoves.has(t.identifier)) {
+      this.droppedSinceLastFlush++;
+    }
+    this.pendingTouchMoves.set(t.identifier, {
+      identifier: t.identifier,
+      x: Math.round(t.x), y: Math.round(t.y),
+      radius_x: Math.max(1, Math.round(t.radius_x)),
+      radius_y: Math.max(1, Math.round(t.radius_y)),
+      force: t.force, twist: Math.round(t.twist),
+    });
+    this.scheduleFlush();
+  }
+
+  sendTouchEnd(identifier: number): void {
+    // Force any queued touch_move for this finger out before the end
+    // event so the server sees the last-known position before the lift.
+    const queued = this.pendingTouchMoves.get(identifier);
+    if (queued !== undefined) {
+      this.pendingTouchMoves.delete(identifier);
+      this.pendingOther.push({
+        v: PROTOCOL_VERSION, type: "touch_move",
+        t: this.opts.now(), seq: 0, data: queued,
+      });
+    }
+    this.enqueue("touch_end", { identifier });
+  }
+
+  sendTouchCancel(identifier: number): void {
+    // Cancel discards any queued move for the same finger — the
+    // server should treat the finger as gone immediately.
+    this.pendingTouchMoves.delete(identifier);
+    this.enqueue("touch_cancel", { identifier });
   }
 
   /** Force-flush the queue immediately. */
@@ -330,6 +404,53 @@ export class InputChannel {
     // user has actually crossed the boundary. Phase 2 may extend
     // this for in-page drags initiated *from* the cloud Chromium.
 
+    // ----- v1.1 multi-touch -----
+    //
+    // Each TouchEvent fires with .changedTouches representing the
+    // fingers whose state changed in this event. We translate per
+    // finger to one envelope per identifier, matching the protocol's
+    // "one envelope per finger per event" rule. preventDefault on
+    // touch events suppresses the synthesized mouse events that
+    // would otherwise fire — important so the bridge doesn't see
+    // both touch_* and mouse_* envelopes for the same gesture.
+    const onTouchStart = (e: TouchEvent) => {
+      const rect = target.getBoundingClientRect();
+      for (const t of Array.from(e.changedTouches)) {
+        const { x, y } = map(t.clientX, t.clientY, rect);
+        this.sendTouchStart({
+          identifier: t.identifier, x, y,
+          radius_x: t.radiusX || 1, radius_y: t.radiusY || 1,
+          force: t.force || 0, twist: t.rotationAngle || 0,
+        });
+      }
+      e.preventDefault();
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const rect = target.getBoundingClientRect();
+      for (const t of Array.from(e.changedTouches)) {
+        const { x, y } = map(t.clientX, t.clientY, rect);
+        this.sendTouchMove({
+          identifier: t.identifier, x, y,
+          radius_x: t.radiusX || 1, radius_y: t.radiusY || 1,
+          force: t.force || 0, twist: t.rotationAngle || 0,
+        });
+      }
+      e.preventDefault();
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      for (const t of Array.from(e.changedTouches)) {
+        this.sendTouchEnd(t.identifier);
+      }
+      e.preventDefault();
+    };
+    const onTouchCancel = (e: TouchEvent) => {
+      for (const t of Array.from(e.changedTouches)) {
+        this.sendTouchCancel(t.identifier);
+      }
+      // No preventDefault on cancel — the system has already
+      // unilaterally claimed the gesture.
+    };
+
     target.addEventListener("mousemove", onMouseMove);
     target.addEventListener("mousedown", onMouseDown);
     target.addEventListener("mouseup", onMouseUp);
@@ -347,6 +468,12 @@ export class InputChannel {
     target.addEventListener("drop", onDrop as EventListener);
     target.addEventListener("dragleave", onDragLeave as EventListener);
     target.addEventListener("dragend", onDragEnd as EventListener);
+    // Touch listeners — passive:false because we call preventDefault
+    // to suppress synthesized mouse events.
+    target.addEventListener("touchstart", onTouchStart as EventListener, { passive: false });
+    target.addEventListener("touchmove",  onTouchMove  as EventListener, { passive: false });
+    target.addEventListener("touchend",   onTouchEnd   as EventListener, { passive: false });
+    target.addEventListener("touchcancel", onTouchCancel as EventListener);
 
     return () => {
       target.removeEventListener("mousemove", onMouseMove);
@@ -366,6 +493,10 @@ export class InputChannel {
       target.removeEventListener("drop", onDrop as EventListener);
       target.removeEventListener("dragleave", onDragLeave as EventListener);
       target.removeEventListener("dragend", onDragEnd as EventListener);
+      target.removeEventListener("touchstart", onTouchStart as EventListener);
+      target.removeEventListener("touchmove",  onTouchMove  as EventListener);
+      target.removeEventListener("touchend",   onTouchEnd   as EventListener);
+      target.removeEventListener("touchcancel", onTouchCancel as EventListener);
     };
   }
 
@@ -393,6 +524,7 @@ export class InputChannel {
       // Drop everything; once closed, queued events are stale.
       this.pendingMove = null;
       this.pendingDragOver = null;
+      this.pendingTouchMoves.clear();
       this.pendingOther.length = 0;
       this.droppedSinceLastFlush = 0;
       return;
@@ -429,6 +561,21 @@ export class InputChannel {
       };
       this.pendingDragOver = null;
       this.dispatch(env);
+    }
+
+    // …and the latest touch_move per finger, if any. Order is
+    // ascending by identifier for determinism (helpful in tests +
+    // makes wire traces easier to compare across runs).
+    if (this.pendingTouchMoves.size > 0) {
+      const ids = Array.from(this.pendingTouchMoves.keys()).sort((a, b) => a - b);
+      for (const id of ids) {
+        const data = this.pendingTouchMoves.get(id)!;
+        this.pendingTouchMoves.delete(id);
+        this.dispatch({
+          v: PROTOCOL_VERSION, type: "touch_move",
+          t: this.opts.now(), seq: 0, data,
+        });
+      }
     }
 
     if (this.droppedSinceLastFlush > 0) {

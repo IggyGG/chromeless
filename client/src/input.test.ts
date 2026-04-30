@@ -349,6 +349,122 @@ describe("extractDragItems", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// v1.1 — multi-touch senders
+// ---------------------------------------------------------------------------
+
+describe("InputChannel touch", () => {
+  const baseTouch = {
+    x: 100, y: 200, radius_x: 10, radius_y: 10, force: 0.5, twist: 0,
+  };
+
+  it("emits touch_start with all fields", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendTouchStart({ identifier: 7, ...baseTouch });
+    sched.tick();
+
+    expect(ch.sent).toHaveLength(1);
+    expect(ch.sent[0]!.type).toBe("touch_start");
+    expect(ch.sent[0]!.data).toEqual({
+      identifier: 7, x: 100, y: 200,
+      radius_x: 10, radius_y: 10, force: 0.5, twist: 0,
+    });
+  });
+
+  it("coalesces touch_move per identifier (latest wins per finger)", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    // Two fingers, three moves each in one rAF tick — expect exactly
+    // 2 touch_move envelopes (one per finger, with the latest pos).
+    ic.sendTouchMove({ identifier: 1, ...baseTouch, x: 10 });
+    ic.sendTouchMove({ identifier: 2, ...baseTouch, x: 20 });
+    ic.sendTouchMove({ identifier: 1, ...baseTouch, x: 11 });
+    ic.sendTouchMove({ identifier: 2, ...baseTouch, x: 21 });
+    ic.sendTouchMove({ identifier: 1, ...baseTouch, x: 12 });
+    ic.sendTouchMove({ identifier: 2, ...baseTouch, x: 22 });
+    sched.tick();
+
+    const moves = ch.sent.filter(e => e.type === "touch_move");
+    expect(moves).toHaveLength(2);
+
+    // Sorted ascending by identifier per the doFlush impl.
+    expect((moves[0]!.data as { identifier: number; x: number }).identifier).toBe(1);
+    expect((moves[0]!.data as { identifier: number; x: number }).x).toBe(12);
+    expect((moves[1]!.data as { identifier: number; x: number }).identifier).toBe(2);
+    expect((moves[1]!.data as { identifier: number; x: number }).x).toBe(22);
+  });
+
+  it("flushes pending touch_move before touch_end for the same finger", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    // Queue a move, then end. The move must ship before the end so
+    // the server sees the last-known position before lift.
+    ic.sendTouchMove({ identifier: 3, ...baseTouch, x: 50 });
+    ic.sendTouchEnd(3);
+    sched.tick();
+
+    // Order: pendingOther flushes first (touch_end was enqueued via
+    // enqueue() AFTER we forced the touch_move into pendingOther),
+    // so we expect [touch_move(50), touch_end].
+    expect(ch.sent.map(e => e.type)).toEqual(["touch_move", "touch_end"]);
+    expect((ch.sent[0]!.data as { x: number }).x).toBe(50);
+    expect((ch.sent[1]!.data as { identifier: number }).identifier).toBe(3);
+  });
+
+  it("touch_cancel discards pending touch_move for the same finger", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendTouchMove({ identifier: 4, ...baseTouch });
+    ic.sendTouchCancel(4);
+    sched.tick();
+
+    // Just touch_cancel — the queued move was discarded.
+    expect(ch.sent.map(e => e.type)).toEqual(["touch_cancel"]);
+    expect((ch.sent[0]!.data as { identifier: number }).identifier).toBe(4);
+  });
+
+  it("rounds non-integer touch coordinates and clamps radii to >= 1", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendTouchStart({
+      identifier: 1, x: 10.4, y: 20.6,
+      radius_x: 0.4, radius_y: 0.0,  // sub-pixel; should clamp to 1
+      force: 0.5, twist: 12.7,
+    });
+    sched.tick();
+
+    const env = ch.sent[0]!;
+    expect(env.data).toEqual({
+      identifier: 1, x: 10, y: 21,
+      radius_x: 1, radius_y: 1, force: 0.5, twist: 13,
+    });
+  });
+
+  it("seq increments monotonically across touch lifecycles", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendTouchStart({ identifier: 1, ...baseTouch });
+    ic.sendTouchMove({ identifier: 1, ...baseTouch, x: 50 });
+    ic.sendTouchEnd(1);
+    sched.tick();
+
+    expect(ch.sent.map(e => e.seq)).toEqual([0, 1, 2]);
+  });
+});
+
 /** Build a DataTransfer-shaped stub with a synchronous getData. */
 function makeStubDataTransfer(
   types: string[],

@@ -122,6 +122,52 @@ type dragEndData struct {
 	Success bool `json:"success"`
 }
 
+// v1.1 multi-touch payload shapes. See docs/protocols/input-channel.md.
+//
+// Per-finger updates: one envelope per identifier per event. The
+// bridge maintains the per-identifier map needed by CDP's
+// dispatchTouchEvent.
+type touchStartData struct {
+	Identifier int     `json:"identifier"`
+	X          int     `json:"x"`
+	Y          int     `json:"y"`
+	RadiusX    int     `json:"radius_x"`
+	RadiusY    int     `json:"radius_y"`
+	Force      float64 `json:"force"`
+	Twist      int     `json:"twist"`
+}
+type touchMoveData = touchStartData
+
+type touchEndData struct {
+	Identifier int `json:"identifier"`
+}
+type touchCancelData = touchEndData
+
+// touchPoint is the in-bridge representation of one active finger.
+// CDP's dispatchTouchEvent wants this assembled into a touchPoints
+// array on every call.
+type touchPoint struct {
+	id      int
+	x       int
+	y       int
+	radiusX int
+	radiusY int
+	force   float64
+	twist   int
+}
+
+func (p touchPoint) toCDP() map[string]any {
+	return map[string]any{
+		"x":             p.x,
+		"y":             p.y,
+		"radiusX":       p.radiusX,
+		"radiusY":       p.radiusY,
+		"force":         p.force,
+		"id":            p.id,
+		"rotationAngle": p.twist,
+	}
+}
+
 // parseEnvelope validates and decodes an input envelope. Returns an
 // error for unsupported `v`, missing required fields, or malformed
 // JSON. Unknown `type` values are accepted at this layer — the
@@ -401,11 +447,22 @@ type dispatcher struct {
 	dragActive   bool
 	dragInterceptOnce sync.Once
 
+	// touchMu guards the active-touches map. CDP's
+	// Input.dispatchTouchEvent expects the *currently active*
+	// touchPoints on every call (per puppeteer's convention: the
+	// array reflects state AFTER this event applies). The map is
+	// keyed by per-finger identifier supplied by the client.
+	touchMu      sync.Mutex
+	activeTouches map[int]touchPoint
+
 	metrics *metrics
 }
 
 func newDispatcher(cdp cdpSender, m *metrics, log *slog.Logger) *dispatcher {
-	return &dispatcher{cdp: cdp, log: log, metrics: m}
+	return &dispatcher{
+		cdp: cdp, log: log, metrics: m,
+		activeTouches: make(map[int]touchPoint),
+	}
 }
 
 // Dispatch routes one envelope to the correct CDP method. Errors are
@@ -644,6 +701,83 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 			d.buildDragEvent("dragCancel", 0, 0))
 		return d.fail(env.Type, err)
 
+	case "touch_start":
+		var data touchStartData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return d.fail(env.Type, fmt.Errorf("touch_start: %w", err))
+		}
+		d.touchMu.Lock()
+		d.activeTouches[data.Identifier] = touchPoint{
+			id: data.Identifier, x: data.X, y: data.Y,
+			radiusX: max1(data.RadiusX), radiusY: max1(data.RadiusY),
+			force: data.Force, twist: data.Twist,
+		}
+		points := d.touchPointsLocked()
+		d.touchMu.Unlock()
+		_, err := d.cdp.Send(ctx, "Input.dispatchTouchEvent", map[string]any{
+			"type":        "touchStart",
+			"touchPoints": points,
+			"modifiers":   0,
+		})
+		return d.fail(env.Type, err)
+
+	case "touch_move":
+		var data touchMoveData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return d.fail(env.Type, fmt.Errorf("touch_move: %w", err))
+		}
+		d.touchMu.Lock()
+		if _, known := d.activeTouches[data.Identifier]; !known {
+			d.touchMu.Unlock()
+			d.log.Warn("touch_move for unknown identifier; dropping",
+				slog.Int("id", data.Identifier))
+			return nil
+		}
+		d.activeTouches[data.Identifier] = touchPoint{
+			id: data.Identifier, x: data.X, y: data.Y,
+			radiusX: max1(data.RadiusX), radiusY: max1(data.RadiusY),
+			force: data.Force, twist: data.Twist,
+		}
+		points := d.touchPointsLocked()
+		d.touchMu.Unlock()
+		_, err := d.cdp.Send(ctx, "Input.dispatchTouchEvent", map[string]any{
+			"type":        "touchMove",
+			"touchPoints": points,
+			"modifiers":   0,
+		})
+		return d.fail(env.Type, err)
+
+	case "touch_end", "touch_cancel":
+		var data touchEndData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return d.fail(env.Type, fmt.Errorf("%s: %w", env.Type, err))
+		}
+		d.touchMu.Lock()
+		if _, known := d.activeTouches[data.Identifier]; !known {
+			d.touchMu.Unlock()
+			d.log.Warn("touch_end/cancel for unknown identifier; dropping",
+				slog.Int("id", data.Identifier),
+				slog.String("type", env.Type))
+			return nil
+		}
+		// Per CDP/puppeteer convention: touchPoints reflects the state
+		// AFTER this event applies — i.e. the remaining active touches
+		// after this finger lifts. Empty when the last finger goes up.
+		delete(d.activeTouches, data.Identifier)
+		points := d.touchPointsLocked()
+		d.touchMu.Unlock()
+
+		cdpType := "touchEnd"
+		if env.Type == "touch_cancel" {
+			cdpType = "touchCancel"
+		}
+		_, err := d.cdp.Send(ctx, "Input.dispatchTouchEvent", map[string]any{
+			"type":        cdpType,
+			"touchPoints": points,
+			"modifiers":   0,
+		})
+		return d.fail(env.Type, err)
+
 	case "clipboard_copy_request":
 		// Phase 1: synthesize Ctrl+C. The reply path ships separately.
 		_, err := d.cdp.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
@@ -703,6 +837,43 @@ func (d *dispatcher) buildDragEvent(t string, x, y int) map[string]any {
 		},
 		"modifiers": 0,
 	}
+}
+
+// touchPointsLocked snapshots the active-touches map as a CDP-shaped
+// slice, sorted by identifier for determinism (matches the client-
+// side flush order; makes traces easier to compare across runs).
+//
+// MUST be called with d.touchMu held.
+func (d *dispatcher) touchPointsLocked() []map[string]any {
+	if len(d.activeTouches) == 0 {
+		// Return a non-nil empty slice so json.Marshal emits `[]`,
+		// not `null`. CDP's some builds reject the null variant.
+		return []map[string]any{}
+	}
+	ids := make([]int, 0, len(d.activeTouches))
+	for id := range d.activeTouches {
+		ids = append(ids, id)
+	}
+	// Simple ascending sort; len(ids) is at most ~10 in practice.
+	for i := 1; i < len(ids); i++ {
+		for j := i; j > 0 && ids[j-1] > ids[j]; j-- {
+			ids[j-1], ids[j] = ids[j], ids[j-1]
+		}
+	}
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, d.activeTouches[id].toCDP())
+	}
+	return out
+}
+
+// max1 clamps a non-positive radius up to 1 px so CDP doesn't reject
+// the touchPoint. Mirrors the client-side clamp in input.ts.
+func max1(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 func (d *dispatcher) fail(eventType string, err error) error {

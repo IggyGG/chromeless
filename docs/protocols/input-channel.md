@@ -11,8 +11,10 @@ T14. The server-side dispatcher that consumes this stream is T22
 >
 > **Changelog**
 > - **v1.1** — Added `drag_start`, `drag_over`, `drag_end`, `drop` event
->   types for drag-and-drop (T45/T46). Wire `v` stays at `1`; v1
->   clients/servers ignore unknown types per the original spec.
+>   types for drag-and-drop (T45/T46). Added `touch_start`, `touch_move`,
+>   `touch_end`, `touch_cancel` for mobile-client touch input (T56).
+>   Wire `v` stays at `1`; v1 clients/servers ignore unknown types per
+>   the original spec.
 
 ---
 
@@ -230,6 +232,64 @@ file drop didn't transfer.
 **Coalescing.** `drag_over` is coalescable on the same rules as
 `mouse_move` (see [Backpressure](#backpressure-and-coalescing)).
 `drag_start`, `drop`, and `drag_end` are NEVER dropped.
+
+### `touch_start` / `touch_move` / `touch_end` / `touch_cancel` (v1.1)
+
+Multi-touch input. Mirrors the DOM `TouchEvent` API on the client side
+and dispatches via CDP `Input.dispatchTouchEvent` on the server side
+(T22). v1 success criteria deferred touch to Phase 4 (mobile is
+"best-effort" per [`docs/v1-success-criteria.md`](../v1-success-criteria.md)
+B5), but landing the wire format early lets a mobile client form-
+factor work end-to-end on day one.
+
+**Identifier semantics.** Each ongoing touch carries a stable
+`identifier` — the same integer on every event for the same finger,
+chosen by the client and unique per active touch. After `touch_end`
+or `touch_cancel` the identifier MAY be reused. The server MUST treat
+`touch_move`/`touch_end`/`touch_cancel` for an identifier it has not
+seen `touch_start` for as a no-op + warning.
+
+**One envelope per finger per event.** Multi-touch gestures produce
+one envelope per moving finger per DOM event, not one envelope
+carrying all current touches. The server-side bridge maintains the
+"active touches" snapshot needed by CDP from those single-finger
+updates.
+
+```jsonc
+// touch_start  — finger 1 lands at (612, 401)
+{ "identifier": 1, "x": 612, "y": 401,
+  "radius_x": 12, "radius_y": 12, "force": 0.6, "twist": 0 }
+
+// touch_move   — finger 1 slides
+{ "identifier": 1, "x": 700, "y": 410,
+  "radius_x": 12, "radius_y": 12, "force": 0.6, "twist": 0 }
+
+// touch_end    — finger 1 lifts
+{ "identifier": 1 }
+
+// touch_cancel — system cancelled the touch (e.g. notification)
+{ "identifier": 1 }
+```
+
+| field      | type     | required | notes                                                                |
+|------------|----------|----------|----------------------------------------------------------------------|
+| `identifier` | int    | yes      | per-finger; stable across the lifetime of one touch                  |
+| `x`,`y`    | int      | yes for `touch_start` / `touch_move` | content-space coords           |
+| `radius_x`,`radius_y` | int | optional | contact ellipse radii (px). Default 1 if omitted.            |
+| `force`    | float    | optional | 0.0–1.0; mirrors `Touch.force`. Default 0 if not reported.           |
+| `twist`    | int      | optional | rotation in degrees clockwise; mirrors `Touch.rotationAngle`. Default 0. |
+
+**Coalescing.** `touch_move` is coalescable per finger: when more than
+one `touch_move` for the same `identifier` is queued in a single
+flush window, only the latest is kept. Other finger identifiers are
+preserved independently. `touch_start`, `touch_end`, and
+`touch_cancel` are NEVER dropped.
+
+**Mapping to CDP.** The bridge maintains a map of active touches
+keyed by `identifier` and on every event re-issues
+`Input.dispatchTouchEvent` with the *currently active* set as
+`touchPoints` (per CDP/puppeteer convention: the array reflects the
+state *after* this event applies — empty when the last finger lifts).
 
 ---
 
