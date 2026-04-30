@@ -1,11 +1,37 @@
-# build-job.yaml — Chromium build Job for triform-6 (T112).
+# build-job.yaml — Chromium build Job for triform-6 (T112 + T119).
 #
 # Drives T113's `build/cb-build.sh` end-to-end on a single Pod
 # scheduled to triform-6. The script handles gclient sync, symlink,
 # patch apply, sccache, gn gen, autoninja, unit tests, and binary
-# packaging. T112's responsibility is the K8s plumbing: PVCs, node
-# pinning, the bootstrap initContainer that gets our repo onto the
-# Pod, env wiring per T113's contract, and resource sizing.
+# packaging.
+#
+# T119 hostPath workaround
+# ------------------------
+# This Job originally used PVCs (chromium-src 500 GiB,
+# sccache 100 GiB on openebs-hostpath). When the team-lead tried to
+# bring it up live on the Triform cluster, openebs-localpv-provisioner
+# was silent on every new claim — across openebs-hostpath,
+# triform-data, AND ceph-rbd. Existing 8-day-old PVCs on the cluster
+# remained healthy, so the regression is provisioner-side for new
+# claims, not disk-space (triform-6 has 5.4T free on /data) and not
+# RBAC.
+#
+# To unblock T112 → T113 → T114, this version of the Job uses
+# hostPath volumes pinned to triform-6's /data filesystem. Trade-offs:
+#   - PRO: works today; no provisioner involvement.
+#   - PRO: 5.4T free on /dev/md5 mounted at /data on triform-6 — well
+#          beyond what the build needs.
+#   - CON: hostPath is operator-pattern, not portable. The dir is
+#          tied to a specific node; if triform-6 dies, so does this
+#          build state.
+#   - CON: requires runAsUser:0 in an init container to chown the dir
+#          for cbuser (uid 1000). The chart-wide PSP / pod-security
+#          baseline allows it; the cb-build ns is labelled
+#          triform.ai/purpose=build precisely to scope this kind of
+#          thing.
+#
+# When the openebs provisioner regression is fixed, revert to the
+# pre-T119 PVC version (git history will show the diff).
 #
 # Contract with T113 (see ../../../build/cb-build.sh header):
 #   /workspace            — our repo, read-only mount.
@@ -21,12 +47,12 @@
 # Headroom for kubelet, sshd, the sccache server, and the linker's
 # RSS spike during the chrome-target link.
 #
-# restartPolicy + backoffLimit: OnFailure + 2 = 3 attempts max. Each
-# retry's bootstrap initContainer is idempotent; the chromium-src
-# PVC survives, so a re-run picks up incrementally. T113's
-# SKIP_FETCH=1 toggle is set on retries so the gclient sync step
-# (which dominates first-run wall-clock) doesn't re-do a populated
-# tree.
+# restartPolicy + backoffLimit: OnFailure + 2 = 3 attempts max.
+# Each retry's bootstrap initContainers are idempotent; the hostPath
+# dirs survive across retries (and across Job deletions), so a re-run
+# picks up incrementally. T113's SKIP_FETCH=1 toggle is set on
+# retries so the gclient sync step (which dominates first-run
+# wall-clock) doesn't re-do a populated tree.
 #
 # activeDeadlineSeconds: 8h. T17 §4 cold-build worst case.
 
@@ -49,28 +75,63 @@ spec:
         app.kubernetes.io/component: build
     spec:
       restartPolicy: OnFailure
-      # Pin to triform-6: 32 CPU / 128 GiB / openebs-hostpath PVCs.
-      # Both PVCs use WaitForFirstConsumer so they materialise on
-      # whichever node this Pod lands on; nodeName guarantees that's
-      # triform-6.
+      # Pin to triform-6: 32 CPU / 128 GiB. hostPath volumes below
+      # require this — the directories live on triform-6's /data
+      # filesystem and follow the node, not the Pod.
       nodeName: triform-6
       # If a future cluster admin taints triform-6 (maintenance), the
       # scheduler fails this Pod cleanly rather than picking another
       # node. Repeating the hostname here makes that a NotReady error
-      # rather than a silent cross-node migration.
+      # rather than a silent cross-node migration that would lose
+      # access to the hostPath dirs.
       nodeSelector:
         kubernetes.io/hostname: triform-6
       imagePullSecrets:
         - name: registry-pull
       initContainers:
-        # bootstrap-our-repo: clone our repo into /workspace (the path
-        # T113's cb-build.sh expects via CB_REPO=/workspace), and
-        # chown the work-tree + sccache PVCs to uid 1000 so the
-        # unprivileged builder user can write to them.
+        # 1/2: host-permissions — run as root, chown the hostPath dirs
+        # to uid 1000 so the unprivileged builder user in the runner
+        # image can write. Idempotent: re-running on a Pod retry
+        # finds 1000:1000-owned dirs and the chown is a no-op.
+        #
+        # The `type: DirectoryOrCreate` on the volumes ensures kubelet
+        # creates the dir if absent; the chown happens inside that
+        # newly-created dir. We mount the parent /data/cb-build for
+        # this container so a single chown -R covers both subdirs in
+        # one shot.
+        - name: host-permissions
+          image: alpine:3.20
+          command:
+            - sh
+            - -euxc
+            - |
+              # Both subdirs may be empty (first run) or populated
+              # (subsequent run). chown -R is idempotent in either
+              # case.
+              mkdir -p /work /sccache
+              chown -R 1000:1000 /work /sccache
+              ls -la /work /sccache
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              # We need DAC_OVERRIDE + CHOWN to chown a dir we don't
+              # already own. Drop the rest.
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+        # 2/2: bootstrap-our-repo — clone our repo into /workspace
+        # (the path T113's cb-build.sh expects via CB_REPO=/workspace).
+        # Runs after host-permissions so /work and /sccache are
+        # already 1000-owned by the time the main container starts.
         #
         # Idempotent: re-running on the same Pod refreshes via
-        # `git fetch` + `git reset --hard`. PVC chown becomes a no-op
-        # on the second run.
+        # `git fetch` + `git reset --hard`.
         - name: bootstrap-our-repo
           image: alpine/git:2.47.0
           command:
@@ -94,32 +155,31 @@ spec:
                 exit 1
               fi
 
-              # Ensure the runner-user (uid 1000) can write to the
-              # PVCs. PVCs come up root-owned on first use; subsequent
-              # runs are already 1000:1000 and the chown is a no-op.
-              chown -R 1000:1000 /work /sccache /workspace
-
-              # Pre-create T113's expected subdirs (cb-build.sh does
-              # mkdir -p anyway, but doing it here avoids a confusing
-              # permission error if the user-side mkdir lands before
-              # the chown propagates).
+              # Pre-create T113's expected subdirs under /work. The
+              # host-permissions initContainer has already chown'd
+              # /work + /sccache, but the subdirs inside them haven't
+              # been created yet on a fresh hostPath.
               mkdir -p /work/src/chromium /work/artifacts /work/logs
-              chown -R 1000:1000 /work
+              chown -R 1000:1000 /work/src /work/artifacts /work/logs
           env:
-            # Forgejo URL for our repo. The forgejo namespace's
-            # registry-pull secret already proves egress to this
-            # host works from triform-6.
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/iggy/cloud-browser-webrtc.git"
             # Track main by default; set to a tag/SHA for reproducible
             # builds (`kubectl set env job/cb-build OUR_REPO_REF=v0.2.0`).
             - name: OUR_REPO_REF
               value: "main"
-          # Bootstrap needs root briefly to chown PVCs; main container
-          # runs as 1000.
+          # Bootstrap also needs root briefly to write under /work
+          # (which we just chown'd — but the workspace emptyDir is
+          # root-owned at first, and the post-chown of /work/src etc.
+          # needs root again). The chained ALL-drop + minimal adds
+          # keeps the privilege boundary tight.
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
           volumeMounts:
             - name: workdir
               mountPath: /work
@@ -167,15 +227,13 @@ spec:
               value: "cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests"
             # Ninja parallelism. autoninja's auto-detect picks
             # nproc=32 on triform-6, which over-subscribes the
-            # 30-CPU container. Cap at 28 so the linker has spare
-            # threads for lto + we don't preempt the sccache server.
+            # 30-CPU container cap; gives lto + sccache server headroom.
             - name: NINJA_PARALLELISM
               value: "28"
             # T113 reads SKIP_FETCH=1 to skip the gclient sync on
-            # retries. The bootstrap initContainer clears any
-            # in-flight gclient state so a retry on a partially-
-            # synced tree continues cleanly. Operators can override
-            # for the rare "wipe and resync" case.
+            # retries. The hostPath dirs survive across Job deletions,
+            # so a manual `kubectl set env job/cb-build SKIP_FETCH=1`
+            # before re-applying skips the multi-hour fetch.
             - name: SKIP_FETCH
               value: ""
             # STUB_MODE=1 short-circuits the heavy steps — useful
@@ -220,19 +278,24 @@ spec:
             seccompProfile:
               type: RuntimeDefault
       volumes:
-        # Single PVC holds Chromium tree + artifacts + logs. T113
-        # lays them out as /work/src/chromium, /work/artifacts,
-        # /work/logs — all under the same volume.
+        # T119: hostPath workaround for the openebs-localpv-provisioner
+        # regression. /data is /dev/md5 on triform-6 (5.4T total,
+        # 5.4T free at deploy time — sibling to image-backups, the
+        # canonical Triform large-disk path on these nodes).
+        # DirectoryOrCreate ensures kubelet creates the subdir if
+        # absent. The host-permissions initContainer chowns to 1000.
         - name: workdir
-          persistentVolumeClaim:
-            claimName: chromium-src
+          hostPath:
+            path: /data/cb-build/chromium-src
+            type: DirectoryOrCreate
         - name: sccache
-          persistentVolumeClaim:
-            claimName: sccache
+          hostPath:
+            path: /data/cb-build/sccache
+            type: DirectoryOrCreate
         # Our repo lives in an emptyDir — bootstrap initContainer
         # populates it once, main container reads-only. Survival
         # across Pod restarts isn't needed; bootstrap is cheap and
-        # idempotent. Sized to fit our repo (a few hundred MB).
+        # idempotent.
         - name: workspace
           emptyDir:
             sizeLimit: 1Gi

@@ -1,19 +1,46 @@
-# cb-build — Chromium build environment on triform-6 (T112)
+# cb-build — Chromium build environment on triform-6 (T112 + T119)
 
 Realises T17 + T101's plan: a K8s Job pinned to triform-6 (32 CPU /
 128 GiB) that runs `cb-build.sh` (T113) to produce
 `cloud_browser_worker` and the encoder unit-test binary from a
 Chromium source checkout + our patch series.
 
+## Why hostPath instead of PVC (T119)
+
+Originally this Job used PVCs (chromium-src 500 GiB + sccache 100 GiB
+on `openebs-hostpath`). The first live attempt to bring it up on the
+Triform cluster hit a **provisioner regression**: openebs-localpv-provisioner
+was silent on every new claim across `openebs-hostpath`,
+`triform-data`, and `ceph-rbd`. PVCs from 8+ days earlier remained
+healthy; only new claims failed. Not disk-space (triform-6 has 5.4T
+free on `/data`), not RBAC.
+
+The pragmatic workaround: pin the build state to triform-6's
+`/data/cb-build/{chromium-src,sccache}` via hostPath. Trade-offs:
+
+- **PRO:** works today, no provisioner involvement.
+- **PRO:** /data is /dev/md5 with 5.4T free — bigger than the PVC
+  sizing.
+- **CON:** hostPath isn't portable. The dirs are tied to triform-6;
+  rebuild the node and you lose the build state.
+- **CON:** needs an init container running as root (with `CHOWN` cap)
+  to chown the hostPath for the unprivileged builder user. The
+  `cb-build` ns is labelled `triform.ai/purpose=build` so this kind
+  of thing is scoped.
+
+When the provisioner regression is fixed cluster-wide, revert to the
+pre-T119 PVC version — `git log -p infra/k8s/cb-build/build-job.yaml`
+shows the diff, and resurrecting `pvc-chromium-src.yaml` +
+`pvc-sccache.yaml` from the same commit takes a minute.
+
 ## Layout
 
 | File | Purpose |
 |------|---------|
 | `namespace.yaml` | `cb-build` ns. Isolated from the runtime ns so build-only quotas / network policies / labels don't leak. |
-| `pvc-chromium-src.yaml` | 500 GiB RWO openebs-hostpath PVC. Holds the Chromium tree, our repo as `//cloud-browser`, and `out/cb-release/`. |
-| `pvc-sccache.yaml` | 100 GiB RWO openebs-hostpath PVC. Local-disk sccache; production swap to S3 backend documented in T17 §5. |
-| `build-job.yaml` | The Job. nodeName=triform-6, 30 CPU / 120 GiB, OnFailure / backoffLimit=2 / 8h activeDeadline. |
-| `Dockerfile.build-runner` | Build-runner image: Debian 12 + depot_tools + sccache + git + python3 + sudo. Pushed to forgejo. |
+| `build-job.yaml` | The Job. nodeName=triform-6, 30 CPU / 120 GiB, OnFailure / backoffLimit=2 / 8h activeDeadline. hostPath volumes per T119. |
+| `cleanup-job.yaml` | **Manual** Job to wipe `/data/cb-build/` on triform-6. NOT in the kustomize bundle — operator runs explicitly when starting from scratch. |
+| `Dockerfile.build-runner` | Build-runner image: Debian 12 + depot_tools + sccache + git + python3 + sudo + zstd. Pushed to forgejo. |
 | `kustomization.yaml` | `kubectl apply -k .` entry. |
 
 ## Prereqs (one-time, per-cluster)
@@ -147,19 +174,52 @@ the per-file overhead of the cp implementation).
 
 ## Iterate on the build
 
-Once the first build is green, **don't** delete + re-apply the Job
-unless you need to start from scratch. The PVCs survive Job
-deletion, so successive builds reuse the synced Chromium tree +
-sccache. The fast-path is:
+Once the first build is green, **don't** delete `/data/cb-build/` on
+triform-6 unless you need to start from scratch. The hostPath dirs
+survive Job deletion, so successive builds reuse the synced
+Chromium tree + sccache. The fast-path is:
 
 ```bash
-# Re-run the same Job on the same PVCs.
-kubectl delete job cb-build -n cb-build  # PVCs survive
-kubectl apply  -k infra/k8s/cb-build/    # recreates Job
+# Re-run the same Job on the same hostPath dirs.
+kubectl delete job cb-build -n cb-build   # hostPath dirs survive
+kubectl apply  -k infra/k8s/cb-build/     # recreates Job
+```
+
+For incremental retries that should skip the multi-hour gclient
+sync entirely:
+
+```bash
+# Tell cb-build.sh to assume the tree is already populated.
+kubectl -n cb-build delete job cb-build
+kubectl -n cb-build apply -k infra/k8s/cb-build/
+kubectl -n cb-build set env job/cb-build SKIP_FETCH=1
 ```
 
 `cb-build.sh` (T113) is responsible for distinguishing first-run
 (needs gclient sync) from subsequent runs (incremental autoninja).
+
+### Start fresh (wipe hostPath state)
+
+If a build wedged the tree in a state cb-build.sh can't recover from,
+or you want to validate from a totally clean baseline:
+
+```bash
+# Apply the manual cleanup Job. NOT in the kustomize bundle.
+kubectl apply -f infra/k8s/cb-build/cleanup-job.yaml
+kubectl logs -n cb-build job/cb-build-cleanup -f
+kubectl delete job -n cb-build cb-build-cleanup     # auto-cleans after ttl, but explicit is fine
+
+# Then re-apply the build Job — hostPath DirectoryOrCreate recreates the dirs empty.
+kubectl apply -k infra/k8s/cb-build/
+```
+
+To wipe selectively (e.g. preserve sccache for a fast next build),
+edit `cleanup-job.yaml`'s `command` to remove only the directory you
+want gone before applying.
+
+Direct ssh to triform-6 also works — `sudo rm -rf /data/cb-build/*` —
+but only if you're already comfortable opening that shell. The
+cleanup Job is the kubectl-only path.
 
 ## cb-build.sh contract (T113)
 
@@ -175,7 +235,7 @@ T113's expected default.
 | Var | Value | Purpose |
 |-----|-------|---------|
 | `CB_REPO` | `/workspace` | Our repo root. Read-only emptyDir mount populated by the bootstrap initContainer. |
-| `CB_WORK_ROOT` | `/work` | Work-tree root. Holds `src/chromium/` (Chromium checkout), `artifacts/` (output binaries), `logs/` (timestamped log files). On the chromium-src PVC. |
+| `CB_WORK_ROOT` | `/work` | Work-tree root. Holds `src/chromium/` (Chromium checkout), `artifacts/` (output binaries), `logs/` (timestamped log files). hostPath: `/data/cb-build/chromium-src` on triform-6. |
 | `CHROMIUM_BRANCH_NUMBER` | `7727` | Plain integer, NOT `refs/branch-heads/...`. Script constructs the full ref. M147 stable; verify on chromiumdash before each roll. |
 | `CB_BUILD_TARGETS` | `cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests` | autoninja targets. |
 | `SCCACHE_DIR` | `/sccache` | Local-disk cache (sccache PVC mount). |
@@ -201,13 +261,16 @@ T113's expected default.
 
 | Symptom | Diagnosis | Fix |
 |---------|-----------|-----|
-| Pod stuck `Pending` | Triform-6 oversubscribed; PVC PV not provisioned | `kubectl describe pod -n cb-build` — read the events. Resize / drain another workload off triform-6. |
+| Pod stuck `Pending` | Triform-6 oversubscribed | `kubectl describe pod -n cb-build` — read the events. Resize / drain another workload off triform-6. |
+| Pod stuck `ContainerCreating` with hostPath error | `/data` missing on triform-6, or kubelet refused the hostPath | ssh triform-6, confirm `/data` is mounted (`df -h /data`). hostPath `DirectoryOrCreate` will create `/data/cb-build/{chromium-src,sccache}` but the parent must exist. |
+| `host-permissions` initContainer fails with "operation not permitted" on chown | Cluster PSP / pod-security blocks the CHOWN cap | The cb-build ns is labelled `triform.ai/purpose=build` to allow this. If a tighter cluster policy lands, scope the policy to exclude this ns or replace this initContainer with a privileged hostPath chown via a DaemonSet. |
 | `bootstrap-our-repo` fails on git clone | OUR_REPO unreachable / wrong ref | Check forgejo.triform.dev reachability from triform-6; verify `OUR_REPO_REF` exists. |
 | `bootstrap-our-repo` reports "build/cb-build.sh missing" | T113 hasn't landed the script | Check the `OUR_REPO_REF` branch HEAD. Block until T113. |
-| Main container OOMKilled | Linker peak exceeded 120 GiB | Reduce parallelism: set `NINJA_PARALLEL` env (cb-build.sh honours per T17 §4). Or split: build `cloud_browser_worker` first, then the unit-test target. |
+| Main container OOMKilled | Linker peak exceeded 120 GiB | Reduce parallelism: set `NINJA_PARALLELISM` env to 16 (default is 28). Or split: build `cloud_browser_worker` first, then the unit-test target. |
 | `gclient sync` HTTPS errors | Egress to chromium.googlesource.com blocked | Confirm cluster egress NetworkPolicies don't drop the cb-build ns. (Default: no policy applied; this should be open.) |
-| Build wall-clock > 8h | Pod hits `activeDeadlineSeconds` | First build with cold sccache is the slow one — bump deadline once for the cold run, or warm the cache by mounting an existing sccache PVC. |
-| Same patch fails to apply repeatedly | Patch context drift after a Chromium roll | Rebase patches/ against `${CHROMIUM_BRANCH}` HEAD; tracking-issue the rebase. |
+| Build wall-clock > 8h | Pod hits `activeDeadlineSeconds` | First build with cold sccache is the slow one — bump deadline once for the cold run, or wipe sccache only via `cleanup-job.yaml` selectively to keep the chromium tree. |
+| Same patch fails to apply repeatedly | Patch context drift after a Chromium roll | Rebase patches/ against `${CHROMIUM_BRANCH_NUMBER}` HEAD; tracking-issue the rebase. |
+| Free space on `/data` shrinking faster than expected | Stale build state from a previous roll | `kubectl logs -n cb-build job/cb-build-cleanup` after running cleanup-job; or ssh triform-6 and `du -sh /data/cb-build/*`. |
 
 ## Cross-references
 

@@ -1,15 +1,20 @@
 # kustomization.yaml — `kubectl apply -k` entry point for the
-# Chromium build env on triform-6 (T112).
+# Chromium build env on triform-6 (T112 + T119).
+#
+# T119 dropped the PVC manifests after openebs-localpv-provisioner
+# stopped binding new claims on the cluster. Volumes now live as
+# hostPath dirs on triform-6's /data filesystem (5.4T free,
+# /dev/md5). See build-job.yaml's header for the full rationale and
+# README.md for the workaround story + cleanup procedure.
 #
 # Apply order:
 #   1. namespace.yaml — creates cb-build ns
-#   2. PVCs (both bind on first Pod consumption per
-#      WaitForFirstConsumer)
-#   3. build-job.yaml — Job that runs the build
+#   2. build-job.yaml — Job that runs the build
 #
-# Kustomize handles ordering automatically (Namespace → PVC → Job by
-# resource kind precedence), so the file order in `resources` is
-# documentation rather than load-bearing.
+# cleanup-job.yaml is NOT in the default resources list — it's a
+# manually-applied "wipe and restart" Job (`kubectl apply -f
+# cleanup-job.yaml`). Including it here would run it on every
+# `kubectl apply -k`, which is the opposite of what we want.
 #
 # The Dockerfile.build-runner is intentionally NOT a resource here —
 # it's an image-build artifact, not a K8s object. See README.md for
@@ -22,8 +27,6 @@ namespace: cb-build
 
 resources:
   - namespace.yaml
-  - pvc-chromium-src.yaml
-  - pvc-sccache.yaml
   - build-job.yaml
 
 labels:
