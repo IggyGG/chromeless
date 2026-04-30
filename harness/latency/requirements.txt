@@ -1,0 +1,14 @@
+# Python dependencies for harness/latency.
+#
+# server-sink.py — websocket sink for in-band timestamps from the
+# harness page. websockets is the only dep here.
+#
+# reconcile.py (T11) adds opencv/pyzbar/numpy/matplotlib; pinning
+# all of them in this single file so a tester can `pip install -r`
+# once and run the whole harness.
+
+websockets==12.0
+pyzbar==0.1.9
+opencv-python==4.10.0.84
+numpy==1.26.4
+matplotlib==3.8.4

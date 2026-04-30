@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Glass-to-glass latency harness — flashing block</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <style>
+    /* Reset to a black canvas so we control every pixel. */
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #000;
+      overflow: hidden;
+      cursor: none;
+    }
+
+    /* The flashing block fills the viewport. We toggle its color. */
+    #block {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #000; /* default OFF state */
+      transition: none;
+    }
+
+    /* Top-left timestamp QR code — high contrast, sized large enough
+       for a 720p webcam at ~50 cm to resolve (a 21x21 V1 QR with 12px
+       modules = ~250px square; we go bigger for resilience). */
+    #qr {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      background: #fff;
+      padding: 8px;
+      box-sizing: content-box;
+      image-rendering: pixelated;
+    }
+
+    /* Bottom-right human-readable timestamp & status — also useful for
+       a tester eyeballing a recording. Big and high-contrast. */
+    #status {
+      position: fixed;
+      bottom: 12px;
+      right: 16px;
+      color: #fff;
+      background: rgba(0,0,0,0.55);
+      padding: 6px 12px;
+      border-radius: 4px;
+      font: 600 18px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    /* Top-right binary-bar timestamp — a fallback encoding the
+       reconciliation script can read if QR detection misses a frame.
+       16 bars representing the low 16 bits of the frame counter,
+       black=0 white=1, on a grey background that's neither ON nor OFF. */
+    #bars {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      gap: 4px;
+      background: #888;
+      padding: 8px;
+    }
+    #bars > div {
+      width: 14px;
+      height: 64px;
+    }
+
+    /* No-flash overlay: when the user holds 'p' we pause flashing without
+       leaving the page. */
+    .paused #block { background: #404040 !important; }
+  </style>
+</head>
+<body>
+  <div id="block"></div>
+  <canvas id="qr" width="280" height="280" aria-hidden="true"></canvas>
+  <div id="bars" aria-hidden="true"></div>
+  <div id="status">init…</div>
+
+  <script src="vendor-qrcode.js"></script>
+  <script src="encode-timestamp.js"></script>
+  <script>
+    // ---------------------------------------------------------------
+    // Configuration
+    // ---------------------------------------------------------------
+    // Flash period in ms. 1000 ms (1 Hz) is conservative — slow enough
+    // for a 30 fps webcam to capture multiple frames of each state.
+    // Make this configurable via ?period=500 etc.
+    const params = new URLSearchParams(location.search);
+    const FLASH_PERIOD_MS = parseInt(params.get('period') || '1000', 10);
+    const SINK_URL = params.get('sink') || 'ws://localhost:9001';
+    const ON_COLOR = params.get('on') || '#ff0000';   // bright red
+    const OFF_COLOR = params.get('off') || '#000000'; // pure black
+    const RUN_ID = params.get('run') || `run-${Date.now()}`;
+
+    // ---------------------------------------------------------------
+    // Elements
+    // ---------------------------------------------------------------
+    const block = document.getElementById('block');
+    const qr = document.getElementById('qr');
+    const bars = document.getElementById('bars');
+    const status = document.getElementById('status');
+
+    // Build 16 bar elements for the binary-bar fallback encoding.
+    const BAR_COUNT = 16;
+    const barEls = [];
+    for (let i = 0; i < BAR_COUNT; i++) {
+      const d = document.createElement('div');
+      bars.appendChild(d);
+      barEls.push(d);
+    }
+
+    // ---------------------------------------------------------------
+    // Sink — best-effort websocket. If it fails we still record locally.
+    // ---------------------------------------------------------------
+    let sink = null;
+    let sinkOpen = false;
+    function connectSink() {
+      try {
+        sink = new WebSocket(SINK_URL);
+        sink.onopen = () => { sinkOpen = true; console.log('sink open', SINK_URL); };
+        sink.onclose = () => { sinkOpen = false; setTimeout(connectSink, 2000); };
+        sink.onerror = () => { sinkOpen = false; };
+      } catch (e) {
+        console.warn('sink connect failed', e);
+        setTimeout(connectSink, 2000);
+      }
+    }
+    connectSink();
+
+    // Local in-memory log; downloadable as JSONL via 'd' key.
+    const log = [];
+    function emit(record) {
+      log.push(record);
+      if (sinkOpen) {
+        try { sink.send(JSON.stringify(record)); } catch {}
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Flash loop
+    // ---------------------------------------------------------------
+    let frameId = 0;
+    let on = false;
+    let lastSwap = 0;
+    let paused = false;
+
+    function tick(now) {
+      if (paused) {
+        requestAnimationFrame(tick);
+        return;
+      }
+      // Decide if we should swap state. We swap on the rAF tick that
+      // is the first one >= the next swap deadline. The `paintTime`
+      // we record is the rAF timestamp, which is the time of the
+      // *upcoming* paint per the HTML spec — not perfect but the best
+      // a JS-only harness can do without OffscreenCanvas instrumentation.
+      if (now - lastSwap >= FLASH_PERIOD_MS) {
+        on = !on;
+        block.style.background = on ? ON_COLOR : OFF_COLOR;
+        frameId++;
+        lastSwap = now;
+
+        // Encode timestamp into QR + bars + DOM.
+        const epochMs = Date.now();
+        const perfMs = now;
+        const code = encodeTimestamp({
+          frameId,
+          on,
+          epochMs,
+          runId: RUN_ID,
+        });
+
+        drawQrInto(qr, code, 13);
+        drawBars(barEls, frameId);
+
+        const rec = {
+          type: 'flash',
+          frameId,
+          state: on ? 'ON' : 'OFF',
+          color: on ? ON_COLOR : OFF_COLOR,
+          // Both timebases — perf for high-res monotonic, epoch for joining
+          // with other observers.
+          perfMs,
+          epochMs,
+          runId: RUN_ID,
+          code,
+        };
+        emit(rec);
+
+        status.textContent =
+          `f=${String(frameId).padStart(5, '0')} ${rec.state} ` +
+          `t=${epochMs} run=${RUN_ID}`;
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame((t) => { lastSwap = t - FLASH_PERIOD_MS; tick(t); });
+
+    // ---------------------------------------------------------------
+    // Draw 16-bit binary-bar fallback. Black bar = 0, white = 1.
+    // LSB is leftmost.
+    // ---------------------------------------------------------------
+    function drawBars(els, value) {
+      for (let i = 0; i < els.length; i++) {
+        const bit = (value >> i) & 1;
+        els[i].style.background = bit ? '#fff' : '#000';
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Keys
+    //   p — pause/resume flashing (block goes neutral grey)
+    //   d — download log as JSONL
+    //   f — fullscreen toggle
+    // ---------------------------------------------------------------
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'p') {
+        paused = !paused;
+        document.body.classList.toggle('paused', paused);
+      } else if (e.key === 'd') {
+        const blob = new Blob(
+          log.map((r) => JSON.stringify(r) + '\n'),
+          { type: 'application/x-ndjson' }
+        );
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${RUN_ID}.jsonl`;
+        a.click();
+      } else if (e.key === 'f') {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen();
+      }
+    });
+
+    console.log('latency harness running', { FLASH_PERIOD_MS, RUN_ID, SINK_URL });
+  </script>
+</body>
+</html>
