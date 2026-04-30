@@ -163,7 +163,7 @@ spec:
               chown -R 1000:1000 /work/src /work/artifacts /work/logs
           env:
             - name: OUR_REPO
-              value: "https://forgejo.triform.dev/iggy/cloud-browser-webrtc.git"
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
             # Track main by default; set to a tag/SHA for reproducible
             # builds (`kubectl set env job/cb-build OUR_REPO_REF=v0.2.0`).
             - name: OUR_REPO_REF
@@ -202,7 +202,7 @@ spec:
             # CB_REPO/.git when this is unset, so we provide it for
             # `kubectl describe` legibility.
             - name: OUR_REPO
-              value: "https://forgejo.triform.dev/iggy/cloud-browser-webrtc.git"
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
               value: "main"
             # T113 expects branch number, NOT a full ref. M147 stable
