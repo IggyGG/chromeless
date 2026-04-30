@@ -1,0 +1,296 @@
+{
+  "ts": "2026-04-30T10:47:20.546Z",
+  "runs": [
+    {
+      "profile": "default",
+      "fixture": "webgl",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgl-fixture.html",
+      "screenshot": "tests/rendering/local-probe-default-webgl.png",
+      "result": {
+        "fixture": "webgl",
+        "ts": "2026-04-30T10:47:22.140Z",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/130.0.6723.31 Safari/537.36",
+        "probes": [
+          {
+            "name": "webgl context",
+            "outcome": "ok",
+            "detail": {
+              "vendor": "Google Inc. (Apple)",
+              "renderer": "ANGLE (Apple, Apple M5, OpenGL 4.1)",
+              "version": "WebGL 1.0 (OpenGL ES 2.0 Chromium)",
+              "glsl": "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
+              "maxTextureSize": 16384,
+              "maxViewportDims": {
+                "0": 16384,
+                "1": 16384
+              }
+            }
+          },
+          {
+            "name": "webgl2 context",
+            "outcome": "ok",
+            "detail": {
+              "vendor": "Google Inc. (Apple)",
+              "renderer": "ANGLE (Apple, Apple M5, OpenGL 4.1)",
+              "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+              "glsl": "WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)",
+              "maxTextureSize": 16384,
+              "maxViewportDims": {
+                "0": 16384,
+                "1": 16384
+              }
+            }
+          },
+          {
+            "name": "WebGL1 triangle",
+            "outcome": "ok",
+            "detail": {
+              "centerPixel": [
+                102,
+                217,
+                102,
+                255
+              ],
+              "looksGreen": true
+            }
+          },
+          {
+            "name": "WebGL2 triangle",
+            "outcome": "ok",
+            "detail": {
+              "centerPixel": [
+                102,
+                217,
+                102,
+                255
+              ],
+              "looksGreen": true
+            }
+          },
+          {
+            "name": "WebGL1 textured",
+            "outcome": "warn",
+            "detail": {
+              "topLeft": [
+                0,
+                0,
+                255,
+                255
+              ],
+              "bottomRight": [
+                0,
+                255,
+                0,
+                255
+              ],
+              "tlRedish": false,
+              "brWhitish": false
+            }
+          },
+          {
+            "name": "WebGL2 FBO + MSAA",
+            "outcome": "warn",
+            "detail": {
+              "centerPixel": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "samples": 4,
+              "looksOrange": false
+            }
+          },
+          {
+            "name": "WebGL1 highp+mediump compile",
+            "outcome": "ok",
+            "detail": "highp + mediump compile"
+          }
+        ],
+        "summary": {
+          "total": 7,
+          "ok": 5,
+          "warn": 2,
+          "err": 0
+        }
+      },
+      "consoleLines": [
+        "[log] [T91] webgl results: {\"total\":7,\"ok\":5,\"warn\":2,\"err\":0}",
+        "[warning] [.WebGL-0x11800a12300] GL_INVALID_OPERATION: Invalid operation on multisampled framebuffer",
+        "[warning] [.WebGL-0x11800a12300] GL_INVALID_OPERATION: Invalid operation on multisampled framebuffer"
+      ],
+      "errors": []
+    },
+    {
+      "profile": "default",
+      "fixture": "webgpu",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgpu-fixture.html",
+      "screenshot": "tests/rendering/local-probe-default-webgpu.png",
+      "result": {
+        "fixture": "webgpu",
+        "ts": "2026-04-30T10:47:23.140Z",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/130.0.6723.31 Safari/537.36",
+        "probes": [
+          {
+            "name": "navigator.gpu present",
+            "outcome": "ok",
+            "detail": ""
+          },
+          {
+            "name": "requestAdapter()",
+            "outcome": "ok",
+            "detail": {
+              "isFallback": false,
+              "features": [
+                "depth32float-stencil8",
+                "rg11b10ufloat-renderable",
+                "bgra8unorm-storage",
+                "texture-compression-astc",
+                "texture-compression-etc2",
+                "depth-clip-control",
+                "texture-compression-bc",
+                "dual-source-blending"
+              ]
+            }
+          },
+          {
+            "name": "requestDevice()",
+            "outcome": "ok",
+            "detail": {
+              "label": "",
+              "features": [],
+              "limits": {
+                "maxTextureDimension2D": 8192
+              }
+            }
+          },
+          {
+            "name": "triangle render",
+            "outcome": "ok",
+            "detail": ""
+          },
+          {
+            "name": "compute shader",
+            "outcome": "ok",
+            "detail": {
+              "expected": [
+                0,
+                7,
+                14,
+                21,
+                28,
+                35,
+                42,
+                49,
+                56,
+                63,
+                70,
+                77,
+                84,
+                91,
+                98,
+                105
+              ],
+              "actual": [
+                0,
+                7,
+                14,
+                21,
+                28,
+                35,
+                42,
+                49,
+                56,
+                63,
+                70,
+                77,
+                84,
+                91,
+                98,
+                105
+              ],
+              "match": true
+            }
+          }
+        ],
+        "summary": {
+          "total": 5,
+          "ok": 5,
+          "warn": 0,
+          "err": 0
+        }
+      },
+      "consoleLines": [
+        "[log] [T91] webgpu results: {\"total\":5,\"ok\":5,\"warn\":0,\"err\":0}"
+      ],
+      "errors": []
+    },
+    {
+      "profile": "swiftshader-v1",
+      "fixture": "webgl",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgl-fixture.html",
+      "screenshot": "tests/rendering/local-probe-swiftshader-v1-webgl.png",
+      "result": {
+        "fixture": "webgl",
+        "ts": "2026-04-30T10:47:23.902Z",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/130.0.6723.31 Safari/537.36",
+        "probes": [
+          {
+            "name": "webgl context",
+            "outcome": "err",
+            "detail": "getContext returned null"
+          },
+          {
+            "name": "webgl2 context",
+            "outcome": "err",
+            "detail": "getContext returned null"
+          }
+        ],
+        "summary": {
+          "total": 2,
+          "ok": 0,
+          "warn": 0,
+          "err": 2
+        }
+      },
+      "consoleLines": [
+        "[log] [T91] webgl results: {\"total\":2,\"ok\":0,\"warn\":0,\"err\":2}"
+      ],
+      "errors": []
+    },
+    {
+      "profile": "swiftshader-v1",
+      "fixture": "webgpu",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgpu-fixture.html",
+      "screenshot": "tests/rendering/local-probe-swiftshader-v1-webgpu.png",
+      "result": {
+        "fixture": "webgpu",
+        "ts": "2026-04-30T10:47:24.210Z",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/130.0.6723.31 Safari/537.36",
+        "probes": [
+          {
+            "name": "navigator.gpu present",
+            "outcome": "ok",
+            "detail": ""
+          },
+          {
+            "name": "requestAdapter()",
+            "outcome": "err",
+            "detail": "returned null"
+          }
+        ],
+        "summary": {
+          "total": 2,
+          "ok": 1,
+          "warn": 0,
+          "err": 1
+        }
+      },
+      "consoleLines": [
+        "[warning] No available adapters.",
+        "[log] [T91] webgpu results: {\"total\":2,\"ok\":1,\"warn\":0,\"err\":1}"
+      ],
+      "errors": []
+    }
+  ]
+}

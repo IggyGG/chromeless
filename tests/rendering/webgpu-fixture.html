@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>cloud-browser WebGPU rendering fixture (T91)</title>
+<style>
+  body { font: 13px ui-monospace, Menlo, monospace; margin: 16px;
+         background: #111; color: #ddd; }
+  h1   { font-size: 14px; color: #6cf; margin-bottom: 4px; }
+  h2   { font-size: 13px; color: #9bd; margin-top: 16px; }
+  .ok   { color: #6f6; }
+  .warn { color: #fc6; }
+  .err  { color: #f66; }
+  table { border-collapse: collapse; margin: 8px 0; }
+  td, th { border: 1px solid #333; padding: 4px 8px; vertical-align: top; }
+  pre { background: #000; padding: 8px; max-width: 800px;
+        white-space: pre-wrap; word-break: break-all; }
+  canvas { border: 1px solid #444; background: #222; }
+</style>
+</head>
+<body>
+<h1>WebGPU rendering fixture — T91</h1>
+<div>Probes <code>navigator.gpu</code>, requests adapter + device,
+runs a triangle render + a tiny compute shader if both succeed.
+Self-reports on <code>window.__results__</code>.
+
+Under v1's SwiftShader path Vulkan is explicitly disabled (see
+<code>capture/streamer-page/launch.md</code> §"Why the GPU /
+Vulkan flags are non-negotiable on Chromium 147"). WebGPU on
+Chromium 147+ requires either Vulkan or Metal — without Vulkan and
+on non-Apple, Dawn falls back to a software backend that is
+typically present but often crashes on first device request.
+This fixture therefore expects every probe past
+<code>navigator.gpu present</code> to fail on the v1 path; that
+expectation is the test signal.</div>
+
+<h2>Probe results</h2>
+<table id="probe-table">
+  <thead><tr><th>Probe</th><th>Outcome</th><th>Detail</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>Render canvas</h2>
+<canvas id="gpu-canvas" width="200" height="200"></canvas>
+
+<h2>JSON summary</h2>
+<pre id="summary">(populating…)</pre>
+
+<script>
+"use strict";
+
+const results = {
+  fixture: "webgpu",
+  ts: new Date().toISOString(),
+  ua: navigator.userAgent,
+  probes: [],
+};
+const tbody = document.querySelector("#probe-table tbody");
+
+function record(name, outcome, detail) {
+  results.probes.push({ name, outcome, detail });
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    `<td>${name}</td>` +
+    `<td class="${outcome}">${outcome.toUpperCase()}</td>` +
+    `<td>${escapeHtml(typeof detail === "string" ? detail : JSON.stringify(detail))}</td>`;
+  tbody.appendChild(tr);
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch] ?? ch));
+}
+
+async function run() {
+  // 1. navigator.gpu existence — the entry point.
+  if (typeof navigator.gpu === "undefined") {
+    record("navigator.gpu present", "err", "undefined");
+    finalize();
+    return;
+  }
+  record("navigator.gpu present", "ok", "");
+
+  // 2. Adapter request — this is where SwiftShader-only backends
+  //    typically still succeed. Failure here means WebGPU is
+  //    completely off.
+  let adapter;
+  try {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      record("requestAdapter()", "err", "returned null");
+      finalize();
+      return;
+    }
+    record("requestAdapter()", "ok", {
+      isFallback: !!adapter.isFallbackAdapter,
+      features: Array.from(adapter.features ?? []).slice(0, 8),
+    });
+  } catch (e) {
+    record("requestAdapter()", "err", String(e?.message || e));
+    finalize();
+    return;
+  }
+
+  // 3. Device request — the typical failure point on a
+  //    Vulkan-disabled Linux container. Wrap with a hard timeout —
+  //    SwiftShader has been observed to hang here on some
+  //    Chromium 147 configurations.
+  let device;
+  try {
+    device = await Promise.race([
+      adapter.requestDevice(),
+      new Promise((_, rej) =>
+        setTimeout(() => rej(new Error("requestDevice timeout (5s)")), 5000)),
+    ]);
+    record("requestDevice()", "ok", {
+      label: device.label,
+      features: Array.from(device.features ?? []).slice(0, 8),
+      limits: {
+        maxTextureDimension2D: device.limits?.maxTextureDimension2D,
+      },
+    });
+  } catch (e) {
+    record("requestDevice()", "err", String(e?.message || e));
+    finalize();
+    return;
+  }
+
+  // 4. Triangle render via render pipeline.
+  try {
+    const canvas = document.getElementById("gpu-canvas");
+    const ctx = canvas.getContext("webgpu");
+    if (!ctx) throw new Error('canvas.getContext("webgpu") returned null');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    ctx.configure({ device, format, alphaMode: "premultiplied" });
+
+    const shader = device.createShaderModule({
+      code: `
+        @vertex
+        fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4<f32> {
+          var p = array<vec2<f32>, 3>(
+            vec2<f32>(-0.8, -0.8),
+            vec2<f32>( 0.8, -0.8),
+            vec2<f32>( 0.0,  0.8),
+          );
+          return vec4<f32>(p[i], 0.0, 1.0);
+        }
+        @fragment
+        fn fs() -> @location(0) vec4<f32> {
+          return vec4<f32>(0.4, 0.85, 0.4, 1.0);
+        }`,
+    });
+    const pipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex:   { module: shader, entryPoint: "vs" },
+      fragment: { module: shader, entryPoint: "fs", targets: [{ format }] },
+      primitive: { topology: "triangle-list" },
+    });
+    const enc = device.createCommandEncoder();
+    const view = ctx.getCurrentTexture().createView();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view, loadOp: "clear",
+        clearValue: { r: 0.07, g: 0.07, b: 0.10, a: 1 },
+        storeOp: "store",
+      }],
+    });
+    pass.setPipeline(pipeline);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    record("triangle render", "ok", "");
+  } catch (e) {
+    record("triangle render", "err", String(e?.message || e));
+  }
+
+  // 5. Compute shader: write 16 ints, read them back, verify.
+  try {
+    const shader = device.createShaderModule({
+      code: `
+        @group(0) @binding(0) var<storage, read_write> buf : array<u32, 16>;
+        @compute @workgroup_size(16)
+        fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+          buf[gid.x] = gid.x * 7u;
+        }`,
+    });
+    const bufSize = 16 * 4;
+    const storage = device.createBuffer({
+      size: bufSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const stage = device.createBuffer({
+      size: bufSize,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const pipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: shader, entryPoint: "main" },
+    });
+    const bind = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: storage } }],
+    });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bind);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    enc.copyBufferToBuffer(storage, 0, stage, 0, bufSize);
+    device.queue.submit([enc.finish()]);
+    await stage.mapAsync(GPUMapMode.READ);
+    const out = new Uint32Array(stage.getMappedRange().slice(0));
+    stage.unmap();
+    const expected = Array.from({ length: 16 }, (_, i) => i * 7);
+    const actual = Array.from(out);
+    const ok = expected.every((v, i) => actual[i] === v);
+    record("compute shader", ok ? "ok" : "err",
+           { expected, actual, match: ok });
+  } catch (e) {
+    record("compute shader", "err", String(e?.message || e));
+  }
+
+  finalize();
+}
+
+function finalize() {
+  results.summary = {
+    total: results.probes.length,
+    ok:   results.probes.filter(p => p.outcome === "ok").length,
+    warn: results.probes.filter(p => p.outcome === "warn").length,
+    err:  results.probes.filter(p => p.outcome === "err").length,
+  };
+  window.__results__ = results;
+  document.getElementById("summary").textContent =
+      JSON.stringify(results, null, 2);
+  console.log("[T91] webgpu results:", JSON.stringify(results.summary));
+  document.body.dataset.complete = "1";
+}
+
+run().catch((e) => {
+  record("run() outer catch", "err", String(e?.message || e));
+  finalize();
+});
+</script>
+</body>
+</html>
