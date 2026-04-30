@@ -183,10 +183,13 @@ func TestStreamerOffersAudio(t *testing.T) {
 	for {
 		var got envelope
 		if err := conn.ReadJSON(&got); err != nil {
-			t.Skipf("no offer envelope from streamer within %s — likely T69 not yet "+
-				"committed, or the streamer-page is failing to dial signaling. "+
-				"Once the streamer is observed in signaling logs as `peer joined "+
-				"role=browser`, re-run this test. Last error: %v", offerWait, err)
+			t.Skipf("no offer envelope from streamer within %s — most likely T78 "+
+				"(getDisplayMedia NotReadableError in cloud Chromium) is keeping "+
+				"the streamer's start() from running. T69 fix is in but masked. "+
+				"Verify by attaching to cloud Chromium DevTools (host:9222 "+
+				"post-T52) and reading the streamer page's #log div: an "+
+				"`ERR start failed NotReadableError` line confirms T78. Last "+
+				"read error: %v", offerWait, err)
 		}
 		if got.Type == "offer" && got.From == "browser" {
 			offerEnv = got

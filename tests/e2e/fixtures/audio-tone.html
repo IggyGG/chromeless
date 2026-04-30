@@ -1,0 +1,109 @@
+<!doctype html>
+<!--
+  tests/e2e/fixtures/audio-tone.html — T64 fixture.
+
+  A self-contained page that synthesizes a 440 Hz sine tone via Web Audio.
+  Used by tests/e2e/04-audio-receives.spec.ts as the *known-audio-emitting
+  page* loaded inside the cloud Chromium during the audio-presence E2E.
+
+  We deliberately don't use a public site (e.g. soundtest.org): keeps the
+  test offline-deterministic, hermetic, and free of third-party SLAs.
+  Hosted via the same `python3 -m http.server` static path that serves
+  the streamer page (T28's [program:streamer-static] in supervisord), or
+  loaded directly via DevTools Page.navigate to a `data:` URL by the
+  spec.
+
+  Why 440 Hz: any non-zero, non-DC tone works for the bytes_received
+  assertion; 440 Hz (concert A) is the convention. The amplitude is
+  intentionally low (0.1) so that if anyone runs the spec without
+  muting, ears survive.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>audio tone — 440 Hz</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #1a1a1a;
+                   color: #eee; font: 14px ui-monospace, Menlo, monospace; }
+      #status { padding: 16px; }
+      #log    { padding: 0 16px; white-space: pre-wrap; opacity: 0.7; }
+    </style>
+  </head>
+  <body>
+    <div id="status">audio fixture: initializing…</div>
+    <pre id="log"></pre>
+    <script>
+      // Single-tone Web Audio fixture.
+      //
+      // The streamer page captures the cloud Chromium's display + system
+      // audio via getDisplayMedia({audio:true}). PulseAudio's null-sink
+      // (T24) routes whatever any tab in this Chromium plays into the
+      // captured stream. So as long as this fixture is *playing*, the
+      // streamer's outbound RTP for kind=audio should accumulate bytes.
+      //
+      // We expose a small `window.__cbwrtc_audio_fixture` for the spec
+      // to introspect: { ok: true, freq, t0, contextState }.
+      const log = (m) => {
+        const el = document.getElementById("log");
+        el.textContent += new Date().toISOString().slice(11, 23) + " " + m + "\n";
+      };
+      const setStatus = (m) => {
+        document.getElementById("status").textContent = m;
+      };
+
+      try {
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.1; // low amplitude; ears.
+        osc.type = "sine";
+        osc.frequency.value = 440;
+        osc.connect(gain).connect(ctx.destination);
+
+        // Many Chromium versions require an initial user-gesture for
+        // AudioContext.resume(). The streamer-page launch wires
+        // --autoplay-policy=no-user-gesture-required (T24/T28), so
+        // resume() should succeed immediately. If it doesn't (e.g.
+        // running this fixture in a stock browser for inspection),
+        // the page is still useful — `osc.start()` succeeds and the
+        // ctx will resume at the first user click.
+        const t0 = performance.now();
+        osc.start();
+
+        const tag = () => {
+          window.__cbwrtc_audio_fixture = {
+            ok: true,
+            freq: 440,
+            amplitude: 0.1,
+            startedAtMs: t0,
+            contextState: ctx.state,
+            sampleRate: ctx.sampleRate,
+          };
+        };
+        tag();
+
+        const onState = () => {
+          tag();
+          log("AudioContext.state=" + ctx.state +
+              " sampleRate=" + ctx.sampleRate);
+          setStatus(ctx.state === "running"
+            ? "playing 440 Hz sine (amp=0.1)"
+            : "audio context state=" + ctx.state);
+        };
+        ctx.addEventListener("statechange", onState);
+        onState();
+
+        // Defensive: try an explicit resume in case the autoplay
+        // policy doesn't kick in.
+        if (ctx.state !== "running") {
+          ctx.resume().then(() => log("ctx.resume() resolved"))
+                     .catch((e) => log("ctx.resume() rejected: " + e));
+        }
+      } catch (err) {
+        window.__cbwrtc_audio_fixture = { ok: false, error: String(err) };
+        setStatus("FAILED: " + err);
+        log("FAILED: " + err);
+      }
+    </script>
+  </body>
+</html>

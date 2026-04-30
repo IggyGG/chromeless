@@ -195,8 +195,52 @@ not the full URL.
 - `tests/integration/signaling-roundtrip` — extended to cover the
   auth path end-to-end.
 
+## TURN issuer (T76)
+
+A second component verifies the same Ed25519 token: the
+`infra/turn-issuer` daemon. When the client wants TURN credentials it
+calls `POST /issue-turn-cred` with the same `Authorization: Bearer
+<token>` it would attach to the signaling WS upgrade. The issuer:
+
+1. Verifies the JWT against `CBWRTC_AUTH_PUBKEY` (same env, same
+   contract — the verifier is a copy of `signaling/auth.go`'s
+   `verifyToken`; tests `TestIssue_*` mirror the rejection cases).
+2. Reads `sub` (tenant) and `sid` (session) from the token.
+3. Mints a TURN-REST credential per RFC 7635:
+   - `username = <expiry>:<tenant>:<sid>`
+   - `credential = base64(hmac_sha1(SHARED_SECRET, username))`
+4. Returns `{username, credential, ttl, urls, iceServers}` so the
+   client can drop the response shape into `RTCPeerConnection`.
+
+The shared secret (`CBWRTC_TURN_SHARED_SECRET`) is **separate** from
+the auth pubkey — the issuer holds both:
+- the **pubkey** (for verifying the caller's identity)
+- the **shared secret** (for minting credentials coturn will accept)
+
+Rotation of either is independent. See
+`infra/turn-issuer/secret-rotation.md` for the shared-secret dance.
+
+The token's `role` claim is **not** consulted by the issuer — both
+`role=client` and `role=browser` are entitled to TURN. If we want to
+restrict TURN to one side later, that's a one-line check after
+`verifyToken`.
+
+### Threat coverage
+
+| Threat | Defense |
+|---|---|
+| Adversary mints arbitrary TURN credentials | Requires the SHARED_SECRET. Held only by the issuer + coturn; never sent to clients. Rotate periodically per `secret-rotation.md`. |
+| Adversary replays a captured token to mint credentials for someone else's session | The token's `sid` claim is bound by signaling on the WS upgrade; for the TURN issuer the credential is scoped to whoever the token's `sub` (tenant) + `sid` say it is. The credential itself includes the expiry, so the leak window is bounded by the token's `exp` AND the credential's `ttl` (max 24h, default 1h). |
+| Compromised issuer leaks the SHARED_SECRET | Rotate the secret (graceful, see `secret-rotation.md`). The pubkey doesn't need to rotate as a result. |
+| TURN-REST username predictable enough to forge offline | `username = exp:tenant:sid` is predictable but the credential is HMAC-SHA1(secret, username); without the secret an attacker can't compute a valid credential. |
+
 ## References
 
 - RFC 7519 (JWT)
 - RFC 8037 (CFRG curves in JWS, including Ed25519 / `EdDSA`)
 - RFC 6455 §10 (WebSocket security)
+- RFC 7635 (TURN-REST short-term credentials)
+- `infra/turn-issuer/main.go` — issuer implementation
+- `infra/turn-issuer/main_test.go` — issuance + rotation grace tests
+- `infra/turn-issuer/secret-rotation.md` — operational rotation
+  procedure

@@ -1,0 +1,132 @@
+# infra/k8s/turn-issuer-deployment.yaml — T76 TURN issuer
+#
+# Stateless HTTP service issuing time-limited TURN-REST credentials.
+# No K8s API access needed (pure compute).
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: turn-issuer
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/component: turn-issuer
+automountServiceAccountToken: false
+
+---
+# The shared-secret + Ed25519 pubkey live in this Secret. Replace the
+# placeholders at deploy time (cosign / sealed-secrets / SOPS / Vault
+# — pick your poison).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: turn-issuer-secrets
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/component: turn-issuer
+type: Opaque
+stringData:
+  # base64 of raw 32-byte Ed25519 public key. Same value the
+  # signaling server reads from CBWRTC_AUTH_PUBKEY.
+  CBWRTC_AUTH_PUBKEY: "REPLACE_WITH_BASE64_ED25519_PUBKEY"
+  # The HMAC shared secret. coturn validates against this; issuer
+  # mints with it. See secret-rotation.md.
+  CBWRTC_TURN_SHARED_SECRET: "REPLACE_WITH_HEX_32"
+  # Optional: previous secret kept valid during a rotation window.
+  # Leave empty in steady state.
+  CBWRTC_TURN_SHARED_SECRET_PREV: ""
+  # Comma-separated TURN URIs surfaced to clients in the issued
+  # response.urls and response.iceServers entries.
+  CBWRTC_TURN_URLS: "turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp,turns:turn.example.com:5349?transport=tcp"
+  # Comma-separated STUN URIs returned alongside (defence-in-depth so
+  # the client has a path even when TURN is wedged).
+  CBWRTC_STUN_URLS: "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: turn-issuer
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/component: turn-issuer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: turn-issuer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: turn-issuer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: turn-issuer
+      automountServiceAccountToken: false
+      containers:
+        - name: turn-issuer
+          image: ghcr.io/iggy/cloud-browser-webrtc/turn-issuer:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8090
+          envFrom:
+            - secretRef:
+                name: turn-issuer-secrets
+          env:
+            - name: LISTEN
+              value: ":8090"
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: turn-issuer
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: turn-issuer
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/component: turn-issuer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: turn-issuer
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http

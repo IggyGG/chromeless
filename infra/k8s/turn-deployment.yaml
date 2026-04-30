@@ -26,12 +26,19 @@ metadata:
     app.kubernetes.io/component: turn
 type: Opaque
 stringData:
-  # Replace at deploy time. The signaling server's /turn-credentials
-  # endpoint signs short-lived TURN-REST credentials with this secret;
+  # Replace at deploy time. The T76 turn-issuer mints short-lived
+  # TURN-REST credentials with this secret (env CBWRTC_TURN_SHARED_SECRET);
   # coturn validates them via use-auth-secret + static-auth-secret.
+  # Both must hold the SAME value at any moment except during a
+  # rotation overlap; see infra/turn-issuer/secret-rotation.md.
   # Generate with: openssl rand -hex 32
   static-auth-secret: "REPLACE_AT_DEPLOY_TIME_WITH_HEX_32"
   realm: "turn.example.com"
+  # Optional: previous secret kept valid during a rotation window. coturn
+  # accepts allocations validated under either. Pair this with the issuer's
+  # CBWRTC_TURN_SHARED_SECRET_PREV in infra/k8s/turn-issuer-deployment.yaml.
+  # Leave empty in steady state.
+  static-auth-secret-prev: ""
 
 ---
 apiVersion: v1
@@ -62,6 +69,14 @@ data:
     denied-peer-ip=169.254.0.0-169.254.255.255
     no-tlsv1
     no-tlsv1_1
+    # T76 secret rotation: alt-server-name lets coturn validate
+    # credentials minted under either the current or the previous
+    # secret. During rotation, set both env vars in the Secret;
+    # coturn evaluates them in order and accepts the first match.
+    # Phase 3 follow-up: have an init container assemble these into
+    # turnserver.conf rather than relying on env-substitution edge
+    # cases.
+    alt-server-name=$ENV{TURN_REALM}
     # Relay port range. Wide range == better concurrency. Confirm node
     # firewall allows this whole range.
     min-port=49152

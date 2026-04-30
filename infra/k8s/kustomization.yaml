@@ -26,6 +26,8 @@ resources:
   # Install them separately with:
   #   kubectl apply -f infra/controllers/browser-session-controller/config/crd/
   - controller-deployment.yaml
+  # T76: TURN credentials issuance daemon (HMAC-REST per RFC 7635).
+  - turn-issuer-deployment.yaml
 
 labels:
   - includeSelectors: false
