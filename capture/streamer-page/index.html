@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="referrer" content="no-referrer" />
+<title>cloud-browser streamer</title>
+<style>
+  /* This page lives inside the headless Chromium and is never seen by a
+     human. The only reason it has any visible UI at all is so the
+     occasional debugging screenshot is legible. */
+  html, body { background: #111; color: #ddd; font: 13px ui-monospace, Menlo, monospace; margin: 0; }
+  body { padding: 12px; }
+  h1 { font-size: 14px; margin: 0 0 8px 0; color: #6cf; }
+  pre#log { background: #000; border: 1px solid #333; padding: 8px; height: 80vh; overflow: auto; white-space: pre-wrap; }
+  .ok   { color: #6f6; }
+  .warn { color: #fc6; }
+  .err  { color: #f66; }
+  .info { color: #9bd; }
+</style>
+</head>
+<body>
+<h1>cloud-browser streamer (role=browser) — getDisplayMedia → RTCPeerConnection</h1>
+<pre id="log"></pre>
+<script type="module" src="./streamer.js"></script>
+</body>
+</html>
