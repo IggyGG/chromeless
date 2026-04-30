@@ -22,8 +22,22 @@ spec:
       annotations:
         cb.io/snapshot-id: ""
     spec:
-      {{- if .Values.gvisor.enabled }}
+      {{- if .Values.defaultPool.runtimeClassName }}
+      runtimeClassName: {{ .Values.defaultPool.runtimeClassName | quote }}
+      {{- else if .Values.gvisor.enabled }}
       runtimeClassName: gvisor
+      {{- end }}
+      {{- with .Values.defaultPool.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.defaultPool.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.defaultPool.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       shareProcessNamespace: true
       restartPolicy: Always

@@ -1,0 +1,244 @@
+# infra/k8s/cb-prod/values-triform.yaml — Helm values overlay for the
+# Triform K8s cluster (T115).
+#
+# Layered on top of infra/helm/cloud-browser-webrtc/values.yaml; only
+# the keys we deliberately diverge from defaults appear here. The
+# install.sh wrapper merges this overlay over the chart defaults.
+#
+# Cluster facts (verified live before authoring):
+#   - triform-1: control-plane (role=infra, 64 CPU / 230 GiB)
+#   - triform-2: app-shaped, no role label (64 CPU / 263 GiB)
+#   - triform-3: role=infra, similar shape to triform-2
+#   - triform-4: role=app, GPU-tainted but no GPU label (small box, 20 CPU)
+#   - triform-5: role=app, nvidia.com/gpu.present=true, 8× RTX PRO 6000
+#                Blackwell, 48 CPU / 263 GiB. Tainted nvidia.com/gpu=present:NoSchedule
+#   - triform-6: role=app, build node (T112), 32 CPU / 128 GiB
+#   - Ingress: nginx (k8s.io/ingress-nginx)
+#   - Cluster issuers: letsencrypt-production (preferred), letsencrypt-prod
+#   - GPU: nvidia-device-plugin DaemonSet only; no GPU operator,
+#          no NVIDIA RuntimeClass installed cluster-wide
+#   - Registry: registry.triform.cloud (forgejo)
+#
+# Secrets handling: this file leaves auth pubkey + TURN shared secret
+# EMPTY. Provide them at install time via a separate non-committed
+# overlay (e.g. ~/.cb-secrets-triform.yaml) or via --set-string.
+# `install.sh` reads CB_SECRETS_FILE and merges it after this overlay.
+
+# ---------------------------------------------------------------------
+# Namespace + region
+# ---------------------------------------------------------------------
+
+namespace:
+  # install.sh creates the namespace up-front (with the right
+  # pod-security labels) so it can pre-stage the registry-pull
+  # secret before helm install runs --wait. Setting create=false
+  # here makes the chart skip its templates/namespace.yaml render,
+  # avoiding the "namespace exists and cannot be imported" error
+  # from helm trying to adopt a non-helm-labelled object.
+  create: false
+  name: cb-prod
+
+# Single-region deployment; triform's K8s sits in Hetzner EU. Matches
+# the `region` label that signaling stamps on the aud claim and that
+# Prometheus / Grafana group on.
+region: triform-eu
+
+# ---------------------------------------------------------------------
+# Image registry — forgejo. Same path the T112 build runner uses.
+# ---------------------------------------------------------------------
+
+images:
+  registry: registry.triform.cloud/cloud-browser-webrtc
+  pullPolicy: IfNotPresent
+  pullSecrets:
+    - name: registry-pull
+  # Tags are filled at install time by install.sh from $CB_IMAGE_TAG
+  # (which T113's build packages as a tag during its `kaniko sidecar`
+  # step). Override per-component if a hot-fix lands for one image
+  # without re-rolling the rest.
+  chromium:        { repository: cb-chromium,            tag: "" }
+  signaling:       { repository: cb-signaling,           tag: "" }
+  controller:      { repository: cb-browser-session-controller, tag: "" }
+  turnIssuer:      { repository: cb-turn-issuer,         tag: "" }
+  metricsSidecar:  { repository: cb-metrics-sidecar,     tag: "" }
+  inputBridge:     { repository: cb-input-bridge,        tag: "" }
+  cursorWatcher:   { repository: cb-cursor-watcher,      tag: "" }
+  clipboardBridge: { repository: cb-clipboard-bridge,    tag: "" }
+
+# ---------------------------------------------------------------------
+# Signaling — 2 replicas pinned to triform-2 + triform-3 (per the brief)
+# ---------------------------------------------------------------------
+
+signaling:
+  enabled: true
+  replicas: 2
+  hpa:
+    # Pin the replica count for the first deploy. Re-enable HPA once
+    # we have load-shape numbers from T117 and the GPU pool isn't
+    # the bottleneck.
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    cpuTargetUtilization: 60
+  ingress:
+    enabled: true
+    className: nginx
+    host: cb-signaling.triform.dev
+    tlsSecretName: cb-signaling-tls
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-production
+      # WebSocket upgrade + long-lived signaling sessions: bump the
+      # nginx proxy timeouts so connections survive idle periods.
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 1,    memory: 512Mi }
+  region: triform-eu
+  # Pin to triform-2/3 via hostname affinity. Both nodes are
+  # non-tainted, non-GPU, healthy 64-CPU workers. Required affinity
+  # (not preferred) — if neither node is available the chart should
+  # fail loud rather than land signaling on the GPU box (would block
+  # a session pod from scheduling) or the build box (already busy).
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: ["triform-2", "triform-3"]
+    # Spread across the two hosts: with replicas=2 this gives one
+    # pod per node, which is what we want.
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: signaling
+          topologyKey: kubernetes.io/hostname
+  # ---- REQUIRED secret. Provide via overlay or --set-string ----
+  authPubkey: ""
+
+# ---------------------------------------------------------------------
+# Controller — 1 replica, off the GPU node + off the build node
+# ---------------------------------------------------------------------
+
+controller:
+  enabled: true
+  replicas: 1
+  defaultPool: default-pool
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+  region: triform-eu
+  # Keep the controller off triform-5 (GPU; tainted) and triform-6
+  # (build; saturated when a build is running). triform-2 / -3 / -1
+  # are all fine; let the scheduler pick.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values: ["triform-5", "triform-6"]
+
+# ---------------------------------------------------------------------
+# TURN issuer — minted REST credentials for the client. Secrets empty;
+# operator overlays before install. See triform-deploy.md.
+# ---------------------------------------------------------------------
+
+turnIssuer:
+  enabled: true
+  replicas: 2
+  secrets:
+    authPubkey: ""        # same value as signaling.authPubkey
+    sharedSecret: ""      # openssl rand -hex 32
+    sharedSecretPrev: ""  # populated only during a rotation
+    turnURLs: ""          # comma-separated TURN URIs (e.g. coturn or
+                          # a managed provider like Cloudflare TURN)
+    stunURLs: "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
+  resources:
+    requests: { cpu: 20m,  memory: 32Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+  # Same off-GPU/off-build placement as the controller.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values: ["triform-5", "triform-6"]
+
+# ---------------------------------------------------------------------
+# coturn — DISABLED. Phase 2 demo uses Cloudflare TURN (managed).
+# Operator may flip on if/when self-hosted TURN becomes the answer.
+# ---------------------------------------------------------------------
+
+coturn:
+  enabled: false
+
+# ---------------------------------------------------------------------
+# Default pool — pinned to triform-5 (the GPU node).
+# ---------------------------------------------------------------------
+
+defaultPool:
+  enabled: true
+  # Keep low for first deploy. With 8 GPUs on triform-5, warmReplicas=2
+  # means 6 GPUs free for assigned sessions; bump after T117 numbers
+  # validate the per-session GPU footprint.
+  warmReplicas: 2
+  # Cap at 6 concurrent sessions: 8 GPUs - 2 warm = 6 assignable.
+  # Leave headroom rather than chase 100% utilisation; oom-killing a
+  # WebRTC session in the middle of a user's flow is the bad outcome.
+  maxSessions: 6
+  maxAgeSeconds: 3600
+  # Phase 2 starts on RecreatePod (per T44 sandbox primer + T90
+  # decision). Flip to ScrubAndReturn once we trust the scrub script
+  # under real session traffic.
+  recyclePolicy: RecreatePod
+  resources:
+    requests:
+      cpu: "1500m"
+      memory: 3Gi
+      ephemeral-storage: 1Gi
+      # GPU resource — extended resources require BOTH requests and
+      # limits per K8s rules, AND request must equal limit.
+      nvidia.com/gpu: "1"
+    limits:
+      cpu: "3000m"
+      memory: 6Gi
+      ephemeral-storage: 2Gi
+      nvidia.com/gpu: "1"
+  # Pin to the GPU node + tolerate the GPU taint.
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule
+  # No NVIDIA RuntimeClass is registered cluster-wide today. The
+  # nvidia-device-plugin DaemonSet exposes nvidia.com/gpu via the
+  # default runtime, which is enough for non-isolated GPU access.
+  # Re-enable once T95's gvisor + nvproxy work lands at the cluster.
+  runtimeClassName: ""
+
+# ---------------------------------------------------------------------
+# gVisor — disabled at the cluster level (no runtimeClass installed).
+# When the operator adds gVisor + nvproxy per T95, set runtimeClassName
+# above to "nvidia" (or whatever name they pick).
+# ---------------------------------------------------------------------
+
+gvisor:
+  enabled: false
+
+# ---------------------------------------------------------------------
+# Prometheus annotations on the Pods — kube-prometheus-stack is already
+# running cluster-wide (verified live), so leave these on.
+# ---------------------------------------------------------------------
+
+prometheusAnnotations:
+  enabled: true

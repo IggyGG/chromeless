@@ -91,6 +91,12 @@ signaling:
   # Leave empty for single-region deploys; the signaling code stays
   # backwards-compatible (empty → "_unspecified" label).
   region: ""
+  # T115: scheduling controls. Empty = scheduler decides. Set in the
+  # per-cluster overlay (e.g. infra/k8s/cb-prod/values-triform.yaml)
+  # to pin signaling to a specific node pool.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 controller:
   enabled: true
@@ -103,6 +109,12 @@ controller:
     limits:
       cpu: 500m
       memory: 256Mi
+  # T115: scheduling controls. Controller is namespaced cluster-state
+  # and watches Pods, so it should NOT land on the GPU node (which is
+  # tainted) — pick a stable infra/control-plane-adjacent worker.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 turnIssuer:
   enabled: true
@@ -151,7 +163,10 @@ defaultPool:
   maxSessions: 100
   maxAgeSeconds: 3600
   recyclePolicy: RecreatePod    # RecreatePod | ScrubAndReturn
-  # Resource shape per session pod (sum across containers).
+  # Resource shape per session pod (sum across containers). Note:
+  # to claim a GPU per session, add `nvidia.com/gpu: "1"` under both
+  # requests and limits; K8s requires the value in BOTH places for
+  # extended resources.
   resources:
     requests:
       cpu: "1500m"
@@ -161,6 +176,20 @@ defaultPool:
       cpu: "3000m"
       memory: 6Gi
       ephemeral-storage: 2Gi
+  # T115: scheduling controls for the SESSION pod template. The pool
+  # is the unit of trust + GPU shape per T87/T95, so per-pool node
+  # pinning lives here. For triform's GPU node:
+  #   nodeSelector: { nvidia.com/gpu.present: "true" }
+  #   tolerations:
+  #     - { key: nvidia.com/gpu, operator: Equal, value: present, effect: NoSchedule }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # T95: opt-in runtimeClass. When set (e.g. "nvidia"), the chart
+  # writes runtimeClassName on the session Pod. Cluster admin must
+  # ensure the RuntimeClass exists. Empty = falls back to
+  # gvisor.enabled below.
+  runtimeClassName: ""
 
 # Optional gVisor isolation per T44 sandbox primer. When enabled,
 # the chart sets runtimeClassName=gvisor on the session pod
