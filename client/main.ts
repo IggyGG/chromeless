@@ -15,15 +15,17 @@
 //   - Receive any incoming data channels via `pc.ondatachannel`. When the
 //     streamer creates the "input" channel, wrap it with InputChannel
 //     (T20) and attach DOM listeners that forward mouse/keyboard.
-//   - Surface signaling/ICE/connection state to the debug panel.
-//
-// Out of scope: T37 reconnect logic, T34 follow-up (streamer-side
-// creation of the "input" data channel — until that lands the channel
-// just won't appear and InputChannel stays detached).
+//   - Surface signaling/ICE/connection/reconnect state to the debug panel.
+//   - Auto-reconnect signaling websocket via T37's ReconnectingWebSocket;
+//     on reconnect, rebuild the peer connection and wait for a fresh
+//     offer from the streamer. On `iceConnectionState=failed`, send a
+//     `request_renegotiate` envelope to ask the streamer for a fresh
+//     offer with iceRestart=true (see docs/protocols/reconnect.md).
 
 import { InputChannel } from "./src/input.js";
 import { fetchTurnConfig } from "./src/turn.js";
 import { prioritizeCodec } from "./src/sdp.js";
+import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src/reconnect.js";
 
 const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
 
@@ -31,7 +33,8 @@ type Envelope =
   | { type: "offer";  from: "client" | "browser"; data: RTCSessionDescriptionInit }
   | { type: "answer"; from: "client" | "browser"; data: RTCSessionDescriptionInit }
   | { type: "ice";    from: "client" | "browser"; data: RTCIceCandidateInit | null }
-  | { type: "bye";    from: "client" | "browser"; data?: undefined };
+  | { type: "bye";    from: "client" | "browser"; data?: undefined }
+  | { type: "request_renegotiate"; from: "client" | "browser"; data?: null };
 
 type LogLevel = "info" | "ok" | "warn" | "err";
 
@@ -88,13 +91,15 @@ function escapeHtml(s: string): string {
 // ---------- session ----------
 
 interface Session {
-  ws: WebSocket;
+  rws: ReconnectingWebSocket;
   pc: RTCPeerConnection;
-  /** Set when the streamer has created the "input" data channel. */
+  iceConfig: RTCConfiguration;
+  /** Set when the streamer has opened the "input" data channel. */
   dc: RTCDataChannel | null;
-  /** Set when an InputChannel has been wired up to the dc. */
   input: InputChannel | null;
   detachInput: (() => void) | null;
+  /** Has at least one rws "open" fired? Used to distinguish first vs reconnect. */
+  hasOpenedOnce: boolean;
 }
 
 let active: Session | null = null;
@@ -105,12 +110,12 @@ function teardown(reason: string): void {
   try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.dc?.close(); } catch { /* ignore */ }
   try { active.pc.close(); } catch { /* ignore */ }
-  if (active.ws.readyState === WebSocket.OPEN) {
+  if (active.rws.isConnected()) {
     try {
-      active.ws.send(JSON.stringify({ type: "bye", from: "client" } satisfies Envelope));
+      active.rws.send(JSON.stringify({ type: "bye", from: "client" } satisfies Envelope));
     } catch { /* ignore */ }
   }
-  try { active.ws.close(); } catch { /* ignore */ }
+  try { active.rws.close(); } catch { /* ignore */ }
   active = null;
   setStatus("closed");
   els.connect.disabled = false;
@@ -174,20 +179,15 @@ function wireInputChannel(dc: RTCDataChannel): void {
   dc.addEventListener("message", (e) => log("info", "← input.message", e.data));
 }
 
-async function connect(sessionId: string): Promise<void> {
-  setStatus("connecting", "ws://");
-  els.connect.disabled = true;
-
-  const wsUrl = `${DEFAULT_SIGNALING}/${encodeURIComponent(sessionId)}`;
-  log("info", `dialing signaling`, wsUrl);
-
-  // Fetch ICE config from the signaling server (T25) before constructing
-  // the peer connection. fetchTurnConfig falls back to public STUN on
-  // any error so the client still has a chance of working.
-  const iceConfig = await fetchTurnConfig(DEFAULT_SIGNALING);
-  log("info", "ice config", iceConfig);
-
-  const ws = new WebSocket(wsUrl);
+/**
+ * Build a fresh RTCPeerConnection wired up to the active session. Used
+ * on the first connect AND on every signaling reconnect, so each fresh
+ * signaling channel gets a fresh peer connection and the streamer can
+ * cleanly re-offer.
+ */
+function buildPeerConnection(): RTCPeerConnection {
+  if (!active) throw new Error("buildPeerConnection: no active session");
+  const { iceConfig, rws } = active;
   const pc = new RTCPeerConnection(iceConfig);
 
   pc.onsignalingstatechange = () => { els.sig.textContent = pc.signalingState; log("info", `signalingState=${pc.signalingState}`); };
@@ -195,6 +195,11 @@ async function connect(sessionId: string): Promise<void> {
     els.ice.textContent = pc.iceConnectionState;
     const lvl: LogLevel = pc.iceConnectionState === "failed" ? "err" : "info";
     log(lvl, `iceConnectionState=${pc.iceConnectionState}`);
+    if (pc.iceConnectionState === "failed") {
+      // T37 ICE recovery — ask the streamer to redo the offer with iceRestart=true.
+      const sent = requestIceRecovery((f) => rws.send(f), "client");
+      log(sent ? "info" : "warn", sent ? "→ request_renegotiate" : "request_renegotiate dropped (ws not open)");
+    }
   };
   pc.onicegatheringstatechange = () => { els.iceg.textContent = pc.iceGatheringState; };
   pc.onconnectionstatechange = () => {
@@ -206,9 +211,8 @@ async function connect(sessionId: string): Promise<void> {
   };
 
   pc.onicecandidate = (ev) => {
-    if (ws.readyState !== WebSocket.OPEN) return;
     const env: Envelope = { type: "ice", from: "client", data: ev.candidate ? ev.candidate.toJSON() : null };
-    ws.send(JSON.stringify(env));
+    rws.send(JSON.stringify(env));
     if (ev.candidate) log("info", `→ ice`, ev.candidate.candidate);
     else log("info", `→ ice (end of candidates)`);
   };
@@ -221,26 +225,79 @@ async function connect(sessionId: string): Promise<void> {
     }
   };
 
-  // T34: we no longer createDataChannel("input") on the answerer side.
-  // The streamer (T23 follow-up / T41) will offer the data channel as
-  // part of its SDP; we receive it here.
   pc.ondatachannel = (ev) => wireInputChannel(ev.channel);
 
-  active = { ws, pc, dc: null, input: null, detachInput: null };
+  return pc;
+}
+
+function rebuildPeerConnection(reason: string): void {
+  if (!active) return;
+  log("info", `rebuilding peer connection: ${reason}`);
+  try { active.detachInput?.(); } catch { /* ignore */ }
+  active.detachInput = null;
+  try { active.dc?.close(); } catch { /* ignore */ }
+  active.dc = null;
+  active.input = null;
+  try { active.pc.close(); } catch { /* ignore */ }
+  active.pc = buildPeerConnection();
+  els.dc.textContent = "—";
+}
+
+async function connect(sessionId: string): Promise<void> {
+  setStatus("connecting", "ws://");
+  els.connect.disabled = true;
+
+  const wsUrl = `${DEFAULT_SIGNALING}/${encodeURIComponent(sessionId)}`;
+  log("info", `dialing signaling`, wsUrl);
+
+  // Fetch ICE config once. We re-use it across reconnects; if it
+  // rotates (TURN-REST in Phase 3), this is the call site that grows a
+  // refresh.
+  const iceConfig = await fetchTurnConfig(DEFAULT_SIGNALING);
+  log("info", "ice config", iceConfig);
+
+  const rws = new ReconnectingWebSocket(wsUrl);
+  // Stash a placeholder pc so the active record is well-typed; replaced
+  // synchronously by buildPeerConnection() once session is set.
+  active = {
+    rws, pc: null as unknown as RTCPeerConnection, iceConfig,
+    dc: null, input: null, detachInput: null, hasOpenedOnce: false,
+  };
+  active.pc = buildPeerConnection();
   els.dc.textContent = "—";
 
-  ws.addEventListener("open", () => {
-    log("ok", "ws open");
-    setStatus("connecting", "waiting for offer");
-    // Send a hello so the signaling server learns our role. The
-    // server's protocol requires a valid envelope as the first frame
-    // (offer|answer|ice|bye); a null-data ice frame is the right
-    // no-op — the streamer treats it as "end of candidates" and
-    // ignores it. See signaling/server.go::wsHandler.
-    ws.send(JSON.stringify({ type: "ice", from: "client", data: null } satisfies Envelope));
+  rws.on("stateChange", (next, prev, info) => {
+    log("info", `signaling ${prev}→${next}`, info.attempt > 0 ? { attempt: info.attempt, retryInMs: info.nextDelayMs } : undefined);
+    if (next === "reconnecting") setStatus("connecting", `reconnecting (attempt ${info.attempt})`);
+    else if (next === "failed")  setStatus("failed", `signaling failed`);
   });
 
-  ws.addEventListener("message", async (ev) => {
+  rws.on("open", () => {
+    if (!active) return;
+    if (active.hasOpenedOnce) {
+      log("ok", "ws reopened — rebuilding peer connection");
+      setStatus("connecting", "renegotiating");
+      rebuildPeerConnection("ws reconnected");
+    } else {
+      active.hasOpenedOnce = true;
+      log("ok", "ws open");
+      setStatus("connecting", "waiting for offer");
+    }
+    // Hello frame so signaling learns our role.
+    rws.send(JSON.stringify({ type: "ice", from: "client", data: null } satisfies Envelope));
+  });
+
+  rws.on("underlyingClose", (ev) => {
+    log(ev.wasClean ? "info" : "warn", `ws closed`, { code: ev.code, reason: ev.reason || "(none)" });
+    // We do NOT teardown the PC here. If signaling reconnects within
+    // backoff window, ICE/DTLS may still be flowing and we just need a
+    // fresh hello + offer cycle. rebuildPeerConnection runs on the
+    // next "open".
+  });
+
+  rws.on("message", async (ev: MessageEvent) => {
+    if (!active) return;
+    const { pc } = active;
     let env: Envelope;
     try {
       env = JSON.parse(typeof ev.data === "string" ? ev.data : await (ev.data as Blob).text());
@@ -258,12 +315,11 @@ async function connect(sessionId: string): Promise<void> {
         try {
           await pc.setRemoteDescription(env.data);
           const answer = await pc.createAnswer();
-          // T30 munging applies on the answer now that we are the
-          // answerer (T34). Same pure transform as before.
+          // T30 munging applies on the answer (T34 role flip).
           const mungedSdp = prioritizeCodec(answer.sdp ?? "", "VP9");
           await pc.setLocalDescription({ type: answer.type, sdp: mungedSdp });
           const reply: Envelope = { type: "answer", from: "client", data: { type: answer.type, sdp: mungedSdp } };
-          ws.send(JSON.stringify(reply));
+          rws.send(JSON.stringify(reply));
           log("ok", `→ answer`, { sdpBytes: mungedSdp.length });
         } catch (err) {
           log("err", "answer pipeline failed", String(err));
@@ -271,8 +327,6 @@ async function connect(sessionId: string): Promise<void> {
         }
         break;
       case "answer":
-        // We are the answerer — receiving an answer is unexpected. Log
-        // and ignore. Renegotiation would be a fresh offer instead.
         log("warn", `← unexpected answer from ${env.from}`);
         break;
       case "ice":
@@ -291,17 +345,17 @@ async function connect(sessionId: string): Promise<void> {
         log("info", `← bye from ${env.from}`);
         teardown("peer said bye");
         break;
+      case "request_renegotiate":
+        // The streamer is asking US to renegotiate. We cannot
+        // initiate (we are the answerer). Best we can do is ack via
+        // log and rely on the streamer's own ICE restart machinery;
+        // if it re-offers, our offer handler picks it up.
+        log("info", `← request_renegotiate from ${env.from} (no-op for answerer; awaiting fresh offer)`);
+        break;
     }
   });
 
-  ws.addEventListener("close", (ev) => {
-    log(ev.wasClean ? "info" : "warn", `ws close`, { code: ev.code, reason: ev.reason || "(none)" });
-    teardown("ws closed");
-  });
-
-  ws.addEventListener("error", () => {
-    log("err", "ws error");
-  });
+  rws.connect();
 }
 
 // ---------- wire up ----------
@@ -319,3 +373,7 @@ els.connect.addEventListener("click", () => {
 window.addEventListener("beforeunload", () => teardown("page unload"));
 
 log("info", "client loaded — click Connect to start");
+
+// Hint to the bundler/eslint that ReconnectState is part of the public
+// surface even though main.ts only uses it via the rws callbacks.
+export type { ReconnectState };

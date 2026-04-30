@@ -64,10 +64,11 @@ func (r peerRole) other() peerRole {
 }
 
 var validTypes = map[string]struct{}{
-	"offer":  {},
-	"answer": {},
-	"ice":    {},
-	"bye":    {},
+	"offer":               {},
+	"answer":              {},
+	"ice":                 {},
+	"bye":                 {},
+	"request_renegotiate": {}, // T37: peer asks the offerer to redo SDP w/ ICE restart.
 }
 
 // ----- session hub -----
