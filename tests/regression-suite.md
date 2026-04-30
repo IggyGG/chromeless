@@ -137,6 +137,7 @@ not the *physical pipeline*.
 | `tests/harness/aliased-warning-baseline.sh` | T60 — reconcile.py warns when `cam_fps < 2 × flash_freq` (Nyquist rule) | ~3 s |
 | `tests/harness/sink-lag-baseline.sh` | T61 — reconcile.py surfaces `sink_lag_p{50,95,max}_ms` when `--jsonl` is supplied | ~3 s |
 | `tests/harness/input-latency-loopback.sh` | T39 — input-latency reconciler against bundled fixture | ~3 s |
+| `tests/harness/y4m-loopback-baseline.sh` | T109 — y4m fixture-correctness check (decodes 30 frames from `harness/latency/fixtures/harness-loop-720p30.y4m`; auto-regenerates the fixture if missing). Asserts qr_decode_rate ≥ 0.5 (proves the fixture isn't synthetic-green-square) | ~5 s (hermetic when fixture cached) |
 | `tests/harness/phase1-baseline.sh` | T65 — operator wrapper against a real cam.mp4 + jsonl; budget assertion + baseline JSON write | **Operator-only** (needs cam) |
 
 **Run via:** `make test-harness` (loopback only) or `make test-all-nightly`

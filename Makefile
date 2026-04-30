@@ -125,12 +125,19 @@ test-harness:
 # Run every hermetic harness baseline. Same fail-aggregate pattern as
 # test-smoke-all. Excludes phase1-baseline.sh — that's operator-only
 # (needs a real cam.mp4 + jsonl, not bundled).
+#
+# y4m-loopback-baseline.sh is also hermetic (decodes 30 frames from
+# the bundled or auto-generated y4m fixture) so it lives here. The
+# fixture itself is .gitignore'd; the script auto-regenerates when
+# missing on a dev box, or skips loudly on a CI runner without
+# ffmpeg + chromium.
 test-harness-all:
 	@set +e; failures=0; \
 	for s in tests/harness/loopback-baseline.sh \
 	         tests/harness/aliased-warning-baseline.sh \
 	         tests/harness/sink-lag-baseline.sh \
-	         tests/harness/input-latency-loopback.sh; do \
+	         tests/harness/input-latency-loopback.sh \
+	         tests/harness/y4m-loopback-baseline.sh; do \
 	  [ -x "$$s" ] || { echo "skip: $$s missing or not executable"; continue; }; \
 	  echo ""; echo ">>> $$s"; \
 	  if ! bash "$$s"; then failures=$$((failures+1)); fi; \

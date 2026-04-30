@@ -88,47 +88,56 @@ green.
 
 Carried forward from
 [`docs/audits/phase1-stack-audit.md`](audits/phase1-stack-audit.md) §4.1
-with status updates:
+with status updates per team-lead's framing — `tests/run-regression.sh`
+RED on a single documented known issue is **not** a sign-off blocker;
+the must-pass list is operator-validation-of-numbers, not orchestrator
+green.
 
-1. **[#108] spec 05 client-side `state-conn` regression** — RED
-   today. Client never advances past the initial dash after Connect,
-   even though the server delivers the offer (signaling logs show
-   replay). webrtc-dev-owned. **Required for the orchestrator
-   `tests/run-regression.sh` to exit GREEN end-to-end.**
-2. **Operator measurement session** — populate
+1. **Operator measurement session** — populate
    [`docs/measurements/phase1-loopback-2026-04-30.md`](measurements/phase1-loopback-2026-04-30.md)
    §3 with real numbers via either the y4m loopback path (T109,
-   shipped) or a real webcam rig. Output: a committed
-   `tests/harness/baselines/phase1-latest.json` with L1–L4 within
-   budget (LAN p50 < 100 ms / p95 < 130 ms; regional p50 < 200 ms /
-   p95 < 260 ms).
-3. **4-session concurrency pilot** — run the C1 reference script
+   shipped + methodology-validated today: `y4m-loopback-baseline.sh`
+   passes with qr_decode_rate=1.000) or a real webcam rig. Output: a
+   committed `tests/harness/baselines/phase1-latest.json` with L1–L4
+   within budget (LAN p50 < 100 ms / p95 < 130 ms; regional
+   p50 < 200 ms / p95 < 260 ms).
+2. **4-session concurrency pilot** — run the C1 reference script
    on a 16 vCPU host; assert R1/R2/L1/L2 hold per-session, no
    OOM-kill. Operator-driven; pre-deployed via T71/T90 controller
    on K8s.
-4. **Browser matrix walk** — Chrome current + previous on Linux +
+3. **Browser matrix walk** — Chrome current + previous on Linux +
    macOS + Windows must pass R1, R2, L1, L2, I1, I2, A1 (per
    v1-success-criteria.md §6 B1). Edge/Firefox/Safari can
    document-or-defer if not green; the Playwright matrix already
    parameterizes the browser projects.
-5. **Clean-host `docker compose up` quickstart** — README's
+4. **Clean-host `docker compose up` quickstart** — README's
    instructions run end-to-end on a fresh Linux host. Validates the
    T40 client-build + T28 streamer-page + T31 lifecycle + T76 TURN
    issuer wiring all compose without manual fixes.
-6. **Two-tester reproducibility** — operator B reruns the §2
+5. **Two-tester reproducibility** — operator B reruns the §1
    measurement session and lands within ±10% of operator A's
    numbers. Codifies the v1-success-criteria §"Sign-off" rule.
+
+**Must-document (acceptable to defer with a known-issue label):**
+
+- **[#108] spec 05 client-side `state-conn` regression** — webrtc-dev
+  has shipped a partial fix (`1835280`); the orchestrator still
+  reports RED on this single spec. **Not a sign-off gate**: spec 05
+  was conditional in [`docs/audits/phase1-stack-audit.md`](audits/phase1-stack-audit.md)
+  §2 anyway — its operator-validation requirement is satisfied by
+  must-pass item 1 (the operator measurement session) without the
+  Playwright spec needing to be green. Document the open issue in the
+  v1-acceptance report; ship.
 
 **Status today (2026-04-30):**
 
 | # | Item                          | State | Owner            |
 |---|-------------------------------|-------|------------------|
-| 1 | #108 spec 05 fix              | in_progress | webrtc-dev   |
-| 2 | Operator measurement session  | scaffolded | qa-tester (when #108 + rig)  |
-| 3 | Concurrency pilot             | scaffolded | qa-tester / infra-dev |
-| 4 | Browser matrix walk           | scaffolded | qa-tester    |
-| 5 | Clean-host quickstart walk    | not run    | qa-tester / infra-dev |
-| 6 | Two-tester reproducibility    | n/a yet    | qa-tester + 2nd tester |
+| 1 | Operator measurement session  | y4m methodology validated; live-pipeline run pending operator + cam OR Playwright frame-loop on client | qa-tester  |
+| 2 | Concurrency pilot             | scaffolded | qa-tester / infra-dev |
+| 3 | Browser matrix walk           | scaffolded | qa-tester    |
+| 4 | Clean-host quickstart walk    | not run    | qa-tester / infra-dev |
+| 5 | Two-tester reproducibility    | n/a yet    | qa-tester + 2nd tester |
 
 ---
 

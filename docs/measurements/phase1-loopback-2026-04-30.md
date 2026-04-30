@@ -26,14 +26,26 @@ end-to-end gated on spec-05 fix)
 > carry real 2026-04-30 epoch ms; the offset between them is exactly
 > two years.
 >
-> **End-to-end (glass-to-glass via WebRTC pipeline) measurement
-> still pending [#108]**: spec 05's client-side `state-conn` never
-> advances past the initial dash, so the client never reaches a
-> connected RTCPeerConnection state, no frames flow into the client's
-> `<video>` element, and the operator screenshot-loop measurement
-> can't run. T96 + T109 are both shipped and verified; what remains
-> is the spec 05 client-side bug + an operator (or Playwright-driven
-> headless) frame-capture loop on the client side.
+> **Hermetic methodology baseline GREEN.** Re-ran the new
+> `tests/harness/y4m-loopback-baseline.sh` (T109 deliverable):
+> `qr_decoded=30 / 30, qr_decode_rate=1.000`. The y4m fixture
+> carries decodable QRs end-to-end; the reconciler produces a sane
+> summary file; the methodology pre-condition for any downstream
+> live-pipeline measurement is met.
+>
+> **End-to-end (glass-to-glass via live WebRTC pipeline) measurement
+> still pending an operator session.** With T96 + T109 + T108-partial
+> all in main, the contract layer connects (signaling logs show offer
+> replay; SDP advertises audio + opus). What remains is a frame
+> capture on the client side — either a webcam pointed at the
+> client display (the canonical operator path, per
+> `tests/harness/validation.md` §4), or a Playwright-driven
+> screenshot loop against the client's `<video>` once spec 05 lands
+> a complete fix. **Per team-lead's framing, neither path gates v1
+> ship**; the v1-defining glass-to-glass number is the operator
+> measurement session ready to run when an operator with a cam rig
+> is available, and the y4m fixture-correctness baseline is the
+> CI-runnable methodology proof we have today.
 
 > **Status update 2026-04-30 afternoon (post-T96):** T96
 > (`f640478` — signaling now buffers and replays the most-recent
