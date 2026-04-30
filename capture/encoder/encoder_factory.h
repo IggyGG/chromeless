@@ -112,6 +112,14 @@ class CloudBrowserVideoEncoderFactory : public webrtc::VideoEncoderFactory {
     // only instantiates it when AV1 is actually negotiated AND no HW
     // path took precedence; harmless when AV1 isn't picked.
     bool enable_svt_av1 = true;
+
+    // Encoder-side simulcast (T83). When true, every per-codec
+    // encoder is wrapped in a SimulcastEncoder that derives its
+    // layer ladder from VideoCodec::simulcastStream[] at InitEncode.
+    // Single-layer SDP degenerates to one inner encoder behind the
+    // wrapper — near-zero overhead. Pair this with the streamer-side
+    // simulcast wiring from T77 (?simulcast=true on the launch URL).
+    bool enable_simulcast = false;
   };
 
   explicit CloudBrowserVideoEncoderFactory(Config config);

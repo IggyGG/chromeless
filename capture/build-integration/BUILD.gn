@@ -105,6 +105,8 @@ source_set("encoder_factory") {
     "../encoder/h264_encoder.h",
     "../encoder/nvenc_encoder.cc",
     "../encoder/nvenc_encoder.h",
+    "../encoder/simulcast_factory.cc",
+    "../encoder/simulcast_factory.h",
     "../encoder/svtav1_encoder.cc",
     "../encoder/svtav1_encoder.h",
     "../encoder/vaapi_encoder.cc",
@@ -115,6 +117,7 @@ source_set("encoder_factory") {
   deps = [
     "//third_party/abseil-cpp:absl",
     "//third_party/libvpx:libvpx",     # VP9 (T35).
+    "//third_party/libyuv:libyuv",     # I420Scale (T83).
     "//third_party/webrtc/api/units:units",            # DataRate (T58).
     "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
@@ -209,6 +212,7 @@ test("cloud_browser_encoder_unittests") {
     "../encoder/bwe_adapter_test.cc",
     "../encoder/h264_encoder_test.cc",
     "../encoder/nvenc_encoder_test.cc",
+    "../encoder/simulcast_factory_test.cc",
     "../encoder/svtav1_encoder_test.cc",
     "../encoder/vaapi_encoder_test.cc",
     "../encoder/vp9_encoder_test.cc",

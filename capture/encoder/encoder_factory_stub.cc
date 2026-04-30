@@ -25,6 +25,7 @@
 #include "capture/encoder/bwe_adapter.h"
 #include "capture/encoder/h264_encoder.h"
 #include "capture/encoder/nvenc_encoder.h"
+#include "capture/encoder/simulcast_factory.h"
 #include "capture/encoder/svtav1_encoder.h"
 #include "capture/encoder/vaapi_encoder.h"
 #include "capture/encoder/vp9_encoder.h"
@@ -188,25 +189,38 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
     // VAAPI VP9 is Intel-only (Mesa AMD drops VP9 — see vaapi-tuning-
     // rationale.md). NVENC has no VP9 path. So the resolution order
     // for VP9 is just VAAPI → SW.
-    if (config_.prefer_vaapi_vp9 && VaapiAvailable("VP9")) {
-      VaapiEncoderConfig cfg;
-      cfg.codec_type = "VP9";
-      cfg.intra_refresh_period_frames = config_.intra_refresh
-          ? std::max(1, config_.gop_length_frames / 4)
+    auto build_inner_vp9 = [factory_cfg = config_](
+                                  const SimulcastLayer& /*layer*/)
+        -> std::unique_ptr<webrtc::VideoEncoder> {
+      // Inner encoder selection mirrors the non-simulcast path
+      // below — the simulcast wrapper only adds the per-layer
+      // dispatch + downscale.
+      if (factory_cfg.prefer_vaapi_vp9 && VaapiEncoder::ProbeAvailable("VP9")) {
+        VaapiEncoderConfig cfg;
+        cfg.codec_type = "VP9";
+        cfg.intra_refresh_period_frames = factory_cfg.intra_refresh
+            ? std::max(1, factory_cfg.gop_length_frames / 4)
+            : 60;
+        cfg.gop_size = (factory_cfg.intra_refresh
+                            ? -1 : factory_cfg.gop_length_frames);
+        cfg.low_latency_tag = factory_cfg.zero_latency;
+        return std::make_unique<VaapiEncoder>(cfg);
+      }
+      Vp9EncoderConfig cfg;
+      cfg.intra_refresh_period_frames = factory_cfg.intra_refresh
+          ? std::max(1, factory_cfg.gop_length_frames / 4)
           : 60;
-      cfg.gop_size = (config_.intra_refresh ? -1 : config_.gop_length_frames);
-      cfg.low_latency_tag = config_.zero_latency;
-      return WrapWithBweAdapter(std::make_unique<VaapiEncoder>(cfg),
-                                 config_.bwe_adapter);
+      cfg.keyframe_interval =
+          (factory_cfg.intra_refresh ? -1 : factory_cfg.gop_length_frames);
+      cfg.low_latency_tag = factory_cfg.zero_latency;
+      return std::make_unique<Vp9Encoder>(cfg);
+    };
+    if (config_.enable_simulcast) {
+      return WrapWithBweAdapter(
+          std::make_unique<SimulcastEncoder>(build_inner_vp9, "vp9"),
+          config_.bwe_adapter);
     }
-    Vp9EncoderConfig cfg;
-    cfg.intra_refresh_period_frames = config_.intra_refresh
-        ? std::max(1, config_.gop_length_frames / 4)
-        : 60;
-    cfg.keyframe_interval =
-        (config_.intra_refresh ? -1 : config_.gop_length_frames);
-    cfg.low_latency_tag = config_.zero_latency;
-    return WrapWithBweAdapter(std::make_unique<Vp9Encoder>(cfg),
+    return WrapWithBweAdapter(build_inner_vp9(SimulcastLayer{}),
                                config_.bwe_adapter);
   }
   // H264 wrapper lives in capture/encoder/h264_encoder.{h,cc} (T36).
@@ -224,36 +238,45 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
     if (it != format.parameters.end() && it->second.size() == 6) {
       profile_level_id = it->second;
     }
-    if (config_.prefer_nvenc_h264 && NvencAvailable("H264")) {
-      NvencEncoderConfig cfg;
-      cfg.codec_type = "H264";
-      cfg.intra_refresh_period_frames = config_.intra_refresh
-          ? std::max(1, config_.gop_length_frames / 4)
+    auto build_inner_h264 = [factory_cfg = config_, profile_level_id](
+                                    const SimulcastLayer& /*layer*/)
+        -> std::unique_ptr<webrtc::VideoEncoder> {
+      if (factory_cfg.prefer_nvenc_h264 && NvencEncoder::ProbeAvailable("H264")) {
+        NvencEncoderConfig cfg;
+        cfg.codec_type = "H264";
+        cfg.intra_refresh_period_frames = factory_cfg.intra_refresh
+            ? std::max(1, factory_cfg.gop_length_frames / 4)
+            : 60;
+        if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
+        cfg.low_latency_tag = factory_cfg.zero_latency;
+        return std::make_unique<NvencEncoder>(cfg);
+      }
+      if (factory_cfg.prefer_vaapi_h264 && VaapiEncoder::ProbeAvailable("H264")) {
+        VaapiEncoderConfig cfg;
+        cfg.codec_type = "H264";
+        cfg.intra_refresh_period_frames = factory_cfg.intra_refresh
+            ? std::max(1, factory_cfg.gop_length_frames / 4)
+            : 60;
+        if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
+        cfg.gop_size = (factory_cfg.intra_refresh
+                            ? -1 : factory_cfg.gop_length_frames);
+        cfg.low_latency_tag = factory_cfg.zero_latency;
+        return std::make_unique<VaapiEncoder>(cfg);
+      }
+      H264EncoderConfig cfg;
+      cfg.intra_refresh_period_frames = factory_cfg.intra_refresh
+          ? std::max(1, factory_cfg.gop_length_frames / 4)
           : 60;
       if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
-      cfg.low_latency_tag = config_.zero_latency;
-      return WrapWithBweAdapter(std::make_unique<NvencEncoder>(cfg),
-                                 config_.bwe_adapter);
+      cfg.low_latency_tag = factory_cfg.zero_latency;
+      return std::make_unique<H264Encoder>(cfg);
+    };
+    if (config_.enable_simulcast) {
+      return WrapWithBweAdapter(
+          std::make_unique<SimulcastEncoder>(build_inner_h264, "h264"),
+          config_.bwe_adapter);
     }
-    if (config_.prefer_vaapi_h264 && VaapiAvailable("H264")) {
-      VaapiEncoderConfig cfg;
-      cfg.codec_type = "H264";
-      cfg.intra_refresh_period_frames = config_.intra_refresh
-          ? std::max(1, config_.gop_length_frames / 4)
-          : 60;
-      if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
-      cfg.gop_size = (config_.intra_refresh ? -1 : config_.gop_length_frames);
-      cfg.low_latency_tag = config_.zero_latency;
-      return WrapWithBweAdapter(std::make_unique<VaapiEncoder>(cfg),
-                                 config_.bwe_adapter);
-    }
-    H264EncoderConfig cfg;
-    cfg.intra_refresh_period_frames = config_.intra_refresh
-        ? std::max(1, config_.gop_length_frames / 4)
-        : 60;
-    if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
-    cfg.low_latency_tag = config_.zero_latency;
-    return WrapWithBweAdapter(std::make_unique<H264Encoder>(cfg),
+    return WrapWithBweAdapter(build_inner_h264(SimulcastLayer{}),
                                config_.bwe_adapter);
   }
   // AV1 routing (T75): NVENC AV1 (Ada+) → VAAPI AV1 (Arc / RDNA3+)
