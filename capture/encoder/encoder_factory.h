@@ -95,6 +95,16 @@ class CloudBrowserVideoEncoderFactory : public webrtc::VideoEncoderFactory {
     bool prefer_nvenc_h264 = false;
     bool prefer_nvenc_hevc = false;
     bool prefer_nvenc_av1  = false;
+
+    // VAAPI HW-encoder preferences (T70, Intel QSV / AMD AMF). When
+    // both NVENC and VAAPI prefer flags are set, NVENC wins (the
+    // typical case is one or the other available, not both). SW
+    // remains the unconditional fallback if neither HW path probes
+    // available.
+    bool prefer_vaapi_h264 = false;
+    bool prefer_vaapi_hevc = false;
+    bool prefer_vaapi_av1  = false;
+    bool prefer_vaapi_vp9  = false;
   };
 
   explicit CloudBrowserVideoEncoderFactory(Config config);

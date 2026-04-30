@@ -25,6 +25,7 @@
 #include "capture/encoder/bwe_adapter.h"
 #include "capture/encoder/h264_encoder.h"
 #include "capture/encoder/nvenc_encoder.h"
+#include "capture/encoder/vaapi_encoder.h"
 #include "capture/encoder/vp9_encoder.h"
 
 namespace cloud_browser {
@@ -56,6 +57,33 @@ bool NvencAvailable(const std::string& codec) {
   if (!slot) return false;
   if (!slot->has_value()) {
     *slot = NvencEncoder::ProbeAvailable(codec);
+  }
+  return slot->value();
+}
+
+// VAAPI parallel of NvencCache. Same shape; one slot per codec.
+struct VaapiCache {
+  absl::optional<bool> h264;
+  absl::optional<bool> hevc;
+  absl::optional<bool> av1;
+  absl::optional<bool> vp9;
+};
+
+VaapiCache& MutableVaapiCache() {
+  static VaapiCache cache;
+  return cache;
+}
+
+bool VaapiAvailable(const std::string& codec) {
+  auto& cache = MutableVaapiCache();
+  absl::optional<bool>* slot =
+      (codec == "H264")  ? &cache.h264 :
+      (codec == "HEVC")  ? &cache.hevc :
+      (codec == "AV1")   ? &cache.av1  :
+      (codec == "VP9")   ? &cache.vp9  : nullptr;
+  if (!slot) return false;
+  if (!slot->has_value()) {
+    *slot = VaapiEncoder::ProbeAvailable(codec);
   }
   return slot->value();
 }
@@ -142,6 +170,20 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
   // the latency-tuning bits from its own Config into Vp9EncoderConfig
   // so the encoder doesn't have to re-derive intent.
   if (format.name == "VP9" && config_.enable_vp9) {
+    // VAAPI VP9 is Intel-only (Mesa AMD drops VP9 — see vaapi-tuning-
+    // rationale.md). NVENC has no VP9 path. So the resolution order
+    // for VP9 is just VAAPI → SW.
+    if (config_.prefer_vaapi_vp9 && VaapiAvailable("VP9")) {
+      VaapiEncoderConfig cfg;
+      cfg.codec_type = "VP9";
+      cfg.intra_refresh_period_frames = config_.intra_refresh
+          ? std::max(1, config_.gop_length_frames / 4)
+          : 60;
+      cfg.gop_size = (config_.intra_refresh ? -1 : config_.gop_length_frames);
+      cfg.low_latency_tag = config_.zero_latency;
+      return WrapWithBweAdapter(std::make_unique<VaapiEncoder>(cfg),
+                                 config_.bwe_adapter);
+    }
     Vp9EncoderConfig cfg;
     cfg.intra_refresh_period_frames = config_.intra_refresh
         ? std::max(1, config_.gop_length_frames / 4)
@@ -157,32 +199,44 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
   // the remote agreed to; the SDP layer normalizes "profile-level-id"
   // to lowercase before we see it.
   if (format.name == "H264" && config_.enable_h264) {
-    // Runtime selection: prefer NVENC HW when (a) caller asked, AND
-    // (b) the per-codec probe succeeded. Probe failure silently
-    // falls back to the x264 SW wrapper — every host always has a
-    // working H.264 path.
+    // Resolution order: NVENC → VAAPI → SW. NVENC wins when both HW
+    // prefers are set (a NVIDIA + Intel/AMD coexistent host is rare;
+    // fall through happens when the active probe fails). Probe
+    // failure on every HW path silently lands on the x264 SW wrapper
+    // — every host always has a working H.264 path.
+    auto it = format.parameters.find("profile-level-id");
+    std::string profile_level_id;
+    if (it != format.parameters.end() && it->second.size() == 6) {
+      profile_level_id = it->second;
+    }
     if (config_.prefer_nvenc_h264 && NvencAvailable("H264")) {
       NvencEncoderConfig cfg;
       cfg.codec_type = "H264";
       cfg.intra_refresh_period_frames = config_.intra_refresh
           ? std::max(1, config_.gop_length_frames / 4)
           : 60;
-      auto it = format.parameters.find("profile-level-id");
-      if (it != format.parameters.end() && it->second.size() == 6) {
-        cfg.profile_level_id = it->second;
-      }
+      if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
       cfg.low_latency_tag = config_.zero_latency;
       return WrapWithBweAdapter(std::make_unique<NvencEncoder>(cfg),
+                                 config_.bwe_adapter);
+    }
+    if (config_.prefer_vaapi_h264 && VaapiAvailable("H264")) {
+      VaapiEncoderConfig cfg;
+      cfg.codec_type = "H264";
+      cfg.intra_refresh_period_frames = config_.intra_refresh
+          ? std::max(1, config_.gop_length_frames / 4)
+          : 60;
+      if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
+      cfg.gop_size = (config_.intra_refresh ? -1 : config_.gop_length_frames);
+      cfg.low_latency_tag = config_.zero_latency;
+      return WrapWithBweAdapter(std::make_unique<VaapiEncoder>(cfg),
                                  config_.bwe_adapter);
     }
     H264EncoderConfig cfg;
     cfg.intra_refresh_period_frames = config_.intra_refresh
         ? std::max(1, config_.gop_length_frames / 4)
         : 60;
-    auto it = format.parameters.find("profile-level-id");
-    if (it != format.parameters.end() && it->second.size() == 6) {
-      cfg.profile_level_id = it->second;
-    }
+    if (!profile_level_id.empty()) cfg.profile_level_id = profile_level_id;
     cfg.low_latency_tag = config_.zero_latency;
     return WrapWithBweAdapter(std::make_unique<H264Encoder>(cfg),
                                config_.bwe_adapter);

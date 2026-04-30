@@ -50,30 +50,43 @@ The contract pinned in `encoder_factory.h` is what makes this a
 plug-in path and not a rewrite each phase. Don't change the contract
 without writing it down in `docs/internal/encoder-factory-design.md`.
 
-## Runtime SW-vs-HW selection (T63)
+## Runtime SW-vs-HW selection (T63 + T70)
 
-`Config` exposes `prefer_nvenc_{h264,hevc,av1}` flags. Each is
-evaluated **per `CreateVideoEncoder` call** as:
+`Config` exposes per-codec HW preference flags for both NVIDIA
+NVENC (`prefer_nvenc_{h264,hevc,av1}`) and VAAPI (`prefer_vaapi_
+{h264,hevc,av1,vp9}`). Each call to `CreateVideoEncoder` walks a
+fixed resolution order:
 
 ```
-hand back HW (NvencEncoder) IF
-    Config::prefer_nvenc_<codec> is true
-    AND NvencEncoder::ProbeAvailable(<codec>) succeeded
-ELSE
-    hand back SW (Vp9Encoder / H264Encoder)
+For every codec, in order:
+  1. Try NVENC — IF prefer_nvenc_<codec> AND NvencEncoder::ProbeAvailable(<codec>)
+  2. Try VAAPI — IF prefer_vaapi_<codec> AND VaapiEncoder::ProbeAvailable(<codec>)
+  3. Fall back to SW (Vp9Encoder / H264Encoder)
 ```
 
-The probe is a cheap session-open + immediate-close on a tiny
-session; it runs once per process per codec and the result is cached
-(`MutableNvencCache()` in `encoder_factory_stub.cc`). A failed probe
-**silently falls back to SW** — every host always has a working
-encoder for every codec in our SDP. This matters because cloud GPU
-fleets are mixed: per `docs/research/av1-encoders.md` an AWS L4
-supports NVENC AV1 but a T4 / A10 does not.
+The decision matrix:
+
+| codec | NVENC path                       | VAAPI path                          | SW fallback                  |
+|-------|----------------------------------|-------------------------------------|-------------------------------|
+| H.264 | Turing+ (T4 / L4 / A10 / H100)   | Intel iHD / AMD Mesa radeonsi       | x264 ultrafast / zerolatency  |
+| HEVC  | Turing+                          | Intel iHD / AMD Mesa radeonsi       | (none in v1)                  |
+| AV1   | Ada Lovelace+ (L4 / L40 / H100)  | Intel Arc / AMD RDNA 3+             | (none in v1; Phase 4 SVT-AV1) |
+| VP9   | (NVENC has no VP9 path)          | Intel iHD only (Mesa drops VP9)     | libvpx VP9                    |
+
+Both probes are cheap session-open + immediate-close on a tiny
+session; each runs **once per process per codec** and the result is
+cached (`MutableNvencCache` / `MutableVaapiCache` in
+`encoder_factory_stub.cc`). A failed probe **silently falls
+through to the next path** — every host always has a working H.264
++ VP9 path because the SW wrappers are unconditional.
 
 The factory is correct on a host with **no GPU at all** — every
 probe returns false, every encoder is SW, and we simply lose the
-HW fast path.
+HW fast path. Cloud GPU fleets are mixed: per
+`docs/research/av1-encoders.md` an AWS L4 supports NVENC AV1 but
+T4 / A10 do not; an Intel Battlemage supports VAAPI AV1 but a Skylake
+iGPU does not. The runtime probe handles both without compile-time
+choice.
 
 ## Files
 
@@ -83,7 +96,8 @@ HW fast path.
 - `encoder_factory_stub.cc` — production stub that returns supported
   formats, runs the NVENC probe cache, and routes to SW or HW.
 - `vp9_encoder.{h,cc}` (T35), `h264_encoder.{h,cc}` (T36),
-  `nvenc_encoder.{h,cc}` (T63) — the per-codec implementations.
+  `nvenc_encoder.{h,cc}` (T63), `vaapi_encoder.{h,cc}` (T70) — the
+  per-codec implementations.
 - `bwe_adapter.{h,cc}` (T58) — central BWE-update fan-out wrapped
   around every encoder created by the factory.
 

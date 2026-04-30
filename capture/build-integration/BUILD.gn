@@ -35,6 +35,11 @@ declare_args() {
   # encoder still compiles and runs as software-only via the factory's
   # runtime probe.
   nvenc_sdk_path = ""
+
+  # Path to a libva install (typically /usr — empty disables VAAPI HW
+  # encode entirely). Same shape as nvenc_sdk_path: empty = HW
+  # disabled, encoder still compiles and runs as software-only.
+  vaapi_libdir = ""
 }
 
 config("nvenc_sdk") {
@@ -53,6 +58,23 @@ config("nvenc_sdk") {
   }
 }
 
+# VAAPI gate (T70). libva is an Apache-2.0-licensed library typically
+# installed system-wide via the libva-dev / libva-drm-dev Debian/
+# Ubuntu packages; we link it dynamically. When `vaapi_libdir` is set
+# we add the include + lib paths and define HAS_VAAPI; otherwise the
+# encoder falls back to software via runtime probe.
+config("vaapi") {
+  if (vaapi_libdir != "") {
+    defines = [ "HAS_VAAPI=1" ]
+    include_dirs = [ "$vaapi_libdir/include" ]
+    libs = [
+      "va",
+      "va-drm",
+    ]
+    lib_dirs = [ "$vaapi_libdir/lib" ]
+  }
+}
+
 source_set("encoder_factory") {
   sources = [
     "../encoder/bwe_adapter.cc",
@@ -63,6 +85,8 @@ source_set("encoder_factory") {
     "../encoder/h264_encoder.h",
     "../encoder/nvenc_encoder.cc",
     "../encoder/nvenc_encoder.h",
+    "../encoder/vaapi_encoder.cc",
+    "../encoder/vaapi_encoder.h",
     "../encoder/vp9_encoder.cc",
     "../encoder/vp9_encoder.h",
   ]
@@ -79,6 +103,8 @@ source_set("encoder_factory") {
   configs += [
     ":nvenc_sdk",                                # T63 — gated on
                                                   # nvenc_sdk_path != "".
+    ":vaapi",                                    # T70 — gated on
+                                                  # vaapi_libdir != "".
     "//build/config/compiler:no_chromium_code",
   ]
 }
@@ -159,6 +185,7 @@ test("cloud_browser_encoder_unittests") {
     "../encoder/bwe_adapter_test.cc",
     "../encoder/h264_encoder_test.cc",
     "../encoder/nvenc_encoder_test.cc",
+    "../encoder/vaapi_encoder_test.cc",
     "../encoder/vp9_encoder_test.cc",
   ]
   deps = [
@@ -171,7 +198,10 @@ test("cloud_browser_encoder_unittests") {
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
     "//third_party/webrtc/test:test_support",
   ]
-  configs += [ ":nvenc_sdk" ]
+  configs += [
+    ":nvenc_sdk",
+    ":vaapi",
+  ]
 }
 
 # ---------------------------------------------------------------------
