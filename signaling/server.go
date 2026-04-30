@@ -109,6 +109,7 @@ func (h *hub) getOrCreate(id string) *session {
 	if !ok {
 		s = &session{id: id, peers: make(map[peerRole]*peer, 2)}
 		h.sessions[id] = s
+		recordSessionCreated() // T38 metrics
 	}
 	return s
 }
@@ -126,6 +127,7 @@ func (h *hub) dropIfEmpty(id string) {
 	s.mu.Unlock()
 	if empty {
 		delete(h.sessions, id)
+		recordSessionDropped() // T38 metrics
 	}
 }
 
@@ -254,9 +256,11 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.log.Info("peer joined")
+	recordPeerRegistered(p.role) // T38 metrics
 
 	// Forward the first envelope before starting pumps.
 	if _, ok := validTypes[first.Type]; ok {
+		recordMessageForwarded(first.Type) // T38 metrics
 		if !sess.forward(p.role.other(), raw) {
 			p.log.Debug("no peer for first frame yet", slog.String("type", first.Type))
 		}
@@ -270,6 +274,7 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	p.readPump(sess, done)
 
 	sess.unregister(p)
+	recordPeerUnregistered(p.role) // T38 metrics; pairs with the Inc above
 	h.dropIfEmpty(sessionID)
 	p.log.Info("peer left")
 }
@@ -282,6 +287,14 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 	for {
 		_, raw, err := p.conn.ReadMessage()
 		if err != nil {
+			// T38 metrics: extract the close code so /metrics reports
+			// {1000, 1001, 1006, 1011, …} as the {code} label.
+			code := 0
+			var ce *websocket.CloseError
+			if errors.As(err, &ce) {
+				code = ce.Code
+			}
+			recordClose(code)
 			if websocket.IsUnexpectedCloseError(err,
 				websocket.CloseGoingAway,
 				websocket.CloseNormalClosure,
@@ -306,6 +319,7 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 				raw = rewritten
 			}
 		}
+		recordMessageForwarded(env.Type) // T38 metrics
 		if !sess.forward(p.role.other(), raw) {
 			p.log.Debug("no counterpart yet", slog.String("type", env.Type))
 		}
@@ -362,6 +376,7 @@ func main() {
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/turn-credentials", turnHandler)
 	mux.HandleFunc("/ws/", h.wsHandler)
+	mux.Handle("/metrics", metricsHandler()) // T38
 
 	srv := &http.Server{
 		Addr:              addr,

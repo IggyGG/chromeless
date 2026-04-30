@@ -18,17 +18,36 @@
 # see Phase 3 in PROJECT_BRIEF.md). DO NOT ship this image to production
 # multi-tenant infra as-is.
 #
-# Build (build context = repo root so we can COPY capture/streamer-page/):
+# Build (build context = repo root so we can COPY capture/streamer-page/
+# and capture/cb-metrics-sidecar/):
 #   docker build -t cloud-browser-webrtc:dev -f infra/Dockerfile .
 #
 # Run (interactive smoke test):
-#   docker run --rm -p 9222:9222 -p 8080:8080 \
+#   docker run --rm -p 9222:9222 -p 9100:9100 \
 #       --shm-size=1g \
 #       cloud-browser-webrtc:dev
 #
 # Inspect from the host while it's running:
 #   curl http://localhost:9222/json/version
+#   curl http://localhost:9100/metrics
 
+# ---------------------------------------------------------------------------
+# Build stage: cb-metrics-sidecar (T38). A small Go service that polls
+# Chromium DevTools + /proc and exposes Prometheus metrics on :9100.
+# Built from source here so the runtime image is the only artifact
+# anyone deploys.
+# ---------------------------------------------------------------------------
+FROM golang:1.22-alpine AS metrics-build
+WORKDIR /src
+COPY capture/cb-metrics-sidecar/go.mod  capture/cb-metrics-sidecar/go.sum ./
+RUN go mod download
+COPY capture/cb-metrics-sidecar/*.go ./
+ENV CGO_ENABLED=0 GOOS=linux
+RUN go build -trimpath -ldflags="-s -w" -o /out/cb-metrics-sidecar .
+
+# ---------------------------------------------------------------------------
+# Runtime image
+# ---------------------------------------------------------------------------
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -95,6 +114,9 @@ COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
 COPY capture/streamer-page/ /opt/cloud-browser/streamer/
 COPY infra/launch-chromium.sh /usr/local/bin/launch-chromium.sh
 
+# Metrics sidecar binary (T38), built in the metrics-build stage above.
+COPY --from=metrics-build /out/cb-metrics-sidecar /usr/local/bin/cb-metrics-sidecar
+
 # Lifecycle scripts (T31): entrypoint chain, per-boot setup, idle
 # watchdog, manual restart. See infra/lifecycle/README.md.
 COPY infra/lifecycle/ /usr/local/lib/cloud-browser/lifecycle/
@@ -106,7 +128,7 @@ RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bi
  && chmod +x /usr/local/bin/launch-chromium.sh \
  && chown -R cbuser:cbuser /opt/cloud-browser
 
-EXPOSE 9222 8080
+EXPOSE 9222 8080 9100
 
 # DevTools exposes /json/version as soon as Chromium accepts connections,
 # which is our cheapest liveness signal. start-period gives Xvfb +

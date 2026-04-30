@@ -42,6 +42,8 @@ services:
     networks: [cbnet]
     ports:
       - "9222:9222"
+      # cb-metrics-sidecar (T38) — Prometheus scrape target.
+      - "9100:9100"
     environment:
       # Streamer launch (T28). Override per session as the lifecycle
       # scripts (T31) come online.
