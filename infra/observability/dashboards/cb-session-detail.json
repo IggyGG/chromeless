@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "Per-session drill-down for one cloud-browser-webrtc chromium pod / sidecar. Use the $instance variable to pick which sidecar's metrics to render. Once the session controller (T50) lands a session_id label, this dashboard pivots to $session_id.",
+  "description": "Per-session drill-down for one cloud-browser-webrtc chromium pod / sidecar. Pick `$instance` for the sidecar process and `$session_id` (T82) for the per-session client metrics. `$tenant_id` (T82) is exposed for multi-tenant filtering.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -279,7 +279,7 @@
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "cb_client_inbound_video_bitrate_bps{instance=~\"$instance\"}",
+          "expr": "cb_client_inbound_video_bitrate_bps{instance=~\"$instance\",tenant_id=~\"$tenant_id\",session_id=~\"$session_id\"}",
           "legendFormat": "inbound (client got)",
           "refId": "B"
         }
@@ -309,7 +309,7 @@
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "cb_client_pair_rtt_ms{instance=~\"$instance\"}",
+          "expr": "cb_client_pair_rtt_ms{instance=~\"$instance\",tenant_id=~\"$tenant_id\",session_id=~\"$session_id\"}",
           "legendFormat": "client-observed",
           "refId": "B"
         }
@@ -332,19 +332,19 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "cb_client_inbound_video_fps{instance=~\"$instance\"}",
+          "expr": "cb_client_inbound_video_fps{instance=~\"$instance\",tenant_id=~\"$tenant_id\",session_id=~\"$session_id\"}",
           "legendFormat": "client fps",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(cb_client_inbound_video_frames_dropped_total{instance=~\"$instance\"}[1m])",
+          "expr": "rate(cb_client_inbound_video_frames_dropped_total{instance=~\"$instance\",tenant_id=~\"$tenant_id\",session_id=~\"$session_id\"}[1m])",
           "legendFormat": "client dropped fps",
           "refId": "B"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "cb_client_remote_inbound_packet_loss_fraction{instance=~\"$instance\"} * 100",
+          "expr": "cb_client_remote_inbound_packet_loss_fraction{instance=~\"$instance\",tenant_id=~\"$tenant_id\",session_id=~\"$session_id\"} * 100",
           "legendFormat": "remote-inbound loss %",
           "refId": "C"
         }
@@ -376,7 +376,7 @@
         "current": {"selected": false, "text": "All", "value": "$__all"},
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
         "definition": "label_values(cb_chromium_cpu_pct, instance)",
-        "description": "Pick a sidecar instance. Once the session controller (T50) tags metrics with session_id, this dashboard will switch to a $session_id variable.",
+        "description": "Pick a sidecar instance.",
         "hide": 0,
         "includeAll": true,
         "label": "Instance",
@@ -385,6 +385,48 @@
         "options": [],
         "query": {
           "query": "label_values(cb_chromium_cpu_pct, instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {"selected": false, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(cb_client_inbound_video_bitrate_bps, session_id)",
+        "description": "Per-session drill-down (T82). `_anonymous` covers pre-T82 clients and auth-disabled deployments; `_other` is the cardinality-cap overflow bucket.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Session",
+        "multi": true,
+        "name": "session_id",
+        "options": [],
+        "query": {
+          "query": "label_values(cb_client_inbound_video_bitrate_bps, session_id)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {"selected": false, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(cb_client_inbound_video_bitrate_bps, tenant_id)",
+        "description": "Per-tenant filter (T82). Same anonymous/_other semantics as session_id.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tenant",
+        "multi": true,
+        "name": "tenant_id",
+        "options": [],
+        "query": {
+          "query": "label_values(cb_client_inbound_video_bitrate_bps, tenant_id)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

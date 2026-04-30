@@ -129,9 +129,12 @@ func startSidecar(t *testing.T) (port int) {
 }
 
 // scrapeMetric reads /metrics and returns the float value of a metric
-// that exactly matches `metricLine` (e.g., `cb_client_inbound_video_fps`).
-// Counters/gauges with no labels are matched against bare lines.
-func scrapeMetric(t *testing.T, port int, metric string) float64 {
+// matching `metricExpr` — accepts either a bare metric name or a
+// metric with a label-set selector (e.g.,
+// `cb_client_inbound_video_fps{tenant_id="t",session_id="s"}`). The
+// labels in the expr must appear in the same order as Prometheus
+// emits them on the wire (alphabetical for *Vec types).
+func scrapeMetric(t *testing.T, port int, metricExpr string) float64 {
 	t.Helper()
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/metrics", port))
 	if err != nil {
@@ -142,15 +145,14 @@ func scrapeMetric(t *testing.T, port int, metric string) float64 {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	// Match: `<metric> <value>` at start of line.
-	re := regexp.MustCompile(fmt.Sprintf(`(?m)^%s (\S+)`, regexp.QuoteMeta(metric)))
+	re := regexp.MustCompile(fmt.Sprintf(`(?m)^%s (\S+)`, regexp.QuoteMeta(metricExpr)))
 	m := re.FindSubmatch(body)
 	if m == nil {
-		t.Fatalf("metric %q not found in /metrics:\n%s", metric, string(body))
+		t.Fatalf("metric %q not found in /metrics:\n%s", metricExpr, string(body))
 	}
 	v, err := strconv.ParseFloat(string(m[1]), 64)
 	if err != nil {
-		t.Fatalf("parse %q value %q: %v", metric, m[1], err)
+		t.Fatalf("parse %q value %q: %v", metricExpr, m[1], err)
 	}
 	return v
 }
@@ -175,8 +177,8 @@ func postStats(t *testing.T, port int, body string) int {
 func TestStatsLoop(t *testing.T) {
 	port := startSidecar(t)
 
-	// First sample at t=1000.
-	first := `{"v":1,"t":1000,"sample":{
+	// T82 v1.1 envelope — session_id + tenant_id are top-level fields.
+	first := `{"v":1,"t":1000,"session_id":"sess-1","tenant_id":"tenant-A","sample":{
 		"v":1,"t":1000,
 		"inbound":[{"trackId":"v","kind":"video","bytesReceived":0,"packetsReceived":0,"packetsLost":0,"jitter":0,"framesPerSecond":30,"framesDropped":0,"framesReceived":0,"totalDecodeTime":0}],
 		"outbound":[],
@@ -188,7 +190,7 @@ func TestStatsLoop(t *testing.T) {
 	}
 
 	// Second sample at t=2000 with +250_000 bytes → 2_000_000 bps.
-	second := `{"v":1,"t":2000,"sample":{
+	second := `{"v":1,"t":2000,"session_id":"sess-1","tenant_id":"tenant-A","sample":{
 		"v":1,"t":2000,
 		"inbound":[{"trackId":"v","kind":"video","bytesReceived":250000,"packetsReceived":200,"packetsLost":4,"jitter":0,"framesPerSecond":29.5,"framesDropped":2,"framesReceived":59,"totalDecodeTime":0}],
 		"outbound":[],
@@ -199,20 +201,22 @@ func TestStatsLoop(t *testing.T) {
 		t.Fatalf("second POST status %d, want 204", code)
 	}
 
-	// Assertions on /metrics.
-	if got := scrapeMetric(t, port, "cb_client_inbound_video_fps"); got != 29.5 {
+	// Assertions: prom emits labels alphabetically, so the order is
+	// {session_id, tenant_id}.
+	const labels = `{session_id="sess-1",tenant_id="tenant-A"}`
+	if got := scrapeMetric(t, port, "cb_client_inbound_video_fps"+labels); got != 29.5 {
 		t.Errorf("cb_client_inbound_video_fps: got %v, want 29.5", got)
 	}
-	if got := scrapeMetric(t, port, "cb_client_pair_rtt_ms"); got != 50 {
+	if got := scrapeMetric(t, port, "cb_client_pair_rtt_ms"+labels); got != 50 {
 		t.Errorf("cb_client_pair_rtt_ms: got %v, want 50", got)
 	}
-	if got := scrapeMetric(t, port, "cb_client_remote_inbound_packet_loss_fraction"); got != 0.0125 {
+	if got := scrapeMetric(t, port, "cb_client_remote_inbound_packet_loss_fraction"+labels); got != 0.0125 {
 		t.Errorf("cb_client_remote_inbound_packet_loss_fraction: got %v, want 0.0125", got)
 	}
-	if got := scrapeMetric(t, port, "cb_client_inbound_video_bitrate_bps"); got != 2_000_000 {
+	if got := scrapeMetric(t, port, "cb_client_inbound_video_bitrate_bps"+labels); got != 2_000_000 {
 		t.Errorf("cb_client_inbound_video_bitrate_bps: got %v, want 2000000", got)
 	}
-	if got := scrapeMetric(t, port, "cb_client_inbound_video_frames_dropped_total"); got < 2 {
+	if got := scrapeMetric(t, port, "cb_client_inbound_video_frames_dropped_total"+labels); got < 2 {
 		t.Errorf("cb_client_inbound_video_frames_dropped_total: got %v, want ≥ 2", got)
 	}
 }

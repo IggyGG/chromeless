@@ -177,3 +177,44 @@ describe("formatSummary", () => {
     expect(line).toContain("out=—kb/s");
   });
 });
+
+// ---------------------------------------------------------------------------
+// T82: envelope builder — session_id + tenant_id propagation.
+// ---------------------------------------------------------------------------
+
+describe("StatsSampler.buildEnvelope (T82)", () => {
+  it("wraps the sample with session_id + tenant_id from constructor", () => {
+    const sampler = new StatsSampler(
+      { getStats: async () => makeReport([]) },
+      { sessionId: "dev-1", tenantId: "tenant-A" },
+    );
+    const s = sampler.extract(makeReport([VIDEO_INBOUND]));
+    const env = sampler.buildEnvelope(s);
+    expect(env).toMatchObject({
+      v: STATS_PROTOCOL_VERSION,
+      session_id: "dev-1",
+      tenant_id: "tenant-A",
+    });
+    expect(env.t).toBe(s.t);
+    expect(env.sample).toBe(s);
+  });
+
+  it("falls back to _anonymous when session_id is omitted", () => {
+    const sampler = new StatsSampler({ getStats: async () => makeReport([]) });
+    const s = sampler.extract(makeReport([]));
+    const env = sampler.buildEnvelope(s);
+    expect(env.session_id).toBe("_anonymous");
+    expect(env.tenant_id).toBe("_anonymous");
+  });
+
+  it("treats empty-string identifiers as _anonymous", () => {
+    const sampler = new StatsSampler(
+      { getStats: async () => makeReport([]) },
+      { sessionId: "", tenantId: "" },
+    );
+    const s = sampler.extract(makeReport([]));
+    const env = sampler.buildEnvelope(s);
+    expect(env.session_id).toBe("_anonymous");
+    expect(env.tenant_id).toBe("_anonymous");
+  });
+});

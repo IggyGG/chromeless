@@ -3,7 +3,15 @@
 How the client publishes WebRTC `getStats()` samples both into its own
 debug panel and out to the server for Prometheus scraping (T38).
 
-> **Status:** v1, frozen for Phase 0 / Phase 1.
+> **Status:** v1.
+>
+> **Changelog**
+> - **v1.1 (T82)** — added optional `session_id` and `tenant_id`
+>   top-level fields to the envelope. The wire `v` stays at `1`
+>   because both fields are additive — pre-T82 servers ignore unknown
+>   keys per the [Versioning](#versioning) rule. Servers SHOULD use
+>   them to label per-session metrics; absence falls back to
+>   `_anonymous` buckets to match T67's signaling cardinality story.
 >
 > **Phase 2 reconsider:** if the server gains direct access to the
 > peer connection's stats (libwebrtc native stats callbacks), the
@@ -31,13 +39,33 @@ sampler's emit hook to it.
 ```jsonc
 {
   "v": 1,
-  "t": 1730290000123,        // client wall-clock ms (Date.now())
-  "sample": <StatsSample>
+  "t":          1730290000123,    // client wall-clock ms (Date.now())
+  "session_id": "dev-1",          // v1.1; required at v1.1, optional at v1
+  "tenant_id":  "tenant-A",       // v1.1; optional, defaults to anonymous
+  "sample":     <StatsSample>
 }
 ```
 
 `v` and the StatsSample shape are versioned together. Adding fields to
-StatsSample is non-breaking; removing or renaming bumps `v`.
+the envelope or StatsSample is non-breaking; removing or renaming
+bumps `v`.
+
+### `session_id` and `tenant_id` (v1.1, T82)
+
+- `session_id` — the session identifier the client also uses on its
+  signaling `/ws/{session_id}` URL. Required from v1.1 onward; pre-T82
+  clients omit it and the server treats them as `session_id =
+  "_anonymous"`.
+- `tenant_id` — the verified token's `sub` claim (T48 / T67). Optional;
+  absent or empty means `tenant_id = "_anonymous"`.
+
+**Cardinality:** the server caps distinct non-anonymous tenants at
+100 and distinct non-anonymous sessions at 100 (each independently).
+Beyond the cap, the value is bucketed under `_other`. Anonymous is
+exempt from both caps.
+
+The labels propagate as Prometheus labels on the `cb_client_*`
+metrics (T72) — see `infra/observability.md`.
 
 ## StatsSample shape
 

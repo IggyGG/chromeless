@@ -60,6 +60,22 @@ export interface StatsSample {
   candidatePair: CandidatePairStats | null;
 }
 
+/**
+ * Wire envelope sent over the "stats" data channel (v1.1, T82).
+ *
+ * `session_id` / `tenant_id` are top-level so the server can label
+ * Prometheus metrics without re-parsing the StatsSample. Both default
+ * to "_anonymous" on the server side if absent — see
+ * `docs/protocols/stats-channel.md`.
+ */
+export interface StatsEnvelope {
+  v: typeof STATS_PROTOCOL_VERSION;
+  t: number;
+  session_id: string;
+  tenant_id: string;
+  sample: StatsSample;
+}
+
 /** Subset of RTCPeerConnection we depend on. */
 export interface StatsSource {
   getStats(): Promise<RTCStatsReport>;
@@ -70,11 +86,27 @@ export interface StatsSamplerOptions {
   now?: () => number;
   setInterval?: (cb: () => void, ms: number) => number;
   clearInterval?: (id: number) => void;
+  /**
+   * Session identifier — same value as the `/ws/{session_id}` path
+   * segment. Used in the v1.1 stats envelope so the sidecar can label
+   * Prometheus metrics. Defaults to `"_anonymous"`.
+   */
+  sessionId?: string;
+  /**
+   * Tenant identifier — typically the verified token's `sub` claim.
+   * Used in the v1.1 stats envelope. Defaults to `"_anonymous"`.
+   */
+  tenantId?: string;
 }
+
+const ANONYMOUS = "_anonymous";
 
 export class StatsSampler {
   private readonly src: StatsSource;
-  private readonly opts: Required<StatsSamplerOptions>;
+  private readonly opts: Required<Omit<StatsSamplerOptions, "sessionId" | "tenantId">> & {
+    sessionId: string;
+    tenantId: string;
+  };
   private timer: number | null = null;
   private subs = new Set<(s: StatsSample) => void>();
 
@@ -85,6 +117,23 @@ export class StatsSampler {
       now: opts.now ?? Date.now,
       setInterval: opts.setInterval ?? ((cb, ms) => globalThis.setInterval(cb, ms) as unknown as number),
       clearInterval: opts.clearInterval ?? ((id) => globalThis.clearInterval(id)),
+      sessionId: opts.sessionId && opts.sessionId !== "" ? opts.sessionId : ANONYMOUS,
+      tenantId:  opts.tenantId  && opts.tenantId  !== "" ? opts.tenantId  : ANONYMOUS,
+    };
+  }
+
+  /**
+   * Wrap a sample in the v1.1 envelope, using this sampler's
+   * configured session/tenant identifiers. Centralised so the wire
+   * format stays consistent across call sites.
+   */
+  buildEnvelope(sample: StatsSample): StatsEnvelope {
+    return {
+      v: STATS_PROTOCOL_VERSION,
+      t: sample.t,
+      session_id: this.opts.sessionId,
+      tenant_id: this.opts.tenantId,
+      sample,
     };
   }
 

@@ -36,11 +36,19 @@ Two Prometheus endpoints, both on plain HTTP:
 | `cb_webrtc_outbound_qp` | gauge | — | Average video encoder quantizer (`qpSum / framesEncoded`). Lower = higher quality. Phase 2 latency-vs-quality tuning watches this. |
 | `cb_webrtc_remote_inbound_packets_lost_total` | counter | — | Packets the remote peer reported as lost on inbound. |
 | `cb_webrtc_round_trip_time_ms` | gauge | — | Selected ICE candidate-pair RTT, in milliseconds. The single best leading indicator of perceived interactivity. |
-| `cb_client_inbound_video_bitrate_bps` | gauge | — | T72: inbound video bitrate **as observed at the user's browser** (bytesReceived delta over POST interval). Pair with `cb_webrtc_outbound_bitrate_bps{kind="video"}` to see "what we sent" vs. "what they got"; persistent gap == network drop. |
-| `cb_client_inbound_video_fps` | gauge | — | T72: inbound video FPS at the user's browser (RTCInboundRtpStreamStats.framesPerSecond). |
-| `cb_client_inbound_video_frames_dropped_total` | counter | — | T72: inbound video frames the user's browser dropped before display. |
-| `cb_client_pair_rtt_ms` | gauge | — | T72: client's view of selected ICE candidate-pair RTT. Should agree with `cb_webrtc_round_trip_time_ms` ± minor sample-time jitter; divergence is a clock-skew or NAT-rebinding signal. |
-| `cb_client_remote_inbound_packet_loss_fraction` | gauge | — | T72: fractionLost the user's browser reports back upstream (0..1). Distinct from `cb_webrtc_remote_inbound_packets_lost_total` — that one is how many packets we've lost cumulatively, this one is the running fraction. |
+| `cb_client_inbound_video_bitrate_bps` | gauge | `tenant_id`, `session_id` | T72/T82: inbound video bitrate **as observed at the user's browser** (bytesReceived delta over POST interval). Pair with `cb_webrtc_outbound_bitrate_bps{kind="video"}` to see "what we sent" vs. "what they got"; persistent gap == network drop. |
+| `cb_client_inbound_video_fps` | gauge | `tenant_id`, `session_id` | T72/T82: inbound video FPS at the user's browser (RTCInboundRtpStreamStats.framesPerSecond). |
+| `cb_client_inbound_video_frames_dropped_total` | counter | `tenant_id`, `session_id` | T72/T82: inbound video frames the user's browser dropped before display. |
+| `cb_client_pair_rtt_ms` | gauge | `tenant_id`, `session_id` | T72/T82: client's view of selected ICE candidate-pair RTT. Should agree with `cb_webrtc_round_trip_time_ms` ± minor sample-time jitter; divergence is a clock-skew or NAT-rebinding signal. |
+| `cb_client_remote_inbound_packet_loss_fraction` | gauge | `tenant_id`, `session_id` | T72/T82: fractionLost the user's browser reports back upstream (0..1). Distinct from `cb_webrtc_remote_inbound_packets_lost_total` — that one is how many packets we've lost cumulatively, this one is the running fraction. |
+
+> **T82 cardinality (cb_client_*):** the sidecar caps distinct
+> non-anonymous tenant IDs at 100 and distinct non-anonymous session
+> IDs at 100 (independent caps). Beyond the cap, values are bucketed
+> as `_other`. The `_anonymous` value is always exempt and applies
+> when the v1.1 envelope omits the corresponding field (pre-T82
+> clients, or auth-disabled deployments). Same pattern as T67's
+> signaling-side cap.
 
 ## How the sidecar gets WebRTC numbers
 

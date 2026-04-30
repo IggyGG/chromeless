@@ -99,26 +99,30 @@ var (
 	// These are what the user's browser actually receives, and they sit
 	// next to the streamer-side metrics above so dashboards (T66) can
 	// graph "what we sent" vs. "what they got."
-	mClientInboundBitrate = promauto.NewGauge(prometheus.GaugeOpts{
+	// T82 added (tenant_id, session_id) labels so per-session
+	// drilldowns in T66's cb-session-detail dashboard actually
+	// populate. Cardinality is bounded by labelTenant/labelSession
+	// (top-100 each, rest bucketed as "_other"; "_anonymous" exempt).
+	mClientInboundBitrate = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cb_client_inbound_video_bitrate_bps",
 		Help: "Inbound video bitrate as observed at the client, in bits per second.",
-	})
-	mClientInboundFPS = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{"tenant_id", "session_id"})
+	mClientInboundFPS = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cb_client_inbound_video_fps",
 		Help: "Inbound video frames per second as observed at the client.",
-	})
-	mClientInboundFramesDropped = promauto.NewCounter(prometheus.CounterOpts{
+	}, []string{"tenant_id", "session_id"})
+	mClientInboundFramesDropped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "cb_client_inbound_video_frames_dropped_total",
 		Help: "Total inbound video frames dropped, observed at the client.",
-	})
-	mClientPairRTT = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{"tenant_id", "session_id"})
+	mClientPairRTT = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cb_client_pair_rtt_ms",
 		Help: "Selected ICE candidate-pair RTT as observed at the client, in milliseconds.",
-	})
-	mClientRemoteInboundLossFraction = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{"tenant_id", "session_id"})
+	mClientRemoteInboundLossFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cb_client_remote_inbound_packet_loss_fraction",
 		Help: "Fraction of packets reported lost on the client's remote-inbound report (0..1).",
-	})
+	}, []string{"tenant_id", "session_id"})
 )
 
 // ---------------------------------------------------------------------------
