@@ -28,6 +28,12 @@ import { prioritizeCodec } from "./src/sdp.js";
 import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src/reconnect.js";
 import { StatsSampler, StatsSample, STATS_PROTOCOL_VERSION, formatSummary } from "./src/stats.js";
 import { fetchSessionToken, withToken } from "./src/auth.js";
+import { classifyNegotiation, describeOutcome } from "./src/codec-negotiate.js";
+
+// Codec preference list, top-first. The first entry must match the
+// codec we ask `prioritizeCodec` to lead with on the answer SDP, so
+// the negotiator's "ok" outcome aligns with what we actually want.
+const VIDEO_CODEC_PREFERENCE = ["VP9", "AV1", "H264", "VP8"] as const;
 
 const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
 
@@ -389,6 +395,33 @@ async function connect(sessionId: string): Promise<void> {
           const reply: Envelope = { type: "answer", from: "client", data: { type: answer.type, sdp: mungedSdp } };
           rws.send(JSON.stringify(reply));
           log("ok", `→ answer`, { sdpBytes: mungedSdp.length });
+
+          // T54: inspect the negotiated codec immediately. The local
+          // description IS the negotiated answer, so the first PT in
+          // its m=video line tells us what the pipeline will use.
+          const result = classifyNegotiation(mungedSdp, [...VIDEO_CODEC_PREFERENCE]);
+          const lvl: LogLevel =
+            result.outcome === "ok" ? "ok" :
+            result.outcome === "fallback" ? "warn" : "err";
+          log(lvl, describeOutcome(result), { videoCodecs: result.videoCodecs });
+          if (result.outcome === "no_codec") {
+            teardown("no video codec negotiated");
+            return;
+          }
+          if (result.outcome === "fallback" && active?.statsDc?.readyState === "open") {
+            try {
+              active.statsDc.send(JSON.stringify({
+                v: STATS_PROTOCOL_VERSION,
+                t: Date.now(),
+                event: "codec_fallback",
+                data: {
+                  preferred: result.preferred,
+                  negotiated: result.negotiated,
+                  video_codecs: result.videoCodecs,
+                },
+              }));
+            } catch { /* ignore */ }
+          }
         } catch (err) {
           log("err", "answer pipeline failed", String(err));
           teardown("answer failed");
