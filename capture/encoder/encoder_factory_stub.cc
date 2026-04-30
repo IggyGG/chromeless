@@ -22,6 +22,7 @@
 
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
+#include "capture/encoder/h264_encoder.h"
 #include "capture/encoder/vp9_encoder.h"
 
 namespace cloud_browser {
@@ -117,11 +118,23 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
     cfg.low_latency_tag = config_.zero_latency;
     return std::make_unique<Vp9Encoder>(cfg);
   }
-  // H264 / VP8 wrappers land in their own tasks; placeholder until
-  // they do.
+  // H264 wrapper lives in capture/encoder/h264_encoder.{h,cc} (T36).
+  // We pull profile-level-id straight from the SDP fmtp parameters
+  // the remote agreed to; the SDP layer normalizes "profile-level-id"
+  // to lowercase before we see it.
   if (format.name == "H264" && config_.enable_h264) {
-    return std::make_unique<UnimplementedEncoder>("h264");
+    H264EncoderConfig cfg;
+    cfg.intra_refresh_period_frames = config_.intra_refresh
+        ? std::max(1, config_.gop_length_frames / 4)
+        : 60;
+    auto it = format.parameters.find("profile-level-id");
+    if (it != format.parameters.end() && it->second.size() == 6) {
+      cfg.profile_level_id = it->second;
+    }
+    cfg.low_latency_tag = config_.zero_latency;
+    return std::make_unique<H264Encoder>(cfg);
   }
+  // VP8 wrapper still placeholder until its own task lands.
   if (format.name == "VP8" && config_.enable_vp8) {
     return std::make_unique<UnimplementedEncoder>("vp8");
   }
