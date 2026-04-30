@@ -5,8 +5,14 @@ Wire format for input events sent from the **browser client** to the
 T14. The server-side dispatcher that consumes this stream is T22
 (platform-dev).
 
-> **Status:** v1, frozen for Phase 0 / Phase 1. Backwards-incompatible
-> changes bump the `v` field — see [Versioning](#versioning).
+> **Status:** v1 (current minor: **v1.1**, additive — see
+> [Versioning](#versioning)). Backwards-incompatible changes bump the
+> `v` field on the wire to `2`.
+>
+> **Changelog**
+> - **v1.1** — Added `drag_start`, `drag_over`, `drag_end`, `drop` event
+>   types for drag-and-drop (T45/T46). Wire `v` stays at `1`; v1
+>   clients/servers ignore unknown types per the original spec.
 
 ---
 
@@ -147,6 +153,84 @@ Asks the server to push the current remote clipboard back over a
 "clipboard" channel). Included in the input envelope so that the local
 copy gesture preserves activation timing.
 
+### `drag_start` / `drag_over` / `drop` / `drag_end` (v1.1)
+
+Drag-and-drop. Mirrors the DOM `dragstart` / `dragover` / `drop` /
+`dragend` events on the client side and dispatches via CDP
+`Input.dispatchDragEvent` on the server side (T22). Coordinates are in
+the same content-space as mouse events.
+
+**State machine.** Every drag begins with `drag_start`, contains zero
+or more `drag_over` updates while the pointer is in the viewport, and
+ends with **either** `drop` (successful) **or** `drag_end` with
+`success: false` (cancelled / dropped outside). After `drop`, the
+client SHOULD send `drag_end` with `success: true` so the server can
+release any per-drag state. Servers MUST tolerate stray `drag_over`
+events outside an active drag (treat as no-op + log).
+
+```jsonc
+// drag_start  — drag has entered the cloud-browser viewport
+{ "x": 612, "y": 401,
+  "types": ["text/plain", "text/uri-list"],
+  "items": [
+    { "kind": "string", "type": "text/plain",   "data": "hello world" },
+    { "kind": "string", "type": "text/uri-list", "data": "https://example.com/" }
+  ] }
+
+// drag_over  — pointer position update while dragging
+{ "x": 700, "y": 410 }
+
+// drop  — pointer released; payload re-asserted
+{ "x": 700, "y": 410,
+  "types": ["text/plain", "text/uri-list"],
+  "items": [ /* same items as drag_start */ ] }
+
+// drag_end  — close out the drag
+{ "success": true }
+```
+
+Per-event-type fields:
+
+**`drag_start`** / **`drop`** carry the same payload shape:
+
+| field   | type     | notes                                                 |
+|---------|----------|-------------------------------------------------------|
+| `x`,`y` | int      | content-space coords                                  |
+| `types` | string[] | the MIME types the drag offers, in client order       |
+| `items` | object[] | per [Item schema](#drag-item-schema). 0..N entries.   |
+
+**`drag_over`**:
+
+| field   | type | notes                  |
+|---------|------|------------------------|
+| `x`,`y` | int  | content-space coords   |
+
+**`drag_end`**:
+
+| field      | type    | notes                                              |
+|------------|---------|----------------------------------------------------|
+| `success`  | boolean | `true` after `drop`; `false` for cancel / outside  |
+
+#### Drag item schema
+
+| field   | type   | notes                                                                   |
+|---------|--------|-------------------------------------------------------------------------|
+| `kind`  | string | `"string"` or `"file"`. v1 only carries `"string"`; see below.          |
+| `type`  | string | MIME type, lower-case (`"text/plain"`, `"text/uri-list"`, `"text/html"`).|
+| `data`  | string | UTF-8 text payload. Required when `kind == "string"`.                   |
+
+**v1 file-drag policy.** When the user drags a file (DOM
+`DataTransferItem.kind === "file"`), the client emits the item with
+`kind: "file"`, `type: <file mime>`, and **NO `data` field**. v1
+servers MUST treat file items as informational and not transmit file
+contents — file upload is a separate task on the v1+ roadmap. The
+client SHOULD also `console.warn` so the user understands why their
+file drop didn't transfer.
+
+**Coalescing.** `drag_over` is coalescable on the same rules as
+`mouse_move` (see [Backpressure](#backpressure-and-coalescing)).
+`drag_start`, `drop`, and `drag_end` are NEVER dropped.
+
 ---
 
 ## Backpressure and coalescing
@@ -182,14 +266,32 @@ state is consistent.
 ## Versioning
 
 - `v` is integer, currently `1`.
-- Adding a new optional field to a `data` schema does NOT bump `v`. The
-  server MUST ignore unknown fields.
-- Adding a new `type` does NOT bump `v`. The server SHOULD ignore
-  unknown types.
-- Removing/renaming/repurposing a field bumps `v`.
+- **Minor revisions (v1.x) are additive and DO NOT change `v` on the
+  wire.** New event types and new optional fields are minor changes —
+  v1 clients/servers must ignore what they don't understand. We track
+  the additions in this document's [Changelog](#input-channel-protocol-v1)
+  for human readers.
+- **Major revisions (v2+) are breaking and DO bump `v`.** Removing a
+  field, renaming a field, repurposing an existing type, or changing
+  the meaning of an existing value are all major changes.
+- Adding a new optional field to a `data` schema is a minor change
+  (v1.x). The server MUST ignore unknown fields.
+- Adding a new `type` is a minor change (v1.x). Servers SHOULD ignore
+  unknown types and MAY log a warning. Clients MAY query a
+  capabilities endpoint in the future to negotiate which types are
+  supported (out of scope for v1).
+- Removing / renaming / repurposing a field bumps `v` to `2`.
 - The client and server negotiate the version range via the signaling
   layer, not over the data channel itself (see T22 for server-side
   negotiation).
+
+### Why we don't put a `1.1` on the wire
+
+Carrying a minor version on the wire would tempt receivers to gate
+behaviour on it ("if minor < 1, fall back…"), which couples the
+server's behaviour to the client's exact version rather than to the
+shape of the message it actually sent. The unknown-type-ignored rule
+keeps the protocol forward-compatible without that coupling.
 
 ## Security notes (Phase 1 deferred)
 

@@ -358,6 +358,191 @@ func TestDryRunDispatch(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 3. Drag-and-drop dispatch (v1.1)
+// ---------------------------------------------------------------------------
+
+func TestDispatchDragLifecycle(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	envs := []string{
+		`{"v":1,"type":"drag_start","t":1,"seq":0,"data":{"x":100,"y":200,"types":["text/plain"],"items":[{"kind":"string","type":"text/plain","data":"hello"}]}}`,
+		`{"v":1,"type":"drag_over","t":2,"seq":1,"data":{"x":110,"y":210}}`,
+		`{"v":1,"type":"drag_over","t":3,"seq":2,"data":{"x":120,"y":220}}`,
+		`{"v":1,"type":"drop","t":4,"seq":3,"data":{"x":130,"y":230,"types":["text/plain"],"items":[{"kind":"string","type":"text/plain","data":"hello"}]}}`,
+		`{"v":1,"type":"drag_end","t":5,"seq":4,"data":{"success":true}}`,
+	}
+	for _, raw := range envs {
+		env, err := parseEnvelope([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if err := disp.Dispatch(ctx, env); err != nil {
+			t.Errorf("dispatch %s: %v", env.Type, err)
+		}
+	}
+
+	calls := f.Calls()
+	dragTypes := []string{}
+	for _, c := range calls {
+		if c.Method != "Input.dispatchDragEvent" {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(c.Params, &p)
+		if t2, ok := p["type"].(string); ok {
+			dragTypes = append(dragTypes, t2)
+		}
+	}
+	// drag_start → dragEnter, drag_over (×2) → dragOver, drop → drop;
+	// drag_end success:true is in-process state-clear only.
+	wantDragSequence := []string{"dragEnter", "dragOver", "dragOver", "drop"}
+	if len(dragTypes) != len(wantDragSequence) {
+		t.Fatalf("drag CDP sequence: got %v, want %v", dragTypes, wantDragSequence)
+	}
+	for i, w := range wantDragSequence {
+		if dragTypes[i] != w {
+			t.Errorf("drag step %d: got %s, want %s", i, dragTypes[i], w)
+		}
+	}
+
+	// setInterceptDrags should have been called once (idempotent across
+	// the whole drag lifecycle).
+	intercepts := 0
+	for _, c := range calls {
+		if c.Method == "Input.setInterceptDrags" {
+			intercepts++
+		}
+	}
+	if intercepts != 1 {
+		t.Errorf("Input.setInterceptDrags fired %d times, want 1", intercepts)
+	}
+}
+
+func TestDispatchDragCancelOnFalseEnd(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	for _, raw := range []string{
+		`{"v":1,"type":"drag_start","t":1,"seq":0,"data":{"x":1,"y":2,"types":[],"items":[]}}`,
+		`{"v":1,"type":"drag_over","t":2,"seq":1,"data":{"x":3,"y":4}}`,
+		`{"v":1,"type":"drag_end","t":3,"seq":2,"data":{"success":false}}`,
+	} {
+		env, _ := parseEnvelope([]byte(raw))
+		_ = disp.Dispatch(ctx, env)
+	}
+
+	cancelSeen := false
+	for _, c := range f.Calls() {
+		if c.Method != "Input.dispatchDragEvent" {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(c.Params, &p)
+		if p["type"] == "dragCancel" {
+			cancelSeen = true
+		}
+	}
+	if !cancelSeen {
+		t.Errorf("expected dragCancel on success:false drag_end")
+	}
+}
+
+func TestDispatchDragOverBeforeStartIsNoOp(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	env, _ := parseEnvelope([]byte(
+		`{"v":1,"type":"drag_over","t":1,"seq":0,"data":{"x":10,"y":20}}`))
+	if err := disp.Dispatch(ctx, env); err != nil {
+		t.Errorf("expected nil error for stray drag_over, got %v", err)
+	}
+	// No Input.dispatchDragEvent should have been issued.
+	for _, c := range f.Calls() {
+		if c.Method == "Input.dispatchDragEvent" {
+			t.Errorf("stray drag_over should not call dispatchDragEvent")
+		}
+	}
+}
+
+func TestDispatchDragItemsReachCDP(t *testing.T) {
+	// Verify that the items we put in drag_start and re-assert in
+	// drop arrive at CDP in the expected DragData shape.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	env, _ := parseEnvelope([]byte(
+		`{"v":1,"type":"drag_start","t":1,"seq":0,"data":{"x":1,"y":2,` +
+			`"types":["text/plain","text/uri-list"],` +
+			`"items":[` +
+			`{"kind":"string","type":"text/plain","data":"hello"},` +
+			`{"kind":"string","type":"text/uri-list","data":"https://example.com/"}` +
+			`]}}`))
+	if err := disp.Dispatch(ctx, env); err != nil {
+		t.Fatalf("dispatch drag_start: %v", err)
+	}
+
+	for _, c := range f.Calls() {
+		if c.Method != "Input.dispatchDragEvent" {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(c.Params, &p)
+		data, _ := p["data"].(map[string]any)
+		items, _ := data["items"].([]any)
+		if len(items) != 2 {
+			t.Fatalf("expected 2 CDP items, got %d", len(items))
+		}
+		first, _ := items[0].(map[string]any)
+		if first["mimeType"] != "text/plain" || first["data"] != "hello" {
+			t.Errorf("first item mismatch: %+v", first)
+		}
+		mask, ok := data["dragOperationsMask"]
+		if !ok {
+			t.Errorf("dragOperationsMask missing")
+		}
+		_ = mask
+		return
+	}
+	t.Fatalf("no Input.dispatchDragEvent observed")
+}
+
 func TestParseFlags(t *testing.T) {
 	cfg, err := parseFlags([]string{"--source", "ws", "--ws-addr", "127.0.0.1:9999"})
 	if err != nil {

@@ -32,7 +32,12 @@ export type InputType =
   | "composition_update"
   | "composition_end"
   | "clipboard_paste"
-  | "clipboard_copy_request";
+  | "clipboard_copy_request"
+  // v1.1 — drag-and-drop. See docs/protocols/input-channel.md.
+  | "drag_start"
+  | "drag_over"
+  | "drag_end"
+  | "drop";
 
 export interface MouseMoveData { x: number; y: number; }
 export interface MouseButtonData { button: 0 | 1 | 2 | 3 | 4; action: "down" | "up"; x: number; y: number; }
@@ -41,6 +46,18 @@ export interface KeyData { code: string; key: string; mods: number; }
 export interface CompositionData { data: string; }
 export interface ClipboardPasteData { text: string; }
 
+// v1.1 — drag-and-drop payload shapes. See protocol doc for semantics.
+export interface DragItem {
+  /** "string" carries `data`; "file" is informational only in v1 (no bytes). */
+  kind: "string" | "file";
+  type: string; // MIME type, lower-case
+  data?: string; // present iff kind === "string"
+}
+export interface DragStartData { x: number; y: number; types: string[]; items: DragItem[]; }
+export interface DragOverData  { x: number; y: number; }
+export interface DropData      { x: number; y: number; types: string[]; items: DragItem[]; }
+export interface DragEndData   { success: boolean; }
+
 export type InputData =
   | MouseMoveData
   | MouseButtonData
@@ -48,6 +65,10 @@ export type InputData =
   | KeyData
   | CompositionData
   | ClipboardPasteData
+  | DragStartData
+  | DragOverData
+  | DropData
+  | DragEndData
   | Record<string, never>;
 
 export interface InputEnvelope {
@@ -106,6 +127,8 @@ export class InputChannel {
   private seq = 0;
   /** Queue of pending mouse_move data; only the last one is kept after coalesce. */
   private pendingMove: MouseMoveData | null = null;
+  /** Queue of pending drag_over data; only the last one is kept after coalesce. */
+  private pendingDragOver: DragOverData | null = null;
   /** Queue of non-coalescable envelopes. Flushed in order on rAF tick. */
   private pendingOther: InputEnvelope[] = [];
   private rafId: number | null = null;
@@ -168,6 +191,36 @@ export class InputChannel {
     this.enqueue("clipboard_copy_request", {});
   }
 
+  // v1.1 — drag-and-drop senders. drag_over coalesces with the same
+  // shape as mouse_move (latest position wins).
+
+  sendDragStart(x: number, y: number, types: string[], items: DragItem[]): void {
+    this.enqueue("drag_start", {
+      x: Math.round(x), y: Math.round(y), types, items,
+    });
+  }
+
+  sendDragOver(x: number, y: number): void {
+    if (this.ch.bufferedAmount > this.opts.bufferedAmountThreshold) {
+      this.droppedSinceLastFlush++;
+    }
+    if (this.pendingDragOver !== null) {
+      this.droppedSinceLastFlush++;
+    }
+    this.pendingDragOver = { x: Math.round(x), y: Math.round(y) };
+    this.scheduleFlush();
+  }
+
+  sendDrop(x: number, y: number, types: string[], items: DragItem[]): void {
+    this.enqueue("drop", {
+      x: Math.round(x), y: Math.round(y), types, items,
+    });
+  }
+
+  sendDragEnd(success: boolean): void {
+    this.enqueue("drag_end", { success });
+  }
+
   /** Force-flush the queue immediately. */
   flush(): void {
     if (this.rafId !== null && this.opts.cancelRaf !== undefined) {
@@ -220,6 +273,63 @@ export class InputChannel {
     };
     const onCopy = (_e: ClipboardEvent) => { this.sendClipboardCopyRequest(); };
 
+    // ----- v1.1 drag-and-drop -----
+    //
+    // We listen on the target for the four DataTransfer-bearing
+    // events. Per the protocol's state machine:
+    //   dragenter (or dragstart) → drag_start envelope (carries items)
+    //   dragover                 → drag_over envelope (coalesced)
+    //   drop                     → drop envelope (re-asserts items)
+    //   dragend / dragleave (when drag exits the target with no drop)
+    //                            → drag_end envelope
+    //
+    // We must call e.preventDefault() in dragover for drop to fire on
+    // the target at all — that's a DOM quirk, not a protocol detail.
+    let dragInFlight = false;
+
+    const onDragEnter = (e: DragEvent) => {
+      const { x, y } = map(e.clientX, e.clientY, target.getBoundingClientRect());
+      const { types, items } = extractDragItems(e.dataTransfer);
+      this.sendDragStart(x, y, types, items);
+      dragInFlight = true;
+      e.preventDefault();
+    };
+    const onDragOver = (e: DragEvent) => {
+      // preventDefault is required for drop to actually fire.
+      e.preventDefault();
+      if (!dragInFlight) return;
+      const { x, y } = map(e.clientX, e.clientY, target.getBoundingClientRect());
+      this.sendDragOver(x, y);
+    };
+    const onDrop = (e: DragEvent) => {
+      const { x, y } = map(e.clientX, e.clientY, target.getBoundingClientRect());
+      const { types, items } = extractDragItems(e.dataTransfer);
+      this.sendDrop(x, y, types, items);
+      // Per the protocol: client SHOULD send drag_end success:true after drop.
+      this.sendDragEnd(true);
+      dragInFlight = false;
+      e.preventDefault();
+    };
+    const onDragLeave = (_e: DragEvent) => {
+      // Drag exited the target without dropping. We can't reliably
+      // distinguish "moved to a child element" from "left for good"
+      // synchronously, so we only send drag_end on a true cancel
+      // (dragend on the document). dragleave handler is kept as a
+      // hook for Phase 2 instrumentation.
+    };
+    const onDragEnd = (e: DragEvent) => {
+      if (!dragInFlight) return;
+      // dataTransfer.dropEffect === "none" means cancel; otherwise the
+      // drop already fired and we should report success.
+      const success = e.dataTransfer?.dropEffect !== "none";
+      this.sendDragEnd(success);
+      dragInFlight = false;
+    };
+    // Suppress dragstart bubbling from inside the target — we don't
+    // want our own selection-drag to trigger a dragenter before the
+    // user has actually crossed the boundary. Phase 2 may extend
+    // this for in-page drags initiated *from* the cloud Chromium.
+
     target.addEventListener("mousemove", onMouseMove);
     target.addEventListener("mousedown", onMouseDown);
     target.addEventListener("mouseup", onMouseUp);
@@ -232,6 +342,11 @@ export class InputChannel {
     target.addEventListener("compositionend", onCompEnd as EventListener);
     win.addEventListener("paste", onPaste);
     win.addEventListener("copy", onCopy);
+    target.addEventListener("dragenter", onDragEnter as EventListener);
+    target.addEventListener("dragover", onDragOver as EventListener);
+    target.addEventListener("drop", onDrop as EventListener);
+    target.addEventListener("dragleave", onDragLeave as EventListener);
+    target.addEventListener("dragend", onDragEnd as EventListener);
 
     return () => {
       target.removeEventListener("mousemove", onMouseMove);
@@ -246,6 +361,11 @@ export class InputChannel {
       target.removeEventListener("compositionend", onCompEnd as EventListener);
       win.removeEventListener("paste", onPaste);
       win.removeEventListener("copy", onCopy);
+      target.removeEventListener("dragenter", onDragEnter as EventListener);
+      target.removeEventListener("dragover", onDragOver as EventListener);
+      target.removeEventListener("drop", onDrop as EventListener);
+      target.removeEventListener("dragleave", onDragLeave as EventListener);
+      target.removeEventListener("dragend", onDragEnd as EventListener);
     };
   }
 
@@ -272,6 +392,7 @@ export class InputChannel {
     if (this.ch.readyState !== "open") {
       // Drop everything; once closed, queued events are stale.
       this.pendingMove = null;
+      this.pendingDragOver = null;
       this.pendingOther.length = 0;
       this.droppedSinceLastFlush = 0;
       return;
@@ -294,6 +415,19 @@ export class InputChannel {
         data: this.pendingMove,
       };
       this.pendingMove = null;
+      this.dispatch(env);
+    }
+
+    // …and the latest drag_over, if any.
+    if (this.pendingDragOver !== null) {
+      const env: InputEnvelope = {
+        v: PROTOCOL_VERSION,
+        type: "drag_over",
+        t: this.opts.now(),
+        seq: 0,
+        data: this.pendingDragOver,
+      };
+      this.pendingDragOver = null;
       this.dispatch(env);
     }
 
@@ -325,4 +459,51 @@ function domButton(b: number): 0 | 1 | 2 | 3 | 4 {
   // DOM: 0 left, 1 middle, 2 right, 3 back, 4 forward — already matches.
   if (b === 0 || b === 1 || b === 2 || b === 3 || b === 4) return b;
   return 0;
+}
+
+/**
+ * Extract `types` and `items` arrays from a DataTransfer for the v1.1
+ * drag-and-drop payload. v1 file-drag policy: items with kind="file"
+ * are emitted with NO `data` field, and the helper logs a console
+ * warning so the user understands their file drop didn't transfer.
+ *
+ * Exported for unit tests.
+ */
+export function extractDragItems(dt: DataTransfer | null): { types: string[]; items: DragItem[] } {
+  if (!dt) return { types: [], items: [] };
+  const types = Array.from(dt.types);
+  const items: DragItem[] = [];
+  if (dt.items && dt.items.length > 0) {
+    let warnedAboutFiles = false;
+    for (let i = 0; i < dt.items.length; i++) {
+      const it = dt.items[i];
+      if (!it) continue;
+      const mime = (it.type || "").toLowerCase();
+      if (it.kind === "string") {
+        // dt.getData reads from the "drag data store"; it works
+        // synchronously in drop and dragstart, returns "" otherwise.
+        // That's fine — empty strings still tell the server which
+        // MIME types were available.
+        const data = dt.getData(mime);
+        items.push({ kind: "string", type: mime, data });
+      } else if (it.kind === "file") {
+        items.push({ kind: "file", type: mime });
+        if (!warnedAboutFiles) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "input.ts: file drags are not transmitted in v1; " +
+            "the file MIME type is forwarded as metadata only.",
+          );
+          warnedAboutFiles = true;
+        }
+      }
+    }
+    return { types, items };
+  }
+  // No DataTransferItemList — fall back to dt.types + dt.getData per type.
+  for (const t of types) {
+    const data = dt.getData(t);
+    items.push({ kind: "string", type: t.toLowerCase(), data });
+  }
+  return { types, items };
 }

@@ -12,6 +12,7 @@ import {
   MOD_META,
   MOD_SHIFT,
   modsFromEvent,
+  extractDragItems,
 } from "./input.js";
 
 class FakeChannel {
@@ -196,3 +197,181 @@ describe("modsFromEvent", () => {
     expect(modsFromEvent({ shiftKey: true,  ctrlKey: false, altKey: false, metaKey: true  })).toBe(MOD_SHIFT | MOD_META);
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.1 — drag-and-drop senders + extractDragItems
+// ---------------------------------------------------------------------------
+
+describe("InputChannel drag/drop", () => {
+  it("emits drag_start with full item payload", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendDragStart(100, 200, ["text/plain"], [
+      { kind: "string", type: "text/plain", data: "hello" },
+    ]);
+    sched.tick();
+
+    expect(ch.sent).toHaveLength(1);
+    const env = ch.sent[0]!;
+    expect(env.type).toBe("drag_start");
+    expect(env.v).toBe(PROTOCOL_VERSION);
+    expect(env.data).toEqual({
+      x: 100, y: 200,
+      types: ["text/plain"],
+      items: [{ kind: "string", type: "text/plain", data: "hello" }],
+    });
+  });
+
+  it("coalesces drag_over the same way mouse_move is coalesced", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    // Five drag_overs in a single rAF tick → only the last one ships.
+    ic.sendDragOver(10, 10);
+    ic.sendDragOver(20, 20);
+    ic.sendDragOver(30, 30);
+    ic.sendDragOver(40, 40);
+    ic.sendDragOver(50, 50);
+    sched.tick();
+
+    const overs = ch.sent.filter(e => e.type === "drag_over");
+    expect(overs).toHaveLength(1);
+    expect(overs[0]!.data).toEqual({ x: 50, y: 50 });
+  });
+
+  it("emits drop then drag_end on the convenience path", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendDrop(700, 410, ["text/uri-list"], [
+      { kind: "string", type: "text/uri-list", data: "https://example.com/" },
+    ]);
+    ic.sendDragEnd(true);
+    sched.tick();
+
+    expect(ch.sent.map(e => e.type)).toEqual(["drop", "drag_end"]);
+    expect((ch.sent[1]!.data as { success: boolean }).success).toBe(true);
+  });
+
+  it("seq increments across drag events monotonically", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendDragStart(0, 0, [], []);
+    ic.sendDragOver(10, 10);
+    ic.sendDrop(20, 20, [], []);
+    ic.sendDragEnd(true);
+    sched.tick();
+
+    const seqs = ch.sent.map(e => e.seq);
+    expect(seqs).toEqual([0, 1, 2, 3]);
+  });
+
+  it("rounds non-integer drag coordinates", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendDragStart(10.6, 20.4, [], []);
+    ic.sendDragOver(30.5, 40.5);
+    sched.tick();
+
+    expect((ch.sent[0]!.data as { x: number; y: number }).x).toBe(11);
+    expect((ch.sent[0]!.data as { x: number; y: number }).y).toBe(20);
+    const overs = ch.sent.filter(e => e.type === "drag_over");
+    expect((overs[0]!.data as { x: number; y: number }).x).toBe(31); // 30.5 → 31 (round half up)
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractDragItems — pulls types + items out of a DataTransfer-shaped object
+// ---------------------------------------------------------------------------
+
+describe("extractDragItems", () => {
+  it("returns empty arrays for null DataTransfer", () => {
+    expect(extractDragItems(null)).toEqual({ types: [], items: [] });
+  });
+
+  it("extracts string items with their data via getData", () => {
+    const dt = makeStubDataTransfer(
+      ["text/plain", "text/uri-list"],
+      [
+        { kind: "string", type: "text/plain", data: "hello" },
+        { kind: "string", type: "text/uri-list", data: "https://example.com/" },
+      ],
+    );
+    const r = extractDragItems(dt);
+    expect(r.types).toEqual(["text/plain", "text/uri-list"]);
+    expect(r.items).toEqual([
+      { kind: "string", type: "text/plain", data: "hello" },
+      { kind: "string", type: "text/uri-list", data: "https://example.com/" },
+    ]);
+  });
+
+  it("emits file items with NO data field and warns once", () => {
+    const warnings: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    try {
+      const dt = makeStubDataTransfer(
+        ["application/x-moz-file"],
+        [
+          { kind: "file", type: "image/png" },
+          { kind: "file", type: "text/plain" },
+        ],
+      );
+      const r = extractDragItems(dt);
+      expect(r.items).toEqual([
+        { kind: "file", type: "image/png" },
+        { kind: "file", type: "text/plain" },
+      ]);
+      // Exactly one warning, even with two file items.
+      expect(warnings).toHaveLength(1);
+      expect(String(warnings[0]![0])).toMatch(/file drags are not transmitted in v1/);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
+  it("falls back to types + getData when DataTransferItemList is empty", () => {
+    const dt: DataTransfer = {
+      types: ["text/plain"],
+      items: { length: 0 } as unknown as DataTransferItemList,
+      getData: (t: string) => (t === "text/plain" ? "fallback" : ""),
+    } as unknown as DataTransfer;
+    const r = extractDragItems(dt);
+    expect(r.items).toEqual([{ kind: "string", type: "text/plain", data: "fallback" }]);
+  });
+});
+
+/** Build a DataTransfer-shaped stub with a synchronous getData. */
+function makeStubDataTransfer(
+  types: string[],
+  items: Array<{ kind: "string" | "file"; type: string; data?: string }>,
+): DataTransfer {
+  // Index map used by getData(mime) -> data.
+  const dataByType = new Map<string, string>();
+  for (const it of items) {
+    if (it.kind === "string" && it.data !== undefined) {
+      dataByType.set(it.type, it.data);
+    }
+  }
+  const arr = items.map((it, _i) => ({
+    kind: it.kind, type: it.type,
+  })) as unknown as DataTransferItemList;
+  // Length needs to be enumerable for the for-loop in extractDragItems.
+  Object.defineProperty(arr, "length", { value: items.length });
+  for (let i = 0; i < items.length; i++) {
+    Object.defineProperty(arr, i, { value: arr[i], enumerable: true });
+  }
+  return {
+    types,
+    items: arr,
+    getData: (t: string) => dataByType.get(t.toLowerCase()) ?? "",
+  } as unknown as DataTransfer;
+}

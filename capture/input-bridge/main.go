@@ -92,6 +92,36 @@ type clipboardPasteData struct {
 	Text string `json:"text"`
 }
 
+// v1.1 drag-and-drop payload shapes. See docs/protocols/input-channel.md.
+type dragItem struct {
+	Kind string `json:"kind"` // "string" | "file"
+	Type string `json:"type"` // MIME type, lower-case
+	Data string `json:"data"` // empty for kind == "file"
+}
+
+type dragStartData struct {
+	X     int        `json:"x"`
+	Y     int        `json:"y"`
+	Types []string   `json:"types"`
+	Items []dragItem `json:"items"`
+}
+
+type dragOverData struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+type dropData struct {
+	X     int        `json:"x"`
+	Y     int        `json:"y"`
+	Types []string   `json:"types"`
+	Items []dragItem `json:"items"`
+}
+
+type dragEndData struct {
+	Success bool `json:"success"`
+}
+
 // parseEnvelope validates and decodes an input envelope. Returns an
 // error for unsupported `v`, missing required fields, or malformed
 // JSON. Unknown `type` values are accepted at this layer — the
@@ -359,6 +389,18 @@ type dispatcher struct {
 	log        *slog.Logger
 	bringFront sync.Once // call Page.bringToFront at most once per process
 
+	// dragMu guards the per-session drag state. CDP's
+	// Input.dispatchDragEvent requires the DragData payload on every
+	// call (dragEnter, dragOver, drop, dragCancel), so we cache the
+	// items from drag_start and reuse them on subsequent events. We
+	// also enable Input.setInterceptDrags once the first drag arrives
+	// so subsequent OS-level drag handling doesn't race us.
+	dragMu       sync.Mutex
+	dragItems    []dragItem
+	dragTypes    []string
+	dragActive   bool
+	dragInterceptOnce sync.Once
+
 	metrics *metrics
 }
 
@@ -516,6 +558,92 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		_, err := d.cdp.Send(ctx, "Input.insertText", params)
 		return d.fail(env.Type, err)
 
+	case "drag_start":
+		var data dragStartData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return d.fail(env.Type, fmt.Errorf("drag_start: %w", err))
+		}
+		// Enable drag interception once per process. Idempotent in
+		// CDP; we don't fail the dispatch if it errors (some Chromium
+		// builds may not need it).
+		d.dragInterceptOnce.Do(func() {
+			interceptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			if _, err := d.cdp.Send(interceptCtx, "Input.setInterceptDrags",
+				map[string]any{"enabled": true}); err != nil {
+				d.log.Debug("Input.setInterceptDrags not supported", slog.Any("err", err))
+			}
+		})
+		d.dragMu.Lock()
+		d.dragItems = data.Items
+		d.dragTypes = data.Types
+		d.dragActive = true
+		d.dragMu.Unlock()
+		_, err := d.cdp.Send(ctx, "Input.dispatchDragEvent",
+			d.buildDragEvent("dragEnter", data.X, data.Y))
+		return d.fail(env.Type, err)
+
+	case "drag_over":
+		var data dragOverData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return d.fail(env.Type, fmt.Errorf("drag_over: %w", err))
+		}
+		d.dragMu.Lock()
+		active := d.dragActive
+		d.dragMu.Unlock()
+		if !active {
+			// Stray drag_over outside an active drag — protocol says
+			// servers MUST tolerate as a no-op.
+			d.log.Debug("ignoring drag_over outside active drag")
+			return nil
+		}
+		_, err := d.cdp.Send(ctx, "Input.dispatchDragEvent",
+			d.buildDragEvent("dragOver", data.X, data.Y))
+		return d.fail(env.Type, err)
+
+	case "drop":
+		var data dropData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return d.fail(env.Type, fmt.Errorf("drop: %w", err))
+		}
+		// drop re-asserts items per the protocol; prefer the fresh
+		// payload over our cached drag_start state in case the client
+		// modified it between events (unusual but allowed).
+		d.dragMu.Lock()
+		d.dragItems = data.Items
+		d.dragTypes = data.Types
+		d.dragMu.Unlock()
+		params := d.buildDragEvent("drop", data.X, data.Y)
+		_, err := d.cdp.Send(ctx, "Input.dispatchDragEvent", params)
+		// Per state-machine: drop does NOT clear state — the
+		// follow-up drag_end with success:true is what releases it.
+		return d.fail(env.Type, err)
+
+	case "drag_end":
+		var data dragEndData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return d.fail(env.Type, fmt.Errorf("drag_end: %w", err))
+		}
+		d.dragMu.Lock()
+		active := d.dragActive
+		// We need a position for dragCancel — use (0,0) if we never
+		// saw a drag_over. CDP doesn't really care for dragCancel.
+		d.dragActive = false
+		d.dragItems = nil
+		d.dragTypes = nil
+		d.dragMu.Unlock()
+		if !active {
+			// drag_end outside an active drag — informational, no-op.
+			return nil
+		}
+		if data.Success {
+			// drop already fired; just clear state. No CDP call.
+			return nil
+		}
+		_, err := d.cdp.Send(ctx, "Input.dispatchDragEvent",
+			d.buildDragEvent("dragCancel", 0, 0))
+		return d.fail(env.Type, err)
+
 	case "clipboard_copy_request":
 		// Phase 1: synthesize Ctrl+C. The reply path ships separately.
 		_, err := d.cdp.Send(ctx, "Input.dispatchKeyEvent", map[string]any{
@@ -540,6 +668,40 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		d.metrics.unknown.Inc()
 		d.log.Warn("ignoring unknown event type", slog.String("type", env.Type))
 		return nil
+	}
+}
+
+// buildDragEvent assembles a CDP Input.dispatchDragEvent payload from
+// the dispatcher's cached drag state plus the supplied (type, x, y).
+//
+// CDP's DragData carries `items` (each with mimeType + data), an
+// optional `files` array, and `dragOperationsMask` (1=copy, 2=link,
+// 4=move). v1 only emits string drags so we hard-code copy.
+//
+// File items in the protocol carry no `data` field (file contents
+// are out of scope for v1). We forward them as zero-data CDP items so
+// the page sees the MIME types in DataTransfer.types but reading
+// file content yields empty.
+func (d *dispatcher) buildDragEvent(t string, x, y int) map[string]any {
+	d.dragMu.Lock()
+	items := make([]map[string]any, 0, len(d.dragItems))
+	for _, it := range d.dragItems {
+		items = append(items, map[string]any{
+			"mimeType": it.Type,
+			"data":     it.Data, // empty string for kind=="file"
+		})
+	}
+	d.dragMu.Unlock()
+
+	return map[string]any{
+		"type": t,
+		"x":    x,
+		"y":    y,
+		"data": map[string]any{
+			"items":              items,
+			"dragOperationsMask": 1, // copy
+		},
+		"modifiers": 0,
 	}
 }
 
