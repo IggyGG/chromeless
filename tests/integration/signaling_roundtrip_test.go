@@ -238,7 +238,7 @@ func TestSignalingRoundtrip(t *testing.T) {
 	// the server drops the warmup; the client is registered.
 	cli := dialPeer(t, port, sessID, envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"client-warmup"}`),
+		Data: nil,
 	})
 	defer cli.Close()
 
@@ -323,7 +323,7 @@ func TestDuplicateRoleRejected(t *testing.T) {
 
 	cli := dialPeer(t, port, sessID, envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"warmup"}`),
+		Data: nil,
 	})
 	defer cli.Close()
 
@@ -362,7 +362,7 @@ func TestByePropagationAndTeardown(t *testing.T) {
 
 	cli := dialPeer(t, port, sessID, envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"warmup"}`),
+		Data: nil,
 	})
 	brw := dialPeer(t, port, sessID, envelope{
 		Type: "offer", From: "browser",
@@ -398,7 +398,7 @@ func TestByePropagationAndTeardown(t *testing.T) {
 	// registrations, no leftover state.
 	cli2 := dialPeer(t, port, sessID, envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"warmup-2"}`),
+		Data: nil,
 	})
 	defer cli2.Close()
 	brw2 := dialPeer(t, port, sessID, envelope{
@@ -425,7 +425,7 @@ func TestSessionIsolation(t *testing.T) {
 	mkPair := func(sess string, marker string) pair {
 		cli := dialPeer(t, port, sess, envelope{
 			Type: "ice", From: "client",
-			Data: json.RawMessage(`{"candidate":"warmup"}`),
+			Data: nil,
 		})
 		brw := dialPeer(t, port, sess, envelope{
 			Type: "offer", From: "browser",

@@ -153,7 +153,7 @@ func TestCrossTenantIsolation(t *testing.T) {
 	// Set up tenant-A pair.
 	aCli := dialAuthed(t, port, sessID, tokA("client"), envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"warmup-A"}`),
+		Data: nil,
 	})
 	defer aCli.Close()
 	aBrw := dialAuthed(t, port, sessID, tokA("browser"), envelope{
@@ -171,7 +171,7 @@ func TestCrossTenantIsolation(t *testing.T) {
 	// Now bring up tenant-B with the SAME session_id.
 	bCli := dialAuthed(t, port, sessID, tokB("client"), envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"warmup-B"}`),
+		Data: nil,
 	})
 	defer bCli.Close()
 	bBrw := dialAuthed(t, port, sessID, tokB("browser"), envelope{
@@ -232,7 +232,7 @@ func TestSameTenantSameSessionStillWorks(t *testing.T) {
 
 	cli := dialAuthed(t, port, sessID, tok("client"), envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"x"}`),
+		Data: nil,
 	})
 	defer cli.Close()
 	brw := dialAuthed(t, port, sessID, tok("browser"), envelope{
@@ -257,7 +257,7 @@ func TestAuthDisabledFallbackUsesAnonymousTenant(t *testing.T) {
 
 	cli := dialPeer(t, port, sessID, envelope{
 		Type: "ice", From: "client",
-		Data: json.RawMessage(`{"candidate":"x"}`),
+		Data: nil,
 	})
 	defer cli.Close()
 	brw := dialPeer(t, port, sessID, envelope{

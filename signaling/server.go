@@ -108,24 +108,107 @@ type sessionKey struct {
 // counterpart peer joins, register() replays whatever is buffered.
 //
 // Bounded by design: max 2 roles × 3 replayable types = 6 envelopes
-// per session, regardless of throughput. ICE is intentionally NOT
-// replayable: it's a stream where pre-join candidates are stale by
-// the time the new peer arrives, and the streamer continues to
-// trickle post-join candidates anyway.
+// per session, regardless of throughput.
+//
+// T104: `recentICE` mirrors the same idea for ICE candidates, but as
+// a *bounded FIFO queue* per sender (vs. single most-recent). The T96
+// "streamer-finishes-gathering-before-client-joins" race ALSO drops
+// pre-join ICE candidates on the floor; with libwebrtc completing its
+// host+reflexive gathering in milliseconds on container boot, by the
+// time the client joins the streamer has nothing left to trickle and
+// the connection sits in iceConnectionState=checking forever.
+//
+// Cap is iceReplayMaxPerSender (oldest evicted on overflow). Replay
+// drops entries older than iceReplayMaxAge to avoid handing the new
+// peer a TURN candidate whose allocation has lapsed.
 type session struct {
-	id     string
-	tenant string
-	mu     sync.Mutex
-	peers  map[peerRole]*peer
-	recent map[peerRole]map[string][]byte
+	id        string
+	tenant    string
+	mu        sync.Mutex
+	peers     map[peerRole]*peer
+	recent    map[peerRole]map[string][]byte
+	recentICE map[peerRole][]bufferedICE // T104
 }
+
+// bufferedICE is a captured ICE envelope plus the wall-clock time we
+// saw it, so register() can age out stale TURN candidates on replay.
+type bufferedICE struct {
+	raw []byte
+	ts  time.Time
+}
+
+const (
+	// iceReplayMaxPerSender bounds memory: a typical streamer trickles
+	// 4–8 host + ~2 reflexive + 1 relay + 1 end-of-candidates = ~12
+	// candidates. 32 leaves headroom for ICE restarts mid-buffer
+	// without unbounded growth.
+	iceReplayMaxPerSender = 32
+	// iceReplayMaxAge is the age cap on replayed ICE. Much shorter
+	// than typical TURN allocation TTL (~10 min) so we never replay a
+	// candidate whose underlying allocation has lapsed; longer than
+	// any realistic Phase-1 demo session-start latency.
+	iceReplayMaxAge = 60 * time.Second
+)
 
 // replayableTypes lists the envelope types whose most-recent value is
 // buffered for a future-joining peer. The slice doubles as the replay
 // order — offer must come before answer must come before
 // request_renegotiate so the receiver can build its peer connection
-// state in the right order.
+// state in the right order. ICE is replayed AFTER these (T104), so
+// the receiver has setRemoteDescription'd the offer before any
+// addIceCandidate calls land.
 var replayableTypes = []string{"offer", "answer", "request_renegotiate"}
+
+// hasICEData reports whether the given ICE envelope carries a real
+// candidate (vs. a hello-frame / end-of-candidates marker whose
+// `data` field is null or absent). It does a fast JSON-aware scan
+// rather than a full unmarshal: the read pump runs hot and ICE is
+// the highest-frequency envelope type.
+//
+// Returns true when the envelope's `data` field is a non-null object
+// (either `{...}` or any other non-`null` token), false otherwise.
+// Conservative: malformed envelopes are treated as "no data" and
+// therefore not buffered; live-forwarding still happens regardless.
+func hasICEData(raw []byte) bool {
+	// Find `"data"` (must be a JSON key, so always preceded by `,` or
+	// `{` plus optional whitespace). We accept the common pretty-print
+	// variants.
+	const key = `"data"`
+	for i := 0; i < len(raw)-len(key); i++ {
+		if raw[i] != '"' {
+			continue
+		}
+		if i+len(key) > len(raw) {
+			break
+		}
+		if string(raw[i:i+len(key)]) != key {
+			continue
+		}
+		// Walk forward past `:` and whitespace.
+		j := i + len(key)
+		for j < len(raw) && (raw[j] == ' ' || raw[j] == '\t') {
+			j++
+		}
+		if j >= len(raw) || raw[j] != ':' {
+			continue
+		}
+		j++
+		for j < len(raw) && (raw[j] == ' ' || raw[j] == '\t') {
+			j++
+		}
+		if j >= len(raw) {
+			return false
+		}
+		// `null` → no data; anything else (object, array, string,
+		// number, bool) is treated as real data.
+		if raw[j] == 'n' && j+4 <= len(raw) && string(raw[j:j+4]) == "null" {
+			return false
+		}
+		return true
+	}
+	// `data` key absent.
+	return false
+}
 
 func isReplayable(envType string) bool {
 	for _, t := range replayableTypes {
@@ -158,10 +241,11 @@ func (h *hub) getOrCreate(tenant, id string) *session {
 	s, ok := h.sessions[k]
 	if !ok {
 		s = &session{
-			id:     id,
-			tenant: tenant,
-			peers:  make(map[peerRole]*peer, 2),
-			recent: make(map[peerRole]map[string][]byte, 2), // T96 replay buffer
+			id:        id,
+			tenant:    tenant,
+			peers:     make(map[peerRole]*peer, 2),
+			recent:    make(map[peerRole]map[string][]byte, 2), // T96 replay buffer
+			recentICE: make(map[peerRole][]bufferedICE, 2),     // T104 ICE queue
 		}
 		h.sessions[k] = s
 		recordSessionCreated(tenant) // T38/T67 metrics
@@ -237,6 +321,34 @@ func (s *session) register(p *peer) (replayed int, err error) {
 			}
 		}
 	}
+
+	// T104: replay buffered ICE candidates from the counterpart, in
+	// the original send order. Must come AFTER the SDP replay above
+	// so the receiver has already setRemoteDescription'd before any
+	// addIceCandidate calls land. Drop entries older than
+	// iceReplayMaxAge — TURN allocations may have lapsed.
+	if queue, ok := s.recentICE[other]; ok {
+		now := timeNow()
+		var dropped int
+		for _, env := range queue {
+			if now.Sub(env.ts) > iceReplayMaxAge {
+				dropped++
+				continue
+			}
+			select {
+			case p.send <- env.raw:
+				replayed++
+			default:
+				p.log.Warn("send buffer full during ICE replay; dropping",
+					slog.Int("queued", len(queue)))
+			}
+		}
+		if dropped > 0 {
+			p.log.Info("dropped stale ICE on replay",
+				slog.Int("dropped", dropped),
+				slog.Duration("age_cap", iceReplayMaxAge))
+		}
+	}
 	return replayed, nil
 }
 
@@ -255,6 +367,11 @@ func (s *session) unregister(p *peer) {
 // in the sender's slot of the replay buffer so that a later-joining
 // counterpart receives it on register(). The buffer keeps a single
 // envelope per (sender, type) — no growth.
+//
+// T104: when envType is "ice", we also append into a bounded FIFO
+// queue per sender so a later-joining counterpart receives the full
+// candidate stream on register(). Cap is iceReplayMaxPerSender;
+// oldest is evicted on overflow.
 func (s *session) forward(role peerRole, envType string, raw []byte) bool {
 	s.mu.Lock()
 	if isReplayable(envType) {
@@ -270,6 +387,28 @@ func (s *session) forward(role peerRole, envType string, raw []byte) bool {
 		dup := make([]byte, len(raw))
 		copy(dup, raw)
 		buf[envType] = dup
+	}
+	if envType == "ice" && hasICEData(raw) {
+		// Skip envelopes whose `data` is null or absent: those are
+		// hello frames (registration-only, see /ws/ first-frame
+		// handling) or end-of-candidates markers. Replaying either
+		// to a late-joining peer is at best a no-op and at worst
+		// confuses libwebrtc into early-EOC state.
+		sender := role.other()
+		// Same defensive copy reasoning as above — the gorilla read
+		// pump reuses its buffer across ReadMessage calls.
+		dup := make([]byte, len(raw))
+		copy(dup, raw)
+		queue := s.recentICE[sender]
+		if len(queue) >= iceReplayMaxPerSender {
+			// Evict oldest. We keep the most recent N because they're
+			// most likely still valid (host candidates rarely change
+			// during a session, and reflexive/relay get refreshed by
+			// libwebrtc's renomination if they expire).
+			queue = queue[1:]
+		}
+		queue = append(queue, bufferedICE{raw: dup, ts: timeNow()})
+		s.recentICE[sender] = queue
 	}
 	target, ok := s.peers[role]
 	s.mu.Unlock()
