@@ -25,6 +25,8 @@ import("//build/config/sanitizers/sanitizers.gni")
 # ---------------------------------------------------------------------
 source_set("encoder_factory") {
   sources = [
+    "../encoder/bwe_adapter.cc",
+    "../encoder/bwe_adapter.h",
     "../encoder/encoder_factory.h",
     "../encoder/encoder_factory_stub.cc",
     "../encoder/h264_encoder.cc",
@@ -35,6 +37,8 @@ source_set("encoder_factory") {
   deps = [
     "//third_party/abseil-cpp:absl",
     "//third_party/libvpx:libvpx",     # VP9 (T35).
+    "//third_party/webrtc/api/units:units",            # DataRate (T58).
+    "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
     "//third_party/webrtc/modules/video_coding",
     "//third_party/x264:x264",         # H.264 (T36).
@@ -116,6 +120,7 @@ executable("cloud_browser_worker") {
 # ---------------------------------------------------------------------
 test("cloud_browser_encoder_unittests") {
   sources = [
+    "../encoder/bwe_adapter_test.cc",
     "../encoder/h264_encoder_test.cc",
     "../encoder/vp9_encoder_test.cc",
   ]
@@ -123,6 +128,8 @@ test("cloud_browser_encoder_unittests") {
     ":encoder_factory",
     "//testing/gmock",
     "//testing/gtest",
+    "//third_party/webrtc/api/units:units",
+    "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video:video_frame",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
     "//third_party/webrtc/test:test_support",

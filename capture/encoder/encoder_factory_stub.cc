@@ -22,6 +22,7 @@
 
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
+#include "capture/encoder/bwe_adapter.h"
 #include "capture/encoder/h264_encoder.h"
 #include "capture/encoder/vp9_encoder.h"
 
@@ -116,7 +117,8 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
     cfg.keyframe_interval =
         (config_.intra_refresh ? -1 : config_.gop_length_frames);
     cfg.low_latency_tag = config_.zero_latency;
-    return std::make_unique<Vp9Encoder>(cfg);
+    return WrapWithBweAdapter(std::make_unique<Vp9Encoder>(cfg),
+                               config_.bwe_adapter);
   }
   // H264 wrapper lives in capture/encoder/h264_encoder.{h,cc} (T36).
   // We pull profile-level-id straight from the SDP fmtp parameters
@@ -132,7 +134,8 @@ CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
       cfg.profile_level_id = it->second;
     }
     cfg.low_latency_tag = config_.zero_latency;
-    return std::make_unique<H264Encoder>(cfg);
+    return WrapWithBweAdapter(std::make_unique<H264Encoder>(cfg),
+                               config_.bwe_adapter);
   }
   // VP8 wrapper still placeholder until its own task lands.
   if (format.name == "VP8" && config_.enable_vp8) {

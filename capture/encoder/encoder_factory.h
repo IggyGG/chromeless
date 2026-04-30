@@ -35,6 +35,8 @@
 
 namespace cloud_browser {
 
+class BweAdapter;  // capture/encoder/bwe_adapter.h
+
 // CloudBrowserVideoEncoderFactory is the single VideoEncoderFactory
 // installed on the libwebrtc PeerConnectionFactory used by the Phase 1
 // streamer (and, in Phase 2+, by the Chromium-internal capture path).
@@ -77,6 +79,13 @@ class CloudBrowserVideoEncoderFactory : public webrtc::VideoEncoderFactory {
                                           // IDRs.
     int gop_length_frames = 240;         // small GOPs; rotated by
                                           // intra-refresh in steady state.
+
+    // Optional BWE adapter (T58). When non-null, every encoder this
+    // factory creates is wrapped so it registers with the adapter on
+    // InitEncode and unregisters on Release. The adapter then routes
+    // libwebrtc BWE updates to all active encoders. Owned by the
+    // caller; must outlive every encoder this factory produces.
+    BweAdapter* bwe_adapter = nullptr;
   };
 
   explicit CloudBrowserVideoEncoderFactory(Config config);
