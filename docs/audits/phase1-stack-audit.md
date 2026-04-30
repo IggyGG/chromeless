@@ -243,6 +243,15 @@ empty. T65 framework is ready to fill on first operator session.
 
 ## 2. Pass/fail vs v1 success criteria (T6)
 
+> **Cross-reference:** the canonical regression-suite split — what
+> runs PR-blocking vs nightly vs operator-only, with per-test
+> rationale and the orchestrator wired to invoke them — lives in
+> [`tests/regression-suite.md`](../../tests/regression-suite.md). The
+> first orchestrator run against post-`e624c0f` `main` is recorded in
+> [`tests/regression-results-2026-04-30.md`](../../tests/regression-results-2026-04-30.md)
+> (4 layers GREEN, e2e RED on a single known issue [#108]).
+
+
 | ID    | Criterion                                                  | Status | Notes |
 |-------|------------------------------------------------------------|--------|-------|
 | R1    | 1080p30 in capture + SDP                                   | **conditional** | Capture is fake-media (T86); negotiated SDP carries 1080p30 video track. Real-screen R1 awaits T17 build env or a non-Xvfb Chromium fix. |

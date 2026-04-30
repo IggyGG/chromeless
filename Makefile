@@ -4,21 +4,44 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help test test-unit test-integration test-smoke test-harness test-e2e \
+.PHONY: help test test-unit test-integration test-smoke test-smoke-all \
+        test-harness test-harness-all test-e2e test-all-ci test-all-nightly \
         test-unit-signaling test-unit-client test-unit-harness
 
 help:
 	@echo "Targets:"
-	@echo "  make test             # = test-unit + test-integration + test-smoke (the PR gate)"
-	@echo "  make test-unit        # all subproject unit tests"
-	@echo "  make test-integration # tests/integration/ — Go toolchain only, no Docker"
-	@echo "  make test-smoke       # tests/smoke/ — requires Docker"
-	@echo "  make test-harness     # tests/harness/ reconciler regression check (hermetic; needs Python harness deps)"
-	@echo "  make test-e2e         # tests/e2e/ — Phase 1+"
+	@echo "  make test                # legacy alias for test-all-ci (the PR gate)"
+	@echo "  make test-all-ci         # PR-blocking subset (unit + integration + smoke)"
+	@echo "  make test-all-nightly    # PR-blocking + harness baselines + e2e"
 	@echo ""
-	@echo "See tests/README.md for the full testing strategy."
+	@echo "  make test-unit           # all subproject unit tests"
+	@echo "  make test-integration    # tests/integration/ — Go toolchain only, no Docker"
+	@echo "  make test-smoke          # tests/smoke/container-boot.sh (single canonical smoke)"
+	@echo "  make test-smoke-all      # all tests/smoke/*.sh (Linux + Docker)"
+	@echo "  make test-harness        # tests/harness/loopback-baseline.sh (single hermetic check)"
+	@echo "  make test-harness-all    # all four hermetic harness baselines"
+	@echo "  make test-e2e            # tests/e2e/ Playwright specs (full compose stack)"
+	@echo ""
+	@echo "See tests/regression-suite.md for the full reference + gate split."
 
-test: test-unit test-integration test-smoke
+# Legacy alias — prior CI configs may invoke `make test`. New work
+# should use `make test-all-ci` so the PR-blocking subset is explicit.
+test: test-all-ci
+
+# PR-blocking subset (the gate every PR must clear).
+# - unit:      < 60 s, no Docker
+# - integration: < 30 s, builds signaling binary in TestMain
+# - smoke:     ~12 s, container-boot.sh (Docker required; Linux runners on CI)
+test-all-ci: test-unit test-integration test-smoke
+
+# Nightly subset (the broader gate; runs every night via dedicated workflows).
+# Adds:
+# - harness-all:  hermetic baselines (loopback / aliased-warning / sink-lag /
+#                 input-latency)
+# - e2e:          Playwright against full compose stack
+# Note: nightly does NOT include opt-in CBWRTC_INTEGRATION_LIVE Go tests
+# (audio_loopback) — those run inside e2e via Playwright spec 05 anyway.
+test-all-nightly: test-all-ci test-harness-all test-e2e
 
 # ---- unit ------------------------------------------------------------------
 
@@ -72,6 +95,22 @@ test-smoke:
 	  exit 1; \
 	fi
 
+# Run every smoke script in tests/smoke/. Each is independent — failure
+# of one doesn't short-circuit the others, but the target exits non-zero
+# if any failed (after running them all, so the operator sees a complete
+# picture). Linux + Docker required for all of them.
+test-smoke-all:
+	@set +e; failures=0; \
+	for s in tests/smoke/*.sh; do \
+	  [ -x "$$s" ] || continue; \
+	  echo ""; echo ">>> $$s"; \
+	  if ! bash "$$s"; then failures=$$((failures+1)); fi; \
+	done; \
+	if [ "$$failures" -gt 0 ]; then \
+	  echo ""; echo "test-smoke-all: $$failures script(s) failed"; \
+	  exit 1; \
+	fi
+
 # ---- harness ---------------------------------------------------------------
 
 test-harness:
@@ -80,6 +119,24 @@ test-harness:
 	else \
 	  echo "TODO(T12): tests/harness/loopback-baseline.sh not implemented yet"; \
 	  echo "           (blocked on T11 — harness/latency/reconcile.py)"; \
+	  exit 1; \
+	fi
+
+# Run every hermetic harness baseline. Same fail-aggregate pattern as
+# test-smoke-all. Excludes phase1-baseline.sh — that's operator-only
+# (needs a real cam.mp4 + jsonl, not bundled).
+test-harness-all:
+	@set +e; failures=0; \
+	for s in tests/harness/loopback-baseline.sh \
+	         tests/harness/aliased-warning-baseline.sh \
+	         tests/harness/sink-lag-baseline.sh \
+	         tests/harness/input-latency-loopback.sh; do \
+	  [ -x "$$s" ] || { echo "skip: $$s missing or not executable"; continue; }; \
+	  echo ""; echo ">>> $$s"; \
+	  if ! bash "$$s"; then failures=$$((failures+1)); fi; \
+	done; \
+	if [ "$$failures" -gt 0 ]; then \
+	  echo ""; echo "test-harness-all: $$failures script(s) failed"; \
 	  exit 1; \
 	fi
 
