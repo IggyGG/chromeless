@@ -13,11 +13,12 @@ http://localhost:9000/streamer/index.html?signal=ws://signaling:8080/ws&session=
 Query parameters (all optional, but `session` should match what the
 user's client connects to):
 
-| Param      | Default                       | Notes                                |
-|------------|--------------------------------|--------------------------------------|
-| `signal`   | `ws://signaling:8080/ws`      | Signaling base URL. Session ID is appended. |
-| `session`  | `dev`                          | Static session ID for v1.            |
-| `fps`      | `30`                           | Display capture target framerate.    |
+| Param      | Default                          | Notes                                |
+|------------|----------------------------------|--------------------------------------|
+| `signal`   | `ws://signaling:8080/ws`         | Signaling base URL. Session ID is appended. |
+| `session`  | `dev`                             | Static session ID for v1.            |
+| `fps`      | `30`                              | Display capture target framerate.    |
+| `input`    | `ws://localhost:9100/input`      | Input-bridge endpoint (T22 / T41). Streamer relays each `RTCDataChannel("input")` message to this WS. Override for tests that run the bridge elsewhere. |
 
 The host name `signaling` resolves to the signaling-server container in
 `infra/compose.yaml` (T8). For local-laptop runs outside compose,
@@ -105,3 +106,29 @@ var so it can be tuned without editing the supervisord config.
 `infra/Dockerfile` and the supervisord config. Create it as part of
 the T23 hand-off (or roll it into T7/T8 follow-ups if those are still
 in flight).
+
+## Input-bridge co-location (T22 / T41)
+
+The streamer dials the input-bridge at `ws://localhost:9100/input` by
+default. That endpoint is expected to live **inside the same Chromium
+container**, supervised by `supervisord`, listening on loopback only.
+This keeps the dependency local — no extra service in compose, no
+DNS to resolve — and means the bridge talks to Chromium's CDP at
+`http://127.0.0.1:9222` without crossing a network boundary.
+
+Required supervisord program block (sketch):
+
+```ini
+[program:input-bridge]
+command=/usr/local/bin/input-bridge --source ws --ws-addr 127.0.0.1:9100 --cdp-url http://127.0.0.1:9222 --metrics-addr 127.0.0.1:9101
+autorestart=true
+stdout_logfile=/var/log/input-bridge.log
+redirect_stderr=true
+```
+
+If this conflicts with an existing port assignment (the current
+`infra/compose.yaml` has the comment "9100: cb-metrics-sidecar (T38)"
+on the chromium container's published ports — the host-side
+publication is for a different sidecar; input-bridge stays on
+loopback inside the container), reconcile during the supervisord
+wire-up. Track via the T23-followup or a dedicated infra task.

@@ -24,12 +24,18 @@
   const SIGNALING_URL = params.get("signal") || "ws://signaling:8080/ws";
   const SESSION_ID    = params.get("session") || "dev";
   const FRAMERATE     = Number(params.get("fps") || "30");
+  // Input-bridge endpoint (T22 / T41). Same container as the streamer
+  // (supervisord-managed), bound to loopback. Override via ?input=...
+  // for tests that run the bridge elsewhere.
+  const INPUT_BRIDGE_URL = params.get("input") || "ws://localhost:9100/input";
 
   const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302"] }];
   // Phase 3 swaps in our TURN-REST issued credentials (see PROJECT_BRIEF
   // Phase 3). Phase 1 stays on public STUN.
 
   const HEARTBEAT_MS = 10_000;
+  const INPUT_BACKOFF_MIN_MS = 200;
+  const INPUT_BACKOFF_MAX_MS = 5_000;
 
   // -------- log -------------------------------------------------------
 
@@ -56,15 +62,143 @@
 
   // -------- session ---------------------------------------------------
 
-  /** @typedef {{ ws: WebSocket, pc: RTCPeerConnection, stream: MediaStream | null }} Session */
+  /** @typedef {{ ws: WebSocket, pc: RTCPeerConnection, stream: MediaStream | null,
+   *              inputRelay: InputRelay | null }} Session */
   /** @type {Session | null} */
   let active = null;
   let heartbeatTimer = null;
+
+  // -------- input relay -----------------------------------------------
+  //
+  // When the user's client (T14 / T34) opens RTCDataChannel("input"),
+  // the streamer page receives it via pc.ondatachannel. We open a
+  // localhost WebSocket to the input-bridge (T22) and forward each
+  // data-channel message verbatim. The bridge parses + dispatches into
+  // CDP. See docs/protocols/input-channel.md for the wire format.
+  //
+  // We deliberately do not parse here: the bridge is the single source
+  // of truth for the protocol and will reject anything malformed. Any
+  // parsing in the streamer would be a duplicate validation surface
+  // that has to stay in lock-step with the bridge's schema.
+
+  class InputRelay {
+    constructor(dc, url) {
+      this.dc = dc;
+      this.url = url;
+      this.ws = null;
+      this.queue = [];
+      this.closed = false;
+      this.attempt = 0;
+      this.connectTimer = null;
+      this.dropped = 0;
+
+      dc.onmessage = (ev) => this.forward(ev.data);
+      dc.onclose = () => {
+        log("info", "input data-channel closed");
+        this.close();
+      };
+      dc.onerror = (e) => log("warn", "input data-channel error", String(e));
+      this.connect();
+    }
+
+    connect() {
+      if (this.closed) return;
+      const ws = new WebSocket(this.url);
+      this.ws = ws;
+      log("info", "input relay → bridge dialing", this.url);
+      ws.onopen = () => {
+        if (this.closed) { ws.close(); return; }
+        this.attempt = 0;
+        log("ok", "input relay → bridge open",
+            { drained: this.queue.length });
+        // Drain any messages that arrived before the bridge ws came up.
+        for (const msg of this.queue) {
+          try { ws.send(msg); } catch (e) { log("warn", "drain send failed", String(e)); break; }
+        }
+        this.queue = [];
+      };
+      ws.onmessage = (ev) => {
+        // The bridge is one-way today. Anything coming back is a
+        // protocol violation; log and ignore.
+        log("warn", "input relay ← unexpected bridge message",
+            typeof ev.data === "string" ? ev.data.slice(0, 80) : "[binary]");
+      };
+      ws.onerror = () => log("warn", "input relay → bridge error");
+      ws.onclose = (ev) => {
+        log(this.closed ? "info" : "warn", "input relay → bridge closed",
+            { code: ev.code, clean: ev.wasClean });
+        this.ws = null;
+        if (!this.closed) this.scheduleReconnect();
+      };
+    }
+
+    scheduleReconnect() {
+      if (this.closed || this.connectTimer) return;
+      // Exponential backoff: 200ms, 400ms, 800ms, ..., capped at 5s.
+      const delay = Math.min(
+        INPUT_BACKOFF_MAX_MS,
+        INPUT_BACKOFF_MIN_MS * Math.pow(2, this.attempt));
+      this.attempt++;
+      log("info", "input relay reconnect scheduled",
+          { delay_ms: delay, attempt: this.attempt });
+      this.connectTimer = setTimeout(() => {
+        this.connectTimer = null;
+        this.connect();
+      }, delay);
+    }
+
+    forward(data) {
+      if (this.closed) return;
+      // The bridge expects strings (text frames carrying JSON). If the
+      // client ever sends binary (it shouldn't per the v1 protocol),
+      // we drop with a warn so the team-lead-side debug surface shows
+      // the misuse.
+      if (typeof data !== "string") {
+        this.dropped++;
+        log("warn", "input relay dropping non-string frame",
+            { dropped_total: this.dropped });
+        return;
+      }
+      const ws = this.ws;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(data); }
+        catch (e) { log("warn", "input relay send failed", String(e)); }
+        return;
+      }
+      // Bridge ws not open yet — buffer briefly. Cap the queue so a
+      // disconnected bridge does not eat unbounded memory.
+      if (this.queue.length >= 256) {
+        this.dropped++;
+        if (this.dropped === 1 || this.dropped % 50 === 0) {
+          log("warn", "input relay queue full, dropping",
+              { dropped_total: this.dropped });
+        }
+        return;
+      }
+      this.queue.push(data);
+    }
+
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
+      if (this.ws && (this.ws.readyState === WebSocket.OPEN ||
+                       this.ws.readyState === WebSocket.CONNECTING)) {
+        try { this.ws.close(); } catch { /* ignore */ }
+      }
+      this.ws = null;
+      this.queue = [];
+      log("info", "input relay closed");
+    }
+  }
 
   function teardown(reason) {
     if (!active) return;
     log("info", `tearing down: ${reason}`);
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    if (active.inputRelay) {
+      try { active.inputRelay.close(); } catch { /* ignore */ }
+    }
     try {
       if (active.stream) {
         active.stream.getTracks().forEach((t) => t.stop());
@@ -120,12 +254,29 @@
       if (pc.connectionState === "failed") teardown("pc failed");
     };
 
+    // T41: client opens RTCDataChannel("input") on its side; we
+    // catch it here and pipe it to the local input-bridge.
+    pc.ondatachannel = (ev) => {
+      const dc = ev.channel;
+      log("info", "← data-channel offered", { label: dc.label, id: dc.id });
+      if (dc.label !== "input") {
+        log("warn", "ignoring unexpected data-channel label", dc.label);
+        return;
+      }
+      if (active && active.inputRelay) {
+        log("warn", "second input data-channel; closing the old relay");
+        active.inputRelay.close();
+      }
+      const relay = new InputRelay(dc, INPUT_BRIDGE_URL);
+      if (active) active.inputRelay = relay;
+    };
+
     // 3. Open the signaling WS.
     const wsUrl = `${SIGNALING_URL}/${encodeURIComponent(SESSION_ID)}`;
     log("info", "dialing signaling", wsUrl);
     const ws = new WebSocket(wsUrl);
 
-    active = { ws, pc, stream };
+    active = { ws, pc, stream, inputRelay: null };
 
     pc.onicecandidate = (ev) => {
       if (ws.readyState !== WebSocket.OPEN) return;
