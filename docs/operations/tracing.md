@@ -141,12 +141,23 @@ shape as `cb.region` from T94.
 
 ## Sample-rate policy
 
-| Environment | Default | Why |
+The SDK ships with `CBWRTC_TRACE_SAMPLE_RATIO=0.1` as the in-code
+default — that's the **production** number. Dev and staging should
+explicitly override; the compose file already does (defaulting the
+env to `1.0`), but K8s and Helm callers must set it themselves.
+
+| Environment | Setting | Why |
 |-------------|---------|-----|
-| Local compose | 1.0 | Dev volume is tiny; you want every trace |
-| Staging | 0.5 | Catch regressions without flooding the backend |
-| Prod (steady-state) | 0.1 | Cost / volume balance; 1 in 10 sessions |
-| Prod (incident) | 1.0 | Set via `kubectl set env` for the duration |
+| Local compose | **1.0** (compose default) | Dev volume is tiny; you want every trace. Without it, debugging "why doesn't my span show up" turns into a sample-rate hunt. |
+| Staging | 0.5 (operator-set) | Catch regressions without flooding the backend |
+| Prod (steady-state) | 0.1 (in-code default) | Cost / volume balance; 1 in 10 sessions |
+| Prod (incident) | 1.0 (operator-set) | `kubectl set env deploy/... CBWRTC_TRACE_SAMPLE_RATIO=1.0` for the duration |
+
+> **Heads-up for operators:** if you bring up the observability
+> profile locally and don't see every connect, double-check
+> `CBWRTC_TRACE_SAMPLE_RATIO`. The compose default is `1.0`, but a
+> stale shell with the prod value exported will silently drop 90% of
+> spans.
 
 The sampler is `ParentBased(TraceIDRatioBased(R))`, so:
 
