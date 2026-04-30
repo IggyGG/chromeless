@@ -1,0 +1,125 @@
+{{- if .Values.defaultPool.enabled -}}
+{{- $ns := include "cb.namespace" . -}}
+apiVersion: cloud-browser-webrtc.example.com/v1alpha1
+kind: BrowserSessionPool
+metadata:
+  name: {{ .Values.controller.defaultPool }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pool
+spec:
+  warmReplicas: {{ .Values.defaultPool.warmReplicas }}
+  maxSessions: {{ .Values.defaultPool.maxSessions }}
+  maxAgeSeconds: {{ .Values.defaultPool.maxAgeSeconds }}
+  recyclePolicy: {{ .Values.defaultPool.recyclePolicy }}
+  template:
+    metadata:
+      labels:
+        {{- include "cb.labels" . | nindent 8 }}
+        app.kubernetes.io/component: session
+        cb.session/state: warm
+      annotations:
+        cb.io/snapshot-id: ""
+    spec:
+      {{- if .Values.gvisor.enabled }}
+      runtimeClassName: gvisor
+      {{- end }}
+      shareProcessNamespace: true
+      restartPolicy: Always
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: cb-chromium.json
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: supervisor-log
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: x11-socket
+          emptyDir: {}
+      containers:
+        - name: cb-chromium
+          image: {{ include "cb.image" (dict "component" "chromium" "values" .Values "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - name: SESSION_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SIGNALING_URL
+              value: "ws://signaling.{{ $ns }}.svc.cluster.local:8080/ws"
+            - name: STREAMER_FPS
+              value: "30"
+            - name: IDLE_TIMEOUT_S
+              value: "999999"
+          ports:
+            - name: devtools
+              containerPort: 9222
+            - name: streamer
+              containerPort: 9000
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+            - { name: run, mountPath: /run }
+            - { name: supervisor-log, mountPath: /var/log/supervisor }
+            - { name: home, mountPath: /home/cbuser }
+            - { name: tmp, mountPath: /tmp }
+            - { name: x11-socket, mountPath: /tmp/.X11-unix }
+          resources:
+            {{- toYaml .Values.defaultPool.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /json/version, port: devtools }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /json/version, port: devtools }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+        - name: cb-metrics-sidecar
+          image: {{ include "cb.image" (dict "component" "metricsSidecar" "values" .Values "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - { name: DEVTOOLS_URL, value: "http://127.0.0.1:9222" }
+            - { name: METRICS_LISTEN, value: ":9100" }
+            - { name: POLL_INTERVAL_S, value: "10" }
+          ports:
+            - { name: metrics, containerPort: 9100 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+{{- end }}

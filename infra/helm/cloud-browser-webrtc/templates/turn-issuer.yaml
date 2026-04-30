@@ -1,0 +1,115 @@
+{{- if .Values.turnIssuer.enabled -}}
+{{- $ns := include "cb.namespace" . -}}
+{{- include "cb.requireValue" (dict "value" .Values.turnIssuer.secrets.authPubkey "name" "turnIssuer.secrets.authPubkey" "context" "turnIssuer enabled") -}}
+{{- include "cb.requireValue" (dict "value" .Values.turnIssuer.secrets.sharedSecret "name" "turnIssuer.secrets.sharedSecret" "context" "turnIssuer enabled") -}}
+{{- include "cb.requireValue" (dict "value" .Values.turnIssuer.secrets.turnURLs "name" "turnIssuer.secrets.turnURLs" "context" "turnIssuer enabled") -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: turn-issuer
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: turn-issuer
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: turn-issuer-secrets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: turn-issuer
+type: Opaque
+stringData:
+  CBWRTC_AUTH_PUBKEY: {{ .Values.turnIssuer.secrets.authPubkey | quote }}
+  CBWRTC_TURN_SHARED_SECRET: {{ .Values.turnIssuer.secrets.sharedSecret | quote }}
+  CBWRTC_TURN_SHARED_SECRET_PREV: {{ .Values.turnIssuer.secrets.sharedSecretPrev | default "" | quote }}
+  CBWRTC_TURN_URLS: {{ .Values.turnIssuer.secrets.turnURLs | quote }}
+  CBWRTC_STUN_URLS: {{ .Values.turnIssuer.secrets.stunURLs | default "" | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: turn-issuer
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: turn-issuer
+spec:
+  replicas: {{ .Values.turnIssuer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "cb.selectorLabels" (merge (dict "component" "turn-issuer") .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cb.selectorLabels" (merge (dict "component" "turn-issuer") .) | nindent 8 }}
+      {{- if .Values.prometheusAnnotations.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8090"
+        prometheus.io/path: "/metrics"
+      {{- end }}
+    spec:
+      serviceAccountName: turn-issuer
+      automountServiceAccountToken: false
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: turn-issuer
+          image: {{ include "cb.image" (dict "component" "turnIssuer" "values" .Values "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8090
+          envFrom:
+            - secretRef:
+                name: turn-issuer-secrets
+          env:
+            - name: LISTEN
+              value: ":8090"
+          resources:
+            {{- toYaml .Values.turnIssuer.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: turn-issuer
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: turn-issuer
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cb.selectorLabels" (merge (dict "component" "turn-issuer") .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+{{- end }}

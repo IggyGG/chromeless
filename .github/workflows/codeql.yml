@@ -1,0 +1,69 @@
+# .github/workflows/codeql.yml — T84 CodeQL static analysis for Go +
+# JS/TS. Runs on PR + a weekly cron so we catch newly-disclosed CVEs
+# in vendored deps and slow-burn code-quality drift.
+
+name: CodeQL
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Friday 04:13 UTC — off-peak, off-business-hours, picked-minute-non-zero
+    # so we don't pile onto GitHub's hourly traffic spike.
+    - cron: "13 4 * * 5"
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go (for go modules)
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Restrict scan to in-repo source so we don't choke on
+          # vendored prom client + controller-runtime trees.
+          source-root: .
+          config: |
+            paths-ignore:
+              - "**/dist/**"
+              - "**/node_modules/**"
+              - "**/vendor/**"
+              - "tests/e2e/playwright-report/**"
+
+      # autobuild covers our Go modules well enough; no custom build
+      # step required for the JS/TS path (build-mode: none).
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

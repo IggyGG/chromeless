@@ -1,0 +1,142 @@
+# .github/workflows/harness-loopback.yml — T84 nightly harness
+# regression. Runs the harness's loopback / aliased-warning / sink-lag /
+# input-latency baselines on a fixed runner, compares the results to a
+# stored baseline file, and files an issue when a sustained regression
+# crosses the gate.
+#
+# The runner is intentionally `ubuntu-latest` — runner CPU varies
+# day-to-day, so we use generous regression thresholds (5ms p50, 10ms
+# p95). The "ground-truth" glass-to-glass measurements happen on the
+# stable test rig (off CI); see docs/operations/runbook.md.
+
+name: Harness regression
+
+on:
+  schedule:
+    # 06:00 UTC daily; off business hours in most TZs.
+    - cron: "7 6 * * *"
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "tests/harness/**"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  harness:
+    name: Harness baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install harness deps
+        working-directory: harness
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+      - name: Run baselines
+        id: baselines
+        run: |
+          mkdir -p .baselines-out
+          # Each script writes a JSON summary to .baselines-out/<name>.json.
+          for s in loopback-baseline.sh aliased-warning-baseline.sh \
+                   sink-lag-baseline.sh input-latency-loopback.sh; do
+            if [ -x "tests/harness/$s" ]; then
+              echo "::group::$s"
+              CB_BASELINE_OUT=".baselines-out/${s%.sh}.json" \
+                  bash "tests/harness/$s" || echo "$s exited non-zero"
+              echo "::endgroup::"
+            else
+              echo "skip: tests/harness/$s missing or not executable"
+            fi
+          done
+
+      - name: Compare against stored baseline
+        id: compare
+        run: |
+          # tests/harness/baseline-thresholds.json holds:
+          #   {"<script>.json": {"p50_ms": <num>, "p95_ms": <num>}, ...}
+          # Threshold for fail: regression > 5ms p50 / 10ms p95.
+          if [ ! -f tests/harness/baseline-thresholds.json ]; then
+            echo "::warning::no baseline thresholds present; this run only records, doesn't compare"
+            echo "regression=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 tests/harness/compare-baselines.py \
+              --baseline tests/harness/baseline-thresholds.json \
+              --current-dir .baselines-out/ \
+              --p50-tolerance-ms 5 \
+              --p95-tolerance-ms 10 \
+              > comparison.txt
+          rc=$?
+          cat comparison.txt
+          if [ "$rc" -ne 0 ]; then
+            echo "regression=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "regression=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Don't fail this step yet; we want the artefact upload + issue
+          # creation to run before the workflow exits non-zero.
+          exit 0
+
+      - name: Upload baseline outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-baselines-${{ github.run_id }}
+          path: |
+            .baselines-out/
+            comparison.txt
+          retention-days: 30
+
+      - name: File regression issue
+        if: steps.compare.outputs.regression == 'true' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const cmp = fs.existsSync('comparison.txt')
+              ? fs.readFileSync('comparison.txt', 'utf8')
+              : '(comparison.txt missing — see workflow logs)';
+            const title = `Harness regression on ${new Date().toISOString().slice(0,10)}`;
+            const body = [
+              '`harness-loopback` workflow detected a regression past the',
+              '5 ms p50 / 10 ms p95 threshold.',
+              '',
+              '## Comparison',
+              '',
+              '```',
+              cmp,
+              '```',
+              '',
+              `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'See [docs/operations/runbook.md#debugging-a-slow-session]',
+              '(../docs/operations/runbook.md#debugging-a-slow-session) for triage steps.',
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['regression', 'harness'],
+            });
+
+      - name: Fail on regression
+        if: steps.compare.outputs.regression == 'true'
+        run: |
+          echo "::error::harness regression detected; see comparison.txt"
+          exit 1

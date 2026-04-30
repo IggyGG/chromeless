@@ -1,0 +1,89 @@
+# config/crd/browsersessions.yaml — BrowserSession CRD
+#
+# Hand-authored from pkg/apis/v1/types.go because controller-gen is
+# not in this repo's tooling. When you change types.go, mirror the
+# spec/status fields here. The CRD shape is the API contract clients
+# depend on; keep it stable.
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: browsersessions.cloud-browser-webrtc.example.com
+spec:
+  group: cloud-browser-webrtc.example.com
+  names:
+    kind: BrowserSession
+    listKind: BrowserSessionList
+    plural: browsersessions
+    singular: browsersession
+    shortNames: [bs]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Pod
+          type: string
+          jsonPath: .status.connection.podName
+        - name: Tenant
+          type: string
+          jsonPath: .spec.tenantID
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion: { type: string }
+            kind:       { type: string }
+            metadata:   { type: object }
+            spec:
+              type: object
+              properties:
+                tenantID:
+                  type: string
+                  maxLength: 64
+                  pattern: '^[a-zA-Z0-9_-]*$'
+                poolName:
+                  type: string
+                region:
+                  type: string
+                idleTimeoutSeconds:
+                  type: integer
+                  minimum: 30
+                  default: 600
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Warming, Ready, Draining, Ended]
+                connection:
+                  type: object
+                  properties:
+                    signalingURL: { type: string }
+                    podName:      { type: string }
+                    podIP:        { type: string }
+                lastActivityAt: { type: string, format: date-time }
+                startedAt:      { type: string, format: date-time }
+                endedAt:        { type: string, format: date-time }
+                endReason:      { type: string }
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason, message]
+                    properties:
+                      type:               { type: string }
+                      status:             { type: string }
+                      observedGeneration: { type: integer, format: int64 }
+                      lastTransitionTime: { type: string, format: date-time }
+                      reason:             { type: string }
+                      message:            { type: string }

@@ -1,6 +1,10 @@
 # cloud-browser-webrtc
 
 [![CI](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/ci.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/ci.yml)
+[![E2E](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/e2e.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/e2e.yml)
+[![Harness](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/harness-loopback.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/harness-loopback.yml)
+[![CodeQL](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/codeql.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/codeql.yml)
+[![Release](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/release.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/release.yml)
 
 **Open-source cloud browser with low-latency WebRTC streaming.**
 
@@ -136,17 +140,45 @@ for the methodology.
 > stub all land before `docker compose up` works end-to-end. Track progress
 > via the task list in this repo.
 
+### Local dev (docker compose)
+
 ```bash
-# Phase 0 exit — does not work yet
 git clone https://github.com/<org>/cloud-browser-webrtc.git
 cd cloud-browser-webrtc
 docker compose -f infra/compose.yaml up
 
-# Then open http://localhost:8080
+# Then open http://localhost:3000
 ```
 
+Add `--profile observability` to also bring up Prometheus + Grafana
+with the cb dashboards (T66) auto-loaded; see
+[`infra/observability/dashboards/README.md`](./infra/observability/dashboards/README.md).
+
+### Kubernetes (Helm)
+
+The supported install path for clusters is the chart at
+[`infra/helm/cloud-browser-webrtc/`](./infra/helm/cloud-browser-webrtc):
+
+```bash
+helm install cloud-browser-webrtc \
+    oci://ghcr.io/<org>/cloud-browser-webrtc/helm/cloud-browser-webrtc \
+    --version 0.1.0 \
+    --namespace cloud-browser-webrtc \
+    --create-namespace \
+    -f my-values.yaml
+```
+
+Required `my-values.yaml` knobs are documented inline in
+[`values.yaml`](./infra/helm/cloud-browser-webrtc/values.yaml); the
+short list is the Ed25519 auth pubkey, the TURN shared secret, and
+the TURN URLs. See
+[`docs/operations/phase1-deployment-checklist.md`](./docs/operations/phase1-deployment-checklist.md)
+before going to production, and
+[`docs/operations/runbook.md`](./docs/operations/runbook.md) for
+day-2 operations.
+
 For development against individual components before the full stack lands,
-see each subdirectory's README (also coming soon).
+see each subdirectory's README.
 
 ---
 

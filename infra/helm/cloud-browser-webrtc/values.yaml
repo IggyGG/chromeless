@@ -1,0 +1,155 @@
+# infra/helm/cloud-browser-webrtc/values.yaml — chart defaults.
+#
+# Override per environment via `-f my-values.yaml` or `--set`.
+# Anything marked REQUIRED here MUST be replaced; the templates fail
+# the install with a fail() if the placeholder leaks through.
+
+namespace:
+  # Created by templates/_namespace.yaml unless create=false.
+  create: true
+  name: cloud-browser-webrtc
+  podSecurityStandards:
+    enforce: baseline
+    audit: restricted
+    warn: restricted
+
+images:
+  # Override these per-environment with --set images.<component>.tag=...
+  # to point at the version you actually want to ship.
+  registry: ghcr.io/iggy/cloud-browser-webrtc
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+  chromium:
+    repository: cb-chromium
+    tag: ""           # falls back to .Chart.AppVersion when empty
+  signaling:
+    repository: cb-signaling
+    tag: ""
+  controller:
+    repository: cb-browser-session-controller
+    tag: ""
+  turnIssuer:
+    repository: cb-turn-issuer
+    tag: ""
+  metricsSidecar:
+    repository: cb-metrics-sidecar
+    tag: ""
+  inputBridge:
+    repository: cb-input-bridge
+    tag: ""
+  cursorWatcher:
+    repository: cb-cursor-watcher
+    tag: ""
+  clipboardBridge:
+    repository: cb-clipboard-bridge
+    tag: ""
+
+signaling:
+  enabled: true
+  replicas: 3
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    cpuTargetUtilization: 60
+  ingress:
+    enabled: true
+    className: nginx
+    host: signaling.example.com
+    tlsSecretName: signaling-tls
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # base64-encoded raw 32-byte Ed25519 public key. REQUIRED if auth
+  # is enabled. See docs/security/auth.md.
+  authPubkey: ""
+
+controller:
+  enabled: true
+  replicas: 2
+  defaultPool: default-pool
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+turnIssuer:
+  enabled: true
+  replicas: 2
+  # See docs/security/auth.md and infra/turn-issuer/secret-rotation.md.
+  # All four are REQUIRED when turnIssuer.enabled=true.
+  secrets:
+    authPubkey: ""           # CBWRTC_AUTH_PUBKEY (same as signaling.authPubkey)
+    sharedSecret: ""         # CBWRTC_TURN_SHARED_SECRET — openssl rand -hex 32
+    sharedSecretPrev: ""     # optional rotation overlap
+    turnURLs: ""             # CBWRTC_TURN_URLS — comma-separated TURN URIs
+    stunURLs: "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# coturn — disabled by default. Production deployments should
+# strongly prefer a managed TURN service (Cloudflare TURN,
+# metered.ca, Twilio). Set `coturn.enabled: true` only if
+# self-hosted is the right answer for your environment; see
+# infra/k8s/turn-deployment.yaml comments for why TURN-on-K8s is
+# operationally painful.
+coturn:
+  enabled: false
+  replicas: 2
+  realm: turn.example.com
+  staticAuthSecret: ""        # must equal turnIssuer.secrets.sharedSecret
+  staticAuthSecretPrev: ""    # for rotation overlap
+  # hostNetwork=true is the only way to expose coturn's wide UDP
+  # range without the K8s NodePort 30000-32767 limit. Pin to a
+  # dedicated node pool with the right firewall.
+  hostNetwork: true
+  nodeSelector: {}
+  tolerations: []
+
+# Default BrowserSessionPool — controller materialises Pods from
+# this template. Disable + supply your own if you want region-
+# scoped pools or per-tenant pools.
+defaultPool:
+  enabled: true
+  warmReplicas: 2
+  maxSessions: 100
+  maxAgeSeconds: 3600
+  recyclePolicy: RecreatePod    # RecreatePod | ScrubAndReturn
+  # Resource shape per session pod (sum across containers).
+  resources:
+    requests:
+      cpu: "1500m"
+      memory: 3Gi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "3000m"
+      memory: 6Gi
+      ephemeral-storage: 2Gi
+
+# Optional gVisor isolation per T44 sandbox primer. When enabled,
+# the chart sets runtimeClassName=gvisor on the session pod
+# template. The runtimeClass itself must be installed
+# cluster-wide separately.
+gvisor:
+  enabled: false
+
+# Optional Prometheus scrape annotations on signaling + controller
+# pods. Set to false if you use ServiceMonitor / PodMonitor instead.
+prometheusAnnotations:
+  enabled: true
