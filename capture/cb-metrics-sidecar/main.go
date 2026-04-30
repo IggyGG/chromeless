@@ -55,6 +55,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// version is overridden at build time via
+// -ldflags="-X main.version=$TAG". Same convention as the controller
+// binary; flows through to the OTel service.version resource attribute.
+var version = "dev"
+
 // ---------------------------------------------------------------------------
 // metrics
 // ---------------------------------------------------------------------------
@@ -675,7 +680,25 @@ func main() {
 		slog.Duration("interval", interval),
 		slog.String("proc_root", procRoot),
 		slog.String("region", region),
+		slog.String("version", version),
 	)
+
+	// T99: OpenTelemetry. Init returns a no-op shutdown when
+	// OTEL_EXPORTER_OTLP_ENDPOINT is unset (dev compose without
+	// Jaeger), so this is safe to call unconditionally.
+	traceCtx, traceCancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer traceCancel()
+	tracingFlush, err := initTracing(traceCtx, version)
+	if err != nil {
+		logger.Warn("tracing init failed; continuing without tracing", slog.Any("err", err))
+	}
+	defer func() {
+		if tracingFlush != nil {
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = tracingFlush(shutCtx)
+		}
+	}()
 
 	// Pre-register known label combinations so the metric series exist
 	// in /metrics output even before the first session runs. Without

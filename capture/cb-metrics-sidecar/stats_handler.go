@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,11 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // statsEnvelope mirrors the wire format from docs/protocols/stats-channel.md.
@@ -38,6 +44,37 @@ type statsEnvelope struct {
 	Sample    *clientSample   `json:"sample,omitempty"`
 	Event     string          `json:"event,omitempty"` // T54 codec_fallback rides this same channel
 	Data      json.RawMessage `json:"data,omitempty"`
+
+	// T99: optional W3C trace context. The streamer page stamps
+	// `cb_trace` with the active `traceparent` (and optional
+	// `tracestate`) so the sidecar can continue the same trace
+	// instead of starting a fresh root. Empty when tracing is
+	// disabled at the browser; we then start a root span here.
+	CBTrace *cbTraceContext `json:"cb_trace,omitempty"`
+}
+
+// cbTraceContext is the on-wire form of the W3C traceparent /
+// tracestate pair. Field names match the HTTP header names in
+// lower-case to keep downstream extraction trivial.
+type cbTraceContext struct {
+	Traceparent string `json:"traceparent,omitempty"`
+	Tracestate  string `json:"tracestate,omitempty"`
+}
+
+// extractTraceContext returns a context with the incoming W3C trace
+// state attached, or the original context if the envelope didn't
+// carry one. Uses the global propagator (set by initTracing).
+func extractTraceContext(parent context.Context, env *statsEnvelope) context.Context {
+	if env == nil || env.CBTrace == nil || env.CBTrace.Traceparent == "" {
+		return parent
+	}
+	carrier := propagation.MapCarrier{
+		"traceparent": env.CBTrace.Traceparent,
+	}
+	if env.CBTrace.Tracestate != "" {
+		carrier["tracestate"] = env.CBTrace.Tracestate
+	}
+	return otel.GetTextMapPropagator().Extract(parent, carrier)
 }
 
 type clientInboundStats struct {
@@ -283,8 +320,16 @@ func (r *statsRouter) applySample(env *statsEnvelope, log *slog.Logger) error {
 // statsUpdateHandler returns the http.HandlerFunc to register at
 // /stats-update. The closure owns the per-process router so per-session
 // counter deltas + cardinality buckets survive across requests.
+//
+// T99: each accepted envelope opens a `cb.client.stats.received` span
+// as a child of the W3C trace carried in `env.cb_trace`, so the trace
+// from `client → signaling → controller → sidecar` shows up as one
+// connected timeline in Jaeger. When the envelope has no trace
+// context (or tracing is disabled), the span is still recorded as a
+// new root — sample rate then decides whether it ships.
 func statsUpdateHandler(log *slog.Logger) (http.HandlerFunc, *statsRouter) {
 	router := newStatsRouter()
+	tracer := tracingTracer("stats")
 	const maxBody = 256 * 1024 // 256 KiB; one StatsSample is ~3 KiB.
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -306,10 +351,32 @@ func statsUpdateHandler(log *slog.Logger) (http.HandlerFunc, *statsRouter) {
 			http.Error(w, "decode: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		// Extract traceparent from envelope (no-op when absent), then
+		// open a span around the apply. Span attributes name the
+		// session/tenant the same way the metric labels do so a
+		// drilldown from a Grafana panel to Jaeger keeps continuity.
+		ctx := extractTraceContext(r.Context(), &env)
+		ctx, span := tracer.Start(ctx, "cb.client.stats.received",
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("tenant.id", env.TenantID),
+				attribute.String("session.id", env.SessionID),
+				attribute.Int("envelope.version", env.V),
+			),
+		)
+		if env.Event != "" {
+			span.SetAttributes(attribute.String("client.event", env.Event))
+		}
+		_ = ctx // future calls (applySample) take a logger; we don't thread ctx in v1.
+
 		if err := router.applySample(&env, log); err != nil {
+			span.RecordError(err)
+			span.End()
 			http.Error(w, "apply: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		span.End()
 		w.WriteHeader(http.StatusNoContent)
 	}, router
 }

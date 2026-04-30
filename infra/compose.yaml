@@ -108,6 +108,14 @@ services:
       # Set to "" (empty) to flip back to real-getDisplayMedia for
       # diagnostic runs once Phase 2 capture is in place.
       CBWRTC_USE_FAKE_MEDIA: "1"
+      # T99: OTel for cb-metrics-sidecar (which runs inside this container
+      # under supervisord). Empty by default → SDK installs a no-op
+      # provider, so the service-without-jaeger case stays quiet.
+      # Enable at run time with:
+      #   OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317 \
+      #     docker compose -f infra/compose.yaml --profile observability up
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      CBWRTC_TRACE_SAMPLE_RATIO: ${CBWRTC_TRACE_SAMPLE_RATIO:-1.0}
     # /dev/shm at default 64m is too small for Chromium tabs; either bump
     # shm_size or rely on the Dockerfile's --disable-dev-shm-usage. Both
     # is belt-and-braces for stability.
@@ -149,6 +157,10 @@ services:
       - "8080:8080"
     environment:
       SIGNALING_PORT: "8080"
+      # T99: same OTel opt-in pattern as chromium. webrtc-dev's
+      # signaling/tracing.go reads these.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      CBWRTC_TRACE_SAMPLE_RATIO: ${CBWRTC_TRACE_SAMPLE_RATIO:-1.0}
     restart: unless-stopped
 
   client:
@@ -276,6 +288,36 @@ services:
     depends_on:
       prometheus:
         condition: service_started
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+
+  # T99: Jaeger all-in-one for the observability profile. Receives
+  # OTLP/gRPC on 4317 (which the signaling, controller, and sidecar
+  # ship to when CBWRTC_TRACE_ENABLED=1) and serves the query UI on
+  # 16686.
+  #
+  # Why all-in-one: dev compose. Production runs Tempo or Grafana
+  # Cloud with a real backend; see docs/operations/tracing.md for the
+  # K8s manifest and the Helm-templatable equivalent.
+  #
+  # The image bundles agent + collector + storage (Badger) + query
+  # in one binary. Traces are kept in /tmp; restart wipes them, which
+  # is exactly what dev wants.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: cbwrtc-jaeger
+    profiles: [observability]
+    networks: [cbnet]
+    ports:
+      - "16686:16686" # query UI
+      - "4317:4317"   # OTLP/gRPC ingress
+      - "4318:4318"   # OTLP/HTTP ingress (handy for browser-side OTel)
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      # Single-process, in-memory storage: dev defaults are fine.
+      SPAN_STORAGE_TYPE: memory
+      MEMORY_MAX_TRACES: "10000"
     restart: unless-stopped
 
 volumes:

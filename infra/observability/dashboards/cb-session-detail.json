@@ -30,6 +30,15 @@
       "asDropdown": true,
       "includeVars": false,
       "keepTime": true
+    },
+    {
+      "title": "View traces in Jaeger",
+      "type": "link",
+      "url": "/explore?orgId=1&left=%7B%22datasource%22:%22jaeger%22,%22queries%22:%5B%7B%22query%22:%22cb-client%22,%22tags%22:%22session.id=$session_id%22%7D%5D%7D",
+      "tooltip": "Open Jaeger explore filtered to this session's traces. Requires a Jaeger or Tempo datasource named 'jaeger'; see docs/operations/tracing.md.",
+      "icon": "external link",
+      "targetBlank": true,
+      "keepTime": true
     }
   ],
   "liveNow": false,

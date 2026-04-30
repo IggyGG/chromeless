@@ -153,7 +153,20 @@ func (r *SessionReconciler) transitionToPending(ctx context.Context, sess *cbv1.
 // If no warm Pod is available, we cold-start one by creating a Pod
 // from the pool template and stay in Warming until it passes
 // readiness.
+//
+// T99: emits `cb.controller.session.assign` span for the assignment
+// attempt. The span attributes record which path (warm/cold) we
+// took and the bound pod name; failures are recorded as span events.
 func (r *SessionReconciler) tryAssign(ctx context.Context, sess *cbv1.BrowserSession) (reconcile.Result, error) {
+	ctx, span := tracingTracer("reconciler.session").Start(ctx, "cb.controller.session.assign",
+		traceWithAttrs(
+			tracingAttrString("session.name", sess.Name),
+			tracingAttrString("tenant.id", sess.Spec.TenantID),
+			tracingAttrString("pool.name", sess.Spec.PoolName),
+			tracingAttrString("region", sess.Spec.Region),
+		),
+	)
+	defer span.End()
 	log := log.FromContext(ctx)
 
 	poolName := sess.Spec.PoolName

@@ -57,8 +57,18 @@ func (r *PoolReconciler) SetupWithManager(mgr manager.Manager) error {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is straightforward: count, replenish if short, drain if
-// over-aged.
+// over-aged. T99 wraps each reconcile pass in a
+// `cb.controller.pool.replenish` span so the operator can drill into
+// "why did this pool's warm count drop?" by looking at the span
+// timeline rather than correlating across log lines.
 func (r *PoolReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+	ctx, span := tracingTracer("reconciler.pool").Start(ctx, "cb.controller.pool.replenish",
+		traceWithAttrs(
+			tracingAttrString("pool.namespace", req.Namespace),
+			tracingAttrString("pool.name", req.Name),
+		),
+	)
+	defer span.End()
 	logger := log.FromContext(ctx).WithValues("pool", req.NamespacedName)
 
 	var pool cbv1.BrowserSessionPool

@@ -12,6 +12,12 @@ debug panel and out to the server for Prometheus scraping (T38).
 >   keys per the [Versioning](#versioning) rule. Servers SHOULD use
 >   them to label per-session metrics; absence falls back to
 >   `_anonymous` buckets to match T67's signaling cardinality story.
+> - **v1.2 (T99)** — added optional `cb_trace` envelope field carrying
+>   W3C `traceparent` (and optional `tracestate`). When present, the
+>   sidecar continues the trace instead of starting a new root, so the
+>   end-to-end client → signaling → controller → sidecar pipeline
+>   shows up as a single trace in Jaeger. Backward-compatible (servers
+>   without OTel just ignore the field).
 >
 > **Phase 2 reconsider:** if the server gains direct access to the
 > peer connection's stats (libwebrtc native stats callbacks), the
@@ -42,6 +48,10 @@ sampler's emit hook to it.
   "t":          1730290000123,    // client wall-clock ms (Date.now())
   "session_id": "dev-1",          // v1.1; required at v1.1, optional at v1
   "tenant_id":  "tenant-A",       // v1.1; optional, defaults to anonymous
+  "cb_trace": {                   // v1.2 (T99); optional; absent when tracing is off
+    "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+    "tracestate":  ""             // optional; W3C tracestate
+  },
   "sample":     <StatsSample>
 }
 ```
@@ -66,6 +76,22 @@ exempt from both caps.
 
 The labels propagate as Prometheus labels on the `cb_client_*`
 metrics (T72) — see `infra/observability.md`.
+
+### `cb_trace` (v1.2, T99)
+
+W3C trace-context fields carried per-envelope so the server can
+continue the same distributed trace started by the client. Stamped by
+the streamer page from the active span context just before
+`RTCDataChannel.send`. Backward-compatible:
+
+- Pre-T99 client → T99 sidecar: no `cb_trace`, sidecar opens a fresh
+  root span. Sample-rate decides whether the span ships.
+- T99 client → pre-T99 sidecar: extra field ignored per the
+  versioning rule.
+
+When tracing is disabled at the browser (no OTLP endpoint configured,
+or the project's noop tracer is active) the field is omitted rather
+than carrying an empty string — saves a few bytes per sample.
 
 ## StatsSample shape
 

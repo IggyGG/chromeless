@@ -22,7 +22,11 @@ import (
 
 	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
 	"github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/reconciler"
+	"github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/tracing"
 )
+
+// version is overridden at build time via -ldflags="-X main.version=$TAG".
+var version = "dev"
 
 var scheme = runtime.NewScheme()
 
@@ -54,6 +58,19 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	logger := ctrl.Log.WithName("setup")
+
+	// T99: OpenTelemetry tracing. Init returns a no-op shutdown when
+	// OTEL_EXPORTER_OTLP_ENDPOINT is unset (test / dev compose
+	// without Jaeger), so this is safe to call unconditionally.
+	tracingShutdown, err := tracing.Init(ctrl.SetupSignalHandler(), version)
+	if err != nil {
+		logger.Error(err, "tracing init failed; continuing without tracing")
+	}
+	defer func() {
+		if tracingShutdown != nil {
+			_ = tracingShutdown(ctrl.SetupSignalHandler())
+		}
+	}()
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
