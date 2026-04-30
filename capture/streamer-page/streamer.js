@@ -378,37 +378,33 @@
 
     // 2. Build the peer connection and attach tracks.
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
 
-    // T77: simulcast — configure 3 encoding layers on the video sender
-    // BEFORE createOffer so libwebrtc bakes the rid + simulcast lines
-    // into the offer SDP. No-op when ?simulcast=true is not set.
+    // T77: simulcast requires rid-bearing encodings to be supplied at
+    // transceiver creation time — `setParameters` after `addTrack`
+    // throws InvalidModificationError because rid is read-only on an
+    // existing sender. Use addTransceiver with sendEncodings for video
+    // when simulcast is requested; fall back to addTrack otherwise.
     if (SIMULCAST_ENABLED) {
-      try {
-        const videoSender = pc.getSenders().find((s) => s.track?.kind === "video");
-        if (!videoSender) {
-          log("warn", "simulcast requested but no video sender available");
-        } else {
-          const sp = videoSender.getParameters();
-          sp.encodings = SIMULCAST_LAYERS.map((l) => {
-            const e = { rid: l.rid, scaleResolutionDownBy: l.scale, active: true };
-            if (l.fps !== undefined) e.maxFramerate = l.fps;
-            if (l.maxBitrate !== undefined) e.maxBitrate = l.maxBitrate;
-            return e;
-          });
-          await videoSender.setParameters(sp);
-          log("ok", "simulcast configured", {
-            layers: sp.encodings.map((e) => ({
-              rid: e.rid, scale: e.scaleResolutionDownBy,
-              maxFps: e.maxFramerate ?? null, maxBps: e.maxBitrate ?? null,
-            })),
-          });
-        }
-      } catch (err) {
-        // setParameters errors are non-fatal — we drop back to single-stream.
-        log("warn", "simulcast setParameters failed; falling back to single layer",
-            String(err));
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        const sendEncodings = SIMULCAST_LAYERS.map((l) => {
+          const e = { rid: l.rid, scaleResolutionDownBy: l.scale, active: true };
+          if (l.fps !== undefined) e.maxFramerate = l.fps;
+          if (l.maxBitrate !== undefined) e.maxBitrate = l.maxBitrate;
+          return e;
+        });
+        pc.addTransceiver(videoTrack, { direction: "sendonly", streams: [stream], sendEncodings });
+        log("ok", "simulcast configured via addTransceiver", {
+          layers: sendEncodings.map((e) => ({
+            rid: e.rid, scale: e.scaleResolutionDownBy,
+            maxFps: e.maxFramerate ?? null, maxBps: e.maxBitrate ?? null,
+          })),
+        });
       }
+      // Audio still uses addTrack — simulcast is video-only.
+      stream.getAudioTracks().forEach((t) => pc.addTrack(t, stream));
+    } else {
+      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
     }
 
     // Expose the live PeerConnection on window so:
