@@ -1,5 +1,9 @@
 # infra/compose.yaml — local dev stack for cloud-browser-webrtc
 #
+# Default stack: four services on a shared bridge network. The
+# `observability` profile (T66) layers on Prometheus + Grafana for
+# people who want dashboards locally.
+#
 # Brings up four services on a shared bridge network so the browser
 # client can reach signaling and signaling can reach Chromium DevTools:
 #
@@ -204,9 +208,65 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------
+  # Optional observability stack (T66). Bring up with:
+  #
+  #   docker compose -f infra/compose.yaml --profile observability up
+  #
+  # without --profile the default stack starts unchanged and these two
+  # services are skipped. Grafana provisioning auto-loads the cb-*
+  # dashboards from infra/observability/dashboards/ and a Prometheus
+  # datasource pointing at the prometheus service.
+  # ---------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: cbwrtc-prometheus
+    profiles: [observability]
+    networks: [cbnet]
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=24h"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: cbwrtc-grafana
+    profiles: [observability]
+    networks: [cbnet]
+    ports:
+      # 3001 on the host so it doesn't collide with the client (3000).
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/cb-cluster-overview.json
+    volumes:
+      - ./observability/grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   client_runtime:
   # T40: cached node_modules for client-build. Speeds up successive
   # `compose up` runs and avoids the host filesystem inheriting per-
   # arch native binaries from inside the container.
   client_node_modules:
+  # T66: persistent storage for the observability profile. Both are
+  # only created when the profile is active.
+  prometheus_data:
+  grafana_data:

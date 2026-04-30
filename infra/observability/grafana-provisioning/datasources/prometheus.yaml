@@ -1,0 +1,19 @@
+# infra/observability/grafana-provisioning/datasources/prometheus.yaml
+#
+# Auto-loaded by Grafana on startup (mounted at
+# /etc/grafana/provisioning/datasources/). Points at the prometheus
+# service in compose's observability profile.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: PROM_CB
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+    editable: false
