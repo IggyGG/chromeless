@@ -78,7 +78,7 @@ spec:
       # Pin to triform-6: 32 CPU / 128 GiB. hostPath volumes below
       # require this — the directories live on triform-6's /data
       # filesystem and follow the node, not the Pod.
-      nodeName: triform-6
+      nodeName: triform-2
       # If a future cluster admin taints triform-6 (maintenance), the
       # scheduler fails this Pod cleanly rather than picking another
       # node. Repeating the hostname here makes that a NotReady error
@@ -303,18 +303,20 @@ spec:
               type: RuntimeDefault
       volumes:
         # T119: hostPath workaround for the openebs-localpv-provisioner
-        # regression. /data is /dev/md5 on triform-6 (5.4T total,
-        # 5.4T free at deploy time — sibling to image-backups, the
-        # canonical Triform large-disk path on these nodes).
+        # regression. /data on the pinned build node holds chromium-
+        # src + sccache. T119-followup repointed from triform-6
+        # (eviction-loop on root-fs DiskPressure under shared tenancy)
+        # to triform-2 (1.4T /data on /dev/mapper/vg0-data, healthier
+        # root fs, existing 29 GB chromium-src at /data/cb-build-t2).
         # DirectoryOrCreate ensures kubelet creates the subdir if
         # absent. The host-permissions initContainer chowns to 1000.
         - name: workdir
           hostPath:
-            path: /data/cb-build/chromium-src
+            path: /data/cb-build-t2/chromium-src
             type: DirectoryOrCreate
         - name: sccache
           hostPath:
-            path: /data/cb-build/sccache
+            path: /data/cb-build-t2/sccache
             type: DirectoryOrCreate
         # Our repo lives in an emptyDir — bootstrap initContainer
         # populates it once, main container reads-only. Survival
