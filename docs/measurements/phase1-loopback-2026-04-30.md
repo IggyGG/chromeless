@@ -1,5 +1,39 @@
-# Phase 1 latency measurement — 2026-04-30 (framework + partial; real
-glass-to-glass still pending)
+# Phase 1 latency measurement — 2026-04-30 (y4m fixture validated; full
+end-to-end gated on spec-05 fix)
+
+> **Status update 2026-04-30 evening (post-T109):** T109 wired
+> `--use-file-for-fake-video-capture-loop` into the launch script and
+> compose stack; `harness/latency/record-y4m.sh` produces the y4m
+> fixture. Generated `harness/latency/fixtures/harness-loop-720p30.y4m`
+> (1.2 GiB raw, 900 frames @ 30 fps × 30 s) inside an ephemeral
+> container based on `cloud-browser-webrtc:dev` (Chromium 147 + Xvfb
+> + ffmpeg x11grab). Transcoded to mp4 (391 KiB) for compactness.
+> Direct reconciliation against the mp4 (no WebRTC pipeline; just
+> reconcile.py decoding the y4m's own QRs):
+>
+>   qr_decode_rate:  1.000
+>   latency_count:   900
+>   cam_fps_hz:      30.303
+>   flash_freq_hz:   0.986
+>   aliased_warning: False
+>
+> **Validates the y4m + reconciler chain end-to-end** — 100% QR
+> decode rate proves the recording captured the harness page
+> faithfully and the reconciler can extract every frame's emit
+> timestamp. The negative latency in this run (-63 billion ms) is
+> expected and confirms reconcile is correct: I passed a placeholder
+> `--recording-start-epoch-ms` from a 2024 timestamp; the y4m's QRs
+> carry real 2026-04-30 epoch ms; the offset between them is exactly
+> two years.
+>
+> **End-to-end (glass-to-glass via WebRTC pipeline) measurement
+> still pending [#108]**: spec 05's client-side `state-conn` never
+> advances past the initial dash, so the client never reaches a
+> connected RTCPeerConnection state, no frames flow into the client's
+> `<video>` element, and the operator screenshot-loop measurement
+> can't run. T96 + T109 are both shipped and verified; what remains
+> is the spec 05 client-side bug + an operator (or Playwright-driven
+> headless) frame-capture loop on the client side.
 
 > **Status update 2026-04-30 afternoon (post-T96):** T96
 > (`f640478` — signaling now buffers and replays the most-recent
