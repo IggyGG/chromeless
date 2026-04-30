@@ -91,8 +91,24 @@ type keyData struct {
 	Key  string `json:"key"`
 	Mods int    `json:"mods"` // bitmask: Shift=1 Ctrl=2 Alt=4 Meta=8
 }
+// compositionData carries the v1.1 IME envelope payload. The
+// v1.0 fields (Data) are required; selection / rect / candidates
+// are optional v1.1 (T88) extensions used to drive
+// Input.imeSetComposition more accurately. Pointers so we can
+// distinguish "field omitted" from "field set to 0".
 type compositionData struct {
-	Data string `json:"data"`
+	Data           string             `json:"data"`
+	SelectionStart *int               `json:"selection_start,omitempty"`
+	SelectionEnd   *int               `json:"selection_end,omitempty"`
+	Rect           *compositionRect   `json:"rect,omitempty"`
+	CandidateList  []string           `json:"candidate_list,omitempty"`
+}
+
+type compositionRect struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"w"`
+	H int `json:"h"`
 }
 type clipboardPasteData struct {
 	Text string `json:"text"`
@@ -643,11 +659,37 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return d.fail(env.Type, fmt.Errorf("%s: %w", env.Type, err))
 		}
-		// Input.imeSetComposition with selection collapsed at end.
+		// CDP `Input.imeSetComposition` parameters (T88 docs):
+		//   text             — the in-progress composing string
+		//   selectionStart   — caret start within `text` (UTF-16 code
+		//                      units). Determines where the caret
+		//                      blinks during composition.
+		//   selectionEnd     — caret end; equal to start for a
+		//                      collapsed caret, larger to highlight
+		//                      a selection inside the composing text.
+		//   replacementStart — start of the range BEFORE the caret
+		//                      that this composition replaces. 0
+		//                      means "insert fresh"; non-zero is for
+		//                      dead-key / accent paths where typing
+		//                      "´" then "e" replaces "´" with "é".
+		//   replacementEnd   — end of the same replacement range.
+		//
+		// v1.0 clients send only `data`; we default selection/end
+		// to the caret-at-end position the original implementation
+		// used (matches CDP's documented default).
+		textLen := utf16Len(data.Data)
+		selStart := textLen
+		selEnd := textLen
+		if data.SelectionStart != nil {
+			selStart = clampInt(*data.SelectionStart, 0, textLen)
+		}
+		if data.SelectionEnd != nil {
+			selEnd = clampInt(*data.SelectionEnd, 0, textLen)
+		}
 		params := map[string]any{
 			"text":             data.Data,
-			"selectionStart":   len(data.Data),
-			"selectionEnd":     len(data.Data),
+			"selectionStart":   selStart,
+			"selectionEnd":     selEnd,
 			"replacementStart": 0,
 			"replacementEnd":   0,
 		}
@@ -659,8 +701,27 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return d.fail(env.Type, fmt.Errorf("composition_end: %w", err))
 		}
+		// CDP `Input.insertText` commits the composing string and
+		// clears any in-progress imeSetComposition state.
 		params := map[string]any{"text": data.Data}
 		_, err := d.cdp.Send(ctx, "Input.insertText", params)
+		return d.fail(env.Type, err)
+
+	case "composition_cancel":
+		// T88 — IME aborted (Escape or focus loss). Clear any
+		// in-progress imeSetComposition state in Chromium by
+		// sending an empty composition. The empty `text` + zero
+		// selection collapses back to the surrounding content.
+		// Per the protocol's "carries no payload" rule, we don't
+		// need to unmarshal env.Data.
+		params := map[string]any{
+			"text":             "",
+			"selectionStart":   0,
+			"selectionEnd":     0,
+			"replacementStart": 0,
+			"replacementEnd":   0,
+		}
+		_, err := d.cdp.Send(ctx, "Input.imeSetComposition", params)
 		return d.fail(env.Type, err)
 
 	case "clipboard_paste":
@@ -929,6 +990,37 @@ func (d *dispatcher) touchPointsLocked() []map[string]any {
 
 // max1 clamps a non-positive radius up to 1 px so CDP doesn't reject
 // the touchPoint. Mirrors the client-side clamp in input.ts.
+// utf16Len returns the length of s in UTF-16 code units, matching
+// JavaScript's String.prototype.length and the unit CDP's
+// Input.imeSetComposition expects for selectionStart/End. ASCII +
+// BMP characters are 1 unit each; characters outside the BMP
+// (emoji, some CJK extensions) are 2.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// clampInt confines x to [lo, hi]. Used to defensively bound the
+// selection_start / selection_end the client sends, since a buggy
+// client could send a value outside [0, len(text)] which Chromium
+// would then reject with "RangeError".
+func clampInt(x, lo, hi int) int {
+	if x < lo {
+		return lo
+	}
+	if x > hi {
+		return hi
+	}
+	return x
+}
+
 func max1(n int) int {
 	if n < 1 {
 		return 1

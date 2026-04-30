@@ -31,6 +31,7 @@ export type InputType =
   | "composition_start"
   | "composition_update"
   | "composition_end"
+  | "composition_cancel"
   | "clipboard_paste"
   | "clipboard_copy_request"
   // v1.1 — drag-and-drop. See docs/protocols/input-channel.md.
@@ -58,7 +59,27 @@ export interface MouseWheelData {
   momentum?: boolean;
 }
 export interface KeyData { code: string; key: string; mods: number; }
-export interface CompositionData { data: string; }
+// v1.1 (T88) — extended composition payload.
+export interface CompositionRect { x: number; y: number; w: number; h: number; }
+export interface CompositionData {
+  data: string;
+  // Caret + selection within `data`, in UTF-16 code units. Optional;
+  // server defaults to caret-at-end when omitted.
+  selection_start?: number;
+  selection_end?: number;
+  // composition_start ONLY: bounding rect of the focused element /
+  // caret in source-content coords. Reserved for client-side
+  // candidate UI; v1.1 servers may ignore.
+  rect?: CompositionRect;
+  // Optional list of IME candidates; unobservable from a DOM client
+  // in v1.1 so clients leave it empty. Reserved for v2 platform-
+  // specific bridges.
+  candidate_list?: string[];
+}
+// composition_cancel carries no data — the envelope's `type` is the
+// signal. We model it as the no-payload case for symmetry with
+// other cancel-style events.
+export type CompositionCancelData = Record<string, never>;
 export interface ClipboardPasteData { text: string; }
 
 // v1.1 — drag-and-drop payload shapes. See protocol doc for semantics.
@@ -91,6 +112,7 @@ export type InputData =
   | MouseWheelData
   | KeyData
   | CompositionData
+  | CompositionCancelData
   | ClipboardPasteData
   | DragStartData
   | DragOverData
@@ -177,6 +199,10 @@ export class InputChannel {
   private pendingDragOver: DragOverData | null = null;
   /** Queue of pending touch_move data per identifier; latest wins per finger. */
   private pendingTouchMoves = new Map<number, TouchMoveData>();
+  // T88 — true between compositionstart and compositionend; used to
+  // suppress raw key forwarding during IME composition per the
+  // protocol's "no key_* during composition" rule.
+  private composing = false;
   // v1.1 wheel-phase state. Reset to "idle" by emitWheelEnd().
   private wheelPhase: "idle" | "active" = "idle";
   private wheelLastEventNow = 0;
@@ -313,8 +339,30 @@ export class InputChannel {
     this.enqueue("key_up", { code, key, mods });
   }
 
-  sendComposition(phase: "start" | "update" | "end", data: string): void {
-    this.enqueue(`composition_${phase}` as const, { data });
+  /**
+   * Send a composition envelope. Two call shapes are supported for
+   * back-compat with v1.0 callers:
+   *
+   *   sendComposition("update", "ni hao")            // legacy: text only
+   *   sendComposition("update", { data: "ni hao",
+   *                                selection_start: 6,
+   *                                selection_end: 6 })  // v1.1
+   *
+   * Pass `composition_cancel` via the dedicated sendCompositionCancel().
+   */
+  sendComposition(
+    phase: "start" | "update" | "end",
+    payload: string | CompositionData,
+  ): void {
+    const data: CompositionData = typeof payload === "string"
+      ? { data: payload }
+      : payload;
+    this.enqueue(`composition_${phase}` as const, data);
+  }
+
+  /** v1.1 — IME aborted (Esc / focus loss). Carries no payload. */
+  sendCompositionCancel(): void {
+    this.enqueue("composition_cancel", {});
   }
 
   sendClipboardPaste(text: string): void {
@@ -447,11 +495,107 @@ export class InputChannel {
       e.preventDefault();
     };
     const onContextMenu = (e: MouseEvent) => { e.preventDefault(); };
-    const onKeyDown = (e: KeyboardEvent) => { this.sendKeyDown(e.code, e.key, modsFromEvent(e)); };
-    const onKeyUp   = (e: KeyboardEvent) => { this.sendKeyUp(e.code,   e.key, modsFromEvent(e)); };
-    const onCompStart  = (e: CompositionEvent) => this.sendComposition("start",  e.data ?? "");
-    const onCompUpdate = (e: CompositionEvent) => this.sendComposition("update", e.data ?? "");
-    const onCompEnd    = (e: CompositionEvent) => this.sendComposition("end",    e.data ?? "");
+    // T88 — IME-aware key forwarding. Per the protocol's "no key_*
+    // during composition" rule, we suppress key events the browser
+    // marks as part of an in-progress composition. Detection uses:
+    //   - KeyboardEvent.isComposing  (W3C standard, true between
+    //     compositionstart and compositionend)
+    //   - keyCode === 229            (Chromium's "this is composition"
+    //     sentinel — fires for the IME-trigger key on platforms where
+    //     isComposing isn't yet set)
+    //   - this.composing             (our own latch; covers timing
+    //     edge cases and tests that don't propagate isComposing)
+    const isComposingKey = (e: KeyboardEvent) =>
+      this.composing
+      || (e as KeyboardEvent & { isComposing?: boolean }).isComposing === true
+      || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return;
+      // Special-case: Escape during composition is a CANCEL signal.
+      // Some IMEs raise compositionend with an empty data string in
+      // this path; others don't. We surface the cancel intent
+      // unconditionally and let the bridge dedupe.
+      if (this.composing && e.key === "Escape") {
+        this.sendCompositionCancel();
+        return;
+      }
+      this.sendKeyDown(e.code, e.key, modsFromEvent(e));
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return;
+      this.sendKeyUp(e.code, e.key, modsFromEvent(e));
+    };
+
+    const onCompStart = (e: CompositionEvent) => {
+      this.composing = true;
+      // Compute a caret rectangle so the server-side bridge can
+      // optionally surface a candidate-positioning hint. Best-
+      // effort — Selection.getRangeAt may throw if the focused
+      // element isn't editable in the conventional sense.
+      let rect: CompositionRect | undefined;
+      try {
+        const sel = (extra.window ?? globalThis.window).getSelection?.();
+        if (sel && sel.rangeCount > 0) {
+          const r = sel.getRangeAt(0).getBoundingClientRect();
+          if (r && (r.width > 0 || r.height > 0)) {
+            const tr = target.getBoundingClientRect();
+            const c = map(r.left, r.top, tr);
+            rect = {
+              x: Math.round(c.x),
+              y: Math.round(c.y),
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+            };
+          }
+        }
+      } catch { /* ignore — best-effort */ }
+      const data: CompositionData = { data: e.data ?? "" };
+      if (rect) data.rect = rect;
+      this.sendComposition("start", data);
+    };
+    const onCompUpdate = (e: CompositionEvent) => {
+      const text = e.data ?? "";
+      const data: CompositionData = { data: text };
+      // Selection within the composing string. The Web platform
+      // doesn't expose IME caret position directly; we use the
+      // active document selection's offsets if they fall inside
+      // `text`. Otherwise we collapse the caret at the end of the
+      // composing string (matches v1.0 behaviour and CDP's
+      // caret-at-end default).
+      const sel = (extra.window ?? globalThis.window).getSelection?.();
+      let placed = false;
+      if (sel && sel.rangeCount > 0) {
+        const r = sel.getRangeAt(0);
+        // r.startOffset / r.endOffset are within the text node —
+        // we can't always tell whether they're within the composing
+        // span vs the surrounding content. Best-effort: when both
+        // offsets are within [0, text.length], use them; otherwise
+        // fall back to caret-at-end.
+        if (r.startOffset >= 0 && r.startOffset <= text.length
+         && r.endOffset   >= 0 && r.endOffset   <= text.length) {
+          data.selection_start = r.startOffset;
+          data.selection_end   = r.endOffset;
+          placed = true;
+        }
+      }
+      if (!placed) {
+        data.selection_start = text.length;
+        data.selection_end   = text.length;
+      }
+      this.sendComposition("update", data);
+    };
+    const onCompEnd = (e: CompositionEvent) => {
+      this.composing = false;
+      const text = e.data ?? "";
+      // Empty compositionend == cancel per the protocol's
+      // "Detecting cancel from the DOM" rule.
+      if (text.length === 0) {
+        this.sendCompositionCancel();
+      } else {
+        this.sendComposition("end", { data: text });
+      }
+    };
     const onPaste = (e: ClipboardEvent) => {
       const text = e.clipboardData?.getData("text/plain");
       if (typeof text === "string" && text.length > 0) this.sendClipboardPaste(text);

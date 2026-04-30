@@ -924,6 +924,210 @@ func TestDispatchWheelLegacyClientNoPhase(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 6. IME composition polish (T88)
+// ---------------------------------------------------------------------------
+
+// imeCalls extracts the sequence of (method, params) for IME-related
+// CDP calls so tests can assert on the imeSetComposition selection
+// arguments and the order of insertText commits.
+type imeCall struct {
+	method string
+	params map[string]any
+}
+
+func collectIMECalls(calls []recordedCall) []imeCall {
+	out := []imeCall{}
+	for _, c := range calls {
+		if c.Method != "Input.imeSetComposition" && c.Method != "Input.insertText" {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(c.Params, &p)
+		out = append(out, imeCall{method: c.Method, params: p})
+	}
+	return out
+}
+
+func TestDispatchCompositionWithSelection(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// Start with empty composition; client sends caret rect for
+	// future candidate-positioning UI.
+	envs := []string{
+		`{"v":1,"type":"composition_start","t":1,"seq":0,"data":{"data":"","rect":{"x":10,"y":20,"w":12,"h":18}}}`,
+		`{"v":1,"type":"composition_update","t":2,"seq":1,"data":{"data":"n","selection_start":1,"selection_end":1}}`,
+		`{"v":1,"type":"composition_update","t":3,"seq":2,"data":{"data":"ni hao","selection_start":3,"selection_end":6}}`,
+		`{"v":1,"type":"composition_end","t":4,"seq":3,"data":{"data":"你好"}}`,
+	}
+	for _, raw := range envs {
+		env, err := parseEnvelope([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if err := disp.Dispatch(ctx, env); err != nil {
+			t.Errorf("dispatch %s: %v", env.Type, err)
+		}
+	}
+
+	calls := collectIMECalls(f.Calls())
+	// 3 imeSetComposition + 1 insertText.
+	if len(calls) != 4 {
+		t.Fatalf("expected 4 IME calls, got %d: %+v", len(calls), calls)
+	}
+	if calls[0].method != "Input.imeSetComposition" {
+		t.Errorf("first call should be imeSetComposition; got %s", calls[0].method)
+	}
+	// composition_start with empty text → selectionStart/End = 0.
+	if calls[0].params["text"] != "" || calls[0].params["selectionStart"] != float64(0) {
+		t.Errorf("start params wrong: %+v", calls[0].params)
+	}
+	// composition_update "n" with selection at 1 → selectionStart=1.
+	if calls[1].params["text"] != "n" || calls[1].params["selectionStart"] != float64(1) {
+		t.Errorf("update#1 params wrong: %+v", calls[1].params)
+	}
+	// composition_update "ni hao" with start=3 end=6 → highlighted range.
+	if calls[2].params["selectionStart"] != float64(3) || calls[2].params["selectionEnd"] != float64(6) {
+		t.Errorf("update#2 selection wrong: %+v", calls[2].params)
+	}
+	// composition_end commits via insertText.
+	if calls[3].method != "Input.insertText" || calls[3].params["text"] != "你好" {
+		t.Errorf("end params wrong: %+v", calls[3])
+	}
+}
+
+func TestDispatchCompositionLegacyV1Client(t *testing.T) {
+	// A v1.0 client with the old `{data: "..."}` payload still works:
+	// no selection_start/end → bridge defaults to caret-at-end via
+	// utf16Len(text).
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// "こんにちは" — 5 BMP characters, all 1 UTF-16 unit each → length 5.
+	env, _ := parseEnvelope([]byte(
+		`{"v":1,"type":"composition_update","t":1,"seq":0,"data":{"data":"こんにちは"}}`))
+	if err := disp.Dispatch(ctx, env); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	calls := collectIMECalls(f.Calls())
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 imeSetComposition call, got %d", len(calls))
+	}
+	// caret-at-end default is 5 for this string.
+	if calls[0].params["selectionStart"] != float64(5) || calls[0].params["selectionEnd"] != float64(5) {
+		t.Errorf("caret-at-end default wrong: %+v", calls[0].params)
+	}
+}
+
+func TestDispatchCompositionCancel(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// composition_cancel with no-payload data — empty-text imeSetComposition.
+	env, _ := parseEnvelope([]byte(
+		`{"v":1,"type":"composition_cancel","t":1,"seq":0,"data":{}}`))
+	if err := disp.Dispatch(ctx, env); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	calls := collectIMECalls(f.Calls())
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 imeSetComposition call, got %d", len(calls))
+	}
+	if calls[0].method != "Input.imeSetComposition" {
+		t.Errorf("expected imeSetComposition; got %s", calls[0].method)
+	}
+	if calls[0].params["text"] != "" {
+		t.Errorf("cancel should send empty text; got %v", calls[0].params["text"])
+	}
+	if calls[0].params["selectionStart"] != float64(0) ||
+		calls[0].params["selectionEnd"] != float64(0) {
+		t.Errorf("cancel should collapse selection to 0; got %+v", calls[0].params)
+	}
+}
+
+func TestDispatchCompositionSelectionClamped(t *testing.T) {
+	// A buggy / malicious client sends selection_end = 999 for a
+	// 3-char string. The bridge MUST clamp to [0, len] so CDP
+	// doesn't reject the call.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	env, _ := parseEnvelope([]byte(
+		`{"v":1,"type":"composition_update","t":1,"seq":0,"data":{"data":"abc","selection_start":-5,"selection_end":999}}`))
+	if err := disp.Dispatch(ctx, env); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	calls := collectIMECalls(f.Calls())
+	if calls[0].params["selectionStart"] != float64(0) {
+		t.Errorf("negative selectionStart should clamp to 0; got %v", calls[0].params["selectionStart"])
+	}
+	if calls[0].params["selectionEnd"] != float64(3) {
+		t.Errorf("oversize selectionEnd should clamp to len; got %v", calls[0].params["selectionEnd"])
+	}
+}
+
+func TestUTF16Len(t *testing.T) {
+	cases := map[string]int{
+		"":       0,
+		"abc":    3,
+		"こんにちは": 5,                  // BMP CJK — 1 unit each
+		"🙂":      2,                  // outside BMP — surrogate pair
+		"a🙂b":   4,                  // 1 + 2 + 1
+		"é": 2,                 // "e" + combining acute = 2 units
+	}
+	for in, want := range cases {
+		if got := utf16Len(in); got != want {
+			t.Errorf("utf16Len(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestClampInt(t *testing.T) {
+	if clampInt(-5, 0, 10) != 0 {
+		t.Error("below lo should clamp to lo")
+	}
+	if clampInt(99, 0, 10) != 10 {
+		t.Error("above hi should clamp to hi")
+	}
+	if clampInt(5, 0, 10) != 5 {
+		t.Error("in-range should pass through")
+	}
+}
+
 func TestParseFlags(t *testing.T) {
 	cfg, err := parseFlags([]string{"--source", "ws", "--ws-addr", "127.0.0.1:9999"})
 	if err != nil {

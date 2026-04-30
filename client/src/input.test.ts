@@ -193,6 +193,82 @@ describe("InputChannel", () => {
 });
 
 // ---------------------------------------------------------------------------
+// v1.1 (T88) — IME composition extensions
+// ---------------------------------------------------------------------------
+
+describe("InputChannel composition (T88)", () => {
+  it("legacy string-payload sendComposition still works", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendComposition("update", "ni hao");
+    sched.tick();
+
+    expect(ch.sent).toHaveLength(1);
+    expect(ch.sent[0]!.type).toBe("composition_update");
+    expect(ch.sent[0]!.data).toEqual({ data: "ni hao" });
+  });
+
+  it("v1.1 object-payload carries selection_start/end + rect", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendComposition("start", {
+      data: "",
+      rect: { x: 100, y: 200, w: 12, h: 18 },
+    });
+    ic.sendComposition("update", {
+      data: "ni hao",
+      selection_start: 3,
+      selection_end: 6,
+    });
+    ic.sendComposition("end", { data: "你好" });
+    sched.tick();
+
+    const types = ch.sent.map(e => e.type);
+    expect(types).toEqual(["composition_start", "composition_update", "composition_end"]);
+
+    expect(ch.sent[0]!.data).toEqual({
+      data: "", rect: { x: 100, y: 200, w: 12, h: 18 },
+    });
+    expect(ch.sent[1]!.data).toEqual({
+      data: "ni hao", selection_start: 3, selection_end: 6,
+    });
+    expect(ch.sent[2]!.data).toEqual({ data: "你好" });
+  });
+
+  it("sendCompositionCancel emits an empty-payload cancel envelope", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendCompositionCancel();
+    sched.tick();
+
+    expect(ch.sent).toHaveLength(1);
+    expect(ch.sent[0]!.type).toBe("composition_cancel");
+    expect(ch.sent[0]!.data).toEqual({});
+  });
+
+  it("seq increments monotonically across a full composition lifecycle", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+
+    ic.sendComposition("start", { data: "" });
+    ic.sendComposition("update", { data: "n", selection_start: 1, selection_end: 1 });
+    ic.sendComposition("update", { data: "ni", selection_start: 2, selection_end: 2 });
+    ic.sendComposition("update", { data: "ni hao", selection_start: 6, selection_end: 6 });
+    ic.sendComposition("end", { data: "你好" });
+    sched.tick();
+
+    expect(ch.sent.map(e => e.seq)).toEqual([0, 1, 2, 3, 4]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // v1.1 — wheel phase machine + scroll inertia
 // ---------------------------------------------------------------------------
 

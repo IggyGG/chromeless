@@ -14,9 +14,14 @@ T14. The server-side dispatcher that consumes this stream is T22
 >   types for drag-and-drop (T45/T46). Added `touch_start`, `touch_move`,
 >   `touch_end`, `touch_cancel` for mobile-client touch input (T56).
 >   Extended `mouse_wheel` with optional `delta_mode`, `phase`, and
->   `momentum` fields for scroll-inertia fidelity (T62). Wire `v` stays
->   at `1`; v1 clients/servers ignore unknown types and unknown
->   optional fields per the original spec.
+>   `momentum` fields for scroll-inertia fidelity (T62). Extended
+>   `composition_start` / `composition_update` with optional
+>   `selection_start` / `selection_end` / `rect` / `candidate_list`
+>   fields, and added `composition_cancel` for Escape / focus-loss
+>   IME aborts (T88). Documented the "no key_* during composition"
+>   suppression rule explicitly. Wire `v` stays at `1`; v1 clients/
+>   servers ignore unknown types and unknown optional fields per the
+>   original spec.
 
 ---
 
@@ -159,16 +164,77 @@ The server uses `code` for layout-independent dispatch (e.g. when the
 remote keyboard layout differs) and falls back to `key` for printable
 characters that have no mapping.
 
-### `composition_start` / `composition_update` / `composition_end`
+### `composition_start` / `composition_update` / `composition_end` / `composition_cancel`
 
-```jsonc
-{ "data": "こん" }
+For IME composition (Pinyin, Hangul, Hiragana, Vietnamese tonal
+marks, dead-key combos for accented Latin). The full sequence is:
+
+```
+composition_start  →  0..N composition_update  →  composition_end
+                                                  composition_cancel  (alternative — Esc / focus loss)
 ```
 
-For IME composition. Mirrors `CompositionEvent.data`. The full sequence
-is `composition_start` → 0..N `composition_update` → `composition_end`.
+The original v1.0 spec had only `data` on each envelope; v1.1 adds
+selection boundaries (so the server's CDP `imeSetComposition` call
+gets the right caret + selection within the composing string), the
+caret rectangle on `composition_start` (so the server can
+optionally surface a candidate-positioning hint to a future client-
+side IME-candidate UI), and an explicit `composition_cancel` event
+distinct from "committed an empty string". v1.0 clients that only
+populate `data` continue to work — the new fields are all optional.
+
+```jsonc
+// composition_start — fired when an IME composition begins.
+{ "data": "",
+  "rect": { "x": 612, "y": 401, "w": 12, "h": 18 } }   // optional
+
+// composition_update — current composing text + caret/selection within it.
+{ "data": "ni hao",
+  "selection_start": 6,
+  "selection_end": 6,
+  "candidate_list": ["你好", "拟好", "妮好"] }          // optional
+
+// composition_end — IME committed; data is the FINAL committed string.
+{ "data": "你好" }
+
+// composition_cancel — user pressed Escape or focus moved away.
+{}
+```
+
+| field             | type      | required | applies to                                        |
+| ----------------- | --------- | -------- | ------------------------------------------------- |
+| `data`            | string    | yes      | start (empty), update, end (committed). Mirrors `CompositionEvent.data`. |
+| `selection_start` | integer   | no       | update (and optionally start). Caret position within `data`, in UTF-16 code units. Defaults to `data.length` (caret at end). |
+| `selection_end`   | integer   | no       | update. End of selection within `data`. When equal to `selection_start`, the caret is collapsed. Defaults to `selection_start`. |
+| `rect`            | object    | no       | start. `{x, y, w, h}` content-space bounding rect of the focused element / caret. Reserved for a future client-side candidate-positioning UI; servers MAY ignore. |
+| `candidate_list`  | string[]  | no       | update. Optional list of IME candidate strings the client-side UI could surface. **Currently unobservable from a Web client** — the IME is a system component the page can't introspect — so v1.1 clients leave this empty. v2 may add a per-platform IME bridge that populates it. |
+
+**Key suppression during composition.** While composition is in
+flight, raw `key_down` / `key_up` events MUST NOT be forwarded for
+keys that are part of the composition. The composing-key detection
+on the client side uses the standard `KeyboardEvent.isComposing`
+property (true between `compositionstart` and `compositionend`) plus
+the legacy Chromium `keyCode === 229` ("composition is active")
+sentinel. Servers receiving both `key_*` and `composition_*` events
+for the same composition would dispatch the keys twice — once
+literally and once as the composed result.
+
 `composition_end.data` is the final committed string and should be
-treated authoritatively even if intermediate updates were dropped.
+treated authoritatively even if intermediate `composition_update`
+events were dropped. Servers SHOULD treat `composition_cancel` as
+"discard any in-progress composition state" — e.g., dispatch
+`Input.imeSetComposition` with empty `text` to clear the IME's
+in-progress display in the cloud Chromium.
+
+**Detecting cancel from the DOM.** There is no `compositioncancel`
+DOM event in HTML. Clients detect cancel by:
+1. observing a `keydown` with `key === "Escape"` while
+   `isComposing === true`, OR
+2. observing `compositionend` with empty `data` (no commit happened —
+   user moved focus or aborted).
+
+Either pathway emits `composition_cancel`. A `compositionend` with
+non-empty `data` always emits `composition_end`.
 
 ### `clipboard_paste`
 
