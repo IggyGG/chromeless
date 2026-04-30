@@ -40,6 +40,7 @@ User opens a webpage in their browser, sees a remote Chromium tab, and can inter
 ## Phase 2 — Quality and capture pipeline
 
 - **Custom capture path:** replace `getDisplayMedia` with a direct hook into Viz's `FrameSinkVideoCapturer`. Requires building Chromium from source. Spike as a separate prototype branch first.
+  - **Update (post-T29 spike):** the previously-listed alternative — a sidecar using `HeadlessExperimental.beginFrame` + `Page.startScreencast` — is **ruled out for stock Chromium** because the `HeadlessExperimental` CDP domain only exists in the `chrome-headless-shell` binary (per M132+). `Page.startScreencast` works on stock Chrome but exhibits jittery frame pacing (p50 17.9 ms, p99 32.8 ms, σ 9.85 ms) — not viable at our latency budget. Phase 2 should therefore commit directly to the `FrameSinkVideoCapturer` route. See `capture/spike-beginframe/findings.md`.
 - **Encoder factory injection:** `webrtc::VideoEncoderFactory` override. Keep software encoders (libvpx VP9, x264) for v1 but tune for low latency: zero-latency tuning, no B-frames, intra-refresh, small GOPs.
 - **Cursor handling:** render cursor client-side based on shape/position metadata over data channel.
 - **Input fidelity:** IME, modifier keys, paste, drag-and-drop, scroll inertia, touch events, gamepad, clipboard sync.
