@@ -22,6 +22,7 @@
 
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
+#include "capture/encoder/vp9_encoder.h"
 
 namespace cloud_browser {
 namespace {
@@ -102,12 +103,22 @@ CloudBrowserVideoEncoderFactory::GetSupportedFormats() const {
 std::unique_ptr<webrtc::VideoEncoder>
 CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
     const webrtc::SdpVideoFormat& format) {
-  // Real impls land in follow-up tasks. Until then, hand back a
-  // placeholder that the runtime will trip over loudly. nullptr is
-  // reserved for "we never claimed to support this format".
+  // VP9 is the v1 default — real implementation lives in
+  // capture/encoder/vp9_encoder.{h,cc} (T35). The factory propagates
+  // the latency-tuning bits from its own Config into Vp9EncoderConfig
+  // so the encoder doesn't have to re-derive intent.
   if (format.name == "VP9" && config_.enable_vp9) {
-    return std::make_unique<UnimplementedEncoder>("vp9");
+    Vp9EncoderConfig cfg;
+    cfg.intra_refresh_period_frames = config_.intra_refresh
+        ? std::max(1, config_.gop_length_frames / 4)
+        : 60;
+    cfg.keyframe_interval =
+        (config_.intra_refresh ? -1 : config_.gop_length_frames);
+    cfg.low_latency_tag = config_.zero_latency;
+    return std::make_unique<Vp9Encoder>(cfg);
   }
+  // H264 / VP8 wrappers land in their own tasks; placeholder until
+  // they do.
   if (format.name == "H264" && config_.enable_h264) {
     return std::make_unique<UnimplementedEncoder>("h264");
   }
