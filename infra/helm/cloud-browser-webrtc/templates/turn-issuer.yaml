@@ -72,6 +72,11 @@ spec:
           env:
             - name: LISTEN
               value: ":8090"
+            {{- $region := include "cb.region" (dict "context" . "component" "turnIssuer") }}
+            {{- if $region }}
+            - name: CBWRTC_REGION
+              value: {{ $region | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.turnIssuer.resources | nindent 12 }}
           readinessProbe:

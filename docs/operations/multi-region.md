@@ -198,28 +198,40 @@ land cleanly when Phase 3 multi-region work begins.
 Multi-region multiplies the operational surface area. Choose where
 to centralise carefully:
 
-### Observability — federate
+### Observability — federate (T94 implementation landed)
 
 **Per-region Prometheus + per-region Grafana would force operators
-to context-switch every time they investigate.** Instead:
+to context-switch every time they investigate.** The T94 shape:
 
-- Per-region Prometheus *as today* (each region scrapes its own
-  signaling + chromium sidecars + turn-issuer + controller).
-- One global Prometheus that *federates* (`/federate` query) the
-  per-region servers. The federate query pulls a curated subset
-  (the `cb_*` metrics, not the full controller-runtime suite) so
-  the global server doesn't choke.
-- One global Grafana with the cb dashboards from
+- Per-region Prometheus configured via
+  [`infra/observability/prometheus/prometheus.yml`](../../infra/observability/prometheus/prometheus.yml).
+  Each region's Prometheus carries `external_labels.region:
+  <region>` (substituted at deploy time). Scrapes signaling, the
+  chromium sidecar, controller, turn-issuer.
+- Global federate Prometheus configured via
+  [`infra/observability/prometheus/prometheus-federate.yml`](../../infra/observability/prometheus/prometheus-federate.yml)
+  (config-only) and deployed via
+  [`infra/k8s/observability-federate.yaml`](../../infra/k8s/observability-federate.yaml)
+  (Deployment + Service + ConfigMap, single replica, ephemeral
+  storage). Pulls `{__name__=~"cb_.*"}` from each per-region
+  endpoint; preserves the `region` label (`honor_labels: true`).
+- One global Grafana hosting
   [`infra/observability/dashboards/`](../../infra/observability/dashboards/).
-  Every metric carries a `region` external label
-  (set in each region's prometheus config); dashboards add a
-  `$region` template variable filtering all queries.
-- Per-region Grafana *also* deployed for the in-region on-call who
-  doesn't need the cross-region view.
+  Both `cb-cluster-overview.json` and `cb-session-detail.json`
+  carry a `$region` template variable (multi-select, default
+  "All"); every panel query is `{region=~"$region"}` filtered.
+- Per-region Grafana *also* deployed for the in-region on-call.
+  Same dashboards; the `$region` selector limits to the local
+  region by default.
 
-This shape doesn't require new code — it's a Prometheus federation
-config change + a `region` external label on each
-[`infra/observability/prometheus/prometheus.yml`](../../infra/observability/prometheus/prometheus.yml).
+The metrics side: cb-signaling carries `region` per T93 in
+`signaling/metrics.go`; cb-metrics-sidecar carries it per T94 via
+`ConstLabels: regionLabels()` reading `CBWRTC_REGION` at start.
+The Helm chart's top-level `region:` value (T94) propagates the
+env to every Pod (signaling, controller, turn-issuer, session
+pool's cb-chromium + cb-metrics-sidecar). When the value is empty
+(single-region deploy), no `region` label is emitted at all —
+existing single-region dashboards keep working unchanged.
 
 ### Alerting — regional routing
 
@@ -300,14 +312,35 @@ points:
 | [T50 Helm chart (`infra/helm/`)](../../infra/helm/cloud-browser-webrtc/) | per-region overlay/values file (`values-<region>.yaml`); CI installs each region with that file. |
 | [T80 runbook](./runbook.md) | per-region drill-down sections; "rotating secrets" gains a per-region step. |
 | [T84 release pipeline](../../.github/workflows/release.yml) | push to a multi-region registry mirror; canary rollout via Argo CD per region. |
-| [T66 Grafana dashboards](../../infra/observability/dashboards/) | add `$region` template variable; queries get `{region=~"$region"}` filter. |
-| AlertManager rules | route by `region` label to regional rotations. |
+| [T66 Grafana dashboards](../../infra/observability/dashboards/) | **DONE in T94** — both dashboards carry `$region` template variable; every panel query is `{region=~"$region"}` filtered. |
+| AlertManager rules | **DONE in T94** — region-local rules group by `region` label; global rules carry `scope: global` for cross-region rotations. See [`cb-alerts.yaml`](../../infra/observability/alerts/cb-alerts.yaml). |
+| Helm chart `region:` value | **DONE in T94** — top-level `region:` value propagates `CBWRTC_REGION` to every Pod. |
 
-Phase 3 implementation tasks (filed when we start):
-1. **T-MR1**: extend `Claims` with `Aud` + `DefaultRegion`; signaling verifier honours them.
-2. **T-MR2**: per-region Helm values + per-region image rollout pipeline.
-3. **T-MR3**: federated Prometheus topology + `$region` template variable across dashboards.
-4. **T-MR4**: GeoDNS provisioning (Cloudflare or Route 53 — pick at deploy time).
+Phase 3 implementation tasks:
+
+1. **T-MR1 (T93 — implemented)**: `Claims.Aud` is honoured by the
+   signaling verifier; rejection emits
+   `cb_signaling_auth_failures_total{reason="region_not_allowed"}`.
+   `CBWRTC_REGION` env var (Helm: `signaling.region`) tags every
+   metric with a constant `region` label. Dev issuer accepts
+   `?aud=…` to mint scoped tokens. Source files:
+   - `signaling/auth.go` (`Claims.Aud`, `processRegion`, `initRegion`,
+     audience check inside `verifyToken`).
+   - `signaling/dev-issuer.go` (`?aud=` query param).
+   - `signaling/metrics.go` (`region` label on every metric).
+   - `infra/helm/cloud-browser-webrtc/values.yaml` +
+     `templates/signaling.yaml` (the Helm wiring).
+   `DefaultRegion`-style claim is deferred to T-MR4 (it only matters
+   once GeoDNS lands; in v1 the issuer can pick a region for the
+   client without the claim).
+2. **T-MR2 (T94 — implemented)**: per-region Helm values + federated
+   Prometheus topology. `cb-metrics-sidecar` also carries the
+   `region` ConstLabel.
+3. **T-MR3**: `$region` template variable across the T66 dashboards
+   (depends on T-MR2 metrics).
+4. **T-MR4**: GeoDNS provisioning (Cloudflare or Route 53 — pick at
+   deploy time). Includes `DefaultRegion` claim plumbing for
+   stickiness once a session lands.
 5. **T-MR5**: tenant region-allowlist policy hook + admin UI.
 
 Each is on the order of a week of work. The total Phase 3

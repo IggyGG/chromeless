@@ -24,7 +24,9 @@
     {
       "title": "Per-session detail",
       "type": "dashboards",
-      "tags": ["cloud-browser-webrtc"],
+      "tags": [
+        "cloud-browser-webrtc"
+      ],
       "asDropdown": true,
       "includeVars": false,
       "keepTime": true,
@@ -48,29 +50,52 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 50},
-              {"color": "red", "value": 100}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
             ]
           },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "pluginVersion": "11.0.0",
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum(cb_signaling_active_sessions)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(cb_signaling_active_sessions{region=~\"$region\"})",
           "legendFormat": "active sessions",
           "refId": "A"
         }
@@ -79,22 +104,53 @@
       "type": "stat"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Active websocket connections on signaling, by peer role. Steady state is 2 × active_sessions (one client + one browser per session).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Active websocket connections on signaling, by peer role. Steady state is 2 \u00d7 active_sessions (one client + one browser per session).",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "stacking": {"mode": "none"}},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none"
+            }
+          },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
       "id": 2,
-      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum by (role) (cb_signaling_active_connections)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (role) (cb_signaling_active_connections{region=~\"$region\"})",
           "legendFormat": "{{role}}",
           "refId": "A"
         }
@@ -103,22 +159,51 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Session creation rate. Sustained > 0 means new users are arriving.",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 0},
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "id": 3,
-      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "mean"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum(rate(cb_signaling_sessions_total[5m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(rate(cb_signaling_sessions_total{region=~\"$region\"}[5m]))",
           "legendFormat": "sessions/sec",
           "refId": "A"
         }
@@ -127,22 +212,54 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Websocket close events bucketed by code. 1000 = normal, 1001 = going-away, 1006 = abnormal (network drop), 1011 = server error. Watch for spikes in 1006/1011.",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "stacking": {"mode": "normal"}},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
       "id": 4,
-      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum by (code) (rate(cb_signaling_close_total[5m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (code) (rate(cb_signaling_close_total{region=~\"$region\"}[5m]))",
           "legendFormat": "code={{code}}",
           "refId": "A"
         }
@@ -151,34 +268,68 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Session-controller assignment latency. Empty until the controller binary lands per T50; the histogram name is reserved.",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "s"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
       "id": 5,
-      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(cb_session_assignment_seconds_bucket[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(cb_session_assignment_seconds_bucket{region=~\"$region\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(cb_session_assignment_seconds_bucket[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(cb_session_assignment_seconds_bucket{region=~\"$region\"}[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(cb_session_assignment_seconds_bucket[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(cb_session_assignment_seconds_bucket{region=~\"$region\"}[5m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -187,22 +338,54 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Aggregated outbound bitrate across every active session. Stacked by kind (video/audio).",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 60, "stacking": {"mode": "normal"}},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "bps"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
       "id": 6,
-      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum by (kind) (cb_webrtc_outbound_bitrate_bps)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (kind) (cb_webrtc_outbound_bitrate_bps{region=~\"$region\"})",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }
@@ -211,22 +394,54 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Auth failures from signaling/auth.go (T48), bucketed by reason. Sustained > 0 means clients are presenting bad tokens — could be a bug, a key rotation issue, or an attack.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Auth failures from signaling/auth.go (T48), bucketed by reason. Sustained > 0 means clients are presenting bad tokens \u2014 could be a bug, a key rotation issue, or an attack.",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 80, "stacking": {"mode": "normal"}},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
       "id": 7,
-      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum by (reason) (rate(cb_signaling_auth_failures_total[5m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (reason) (rate(cb_signaling_auth_failures_total{region=~\"$region\"}[5m]))",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -237,11 +452,17 @@
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["cloud-browser-webrtc"],
+  "tags": [
+    "cloud-browser-webrtc"
+  ],
   "templating": {
     "list": [
       {
-        "current": {"selected": false, "text": "Prometheus", "value": "Prometheus"},
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Datasource",
@@ -253,13 +474,44 @@
         "regex": "",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(cb_signaling_active_sessions, region)",
+        "description": "Filter every panel by region (T94). Multi-select; default \"All\" matches every region the federated Prometheus has seen. Empty = no `region` label was emitted (single-region deploy).",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Region",
+        "multi": true,
+        "name": "region",
+        "options": [],
+        "query": {
+          "query": "label_values(cb_signaling_active_sessions, region)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
       }
     ]
   },
-  "time": {"from": "now-1h", "to": "now"},
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
-  "title": "cloud-browser-webrtc — cluster overview",
+  "title": "cloud-browser-webrtc \u2014 cluster overview",
   "uid": "cb-cluster-overview",
   "version": 1,
   "weekStart": ""

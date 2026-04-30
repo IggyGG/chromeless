@@ -47,3 +47,33 @@ Usage: {{ include "cb.requireValue" (dict "value" .Values.x.y "name" "x.y" "cont
 {{- fail (printf "values.%s is required (%s)" .name .context) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+T94: resolve the region this deployment serves. Top-level
+.Values.region is the canonical knob; per-component overrides
+(`.Values.signaling.region`, etc.) are still honoured for
+backwards compat with T93's signaling-only addition.
+
+Usage: {{ include "cb.region" (dict "context" . "component" "signaling") }}
+- `component` is optional; when set, that component's per-component
+  region overrides the top-level value.
+- Returns "" when nothing is set; templates SHOULD wrap their env
+  block with `{{ if $region }}` so they don't emit an empty
+  CBWRTC_REGION (which would mean "no region label" downstream
+  rather than "the empty-string region").
+*/}}
+{{- define "cb.region" -}}
+{{- $ctx := .context -}}
+{{- $component := .component -}}
+{{- $top := default "" $ctx.Values.region -}}
+{{- $override := "" -}}
+{{- if $component -}}
+  {{- if hasKey $ctx.Values $component -}}
+    {{- $cv := index $ctx.Values $component -}}
+    {{- if and $cv (kindIs "map" $cv) (hasKey $cv "region") -}}
+      {{- $override = default "" $cv.region -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- if $override -}}{{- $override -}}{{- else -}}{{- $top -}}{{- end -}}
+{{- end -}}

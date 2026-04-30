@@ -10,6 +10,12 @@
 # infra/observability/prometheus/prometheus.yml does NOT auto-load
 # this — alerts in dev are noisy and rarely informative; flip on per
 # environment.
+#
+# T94 multi-region awareness: every rule that has region-specific
+# meaning aggregates by `region` so AlertManager's routing tree can
+# fan out to per-region rotations. A small `cloud-browser-webrtc.global`
+# group at the bottom holds aggregates that span regions (e.g., total
+# active sessions across the fleet).
 
 groups:
 
@@ -21,34 +27,35 @@ groups:
       - alert: CBHighRoundTripTime
         # Alert when median RTT crosses 1.2× the v1 LAN target (100 ms).
         # `cb_webrtc_round_trip_time_ms` is a per-session gauge; we
-        # quantile across all live sessions to avoid one bad session
-        # flapping the alert.
+        # quantile across live sessions per region (T94) so a single
+        # bad region doesn't get amplified by global aggregation.
         expr: |
-          quantile by (deploy) (0.5, cb_webrtc_round_trip_time_ms) > 120
+          quantile by (region) (0.5, cb_webrtc_round_trip_time_ms) > 120
         for: 5m
         labels:
           severity: warning
           slo: glass-to-glass-rtt
         annotations:
-          summary: "median ICE RTT > 120ms (deploy={{ $labels.deploy }})"
+          summary: "median ICE RTT > 120ms (region={{ $labels.region }})"
           runbook: "docs/operations/runbook.md#debugging-a-slow-session"
           description: |
-            Median selected-pair RTT crossed 1.2× the LAN target (100 ms).
-            Glass-to-glass latency typically lags RTT by encode + jitter
-            buffer (~30-60 ms on top of RTT). Investigate per-session via
-            cb-session-detail Grafana dashboard; cross-check
+            Median selected-pair RTT in region {{ $labels.region }}
+            crossed 1.2× the LAN target (100 ms). Glass-to-glass
+            latency typically lags RTT by encode + jitter buffer
+            (~30-60 ms). Investigate per-session via cb-session-detail
+            Grafana dashboard filtered to this region; cross-check
             `cb_webrtc_outbound_qp` for encoder saturation.
 
       - alert: CBHighRoundTripTimeRegional
-        # 1.2× the regional target (200 ms).
+        # 1.2× the regional target (200 ms), per region.
         expr: |
-          quantile by (deploy) (0.95, cb_webrtc_round_trip_time_ms) > 240
+          quantile by (region) (0.95, cb_webrtc_round_trip_time_ms) > 240
         for: 10m
         labels:
           severity: critical
           slo: glass-to-glass-rtt
         annotations:
-          summary: "p95 ICE RTT > 240ms (deploy={{ $labels.deploy }})"
+          summary: "p95 ICE RTT > 240ms (region={{ $labels.region }})"
           runbook: "docs/operations/runbook.md#debugging-a-slow-session"
 
   # =====================================================================
@@ -61,13 +68,13 @@ groups:
         # for the bitrate budget — users see pixelation. Cross-check
         # bandwidth estimator before declaring "fix the encoder."
         expr: |
-          avg by (instance) (cb_webrtc_outbound_qp) > 38
+          avg by (region, instance) (cb_webrtc_outbound_qp) > 38
         for: 10m
         labels:
           severity: warning
           slo: encoder-quality
         annotations:
-          summary: "encoder QP > 38 sustained (instance={{ $labels.instance }})"
+          summary: "encoder QP > 38 sustained (region={{ $labels.region }} instance={{ $labels.instance }})"
           runbook: "docs/operations/runbook.md#checking-encoder-health"
 
       - alert: CBDroppedFramesElevated
@@ -235,6 +242,58 @@ groups:
         annotations:
           summary: "warm pool below 50% of target (pool={{ $labels.pool }})"
           runbook: "docs/operations/runbook.md#scaling"
+
+  # =====================================================================
+  # Global / cross-region aggregates (T94)
+  #
+  # These rules deliberately do NOT group by region — they fire on
+  # the federated total. AlertManager routes them to a "global"
+  # rotation rather than the regional ones (label `scope: global`).
+  # =====================================================================
+  - name: cloud-browser-webrtc.global
+    rules:
+      - alert: CBGlobalActiveSessionsHigh
+        # Global active session count crosses an absolute capacity
+        # ceiling. Tune per fleet size.
+        expr: |
+          sum(cb_signaling_active_sessions) > 10000
+        for: 10m
+        labels:
+          severity: warning
+          slo: capacity
+          scope: global
+        annotations:
+          summary: "global active sessions > 10000 (sum across regions)"
+          runbook: "docs/operations/runbook.md#scaling"
+
+      - alert: CBGlobalAuthFailureBurst
+        # Auth failures spiking across multiple regions simultaneously
+        # is a different threat shape than a single-region spike — it
+        # suggests the central auth issuer is mis-signing.
+        expr: |
+          count(sum by (region) (rate(cb_signaling_auth_failures_total[5m])) > 0.5) >= 2
+        for: 5m
+        labels:
+          severity: critical
+          slo: auth-correctness
+          scope: global
+        annotations:
+          summary: "auth failures spiking in {{ $value }} regions concurrently"
+          runbook: "docs/operations/runbook.md#rotating-secrets"
+
+      - alert: CBRegionMissingFromFederate
+        # `up{job="cb-region-federate"}` goes 0 when a per-region
+        # Prometheus is unreachable. We notice within ~3 minutes.
+        expr: |
+          up{job="cb-region-federate"} == 0
+        for: 3m
+        labels:
+          severity: warning
+          slo: observability
+          scope: global
+        annotations:
+          summary: "per-region prometheus unreachable (instance={{ $labels.instance }})"
+          runbook: "docs/operations/runbook.md#debugging-a-slow-session"
 
   # =====================================================================
   # Black-box / endpoint health

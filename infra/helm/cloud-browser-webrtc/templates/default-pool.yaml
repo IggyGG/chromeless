@@ -72,6 +72,11 @@ spec:
               value: "30"
             - name: IDLE_TIMEOUT_S
               value: "999999"
+            {{- $region := include "cb.region" (dict "context" . "component" "") }}
+            {{- if $region }}
+            - name: CBWRTC_REGION
+              value: {{ $region | quote }}
+            {{- end }}
           ports:
             - name: devtools
               containerPort: 9222
@@ -110,6 +115,10 @@ spec:
             - { name: DEVTOOLS_URL, value: "http://127.0.0.1:9222" }
             - { name: METRICS_LISTEN, value: ":9100" }
             - { name: POLL_INTERVAL_S, value: "10" }
+            {{- $region := include "cb.region" (dict "context" . "component" "") }}
+            {{- if $region }}
+            - { name: CBWRTC_REGION, value: {{ $region | quote }} }
+            {{- end }}
           ports:
             - { name: metrics, containerPort: 9100 }
           resources:

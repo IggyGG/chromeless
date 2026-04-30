@@ -76,6 +76,11 @@ spec:
                   name: signaling-auth
                   key: CBWRTC_AUTH_PUBKEY
             {{- end }}
+            {{- $region := include "cb.region" (dict "context" . "component" "signaling") }}
+            {{- if $region }}
+            - name: CBWRTC_REGION
+              value: {{ $region | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.signaling.resources | nindent 12 }}
           readinessProbe:

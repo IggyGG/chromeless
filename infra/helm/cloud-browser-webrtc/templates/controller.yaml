@@ -101,6 +101,12 @@ spec:
             - "--metrics-bind=:8080"
             - "--health-bind=:8081"
             - "--default-pool={{ .Values.controller.defaultPool }}"
+          {{- $region := include "cb.region" (dict "context" . "component" "controller") }}
+          {{- if $region }}
+          env:
+            - name: CBWRTC_REGION
+              value: {{ $region | quote }}
+          {{- end }}
           ports:
             - name: metrics
               containerPort: 8080

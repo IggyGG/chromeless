@@ -1,0 +1,39 @@
+# infra/observability/prometheus/prometheus-federate.yml — global
+# federate Prometheus config (T94 / T87).
+#
+# Scrapes /federate from each per-region Prometheus, pulling only the
+# `cb_*` metric set we actually use in dashboards. The full
+# controller-runtime suite (workqueue_*, controller_runtime_*) stays
+# regional — the federate Prometheus would choke if every region's
+# 200+ controller-runtime series joined here.
+#
+# Selection rule: metric NAME starts with `cb_`. That covers
+# cb_signaling_*, cb_chromium_*, cb_webrtc_*, cb_client_*,
+# cb_session_*, cb_turn_issuer_*, cb_pool_*. Nothing else federates.
+#
+# Targets: one entry per region. Replace at deploy time with the
+# real per-region Prometheus endpoints. The example here lists three
+# placeholder regions to make the multi-region shape obvious in
+# dev / docs.
+
+global:
+  scrape_interval: 30s         # federate scrapes 2× rarer than per-region
+  evaluation_interval: 30s
+  external_labels:
+    role: federate
+    deploy: cloud-browser-webrtc-global
+
+scrape_configs:
+  - job_name: cb-region-federate
+    honor_labels: true         # preserve `region` label from the source
+    metrics_path: /federate
+    params:
+      "match[]":
+        - '{__name__=~"cb_.*"}'
+    static_configs:
+      - targets:
+          - prometheus.us-east-1.cloud-browser-webrtc.example.com:9090
+          - prometheus.eu-west-1.cloud-browser-webrtc.example.com:9090
+          - prometheus.ap-northeast-1.cloud-browser-webrtc.example.com:9090
+        labels:
+          tier: regional

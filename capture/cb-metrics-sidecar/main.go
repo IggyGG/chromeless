@@ -59,39 +59,58 @@ import (
 // metrics
 // ---------------------------------------------------------------------------
 
+// regionLabels stamps every metric with the static `region` label
+// when CBWRTC_REGION is set (T94). Returns nil otherwise — single-
+// region deploys (and the existing dev compose) stay clean. Single
+// static label per process; no cardinality concern.
+func regionLabels() prometheus.Labels {
+	if r := os.Getenv("CBWRTC_REGION"); r != "" {
+		return prometheus.Labels{"region": r}
+	}
+	return nil
+}
+
 var (
 	mCPU = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cb_chromium_cpu_pct",
-		Help: "Aggregate Chromium CPU usage as a percent of one core (so 100 == one fully busy core; 200 == two cores etc.).",
+		Name:        "cb_chromium_cpu_pct",
+		Help:        "Aggregate Chromium CPU usage as a percent of one core (so 100 == one fully busy core; 200 == two cores etc.).",
+		ConstLabels: regionLabels(),
 	})
 	mRSS = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cb_chromium_rss_bytes",
-		Help: "Aggregate resident set size of all Chromium processes, in bytes.",
+		Name:        "cb_chromium_rss_bytes",
+		Help:        "Aggregate resident set size of all Chromium processes, in bytes.",
+		ConstLabels: regionLabels(),
 	})
 
 	mOutboundBitrate = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cb_webrtc_outbound_bitrate_bps",
-		Help: "Outbound RTP bitrate in bits per second, computed as a delta over the polling interval.",
+		Name:        "cb_webrtc_outbound_bitrate_bps",
+		Help:        "Outbound RTP bitrate in bits per second, computed as a delta over the polling interval.",
+		ConstLabels: regionLabels(),
 	}, []string{"kind"})
 	mOutboundFPS = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cb_webrtc_outbound_frames_per_second",
-		Help: "Outbound video frames per second, as reported by the encoder.",
+		Name:        "cb_webrtc_outbound_frames_per_second",
+		Help:        "Outbound video frames per second, as reported by the encoder.",
+		ConstLabels: regionLabels(),
 	})
 	mOutboundDropped = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "cb_webrtc_outbound_dropped_frames_total",
-		Help: "Total frames dropped by the outbound video pipeline.",
+		Name:        "cb_webrtc_outbound_dropped_frames_total",
+		Help:        "Total frames dropped by the outbound video pipeline.",
+		ConstLabels: regionLabels(),
 	})
 	mOutboundQP = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cb_webrtc_outbound_qp",
-		Help: "Average video encoder quantization parameter (lower = higher quality).",
+		Name:        "cb_webrtc_outbound_qp",
+		Help:        "Average video encoder quantization parameter (lower = higher quality).",
+		ConstLabels: regionLabels(),
 	})
 	mInboundLost = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "cb_webrtc_remote_inbound_packets_lost_total",
-		Help: "Packets the remote peer reported as lost on the inbound side.",
+		Name:        "cb_webrtc_remote_inbound_packets_lost_total",
+		Help:        "Packets the remote peer reported as lost on the inbound side.",
+		ConstLabels: regionLabels(),
 	})
 	mRTT = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cb_webrtc_round_trip_time_ms",
-		Help: "Selected ICE candidate-pair round-trip time in milliseconds.",
+		Name:        "cb_webrtc_round_trip_time_ms",
+		Help:        "Selected ICE candidate-pair round-trip time in milliseconds.",
+		ConstLabels: regionLabels(),
 	})
 
 	// ---- T72: client-side stats forwarded over the WebRTC "stats" data
@@ -103,25 +122,31 @@ var (
 	// drilldowns in T66's cb-session-detail dashboard actually
 	// populate. Cardinality is bounded by labelTenant/labelSession
 	// (top-100 each, rest bucketed as "_other"; "_anonymous" exempt).
+	// T94 adds the static `region` ConstLabel.
 	mClientInboundBitrate = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cb_client_inbound_video_bitrate_bps",
-		Help: "Inbound video bitrate as observed at the client, in bits per second.",
+		Name:        "cb_client_inbound_video_bitrate_bps",
+		Help:        "Inbound video bitrate as observed at the client, in bits per second.",
+		ConstLabels: regionLabels(),
 	}, []string{"tenant_id", "session_id"})
 	mClientInboundFPS = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cb_client_inbound_video_fps",
-		Help: "Inbound video frames per second as observed at the client.",
+		Name:        "cb_client_inbound_video_fps",
+		Help:        "Inbound video frames per second as observed at the client.",
+		ConstLabels: regionLabels(),
 	}, []string{"tenant_id", "session_id"})
 	mClientInboundFramesDropped = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cb_client_inbound_video_frames_dropped_total",
-		Help: "Total inbound video frames dropped, observed at the client.",
+		Name:        "cb_client_inbound_video_frames_dropped_total",
+		Help:        "Total inbound video frames dropped, observed at the client.",
+		ConstLabels: regionLabels(),
 	}, []string{"tenant_id", "session_id"})
 	mClientPairRTT = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cb_client_pair_rtt_ms",
-		Help: "Selected ICE candidate-pair RTT as observed at the client, in milliseconds.",
+		Name:        "cb_client_pair_rtt_ms",
+		Help:        "Selected ICE candidate-pair RTT as observed at the client, in milliseconds.",
+		ConstLabels: regionLabels(),
 	}, []string{"tenant_id", "session_id"})
 	mClientRemoteInboundLossFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cb_client_remote_inbound_packet_loss_fraction",
-		Help: "Fraction of packets reported lost on the client's remote-inbound report (0..1).",
+		Name:        "cb_client_remote_inbound_packet_loss_fraction",
+		Help:        "Fraction of packets reported lost on the client's remote-inbound report (0..1).",
+		ConstLabels: regionLabels(),
 	}, []string{"tenant_id", "session_id"})
 )
 
@@ -640,11 +665,16 @@ func main() {
 		os.Exit(2)
 	}
 
+	region := os.Getenv("CBWRTC_REGION")
+	if region == "" {
+		region = "(unset)"
+	}
 	logger.Info("cb-metrics-sidecar starting",
 		slog.String("listen", listen),
 		slog.String("devtools_url", devtoolsURL),
 		slog.Duration("interval", interval),
 		slog.String("proc_root", procRoot),
+		slog.String("region", region),
 	)
 
 	// Pre-register known label combinations so the metric series exist

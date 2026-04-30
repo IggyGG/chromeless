@@ -13,6 +13,18 @@ namespace:
     audit: restricted
     warn: restricted
 
+# T94: region this deployment serves. When set, propagated as
+# CBWRTC_REGION to every Pod (signaling, controller, turn-issuer,
+# session-pool template's cb-chromium + cb-metrics-sidecar). The
+# value lands as:
+#   - signaling: token aud-claim verification + Prometheus label.
+#   - sidecar/controller/turn-issuer: Prometheus label only.
+# Per-component overrides under `<component>.region:` are still
+# honoured (T93 left signaling.region in place); set per-component
+# only when one component must report a different region from the
+# rest of the deployment, which is unusual.
+region: ""
+
 images:
   # Override these per-environment with --set images.<component>.tag=...
   # to point at the version you actually want to ship.
@@ -71,6 +83,14 @@ signaling:
   # base64-encoded raw 32-byte Ed25519 public key. REQUIRED if auth
   # is enabled. See docs/security/auth.md.
   authPubkey: ""
+  # T93: identifier for the AWS / GCP / on-prem region this signaling
+  # deployment serves. When set, propagated as CBWRTC_REGION; the
+  # signaling server uses it to verify token `aud` claims (data
+  # residency) and tags every emitted Prometheus metric with
+  # `region="<value>"` so federated dashboards group cleanly.
+  # Leave empty for single-region deploys; the signaling code stays
+  # backwards-compatible (empty → "_unspecified" label).
+  region: ""
 
 controller:
   enabled: true

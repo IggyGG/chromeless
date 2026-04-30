@@ -1,22 +1,26 @@
-# infra/observability/prometheus/prometheus.yml — minimal Prometheus
-# config for the cloud-browser-webrtc observability profile. Two scrape
-# jobs:
+# infra/observability/prometheus/prometheus.yml — per-region Prometheus
+# config (T94). One of these runs in each region; metrics it scrapes
+# get the region external label so a global federate Prometheus
+# (prometheus-federate.yml) can aggregate without losing provenance.
 #
-#   signaling   — host-mapped 8080 from the signaling service. Reads
-#                 cb_signaling_* metrics (sessions, messages, close
-#                 codes, auth failures, active connections).
-#   chromium    — host-mapped 9100 from cb-metrics-sidecar. Reads
-#                 cb_chromium_* and cb_webrtc_* metrics.
+# Scrape jobs:
+#   cb-signaling   — local cluster's signaling :8080 (cb_signaling_*).
+#   cb-chromium    — local cluster's metrics sidecar :9100
+#                    (cb_chromium_*, cb_webrtc_*, cb_client_*).
+#   cb-controller  — the BrowserSession controller's :8080 (T71).
+#   cb-turn-issuer — the TURN issuer's :8090 (T76).
 #
-# Both targets are reached from inside the prometheus container via
-# the compose service DNS names (signaling, chromium). Tweak retention
-# / storage on the prometheus container's CLI args, not here.
+# Substitute REGION at deploy time. The dev compose stack passes
+# REGION via env (defaults to `dev` when CBWRTC_REGION is unset).
+# K8s deploys template this value via the Helm chart.
 
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
     deploy: cloud-browser-webrtc-dev
+    # T94: region label every metric the federate aggregates.
+    region: "${CBWRTC_REGION:-dev}"
 
 scrape_configs:
   - job_name: cb-signaling
@@ -34,3 +38,25 @@ scrape_configs:
           - chromium:9100
         labels:
           service: chromium-sidecar
+
+  # Phase-3 controller + issuer scrapes. Targets resolve only when
+  # those services are deployed (Helm chart per region).
+  - job_name: cb-controller
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - browser-session-controller:8080
+        labels:
+          service: controller
+    # Don't fail loudly when the controller isn't running (single-region
+    # dev compose doesn't ship it).
+    honor_labels: false
+
+  - job_name: cb-turn-issuer
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - turn-issuer:8090
+        labels:
+          service: turn-issuer
+    honor_labels: false
