@@ -28,14 +28,22 @@ networks:
 
 services:
   chromium:
+    # Build context is the repo root because the Dockerfile copies
+    # capture/streamer-page/ (T28) and infra/* into the image.
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: infra/Dockerfile
     image: cloud-browser-webrtc:dev
     container_name: cbwrtc-chromium
     networks: [cbnet]
     ports:
       - "9222:9222"
+    environment:
+      # Streamer launch (T28). Override per session as the lifecycle
+      # scripts (T31) come online.
+      SESSION_ID: dev
+      SIGNALING_URL: ws://signaling:8080/ws
+      STREAMER_FPS: "30"
     # /dev/shm at default 64m is too small for Chromium tabs; either bump
     # shm_size or rely on the Dockerfile's --disable-dev-shm-usage. Both
     # is belt-and-braces for stability.

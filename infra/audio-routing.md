@@ -67,8 +67,9 @@ not a runaway echo.
 
 | Flag                                          | Where set                | Why                                           |
 | --------------------------------------------- | ------------------------ | --------------------------------------------- |
-| `--autoplay-policy=no-user-gesture-required`  | `infra/supervisord.conf` | Allows the streamer page to start audio playback without a synthetic click. |
-| `--use-fake-ui-for-media-stream` (NOT set)    | `infra/supervisord.conf` | Deliberately absent — that flag fakes the permission UI but also feeds synthesized media into capture, which would bypass our PulseAudio routing. |
+| `--autoplay-policy=no-user-gesture-required`  | `infra/launch-chromium.sh` | Allows the streamer page to start audio playback without a synthetic click. |
+| `--use-fake-ui-for-media-stream` (set in T28) | `infra/launch-chromium.sh` | Auto-grants the getUserMedia/getDisplayMedia permission picker. **Does NOT synthesize media** — that's `--use-fake-device-for-media-stream`, which we deliberately omit so real PulseAudio routes through `cb_audio.monitor` end up in the captured track. |
+| `--use-fake-device-for-media-stream` (NOT set)| `infra/launch-chromium.sh` | Deliberately absent — would feed Chromium's synthetic media (sine-wave audio, green-circle video) into capture, bypassing our PulseAudio routing. |
 | `PULSE_SERVER=unix:/run/user/1000/pulse/native` | `infra/Dockerfile` ENV  | Pins Chromium to the in-container PulseAudio socket so it cannot fall through to host audio if the env is inherited. |
 
 ## Manual smoke test

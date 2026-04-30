@@ -100,7 +100,10 @@ jobs:
       - name: Build cloud-browser-webrtc:ci
         uses: docker/build-push-action@v5
         with:
-          context: infra
+          # Context is repo root: the Dockerfile COPYs both
+          # capture/streamer-page/ (T28) and infra/*, so it needs the
+          # whole tree in build context.
+          context: .
           file: infra/Dockerfile
           tags: cloud-browser-webrtc:ci
           load: true
@@ -135,7 +138,10 @@ jobs:
         if: steps.probe.outputs.present == 'true'
         uses: docker/build-push-action@v5
         with:
-          context: infra
+          # Context is repo root: the Dockerfile COPYs both
+          # capture/streamer-page/ (T28) and infra/*, so it needs the
+          # whole tree in build context.
+          context: .
           file: infra/Dockerfile
           tags: cloud-browser-webrtc:ci
           load: true

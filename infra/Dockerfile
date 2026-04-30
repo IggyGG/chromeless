@@ -18,8 +18,8 @@
 # see Phase 3 in PROJECT_BRIEF.md). DO NOT ship this image to production
 # multi-tenant infra as-is.
 #
-# Build:
-#   docker build -t cloud-browser-webrtc:dev infra/
+# Build (build context = repo root so we can COPY capture/streamer-page/):
+#   docker build -t cloud-browser-webrtc:dev -f infra/Dockerfile .
 #
 # Run (interactive smoke test):
 #   docker run --rm -p 9222:9222 -p 8080:8080 \
@@ -40,7 +40,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PULSE_RUNTIME_PATH=/run/user/1000/pulse \
     PULSE_SERVER=unix:/run/user/1000/pulse/native
 
-# Runtime stack: Chromium + virtual display + audio + process supervisor.
+# Runtime stack: Chromium + virtual display + audio + process supervisor
+# + python3 (used by the in-container static server hosting the streamer
+# page; see infra/supervisord.conf [program:streamer-static]).
 # fonts-noto-* and fonts-dejavu give us Latin + CJK + emoji coverage so
 # the latency harness pages don't render as tofu. procps is in here for
 # `ps` during smoke debugging; drop it later if image size matters.
@@ -60,6 +62,7 @@ RUN apt-get update \
         dumb-init \
         ca-certificates \
         curl \
+        python3 \
         fonts-noto-core \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
@@ -83,8 +86,16 @@ RUN groupadd --gid 1000 cbuser \
 # module-alsa-sink etc. on startup; -F is additive and would not stop
 # the default script from running. See pulse-default.pa for module-level
 # rationale.
-COPY pulse-default.pa /etc/pulse/default.pa
-COPY supervisord.conf /etc/supervisor/supervisord.conf
+COPY infra/pulse-default.pa /etc/pulse/default.pa
+COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
+
+# Streamer page (T23 product) and its launch wrapper (T28). The static
+# server in supervisord serves /opt/cloud-browser, so the URL path
+# /streamer/index.html resolves to the page chromium-dev shipped.
+COPY capture/streamer-page/ /opt/cloud-browser/streamer/
+COPY infra/launch-chromium.sh /usr/local/bin/launch-chromium.sh
+RUN chmod +x /usr/local/bin/launch-chromium.sh \
+ && chown -R cbuser:cbuser /opt/cloud-browser
 
 EXPOSE 9222 8080
 

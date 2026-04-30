@@ -7,14 +7,19 @@ runtime.
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Base image: Debian bookworm-slim + Chromium + Xvfb + PulseAudio (null sink) + supervisord. |
-| `supervisord.conf` | Process supervisor config; starts Xvfb, PulseAudio, Chromium in that order. |
-| `pulse-default.pa` | PulseAudio bootstrap script, copied to `/etc/pulse/default.pa`. Null sink only — no host audio. |
+| `Dockerfile` | Base image: Debian bookworm-slim + Chromium + Xvfb + PulseAudio (null sink) + python3 + supervisord. |
+| `supervisord.conf` | Process supervisor config; starts Xvfb → PulseAudio → streamer-static → Chromium in that order. |
+| `pulse-default.pa` | PulseAudio bootstrap script, copied to `/etc/pulse/default.pa`. Two null sinks (cb_audio playback + cb_capture intermediary) plus a loopback — see `audio-routing.md`. |
+| `launch-chromium.sh` | Wrapper invoked by supervisord; expands `SESSION_ID` / `SIGNALING_URL` / `STREAMER_FPS` into the streamer URL then execs Chromium with the full T28 flag list. |
+| `audio-routing.md` | Topology + manual smoke procedure for the in-container audio path. |
 
 ## Build
 
+The build context is the **repo root** (not `infra/`), because the
+Dockerfile COPYs `capture/streamer-page/` alongside `infra/*`:
+
 ```
-docker build -t cloud-browser-webrtc:dev infra/
+docker build -t cloud-browser-webrtc:dev -f infra/Dockerfile .
 ```
 
 ## Run
