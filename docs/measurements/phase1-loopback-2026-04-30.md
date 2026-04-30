@@ -1,14 +1,29 @@
-# Phase 1 latency measurement — 2026-04-30 (framework only; numbers
-gated on T86)
+# Phase 1 latency measurement — 2026-04-30 (framework + partial; real
+glass-to-glass still pending)
 
-> **Status:** Framework + scaffolding done; actual numbers section is
-> `(blocked-on-T86)`. This report exists today so the file path
-> (`docs/measurements/phase1-loopback-2026-04-30.md`), the baseline
-> JSON path (`tests/harness/baselines/phase1-<runId>.json`), and the
-> wrapper script (`tests/harness/phase1-baseline.sh`) are all wired up
-> end-to-end. When T86 lands and the live pipeline negotiates a real
-> peer connection, an operator runs the harness once and swaps the
-> numbers below in without re-architecting anything.
+> **Status update 2026-04-30 afternoon (post-T96):** T96
+> (`f640478` — signaling now buffers and replays the most-recent
+> offer/answer/request_renegotiate per session) shipped. Confirmed live:
+> the `audio_loopback_test.go` Go integration test passes against the
+> running compose stack (PASS in 21.84 s; SDP carries `m=audio` +
+> opus rtpmap), and signaling logs show
+> `peer joined (replayed buffered envelopes) ... role=client, replayed:1`.
+> The protocol-layer pipeline is fully open.
+>
+> **However**, the *real glass-to-glass number* the harness was
+> designed to produce is **still gated** — not on T96 anymore, but on
+> the still-active `CBWRTC_USE_FAKE_MEDIA=1` workaround for the
+> Chromium-147 + Xvfb getDisplayMedia issue (T78 / #86). With
+> fake-media, the streamer captures Chromium's synthetic test pattern,
+> NOT whatever harness page is actually rendered. So the harness's
+> QR-bearing flashing block never enters the captured stream, and
+> `reconcile.py`'s QR detector finds nothing. Real numbers require
+> either (a) the real-getDisplayMedia path (T78 real fix), or (b) the
+> Phase 2 FrameSinkVideoCapturer path, or (c) feeding a recorded
+> harness y4m to `--use-file-for-fake-video-capture`.
+>
+> The framework section below remains valid; the numbers section is
+> still `(blocked-on-real-screen-capture)` rather than `(blocked-on-T86)`.
 >
 > **Template for future runs:** [`phase1-loopback-TEMPLATE.md`](./phase1-loopback-TEMPLATE.md).
 
@@ -193,31 +208,61 @@ during T16:
 
 ## 6. Bottleneck & next-step recommendation
 
-**Today's recommendation (framework-only, no real numbers):**
-**FIX-AND-RETRY** — three concrete blockers must be resolved before
-this report can carry the v1-defining number:
+**Updated 2026-04-30 afternoon — what's resolved, what's still
+blocked:**
 
-1. **T86** ([task #86 — original filing](#) plus the in-flight chromium-dev
-   work) — `getDisplayMedia` returns `NotReadableError` under Chromium
-   147 + Xvfb. The X11+SwiftShader pin (commit `5d69ac4`) and the new
-   ozone/angle/swiftshader-webgl flags (commits T80–T84 area) take
-   effect in the launch but didn't resolve the screen-source
-   acquisition. Workaround on `main` is `CBWRTC_USE_FAKE_MEDIA=1`
-   (commit `411d06a`) — usable for protocol/audio/SDP testing,
-   **not** usable for real glass-to-glass numbers.
-
-2. **#96** — Phase 1 protocol gap: the streamer sends its SDP offer
-   on container boot, before any client has joined; signaling drops
-   the offer because no `client` role is registered yet; the streamer
-   never re-offers. Any client (Playwright, Python test, real user)
-   that joins after the streamer sees a dead pipeline. Filed during
-   T64/T65 validation. Three suggested fixes in the task; lowest-risk
-   is "streamer re-offers on detected client join".
-
-3. **A loopback-rig session** — once 1+2 are green, an operator with
-   a webcam, a fixed display, and NTP-synced hosts runs the procedure
-   in `tests/harness/validation.md` §4 against the assembled stack
-   and pipes the results through `phase1-baseline.sh`.
+1. **#96 — RESOLVED.** T96 (`f640478`) shipped. Signaling buffers and
+   replays the most-recent offer/answer/request_renegotiate per
+   session. Confirmed live:
+   - `tests/integration/audio_loopback_test.go`
+     `TestStreamerOffersAudio`: **PASS in 21.84 s** with
+     `CBWRTC_INTEGRATION_LIVE=1`. SDP advertises `m=audio` + opus
+     rtpmap. (No real-pipeline numbers from this — it asserts on the
+     contract layer.)
+   - Signaling logs show `peer joined (replayed buffered envelopes)
+     ... role=client, replayed:1` for late-joining clients.
+   - Companion regression: `tests/integration/offer_replay_test.go`
+     covers four scenarios (only-most-recent, no-effect-on-normal,
+     ICE-not-replayed, survives-peer-reconnect) — all green.
+   - Filed [#104](#) (T96-followup) on the explicit
+     ICE-not-replayed gap — late-joining client must initiate ICE
+     restart per design; not in scope for v1 LAN.
+2. **T86 / #86 — STILL ACTIVE for real numbers.** The X11+SwiftShader
+   pin (`5d69ac4`), the broader ozone/angle/swiftshader-webgl flag
+   suite (T80–T84 area), and finally the
+   `CBWRTC_USE_FAKE_MEDIA=1` env switch (`411d06a`, T86 commit)
+   together let the streamer dial signaling and complete WebRTC
+   negotiation. **They do NOT make real screen capture work.** The
+   captured stream is Chromium's synthetic test pattern, not whatever
+   page Chromium is rendering. Consequently:
+   - Real glass-to-glass latency cannot be reconciled by `reconcile.py`
+     because the harness's QR-bearing flashing block never enters the
+     captured stream.
+   - The audio path *does* carry a real-ish 440 Hz tone (synthesized
+     by Chromium's fake-audio generator), so audio-only measurements
+     could in principle work — but the `harness/latency/` reconciler
+     is video-side.
+   - **Only fixes that unblock real numbers are**: (a) real
+     `getDisplayMedia` on Chromium 147 + Xvfb (T78 real fix, still
+     pending), (b) the Phase 2 FrameSinkVideoCapturer path (T55
+     scaffold ready; gated on T17 build env per T101), or (c)
+     `--use-file-for-fake-video-capture=<y4m of the harness page>` —
+     possible workaround if someone records a harness page run as a
+     y4m file and loops it; not implemented today.
+3. **[#108](#) — NEW**. While running spec 05 against the post-T96
+   stack, found a client-side regression: `#state-conn` stays at the
+   initial `"—"` for 20 s after Connect. Audio_loopback Go test
+   confirms the streamer's offer is delivered (replayed:1 in
+   signaling logs), so the failure is downstream — likely client
+   `pc.onconnectionstatechange` not wired or `fetchTurnConfig`
+   stalling. Filed; doesn't gate v1 ship since spec 05 was already
+   conditional in the audit (T100 §2). Investigation owner suggested:
+   webrtc-dev (T34/T42 surface).
+4. **Loopback-rig session** — still required for the v1-defining
+   number. Operator with cam + display + NTP-synced hosts runs
+   `tests/harness/validation.md` §4 once a real-screen-capture path
+   is alive (item 2(a), 2(b), or 2(c) above), and pipes the results
+   through `phase1-baseline.sh`. Today's stack does not support this.
 
 **Anticipated bottleneck order** (to be confirmed against real
 numbers): encoder time (libvpx VP9 zero-latency or x264 zero-latency)
