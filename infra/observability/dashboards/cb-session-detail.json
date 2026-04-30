@@ -256,6 +256,101 @@
       ],
       "title": "Encoder quality limitation reasons (reserved; empty until T38 follow-up)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "T72: Outbound video bitrate (what the streamer sent) overlaid with the client's observed inbound video bitrate (what the user's browser actually received). A persistent gap between the two is the network drop signal — see infra/observability.md.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "bps"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "id": 9,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"]}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "cb_webrtc_outbound_bitrate_bps{kind=\"video\",instance=~\"$instance\"}",
+          "legendFormat": "outbound (server sent)",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "cb_client_inbound_video_bitrate_bps{instance=~\"$instance\"}",
+          "legendFormat": "inbound (client got)",
+          "refId": "B"
+        }
+      ],
+      "title": "Video bitrate — sent vs. received (T72)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "T72: client-observed RTT vs. server-observed RTT. Should agree to within sample-time jitter; persistent divergence == clock skew or NAT rebinding.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ms"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "id": 10,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"]}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "cb_webrtc_round_trip_time_ms{instance=~\"$instance\"}",
+          "legendFormat": "server-observed",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "cb_client_pair_rtt_ms{instance=~\"$instance\"}",
+          "legendFormat": "client-observed",
+          "refId": "B"
+        }
+      ],
+      "title": "ICE RTT — server vs. client (T72)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "T72: client-side video FPS, dropped frames rate, and remote-inbound packet loss fraction. Lower-right loss-fraction is the leading indicator of upcoming connection trouble.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36},
+      "id": 11,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "cb_client_inbound_video_fps{instance=~\"$instance\"}",
+          "legendFormat": "client fps",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "rate(cb_client_inbound_video_frames_dropped_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "client dropped fps",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "cb_client_remote_inbound_packet_loss_fraction{instance=~\"$instance\"} * 100",
+          "legendFormat": "remote-inbound loss %",
+          "refId": "C"
+        }
+      ],
+      "title": "Client-side health — FPS / dropped / loss (T72)",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",

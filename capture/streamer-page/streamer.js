@@ -28,6 +28,12 @@
   // (supervisord-managed), bound to loopback. Override via ?input=...
   // for tests that run the bridge elsewhere.
   const INPUT_BRIDGE_URL = params.get("input") || "ws://localhost:9100/input";
+  // cb-metrics-sidecar /stats-update endpoint (T38 sidecar, T72 wiring).
+  // Also loopback within the supervisord-managed container. Override
+  // via ?metrics=... for integration tests that run the sidecar on a
+  // different port. Set to "off" to disable the relay entirely (used
+  // by tests that don't want a 9100/connect refused log every second).
+  const METRICS_SIDECAR_URL = params.get("metrics") || "http://localhost:9100/stats-update";
 
   const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302"] }];
   // Phase 3 swaps in our TURN-REST issued credentials (see PROJECT_BRIEF
@@ -63,7 +69,7 @@
   // -------- session ---------------------------------------------------
 
   /** @typedef {{ ws: WebSocket, pc: RTCPeerConnection, stream: MediaStream | null,
-   *              inputRelay: InputRelay | null }} Session */
+   *              inputRelay: InputRelay | null, statsRelay: StatsRelay | null }} Session */
   /** @type {Session | null} */
   let active = null;
   let heartbeatTimer = null;
@@ -192,6 +198,84 @@
     }
   }
 
+  // -------- stats relay (T72) ----------------------------------------
+  //
+  // The user's client (T42) opens RTCDataChannel("stats") and emits
+  // {v, t, sample} envelopes once per second. We forward them to the
+  // cb-metrics-sidecar's /stats-update endpoint on loopback, which
+  // updates the cb_client_* gauges (T38). HTTP POST is the right shape
+  // here because:
+  //   - Each sample is independent; no need for a long-lived ws.
+  //   - The sidecar's HTTP surface already exists (/metrics, /healthz);
+  //     adding /stats-update is one more handler.
+  //   - We can drop on failure without retry semantics — the next
+  //     sample is at most 1s away and the gauges are last-set anyway.
+  //
+  // Failure mode: when the sidecar is down, fetch() rejects. We log
+  // once per failure burst (rate-limited by the consecutiveFailures
+  // counter) and otherwise stay quiet so the streamer page stays
+  // legible.
+
+  class StatsRelay {
+    constructor(dc, url) {
+      this.dc = dc;
+      this.url = url;
+      this.disabled = (url === "off" || !url);
+      this.consecutiveFailures = 0;
+      this.successCount = 0;
+
+      dc.onmessage = (ev) => this.forward(ev.data);
+      dc.onclose = () => {
+        log("info", "stats data-channel closed",
+            { posted: this.successCount, failures: this.consecutiveFailures });
+      };
+      dc.onerror = (e) => log("warn", "stats data-channel error", String(e));
+      if (this.disabled) {
+        log("info", "stats relay disabled (url=off)");
+      } else {
+        log("info", "stats relay → sidecar", { url });
+      }
+    }
+
+    forward(data) {
+      if (this.disabled) return;
+      if (typeof data !== "string") {
+        log("warn", "stats relay: non-string frame, dropping");
+        return;
+      }
+      // Fire-and-forget; we do not await the response.
+      fetch(this.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: data,
+        // No-CORS so fetch doesn't try a preflight on a JSON POST in
+        // some browser configurations. The sidecar trusts loopback.
+        keepalive: true,
+      }).then((resp) => {
+        if (!resp.ok) {
+          this.consecutiveFailures++;
+          if (this.consecutiveFailures === 1 || this.consecutiveFailures % 10 === 0) {
+            log("warn", "stats relay POST non-2xx",
+                { status: resp.status, consecutive: this.consecutiveFailures });
+          }
+          return;
+        }
+        this.successCount++;
+        if (this.consecutiveFailures > 0) {
+          log("info", "stats relay recovered",
+              { after_failures: this.consecutiveFailures });
+          this.consecutiveFailures = 0;
+        }
+      }).catch((err) => {
+        this.consecutiveFailures++;
+        if (this.consecutiveFailures === 1 || this.consecutiveFailures % 10 === 0) {
+          log("warn", "stats relay POST failed",
+              { err: String(err), consecutive: this.consecutiveFailures });
+        }
+      });
+    }
+  }
+
   function teardown(reason) {
     if (!active) return;
     log("info", `tearing down: ${reason}`);
@@ -273,21 +357,12 @@
       if (pc.connectionState === "failed") teardown("pc failed");
     };
 
-    // T41: client opens RTCDataChannel("input") on its side; we
-    // catch it here and pipe it to the local input-bridge.
+    // The streamer is the offerer (T34) and creates the "input"
+    // (T41) and "stats" (T72) channels itself; see below. Anything
+    // arriving via pc.ondatachannel would be an unexpected client-
+    // initiated channel — log it for diagnostics.
     pc.ondatachannel = (ev) => {
-      const dc = ev.channel;
-      log("info", "← data-channel offered", { label: dc.label, id: dc.id });
-      if (dc.label !== "input") {
-        log("warn", "ignoring unexpected data-channel label", dc.label);
-        return;
-      }
-      if (active && active.inputRelay) {
-        log("warn", "second input data-channel; closing the old relay");
-        active.inputRelay.close();
-      }
-      const relay = new InputRelay(dc, INPUT_BRIDGE_URL);
-      if (active) active.inputRelay = relay;
+      log("warn", "unexpected client-initiated data channel", { label: ev.channel.label });
     };
 
     // 3. Open the signaling WS.
@@ -299,7 +374,25 @@
     // (T42 stats panel, manual debugging) benefit from a stable hook.
     window.signalingWs = ws;
 
-    active = { ws, pc, stream, inputRelay: null };
+    // T41 + T72: as the offerer (T34) we are responsible for creating
+    // the data channels so they appear in the offer SDP. The client
+    // (answerer) receives them via pc.ondatachannel and pushes events
+    // through; we relay each one to its sidecar.
+    //
+    // We have to call pc.ondatachannel BEFORE these createDataChannel
+    // calls so the corresponding open events fire on this side (they
+    // don't, normally — the offerer's createDataChannel returns the
+    // channel directly — but our own dispatch uses pc.ondatachannel
+    // in case future code paths add channels remotely).
+    const inputDC  = pc.createDataChannel("input",  { ordered: true });
+    const statsDC  = pc.createDataChannel("stats",  { ordered: true });
+    log("info", "created data channels", {
+      input: inputDC.id, stats: statsDC.id,
+    });
+    const inputRelay = new InputRelay(inputDC, INPUT_BRIDGE_URL);
+    const statsRelay = new StatsRelay(statsDC, METRICS_SIDECAR_URL);
+
+    active = { ws, pc, stream, inputRelay, statsRelay };
 
     pc.onicecandidate = (ev) => {
       if (ws.readyState !== WebSocket.OPEN) return;

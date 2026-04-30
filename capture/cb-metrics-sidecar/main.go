@@ -93,6 +93,32 @@ var (
 		Name: "cb_webrtc_round_trip_time_ms",
 		Help: "Selected ICE candidate-pair round-trip time in milliseconds.",
 	})
+
+	// ---- T72: client-side stats forwarded over the WebRTC "stats" data
+	// channel (T42 protocol) and relayed by streamer.js to /stats-update.
+	// These are what the user's browser actually receives, and they sit
+	// next to the streamer-side metrics above so dashboards (T66) can
+	// graph "what we sent" vs. "what they got."
+	mClientInboundBitrate = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cb_client_inbound_video_bitrate_bps",
+		Help: "Inbound video bitrate as observed at the client, in bits per second.",
+	})
+	mClientInboundFPS = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cb_client_inbound_video_fps",
+		Help: "Inbound video frames per second as observed at the client.",
+	})
+	mClientInboundFramesDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cb_client_inbound_video_frames_dropped_total",
+		Help: "Total inbound video frames dropped, observed at the client.",
+	})
+	mClientPairRTT = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cb_client_pair_rtt_ms",
+		Help: "Selected ICE candidate-pair RTT as observed at the client, in milliseconds.",
+	})
+	mClientRemoteInboundLossFraction = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cb_client_remote_inbound_packet_loss_fraction",
+		Help: "Fraction of packets reported lost on the client's remote-inbound report (0..1).",
+	})
 )
 
 // ---------------------------------------------------------------------------
@@ -634,6 +660,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	// T72: client-side stats forwarded by the streamer page over the
+	// "stats" data channel. See docs/protocols/stats-channel.md.
+	statsHandler, _ := statsUpdateHandler(logger)
+	mux.HandleFunc("/stats-update", statsHandler)
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           mux,

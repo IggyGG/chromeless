@@ -20,6 +20,12 @@ resources:
   # production it lives inside the controller code, not the kustomize
   # bundle.
   - cloud-browser-session.yaml
+  # T71: controller Deployment + RBAC. The CRDs live under
+  # ../controllers/browser-session-controller/config/crd/ and are
+  # NOT pulled in here — kustomize refuses to climb above its root.
+  # Install them separately with:
+  #   kubectl apply -f infra/controllers/browser-session-controller/config/crd/
+  - controller-deployment.yaml
 
 labels:
   - includeSelectors: false

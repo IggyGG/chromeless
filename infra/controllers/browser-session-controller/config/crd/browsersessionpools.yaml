@@ -1,0 +1,89 @@
+# config/crd/browsersessionpools.yaml — BrowserSessionPool CRD
+# Hand-authored to match pkg/apis/v1/types.go BrowserSessionPool.
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: browsersessionpools.cloud-browser-webrtc.example.com
+spec:
+  group: cloud-browser-webrtc.example.com
+  names:
+    kind: BrowserSessionPool
+    listKind: BrowserSessionPoolList
+    plural: browsersessionpools
+    singular: browsersessionpool
+    shortNames: [bsp]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Warm
+          type: integer
+          jsonPath: .status.warm
+        - name: Active
+          type: integer
+          jsonPath: .status.active
+        - name: Draining
+          type: integer
+          jsonPath: .status.draining
+        - name: Target
+          type: integer
+          jsonPath: .spec.warmReplicas
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion: { type: string }
+            kind:       { type: string }
+            metadata:   { type: object }
+            spec:
+              type: object
+              required: [warmReplicas, template]
+              properties:
+                warmReplicas:
+                  type: integer
+                  minimum: 0
+                  maximum: 10000
+                maxSessions:
+                  type: integer
+                  minimum: 0
+                maxAgeSeconds:
+                  type: integer
+                  default: 3600
+                recyclePolicy:
+                  type: string
+                  enum: [RecreatePod, ScrubAndReturn]
+                  default: RecreatePod
+                # We intentionally use x-kubernetes-preserve-unknown-fields here
+                # rather than re-declaring the entire PodTemplateSpec schema —
+                # K8s already validates the embedded Pod via its own admission
+                # path on Pod creation, and re-stating ~700 lines of schema in
+                # this CRD would just diverge from upstream over time.
+                template:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                warm:                 { type: integer }
+                active:               { type: integer }
+                draining:             { type: integer }
+                totalEverProvisioned: { type: integer, format: int64 }
+                lastReplenishedAt:    { type: string, format: date-time }
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason, message]
+                    properties:
+                      type:               { type: string }
+                      status:             { type: string }
+                      observedGeneration: { type: integer, format: int64 }
+                      lastTransitionTime: { type: string, format: date-time }
+                      reason:             { type: string }
+                      message:            { type: string }

@@ -36,6 +36,11 @@ Two Prometheus endpoints, both on plain HTTP:
 | `cb_webrtc_outbound_qp` | gauge | — | Average video encoder quantizer (`qpSum / framesEncoded`). Lower = higher quality. Phase 2 latency-vs-quality tuning watches this. |
 | `cb_webrtc_remote_inbound_packets_lost_total` | counter | — | Packets the remote peer reported as lost on inbound. |
 | `cb_webrtc_round_trip_time_ms` | gauge | — | Selected ICE candidate-pair RTT, in milliseconds. The single best leading indicator of perceived interactivity. |
+| `cb_client_inbound_video_bitrate_bps` | gauge | — | T72: inbound video bitrate **as observed at the user's browser** (bytesReceived delta over POST interval). Pair with `cb_webrtc_outbound_bitrate_bps{kind="video"}` to see "what we sent" vs. "what they got"; persistent gap == network drop. |
+| `cb_client_inbound_video_fps` | gauge | — | T72: inbound video FPS at the user's browser (RTCInboundRtpStreamStats.framesPerSecond). |
+| `cb_client_inbound_video_frames_dropped_total` | counter | — | T72: inbound video frames the user's browser dropped before display. |
+| `cb_client_pair_rtt_ms` | gauge | — | T72: client's view of selected ICE candidate-pair RTT. Should agree with `cb_webrtc_round_trip_time_ms` ± minor sample-time jitter; divergence is a clock-skew or NAT-rebinding signal. |
+| `cb_client_remote_inbound_packet_loss_fraction` | gauge | — | T72: fractionLost the user's browser reports back upstream (0..1). Distinct from `cb_webrtc_remote_inbound_packets_lost_total` — that one is how many packets we've lost cumulatively, this one is the running fraction. |
 
 ## How the sidecar gets WebRTC numbers
 
@@ -54,6 +59,37 @@ The streamer page (T23) exposes `window.pc` — the active
 This keeps the sidecar dep-free of any custom Chromium build and lets
 `window.pc`'s contract (already a public surface for T24's audio-presence
 smoke and T31's idle watchdog) be the single integration point.
+
+## How the sidecar gets *client-side* WebRTC numbers (T72)
+
+The streamer-side metrics above describe what the cloud-browser was
+sending. The user's browser sees a different reality — frames may be
+dropped on the wire, the receive jitter buffer may be deeper than the
+encoder's send rhythm, the browser may be CPU-starved. T72 closes
+that loop:
+
+1. **Client** (`client/src/stats.ts`) samples its own `pc.getStats()`
+   every 1 s and emits a `StatsSample` envelope over an
+   `RTCDataChannel("stats")` (see [docs/protocols/stats-channel.md](../docs/protocols/stats-channel.md)).
+2. **Streamer page** receives the data channel (it created the channel
+   in the offer; the client receives via `pc.ondatachannel`) and
+   `fetch()`-POSTs each envelope to
+   `http://localhost:9100/stats-update` on the local sidecar.
+3. **Sidecar** (`/stats-update` handler) parses the envelope, computes
+   bitrate from byte deltas across consecutive samples, and updates
+   the `cb_client_*` gauges + counter.
+
+The relay is fire-and-forget: a sidecar restart drops at most one
+sample, the gauges go cold for one tick, and the next POST resumes.
+No retry queue; the next sample is at most 1 s away.
+
+If `cb_webrtc_outbound_bitrate_bps{kind="video"}` is healthy but
+`cb_client_inbound_video_bitrate_bps` is consistently lower, look for
+network drop or a downsizing SFU. If client RTT
+(`cb_client_pair_rtt_ms`) diverges from server RTT
+(`cb_webrtc_round_trip_time_ms`), the candidate pair has rebound or
+the clocks have skewed enough to matter — both are leading indicators
+of an upcoming ICE failure.
 
 ## Scrape config
 

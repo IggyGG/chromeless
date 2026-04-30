@@ -1,0 +1,158 @@
+# infra/k8s/controller-deployment.yaml — BrowserSession controller
+# (T71). RBAC + Deployment + Service + ServiceAccount + leader-elect
+# Lease.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: browser-session-controller
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/component: controller
+
+---
+# ClusterRole because the controller manages Pods anywhere our tenant
+# session pods land. If/when we restrict sessions to the
+# cloud-browser-webrtc namespace exclusively, downgrade to a Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: browser-session-controller
+  labels:
+    app.kubernetes.io/component: controller
+rules:
+  # Our CRDs.
+  - apiGroups: ["cloud-browser-webrtc.example.com"]
+    resources: ["browsersessions", "browsersessionpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["cloud-browser-webrtc.example.com"]
+    resources: ["browsersessions/status", "browsersessionpools/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["cloud-browser-webrtc.example.com"]
+    resources: ["browsersessions/finalizers"]
+    verbs: ["update"]
+  # Pods we materialise from the pool template.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+  # Events for audit / kubectl describe.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Leader-election Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: browser-session-controller
+  labels:
+    app.kubernetes.io/component: controller
+subjects:
+  - kind: ServiceAccount
+    name: browser-session-controller
+    namespace: cloud-browser-webrtc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: browser-session-controller
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser-session-controller
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: controller
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: browser-session-controller
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: ghcr.io/iggy/cloud-browser-webrtc/browser-session-controller:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--leader-elect=true"
+            - "--metrics-bind=:8080"
+            - "--health-bind=:8081"
+            - "--default-pool=default-pool"
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: controller
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: browser-session-controller
+  namespace: cloud-browser-webrtc
+  labels:
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: controller
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
