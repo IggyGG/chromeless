@@ -97,13 +97,15 @@ cmd_apply_patches() {
     local p
     for p in "${patches[@]}"; do
         log "  -> $(basename "${p}")"
-        if ! (cd "${CHROMIUM_SRC}" && git apply --3way --check "${p}"); then
-            die "patch failed pre-check: ${p}"
-        fi
+        # Clean any leftover am state from a prior failed attempt.
+        # `git apply --3way --check` would also create .git/rebase-apply
+        # as a side effect, then git am would refuse to run. The pre-check
+        # was redundant anyway -- git am does its own apply step.
+        rm -rf "${CHROMIUM_SRC}/.git/rebase-apply"
         if ! (cd "${CHROMIUM_SRC}" && git \
                 -c user.email=iggy@triform.ai \
                 -c user.name="Iggy" \
-                am --keep-non-patch "${p}"); then
+                am --3way --keep-non-patch "${p}"); then
             die "patch failed to apply: ${p}"
         fi
     done
