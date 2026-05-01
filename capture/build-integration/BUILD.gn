@@ -265,7 +265,22 @@ executable("cloud_browser_worker") {
     # transitively through other deps; the bare exec doesn't.
     "//base",
   ]
-  configs += [ ":cb_include_paths" ]               # T17.
+  configs += [
+    ":cb_include_paths",                           # T17.
+    # Codec link-side configs. The test target lists these too. We
+    # need them on the executable because GN propagates `libs` from
+    # any config attached to a transitively-depended source_set, but
+    # `ldflags` only propagate within the same target — encoder_factory's
+    # `:x264` config gets `-lx264` onto our link line via lib propagation,
+    # but the matching `-Wl,--allow-shlib-undefined` (needed for the
+    # bookworm/bullseye glibc skew, see config(":x264")) is dropped
+    # unless we list `:x264` here too. Same goes for :nvenc_sdk /
+    # :vaapi / :svt_av1 once those profiles wire ldflags.
+    ":nvenc_sdk",
+    ":svt_av1",
+    ":vaapi",
+    ":x264",
+  ]
   # cloud_browser_worker is a Linux-server binary; we don't carry mac/
   # win configs.
   if (!is_linux) {
