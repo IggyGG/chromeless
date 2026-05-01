@@ -30,6 +30,7 @@
 #include "base/test/task_environment.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
+#include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "media/mojo/mojom/media_types.mojom.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
@@ -174,7 +175,7 @@ class FrameSinkCapturerTest : public ::testing::Test {
   }
 
   // Run the runloop until idle so Mojo IPC settles.
-  void FlushIPC() {
+  void FlushPendingIPC() {
     base::RunLoop loop;
     loop.RunUntilIdle();
   }
@@ -187,26 +188,26 @@ class FrameSinkCapturerTest : public ::testing::Test {
 
 TEST_F(FrameSinkCapturerTest, StartForwardsToProducer) {
   capturer_->Start(viz::VideoCaptureTarget());
-  FlushIPC();
+  FlushPendingIPC();
   EXPECT_TRUE(producer_.start_called());
 }
 
 TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
   capturer_->Start(viz::VideoCaptureTarget());
-  FlushIPC();
+  FlushPendingIPC();
 
   producer_.SendFrame();
-  FlushIPC();
+  FlushPendingIPC();
 
   ASSERT_EQ(1u, delivered_.size());
   // Done() is RAII-tied to frame destruction; until we drop our ref
   // it should NOT have fired yet.
-  FlushIPC();
+  FlushPendingIPC();
   EXPECT_EQ(0, producer_.total_done_calls())
       << "Done() fired before frame released";
 
   delivered_.clear();
-  FlushIPC();
+  FlushPendingIPC();
   EXPECT_EQ(1, producer_.total_done_calls())
       << "Done() did not fire after frame released";
 
@@ -219,25 +220,25 @@ TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
 
 TEST_F(FrameSinkCapturerTest, MultipleFramesAllAcked) {
   capturer_->Start(viz::VideoCaptureTarget());
-  FlushIPC();
+  FlushPendingIPC();
 
   for (int i = 0; i < 5; ++i) producer_.SendFrame();
-  FlushIPC();
+  FlushPendingIPC();
 
   EXPECT_EQ(5u, delivered_.size());
   delivered_.clear();
-  FlushIPC();
+  FlushPendingIPC();
   EXPECT_EQ(5, producer_.total_done_calls());
   EXPECT_EQ(5u, capturer_->GetStats().buffers_done);
 }
 
 TEST_F(FrameSinkCapturerTest, DroppedFrameCountSurfacesInStats) {
   capturer_->Start(viz::VideoCaptureTarget());
-  FlushIPC();
+  FlushPendingIPC();
 
   producer_.SendFrame(/*dropped=*/3);
   producer_.SendFrame(/*dropped=*/2);
-  FlushIPC();
+  FlushPendingIPC();
   EXPECT_EQ(5u, capturer_->GetStats().frames_dropped_by_capturer);
 }
 
@@ -246,7 +247,7 @@ TEST_F(FrameSinkCapturerTest, DoneFiresEvenIfWrapFails) {
   // VideoFrameInfoPtr (null). The capturer should still ack the
   // buffer.
   capturer_->Start(viz::VideoCaptureTarget());
-  FlushIPC();
+  FlushPendingIPC();
   // Manually invoke OnFrameCaptured with null info.
   auto region = base::ReadOnlySharedMemoryRegion::Create(64);
   auto handle = media::mojom::VideoBufferHandle::NewReadOnlyShmemRegion(
@@ -271,7 +272,7 @@ TEST_F(FrameSinkCapturerTest, DoneFiresEvenIfWrapFails) {
                               /*info=*/nullptr,
                               gfx::Rect(),
                               std::move(cb_remote));
-  FlushIPC();
+  FlushPendingIPC();
   EXPECT_EQ(1, one_shot->dones)
       << "Done() not fired despite null info — buffer-pool starvation risk";
   EXPECT_EQ(0u, delivered_.size());
@@ -280,16 +281,16 @@ TEST_F(FrameSinkCapturerTest, DoneFiresEvenIfWrapFails) {
 
 TEST_F(FrameSinkCapturerTest, StopForwardsToProducer) {
   capturer_->Start(viz::VideoCaptureTarget());
-  FlushIPC();
+  FlushPendingIPC();
   capturer_->Stop();
-  FlushIPC();
+  FlushPendingIPC();
   EXPECT_TRUE(producer_.stop_called());
 }
 
 TEST_F(FrameSinkCapturerTest, StartIsIdempotent) {
   capturer_->Start(viz::VideoCaptureTarget());
   capturer_->Start(viz::VideoCaptureTarget());
-  FlushIPC();
+  FlushPendingIPC();
   // FakeProducer flips start_called_ on every Start; we only want to
   // assert that we observe Start at least once. The relevant
   // production behaviour is that the capturer never re-issues
