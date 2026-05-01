@@ -93,14 +93,29 @@ cmd_apply_patches() {
     if [[ ${#patches[@]} -eq 0 || ! -e "${patches[0]}" ]]; then
         die "no patches found at ${CB_ROOT}/patches/"
     fi
+
+    # Defensive: a prior cb-build run that died mid-`git am` (Pod OOM,
+    # node eviction, kubectl interrupt, etc.) leaves the chromium tree
+    # with a held .git/index.lock and/or in-progress .git/rebase-apply/
+    # state. Both are fatal to subsequent runs and require out-of-band
+    # cleanup via a debug pod (per vaapi-builder's session 2026-05-01).
+    # Recover both upfront so retries are self-healing.
+    if (cd "${CHROMIUM_SRC}" && git rev-parse --git-dir >/dev/null 2>&1); then
+        # `git am --abort` is a no-op when no rebase-apply state exists,
+        # but cleanly tears it down when one does. Suppress its noise so
+        # the no-op case doesn't pollute logs.
+        (cd "${CHROMIUM_SRC}" && git am --abort) >/dev/null 2>&1 || true
+        rm -f  "${CHROMIUM_SRC}/.git/index.lock"
+        rm -rf "${CHROMIUM_SRC}/.git/rebase-apply"
+    fi
+
     log "Applying ${#patches[@]} patch(es) to ${CHROMIUM_SRC}..."
     local p
     for p in "${patches[@]}"; do
         log "  -> $(basename "${p}")"
-        # Clean any leftover am state from a prior failed attempt.
-        # `git apply --3way --check` would also create .git/rebase-apply
-        # as a side effect, then git am would refuse to run. The pre-check
-        # was redundant anyway -- git am does its own apply step.
+        # Per-patch defensive: even after the upfront recovery above,
+        # a failure mid-loop on patch N would leave state behind for
+        # patch N+1. Same pattern, idempotent.
         rm -rf "${CHROMIUM_SRC}/.git/rebase-apply"
         if ! (cd "${CHROMIUM_SRC}" && git \
                 -c user.email=iggy@triform.ai \
