@@ -23,9 +23,21 @@
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/logging.h"
 
+#if defined(HAS_X264)
 extern "C" {
 #include "third_party/x264/x264.h"
 }
+#else
+// HAS_X264 is undefined when capture/build-integration/BUILD.gn's
+// x264_libdir is empty (the default). Provide empty struct definitions
+// for x264_t and x264_picture_t so std::unique_ptr<x264_picture_t>
+// destructors and pointer arithmetic in this TU still compile; every
+// method body that would reach into real x264 APIs is gated below.
+extern "C" {
+struct x264_t {};
+struct x264_picture_t {};
+}
+#endif  // HAS_X264
 
 namespace cloud_browser {
 namespace {
@@ -39,6 +51,7 @@ constexpr int kFallbackThreads = 4;
 //     "42e01f" — Constrained Baseline 3.1
 //     "4d401f" — Main 3.1 (no B-frames variant)
 //     "640c1f" — Constrained High 3.1
+#if defined(HAS_X264)
 bool ParseProfileLevelId(const std::string& s, std::string* profile,
                          int* level_idc) {
   if (s.size() != 6) return false;
@@ -61,6 +74,7 @@ bool ParseProfileLevelId(const std::string& s, std::string* profile,
   *level_idc = static_cast<int>(lvl);
   return true;
 }
+#endif  // HAS_X264
 
 }  // namespace
 
@@ -70,12 +84,20 @@ H264Encoder::~H264Encoder() { Release(); }
 
 bool H264Encoder::ResolveProfileLevel(std::string* profile,
                                       int* level_idc) const {
+#if defined(HAS_X264)
   return ParseProfileLevelId(config_.profile_level_id, profile, level_idc);
+#else
+  // Without x264, profile resolution is meaningless.
+  (void)profile;
+  (void)level_idc;
+  return false;
+#endif  // HAS_X264
 }
 
 int32_t H264Encoder::InitEncode(
     const webrtc::VideoCodec* codec_settings,
     const webrtc::VideoEncoder::Settings& /*settings*/) {
+#if defined(HAS_X264)
   if (codec_settings == nullptr ||
       codec_settings->width == 0 ||
       codec_settings->height == 0) {
@@ -157,11 +179,19 @@ int32_t H264Encoder::InitEncode(
   initialized_ = true;
   frames_in_ = 0;
   return WEBRTC_VIDEO_CODEC_OK;
+#else
+  // x264 not built in; signal that we cannot initialize. The factory's
+  // ProbeAvailable check should have ruled this codec out before
+  // CreateVideoEncoder, so this path is defensive.
+  (void)codec_settings;
+  return WEBRTC_VIDEO_CODEC_ERROR;
+#endif  // HAS_X264
 }
 
 int32_t H264Encoder::Encode(
     const webrtc::VideoFrame& frame,
     const std::vector<webrtc::VideoFrameType>* frame_types) {
+#if defined(HAS_X264)
   if (!initialized_ || encoder_ == nullptr || callback_ == nullptr) {
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
@@ -244,6 +274,11 @@ int32_t H264Encoder::Encode(
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
   return WEBRTC_VIDEO_CODEC_OK;
+#else
+  (void)frame;
+  (void)frame_types;
+  return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+#endif  // HAS_X264
 }
 
 int32_t H264Encoder::RegisterEncodeCompleteCallback(
@@ -253,6 +288,7 @@ int32_t H264Encoder::RegisterEncodeCompleteCallback(
 }
 
 int32_t H264Encoder::Release() {
+#if defined(HAS_X264)
   if (encoder_ != nullptr) {
     x264_encoder_close(encoder_);
     encoder_ = nullptr;
@@ -262,12 +298,14 @@ int32_t H264Encoder::Release() {
     pic_in_.reset();
   }
   pic_out_.reset();
+#endif  // HAS_X264
   initialized_ = false;
   callback_ = nullptr;
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
 void H264Encoder::SetRates(const RateControlParameters& parameters) {
+#if defined(HAS_X264)
   if (encoder_ == nullptr) return;
   config_.target_bitrate_bps =
       static_cast<int>(parameters.bitrate.get_sum_bps());
@@ -283,13 +321,24 @@ void H264Encoder::SetRates(const RateControlParameters& parameters) {
   if (x264_encoder_reconfig(encoder_, &cur) != 0) {
     RTC_LOG(LS_WARNING) << "x264_encoder_reconfig failed";
   }
+#else
+  // Track the requested rate so observability still sees it; no encoder
+  // to reconfigure when x264 isn't built in.
+  config_.target_bitrate_bps =
+      static_cast<int>(parameters.bitrate.get_sum_bps());
+  config_.framerate = std::max(1, static_cast<int>(parameters.framerate_fps));
+#endif  // HAS_X264
 }
 
 webrtc::VideoEncoder::EncoderInfo H264Encoder::GetEncoderInfo() const {
   EncoderInfo info;
+#if defined(HAS_X264)
   info.implementation_name = config_.low_latency_tag
       ? "cloud-browser-h264-x264-lowlatency"
       : "cloud-browser-h264-x264";
+#else
+  info.implementation_name = "cloud-browser-h264-stub";
+#endif  // HAS_X264
   info.is_hardware_accelerated = false;
   info.supports_native_handle = false;
   info.supports_simulcast = false;
