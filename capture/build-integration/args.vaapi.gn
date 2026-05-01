@@ -1,0 +1,33 @@
+# gn args overlay for the vaapi build profile (Track F2).
+#
+# Imports the base args.gn unchanged, then enables the libva
+# dependency by setting vaapi_libdir = "/work/system-libs" — the
+# staging prefix where build-job-vaapi.yaml's bootstrap initContainer
+# drops the headers + shared libs from the Debian `libva-dev` /
+# `libva-drm-dev` packages:
+#   /work/system-libs/include/va/va.h
+#   /work/system-libs/include/va/va_drm.h
+#   /work/system-libs/lib/libva.so
+#   /work/system-libs/lib/libva-drm.so
+#
+# capture/build-integration/BUILD.gn:config(":vaapi") gates the
+# HAS_VAAPI=1 define on `vaapi_libdir != ""`, so this overlay is the
+# only thing the encoder factory needs to flip the VAAPI path on at
+# build time.
+#
+# Selected by setting CB_BUILD_PROFILE=vaapi in the build job env;
+# build.sh:cmd_gen emits an args.gn that imports this file.
+
+import("//cloud-browser/capture/build-integration/args.gn")
+
+# libva staged at /work/system-libs by the build-job-vaapi.yaml
+# bootstrap initContainer (runs as root, can apt-get install
+# libva-dev + libva-drm-dev, then copies va/*.h headers + libva.so*
+# libva-drm.so* into /work/system-libs/{include/va,lib}). Main build
+# container can then read this prefix without needing root.
+#
+# Layout that capture/build-integration/BUILD.gn:config(":vaapi")
+# expects:
+#   ${vaapi_libdir}/include/va/va.h
+#   ${vaapi_libdir}/lib/libva.so
+vaapi_libdir = "/work/system-libs"
