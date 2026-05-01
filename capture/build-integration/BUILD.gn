@@ -252,10 +252,7 @@ test("cloud_browser_encoder_unittests") {
     "//testing/gmock",
     "//testing/gtest",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
-    # NB: //third_party/webrtc/test:test_support has the same visibility
-    # rule. If this dep also gets rejected, add it to the passthrough's
-    # public_deps in 0003 (or a follow-up patch).
-    "//third_party/webrtc/test:test_support",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_test_passthrough",
   ]
   configs += [
     ":nvenc_sdk",
