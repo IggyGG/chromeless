@@ -29,6 +29,7 @@
 #include "net/socket/tcp_server_socket.h"
 #include "ui/base/page_transition_types.h"
 #include "url/gurl.h"
+#include "url/url_constants.h"
 
 namespace cloud_browser {
 
