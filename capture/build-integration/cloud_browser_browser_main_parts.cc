@@ -132,7 +132,7 @@ int CloudBrowserBrowserMainParts::PreEarlyInitialization() {
   // A bare ScreenBase with a single 1280x720 display matches the Xvfb
   // resolution the cb-chromium pod brings up and gives chromium's
   // DisplayObservers something to attach to.
-  if (!display::Screen::GetScreen()) {
+  if (!display::Screen::HasScreen()) {
     screen_ = std::make_unique<display::ScreenBase>();
     display::Display default_display(
         kDefaultDisplayId,
