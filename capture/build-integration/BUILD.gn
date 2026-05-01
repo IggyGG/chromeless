@@ -231,6 +231,11 @@ source_set("embedder") {
     "//content/public/app",
     "//content/public/browser",
   ]
+  # Apply the repo-root include path explicitly. public_configs from
+  # :encoder_factory and :framesink_capture only propagate to direct
+  # consumers, not transitively through this source_set's own
+  # consumers (the worker executable). T17 / Wall #20.
+  configs += [ ":cb_include_paths" ]
 }
 
 # ---------------------------------------------------------------------
@@ -241,6 +246,7 @@ executable("cloud_browser_worker") {
   deps = [
     ":embedder",
   ]
+  configs += [ ":cb_include_paths" ]               # T17.
   # cloud_browser_worker is a Linux-server binary; we don't carry mac/
   # win configs.
   if (!is_linux) {
@@ -273,6 +279,7 @@ test("cloud_browser_encoder_unittests") {
     "//third_party/webrtc_overrides/cloud_browser:webrtc_test_passthrough",
   ]
   configs += [
+    ":cb_include_paths",                            # T17.
     ":nvenc_sdk",
     ":svt_av1",
     ":vaapi",
@@ -295,4 +302,5 @@ test("cloud_browser_framesink_capturer_unittests") {
     "//testing/gtest",
     "//ui/gfx/geometry",
   ]
+  configs += [ ":cb_include_paths" ]               # T17.
 }
