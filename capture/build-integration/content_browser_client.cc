@@ -8,7 +8,9 @@
 #include <utility>
 
 #include "capture/build-integration/cb_devtools_agent.h"
+#include "capture/build-integration/cloud_browser_browser_main_parts.h"
 #include "capture/encoder/encoder_factory.h"
+#include "content/public/browser/browser_main_parts.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
 namespace cloud_browser {
@@ -16,6 +18,18 @@ namespace cloud_browser {
 CloudBrowserContentBrowserClient::CloudBrowserContentBrowserClient() = default;
 
 CloudBrowserContentBrowserClient::~CloudBrowserContentBrowserClient() = default;
+
+std::unique_ptr<content::BrowserMainParts>
+CloudBrowserContentBrowserClient::CreateBrowserMainParts(
+    bool /*is_integration_test*/) {
+  // ContentMain calls this exactly once on the browser process and
+  // owns the returned unique_ptr for the lifetime of the run loop.
+  // Returning nullptr (the base default) means chromium runs the
+  // browser process to its message-loop without ever creating a
+  // BrowserContext, which leaves DevToolsAgentHost with no targets to
+  // publish — see cloud_browser_browser_main_parts.h for the reasoning.
+  return std::make_unique<CloudBrowserBrowserMainParts>();
+}
 
 std::unique_ptr<webrtc::VideoEncoderFactory>
 CloudBrowserContentBrowserClient::GetWebRtcVideoEncoderFactory() {

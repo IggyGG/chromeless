@@ -245,6 +245,10 @@ source_set("embedder") {
   sources = [
     "cb_devtools_agent.cc",
     "cb_devtools_agent.h",
+    "cloud_browser_browser_context.cc",
+    "cloud_browser_browser_context.h",
+    "cloud_browser_browser_main_parts.cc",
+    "cloud_browser_browser_main_parts.h",
     "cloud_browser_main.cc",
     "cloud_browser_main.h",
     "content_browser_client.cc",
@@ -254,6 +258,14 @@ source_set("embedder") {
     ":encoder_factory",
     ":framesink_capture",
     "//base",
+    # cloud_browser_browser_context.cc registers with the
+    # BrowserContext / Simple keyed-service dependency managers (same
+    # shape every chromium embedder uses; see
+    # content/shell/browser/shell_browser_context.cc and
+    # headless/lib/browser/headless_browser_context_impl.cc for the
+    # canonical templates).
+    "//components/keyed_service/content",
+    "//components/keyed_service/core",
     # cb_devtools_agent.cc uses inspector_protocol's CBOR + dispatch
     # primitives to parse the incoming Cb.* command and emit the
     # response. crdtp is the same library every upstream embedder
@@ -262,10 +274,17 @@ source_set("embedder") {
     "//components/viz/host",
     "//content/public/app",
     "//content/public/browser",
+    "//content/public/common",
     "//media",
     "//mojo/public/cpp/bindings",
+    # cloud_browser_browser_main_parts.cc opens a TCPServerSocket on
+    # the loopback for the DevTools HTTP listener — same shape every
+    # other chromium embedder uses (content_shell, headless).
+    "//net",
     "//services/viz/privileged/mojom",
     "//third_party/inspector_protocol:crdtp",
+    "//ui/base",
+    "//url",
     # NOTE — cb_devtools_agent.cc additionally includes
     # "content/browser/compositor/surface_utils.h" (with a //nogncheck
     # marker) to call content::GetHostFrameSinkManager(). That symbol
