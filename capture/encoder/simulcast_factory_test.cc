@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
 
 #include "api/video/i420_buffer.h"
 #include "api/video/video_bitrate_allocation.h"
@@ -86,8 +87,18 @@ class FakeEncoder : public webrtc::VideoEncoder {
   EncoderInfo GetEncoderInfo() const override { return EncoderInfo(); }
 
  private:
-  raw_ptr<Sink> sink_;
-  raw_ptr<webrtc::EncodedImageCallback> callback_ = nullptr;
+  // RAW_PTR_EXCLUSION on these test-fixture fields: the previous
+  // raw_ptr<T> wrapping (Wall #29 era) caused MiraclePtr's BackupRefPtr
+  // to flag a "dangling raw_ptr" at FakeEncoder destruction time — the
+  // pointed-to Sink lives in a stack-local std::vector<Sink> that
+  // BackupRefPtr's allocation tracking doesn't trust as a stable
+  // lifetime container. The relationship is intentional (test owns
+  // both objects, scope-end destruction order is the test scope), so
+  // we use the chromium-standard escape hatch instead of the
+  // raw_ptr<T> wrapper. Same fix shape as Wall #29 for
+  // simulcast_factory.cc's TaggingCallback::outer_.
+  RAW_PTR_EXCLUSION Sink* sink_;
+  RAW_PTR_EXCLUSION webrtc::EncodedImageCallback* callback_ = nullptr;
 };
 
 class CapturingOuterCallback : public webrtc::EncodedImageCallback {

@@ -26,10 +26,12 @@
 #include <vector>
 
 #include "base/memory/scoped_refptr.h"
+#include "base/no_destructor.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "media/base/video_frame.h"
+#include "mojo/core/embedder/embedder.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "media/mojo/mojom/media_types.mojom.h"
@@ -165,6 +167,23 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
 class FrameSinkCapturerTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    // mojo::core::Init() is process-global and idempotent-once: it
+    // must run exactly once before any Mojo primitive (MessagePipe,
+    // Remote::BindNewPipeAndPassReceiver, etc.) is used. The
+    // base::TestSuite main from //base/test:run_all_unittests does
+    // NOT call it for us — only browsertest mains do. Without this
+    // initialization the producer_.BindAndPassRemote() call below
+    // crashes with FATAL "Mojo has not been initialized in this
+    // process. You must call mojo::core::Init() as an embedder."
+    // (mojo/public/c/system/thunks.cc:40).
+    //
+    // We use a base::NoDestructor singleton so Init runs exactly
+    // once regardless of how many test fixtures instantiate.
+    [[maybe_unused]] static base::NoDestructor<bool> kMojoInited([] {
+      mojo::core::Init();
+      return true;
+    }());
+
     auto producer_remote = producer_.BindAndPassRemote();
     capturer_ = std::make_unique<CloudBrowserFrameSinkCapturer>(
         std::move(producer_remote),

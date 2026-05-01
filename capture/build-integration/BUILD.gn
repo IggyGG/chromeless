@@ -311,6 +311,14 @@ test("cloud_browser_framesink_capturer_unittests") {
     "//base/test:run_all_unittests",
     "//base/test:test_support",
     "//media/mojo/mojom",
+    # mojo::core::Init() — the test fixture's SetUp() calls this once
+    # process-wide. Without it the very first
+    # mojo::Remote::BindNewPipeAndPassReceiver call inside FakeProducer
+    # crashes with FATAL "Mojo has not been initialized in this
+    # process. You must call mojo::core::Init() as an embedder."
+    # base::TestSuite (the run_all_unittests main) does NOT init Mojo
+    # by default — only chromium browser-test mains do.
+    "//mojo/core/embedder",
     "//mojo/public/cpp/bindings",
     "//services/viz/privileged/mojom",
     "//testing/gmock",
