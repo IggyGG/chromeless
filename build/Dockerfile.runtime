@@ -85,6 +85,29 @@ RUN useradd --create-home --shell /bin/bash --uid 1000 cbuser && \
 COPY cloud_browser_worker /usr/local/bin/cloud_browser_worker
 RUN chmod +x /usr/local/bin/cloud_browser_worker
 
+# Chromium runtime data files. Even though args.gn sets
+# v8_use_external_startup_data=false (V8 snapshot embedded — see
+# capture/build-integration/args.gn §"V8 snapshot"), ICU data is NOT
+# embedded by default and is loaded from icudtl.dat at runtime via
+# base::PathService::Get(base::DIR_ASSETS) which resolves to the
+# binary's directory. Without it the worker exits at startup with
+# `Check failed: result. ` from base/i18n/icu_util.cc:306.
+#
+# libEGL.so / libGLESv2.so / libvk_swiftshader.so ship the Angle +
+# SwiftShader bits the worker uses for `--use-gl=angle
+# --use-angle=swiftshader-webgl`; without them the GL backend can't
+# load and the renderer crashes during compositor init.
+#
+# All four files are staged into the build context by cb-build.sh
+# Step 9 alongside cloud_browser_worker. They live next to the
+# binary in /usr/local/bin/ so chromium's default PathService
+# resolution finds them without an extra `--icu-data-dir` flag.
+COPY icudtl.dat            /usr/local/bin/icudtl.dat
+COPY snapshot_blob.bin     /usr/local/bin/snapshot_blob.bin
+COPY libEGL.so             /usr/local/bin/libEGL.so
+COPY libGLESv2.so          /usr/local/bin/libGLESv2.so
+COPY libvk_swiftshader.so  /usr/local/bin/libvk_swiftshader.so
+
 # Supervisord glue. The Phase 1 supervisord.conf (T7) launches
 # /usr/bin/chromium via launch-chromium.sh; the Phase 2 path swaps
 # that program block for cloud_browser_worker. Both files are staged
