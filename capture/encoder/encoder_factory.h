@@ -29,9 +29,11 @@
 #include <vector>
 
 #include "absl/types/optional.h"
+#include "api/environment/environment.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
 #include "api/video_codecs/video_encoder_factory.h"
+#include "base/memory/raw_ptr.h"
 
 namespace cloud_browser {
 
@@ -85,7 +87,7 @@ class CloudBrowserVideoEncoderFactory : public webrtc::VideoEncoderFactory {
     // InitEncode and unregisters on Release. The adapter then routes
     // libwebrtc BWE updates to all active encoders. Owned by the
     // caller; must outlive every encoder this factory produces.
-    BweAdapter* bwe_adapter = nullptr;
+    raw_ptr<BweAdapter> bwe_adapter = nullptr;
 
     // HW-encoder preferences (T63). When true and the runtime probe
     // succeeds, the factory hands back an NvencEncoder instead of
@@ -128,7 +130,8 @@ class CloudBrowserVideoEncoderFactory : public webrtc::VideoEncoderFactory {
   // webrtc::VideoEncoderFactory:
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override;
 
-  std::unique_ptr<webrtc::VideoEncoder> CreateVideoEncoder(
+  std::unique_ptr<webrtc::VideoEncoder> Create(
+      const webrtc::Environment& env,
       const webrtc::SdpVideoFormat& format) override;
 
   webrtc::VideoEncoderFactory::CodecSupport QueryCodecSupport(

@@ -20,6 +20,7 @@
 #include <cassert>
 #include <utility>
 
+#include "api/environment/environment.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
 #include "capture/encoder/bwe_adapter.h"
@@ -179,7 +180,8 @@ CloudBrowserVideoEncoderFactory::GetSupportedFormats() const {
 }
 
 std::unique_ptr<webrtc::VideoEncoder>
-CloudBrowserVideoEncoderFactory::CreateVideoEncoder(
+CloudBrowserVideoEncoderFactory::Create(
+    const webrtc::Environment& /*env*/,
     const webrtc::SdpVideoFormat& format) {
   // VP9 is the v1 default — real implementation lives in
   // capture/encoder/vp9_encoder.{h,cc} (T35). The factory propagates
