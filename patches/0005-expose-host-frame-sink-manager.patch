@@ -32,45 +32,6 @@ Why this patch exists:
   — a stable, exported call site for embedders that funnels into the
   content-internal symbol.
 
-Why not avoid the patch:
-- Public APIs that *don't* require this patch (RenderWidgetHostView::
-  CreateVideoCapturer) return std::unique_ptr<viz::ClientFrameSinkVideo
-  Capturer>, a viz-crash-resilient wrapper. Our CloudBrowserFrameSinkCapturer
-  constructor takes a raw mojo::Remote<viz::mojom::FrameSinkVideoCapturer>;
-  using ClientFrameSinkVideoCapturer would require either refactoring our
-  capturer's constructor (out of Track E scope) or holding two parallel
-  capturers in the agent. Going through HostFrameSinkManager keeps the
-  existing API intact and the embedder code minimal.
-- The other production-grade alternative (override an existing
-  ContentBrowserClient virtual to push a HostFrameSinkManager into the
-  embedder at startup) is heavier weight than a free-function accessor
-  and would be premature for a single Track E call site.
-
-Why a free-function wrapper (vs. widening surface_utils.h's visibility):
-- Loosening //content/browser:browser visibility to admit
-  //cloud-browser:embedder leaks the entire content/browser/ private
-  surface to us, not just GetHostFrameSinkManager. A targeted CONTENT_
-  EXPORT shim is the narrower seam.
-- Same reasoning as patch 0001 §"Why a free-function wrapper".
-
-Embedder-side update required after this patch lands:
-- capture/build-integration/cb_devtools_agent.cc currently includes
-  "content/browser/compositor/surface_utils.h" (with //nogncheck) and
-  calls content::GetHostFrameSinkManager() directly. With this patch
-  in place that include + call should be retired in favor of
-  content::GetEmbedderHostFrameSinkManager() — a one-line rename in
-  the embedder, plus dropping the //nogncheck. Done in a follow-up
-  embedder commit, not in this patch (which is chromium-only).
-
-Upstream considerations:
-- Upstream chromium does not currently expose HostFrameSinkManager via
-  a public header. Chromium's own non-content embedders (cast_shell,
-  weblayer, headless) use chromium-internal access either by being in-
-  tree or via separate carve-outs. If our embedder pattern proves
-  durable across two roll cycles, file an upstream bug to expose this
-  via content/public/browser/ proper — the shape would mirror this
-  patch.
-
 Touched files:
 - content/public/browser/content_browser_client.h  (forward decl,
                                                      CONTENT_EXPORT free
@@ -79,28 +40,29 @@ Touched files:
                                                      surface_utils.h
                                                      include)
 
-Resolved against branch-heads/7727 (Chromium 147 stable). Context lines
-are illustrative; the patch is shape-only until first build apply, per
-patches/README.md §"shape-only". Conflicts on rebase are fix-forward.
+Resolved against branch-heads/7727 (Chromium 147 stable). Re-rebased
+2026-05-02 against the actual upstream content_browser_client.{h,cc}
+(initial shape-only context lines failed `git am` against the real
+chromium tree on first build attempt).
 ---
  content/public/browser/content_browser_client.cc | 14 ++++++++++++++
  content/public/browser/content_browser_client.h  | 14 ++++++++++++++
  2 files changed, 28 insertions(+)
 
 diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
-index 5c72f6a34e..a5b1c2d0e1 100644
 --- a/content/public/browser/content_browser_client.cc
 +++ b/content/public/browser/content_browser_client.cc
-@@ -29,6 +29,8 @@
- #include "build/build_config.h"
- #include "components/embedder_support/user_agent_utils.h"
- #include "components/viz/common/features.h"
+@@ -27,7 +27,9 @@
+ #include "components/language_detection/content/browser/content_language_detection_driver.h"
+ #include "components/language_detection/content/common/language_detection.mojom.h"
+ #include "components/language_detection/core/browser/language_detection_model_provider.h"
 +#include "components/viz/host/host_frame_sink_manager.h"
-+#include "content/browser/compositor/surface_utils.h"
  #include "content/browser/ai/echo_ai_manager_impl.h"
++#include "content/browser/compositor/surface_utils.h"
  #include "content/browser/cpu_performance/cpu_performance.h"
  #include "content/browser/renderer_host/render_frame_host_impl.h"
-@@ -976,6 +978,18 @@ GetEmbedderWebRtcVideoEncoderFactory() {
+ #include "content/browser/webauth/default_authenticator_request_client_delegate.h"
+@@ -973,6 +975,18 @@ GetEmbedderWebRtcVideoEncoderFactory() {
    return browser_client->GetWebRtcVideoEncoderFactory();
  }
 
@@ -120,7 +82,6 @@ index 5c72f6a34e..a5b1c2d0e1 100644
  ContentBrowserClient::CreateSelectFilePolicy(WebContents* web_contents) {
    return nullptr;
 diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
-index 9052f617e1..b7c95e1d8a 100644
 --- a/content/public/browser/content_browser_client.h
 +++ b/content/public/browser/content_browser_client.h
 @@ -181,6 +181,10 @@ namespace webrtc {
@@ -134,7 +95,7 @@ index 9052f617e1..b7c95e1d8a 100644
  namespace optimization_guide {
  class ModelBrokerClient;
  }  // namespace optimization_guide
-@@ -3469,6 +3473,16 @@ class CONTENT_EXPORT ContentBrowserClient {
+@@ -3466,6 +3470,16 @@ class CONTENT_EXPORT ContentBrowserClient {
  CONTENT_EXPORT std::unique_ptr<webrtc::VideoEncoderFactory>
  GetEmbedderWebRtcVideoEncoderFactory();
 
@@ -153,4 +114,3 @@ index 9052f617e1..b7c95e1d8a 100644
  #endif  // CONTENT_PUBLIC_BROWSER_CONTENT_BROWSER_CLIENT_H_
 --
 2.43.0
-
