@@ -64,6 +64,18 @@ struct H264EncoderConfig {
 
   // Diagnostic; tagged into EncoderInfo::implementation_name.
   bool low_latency_tag = true;
+
+  // Declared out-of-line to satisfy chromium-style ("Complex class/struct
+  // needs an explicit out-of-line constructor"). The struct holds
+  // std::string members whose implicit destructor is non-trivial; pinning
+  // the lifecycle bodies in the .cc keeps them out of every TU that
+  // #includes this header.
+  H264EncoderConfig();
+  ~H264EncoderConfig();
+  H264EncoderConfig(const H264EncoderConfig&);
+  H264EncoderConfig& operator=(const H264EncoderConfig&);
+  H264EncoderConfig(H264EncoderConfig&&);
+  H264EncoderConfig& operator=(H264EncoderConfig&&);
 };
 
 class H264Encoder : public webrtc::VideoEncoder {
@@ -99,18 +111,24 @@ class H264Encoder : public webrtc::VideoEncoder {
 
   H264EncoderConfig config_;
 
-  // x264 state. Heap-allocated so the C types don't bleed into the
-  // header.
+  webrtc::EncodedImageCallback* callback_ = nullptr;
+  bool initialized_ = false;
+
+#if defined(HAS_X264)
+  // x264-only state. Wrapped because chromium's raw-ptr-plugin rejects a
+  // bare x264_t* member, AND because frames_in_/width_/height_ are
+  // unused when the gated implementation in h264_encoder.cc is the
+  // disabled path. Heap-allocated so the C types don't bleed into the
+  // header beyond the forward declarations of struct x264_t /
+  // x264_picture_t at the top of this file.
   x264_t* encoder_ = nullptr;
   std::unique_ptr<x264_picture_t> pic_in_;
   std::unique_ptr<x264_picture_t> pic_out_;
 
-  webrtc::EncodedImageCallback* callback_ = nullptr;
-
   uint64_t frames_in_ = 0;
   int width_ = 0;
   int height_ = 0;
-  bool initialized_ = false;
+#endif  // HAS_X264
 };
 
 }  // namespace cloud_browser
