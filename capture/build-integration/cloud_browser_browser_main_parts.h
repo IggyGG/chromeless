@@ -61,6 +61,7 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   ~CloudBrowserBrowserMainParts() override;
 
   // content::BrowserMainParts:
+  int PreEarlyInitialization() override;
   int PreMainMessageLoopRun() override;
   void WillRunMainMessageLoop(
       std::unique_ptr<base::RunLoop>& run_loop) override;

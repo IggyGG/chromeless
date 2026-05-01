@@ -116,15 +116,22 @@ constexpr int kDefaultDisplayHeight = 720;
 
 }  // namespace
 
-int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
-  // 0. Global display::Screen. chromium subsystems register
-  //    DisplayObservers against the global Screen during init; without
-  //    one set the worker fatals at
-  //    `Check failed: Screen::Get()` (ui/display/display_observer.cc:32).
-  //    A bare ScreenBase with a single 1280x720 display matches the
-  //    Xvfb resolution the cb-chromium pod brings up and gives those
-  //    observers something to attach to. Done before any chromium code
-  //    that might register an observer runs.
+int CloudBrowserBrowserMainParts::PreEarlyInitialization() {
+  // Global display::Screen — done at the EARLIEST available embedder
+  // hook. chromium subsystems register DisplayObservers during the
+  // PreCreateThreads phase (well before PreMainMessageLoopRun), and
+  // without a global Screen the worker fatals at
+  // `Check failed: Screen::Get()` (ui/display/display_observer.cc:32).
+  // First validation attempt set the Screen in PreMainMessageLoopRun
+  // and still fataled — by the time PreMainMessageLoopRun is invoked,
+  // chromium has already created an observer in some service-init
+  // path between PostCreateThreads and PreMainMessageLoopRun.
+  // PreEarlyInitialization is the embedder's first chance to run code
+  // before any of that, so the Screen lands here.
+  //
+  // A bare ScreenBase with a single 1280x720 display matches the Xvfb
+  // resolution the cb-chromium pod brings up and gives chromium's
+  // DisplayObservers something to attach to.
   if (!display::Screen::GetScreen()) {
     screen_ = std::make_unique<display::ScreenBase>();
     display::Display default_display(
@@ -135,7 +142,10 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
                                        display::DisplayList::Type::PRIMARY);
     display::Screen::SetScreenInstance(screen_.get());
   }
+  return content::RESULT_CODE_NORMAL_EXIT;
+}
 
+int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // 1. Profile.
   browser_context_ = std::make_unique<CloudBrowserBrowserContext>();
 
