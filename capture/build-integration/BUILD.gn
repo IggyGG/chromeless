@@ -48,6 +48,15 @@ declare_args() {
   # falls through to whatever lower-priority codec libwebrtc
   # negotiates. T75.
   svt_av1_libdir = ""
+
+  # Path to a libx264 install (typically /usr for the Debian
+  # libx264-dev package). libx264 is GPL-licensed and not redistributable
+  # inside chromium, so we link it dynamically when present and
+  # leave it off by default. Empty = SW H.264 disabled — h264_encoder.cc
+  # still compiles, but ProbeAvailable() returns false and the factory
+  # falls through to lower-priority codecs. Same shape as vaapi_libdir.
+  # T36.
+  x264_libdir = ""
 }
 
 config("nvenc_sdk") {
@@ -96,6 +105,20 @@ config("svt_av1") {
   }
 }
 
+# x264 gate (T36). libx264 is GPL-licensed and not redistributable inside
+# chromium, so we cannot use //third_party/x264 (it does not exist in the
+# upstream tree). Instead we link the system libx264 dynamically when
+# present. Empty `x264_libdir` = HAS_X264 undefined → ProbeAvailable
+# returns false → factory falls through.
+config("x264") {
+  if (x264_libdir != "") {
+    defines = [ "HAS_X264=1" ]
+    include_dirs = [ "$x264_libdir/include" ]
+    libs = [ "x264" ]
+    lib_dirs = [ "$x264_libdir/lib" ]
+  }
+}
+
 source_set("encoder_factory") {
   sources = [
     "../encoder/bwe_adapter.cc",
@@ -123,7 +146,8 @@ source_set("encoder_factory") {
     "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
     "//third_party/webrtc/modules/video_coding",
-    "//third_party/x264:x264",         # H.264 (T36).
+    # T36 (libx264) is now linked via config(":x264") + system libx264 —
+    # chromium does not ship //third_party/x264:x264 (GPL).
     # TODO(T43): //third_party/svt_av1 once AV1 lands.
   ]
   configs += [
@@ -133,6 +157,8 @@ source_set("encoder_factory") {
                                                   # vaapi_libdir != "".
     ":svt_av1",                                  # T75 — gated on
                                                   # svt_av1_libdir != "".
+    ":x264",                                     # T36 — gated on
+                                                  # x264_libdir != "".
     "//build/config/compiler:no_chromium_code",
   ]
 }
@@ -232,6 +258,7 @@ test("cloud_browser_encoder_unittests") {
     ":nvenc_sdk",
     ":svt_av1",
     ":vaapi",
+    ":x264",
   ]
 }
 
