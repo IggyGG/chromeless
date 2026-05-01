@@ -100,7 +100,7 @@ spec:
         # this container so a single chown -R covers both subdirs in
         # one shot.
         - name: bootstrap-our-repo
-          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.3
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.4
           command:
             - sh
             - -euxc
@@ -185,7 +185,7 @@ spec:
               mountPath: /workspace
       containers:
         - name: build
-          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.3
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.4
           imagePullPolicy: IfNotPresent
           # Invoke T113's script directly from the cloned repo. The
           # earlier brief proposed /work/src/build/cb-build.sh as the
