@@ -15,6 +15,7 @@
 #include "base/logging.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
+#include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "media/mojo/common/media_type_converters.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "ui/gfx/geometry/rect.h"
@@ -106,13 +107,13 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
                            /*sub_capture_target_version=*/0);
 
   // 2. Bind our consumer receiver and hand the remote to the producer.
-  //    kPreferGpuMemoryBuffer is the right pick when the format is
-  //    NV12 — it lets the producer hand us a GMB-backed shared
+  //    kPreferMappableSharedImage is the right pick when the format is
+  //    NV12 — it lets the producer hand us a MappableSharedImage-backed
   //    handle, enabling the zero-copy GPU path. For I420 / ARGB we
   //    fall back to shared-memory.
   const auto buffer_pref =
       (format_ == media::PIXEL_FORMAT_NV12)
-          ? viz::mojom::BufferFormatPreference::kPreferGpuMemoryBuffer
+          ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage
           : viz::mojom::BufferFormatPreference::kDefault;
   producer_->Start(consumer_.BindNewPipeAndPassRemote(), buffer_pref);
 }
@@ -195,8 +196,8 @@ void CloudBrowserFrameSinkCapturer::OnFrameCaptured(
   on_frame_.Run(std::move(frame));
 }
 
-void CloudBrowserFrameSinkCapturer::OnNewSubCaptureTargetVersion(
-    uint32_t /*sub_capture_target_version*/) {
+void CloudBrowserFrameSinkCapturer::OnNewCaptureVersion(
+    const ::media::CaptureVersion& /*capture_version*/) {
   // We don't use sub-capture targets in v1; ignore.
 }
 
@@ -252,6 +253,14 @@ CloudBrowserFrameSinkCapturer::WrapAsMediaFrame(
           std::move(data->get_read_only_shmem_region()),
           std::move(mapping));
     }
+#if 0
+  // TODO(T17): port GMB→VideoFrame path to MappableSharedImage when
+  // chromium-side renderer is wired. WrapExternalGpuMemoryBuffer was
+  // removed; the replacement WrapMappableSharedImage takes a
+  // gpu::ClientSharedImage which isn't available at this call site
+  // (see media/base/video_frame.h:233). For first-light we ride the
+  // shmem path only; GMB is a perf optimization for hardware decode
+  // and isn't needed for the encoder factory injection MVP.
   } else if (data->is_gpu_memory_buffer_handle()) {
     frame = media::VideoFrame::WrapExternalGpuMemoryBuffer(
         info->visible_rect,
@@ -259,6 +268,7 @@ CloudBrowserFrameSinkCapturer::WrapAsMediaFrame(
         std::move(data->get_gpu_memory_buffer_handle()),
         info->pixel_format,
         info->timestamp);
+#endif
   } else {
     LOG(WARNING) << "OnFrameCaptured: unknown VideoBufferHandle variant";
     return nullptr;
