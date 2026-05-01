@@ -17,7 +17,6 @@
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
-#include "media/mojo/common/media_type_converters.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
