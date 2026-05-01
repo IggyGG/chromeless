@@ -34,6 +34,7 @@
 #include "api/video/video_frame.h"
 #include "api/video_codecs/video_codec.h"
 #include "api/video_codecs/video_encoder.h"
+#include "base/memory/raw_ptr.h"
 
 namespace cloud_browser {
 
@@ -128,7 +129,7 @@ class NvencEncoder : public webrtc::VideoEncoder {
 
   NvencEncoderConfig config_;
   std::unique_ptr<Impl> impl_;
-  webrtc::EncodedImageCallback* callback_ = nullptr;
+  raw_ptr<webrtc::EncodedImageCallback> callback_ = nullptr;
   uint64_t frames_in_ = 0;
   int width_ = 0;
   int height_ = 0;

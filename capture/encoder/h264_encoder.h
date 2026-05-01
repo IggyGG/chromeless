@@ -24,6 +24,7 @@
 #include "api/video/video_frame.h"
 #include "api/video_codecs/video_codec.h"
 #include "api/video_codecs/video_encoder.h"
+#include "base/memory/raw_ptr.h"
 
 // Forward declarations for the x264 C struct so this header doesn't
 // drag <x264.h> into every translation unit. The struct lives in the
@@ -111,7 +112,7 @@ class H264Encoder : public webrtc::VideoEncoder {
 
   H264EncoderConfig config_;
 
-  webrtc::EncodedImageCallback* callback_ = nullptr;
+  raw_ptr<webrtc::EncodedImageCallback> callback_ = nullptr;
   bool initialized_ = false;
 
 #if defined(HAS_X264)
@@ -121,7 +122,7 @@ class H264Encoder : public webrtc::VideoEncoder {
   // disabled path. Heap-allocated so the C types don't bleed into the
   // header beyond the forward declarations of struct x264_t /
   // x264_picture_t at the top of this file.
-  x264_t* encoder_ = nullptr;
+  raw_ptr<x264_t> encoder_ = nullptr;
   std::unique_ptr<x264_picture_t> pic_in_;
   std::unique_ptr<x264_picture_t> pic_out_;
 

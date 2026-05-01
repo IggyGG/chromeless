@@ -48,6 +48,7 @@
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_codec.h"
 #include "api/video_codecs/video_encoder.h"
+#include "base/memory/raw_ptr.h"
 
 namespace cloud_browser {
 
@@ -123,7 +124,7 @@ class SimulcastEncoder : public webrtc::VideoEncoder {
   std::string codec_name_;
 
   std::vector<std::unique_ptr<LayerState>> states_;
-  webrtc::EncodedImageCallback* outer_callback_ = nullptr;
+  raw_ptr<webrtc::EncodedImageCallback> outer_callback_ = nullptr;
 
   // Source dimensions captured at InitEncode; used for the per-
   // layer downscale.

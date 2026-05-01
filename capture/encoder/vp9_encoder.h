@@ -30,6 +30,7 @@
 #include "api/video/video_frame.h"
 #include "api/video_codecs/video_codec.h"
 #include "api/video_codecs/video_encoder.h"
+#include "base/memory/raw_ptr.h"
 
 // Forward declarations for the libvpx C structs so this header doesn't
 // drag the libvpx headers into every translation unit.
@@ -109,7 +110,7 @@ class Vp9Encoder : public webrtc::VideoEncoder {
   std::unique_ptr<vpx_image> raw_image_;
 
   // Output sink supplied by libwebrtc.
-  webrtc::EncodedImageCallback* callback_ = nullptr;
+  raw_ptr<webrtc::EncodedImageCallback> callback_ = nullptr;
 
   // Frame counter, used both for pts and for IDR-on-demand decisions.
   uint64_t frames_in_ = 0;
