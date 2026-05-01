@@ -27,17 +27,11 @@
 extern "C" {
 #include "third_party/x264/x264.h"
 }
-#else
-// HAS_X264 is undefined when capture/build-integration/BUILD.gn's
-// x264_libdir is empty (the default). Provide empty struct definitions
-// for x264_t and x264_picture_t so std::unique_ptr<x264_picture_t>
-// destructors and pointer arithmetic in this TU still compile; every
-// method body that would reach into real x264 APIs is gated below.
-extern "C" {
-struct x264_t {};
-struct x264_picture_t {};
-}
 #endif  // HAS_X264
+// In the disabled path, the field declarations themselves are gated out
+// in h264_encoder.h, so no x264_t / x264_picture_t storage exists in
+// this TU. The header keeps opaque forward declarations for any future
+// caller that needs to refer to the typenames.
 
 namespace cloud_browser {
 namespace {
@@ -77,6 +71,18 @@ bool ParseProfileLevelId(const std::string& s, std::string* profile,
 #endif  // HAS_X264
 
 }  // namespace
+
+// Out-of-line lifecycle for H264EncoderConfig (chromium-style: the struct
+// holds std::string members with non-trivial destructors, which the
+// chromium plugin wants pinned to the .cc rather than inlined into every
+// TU that #includes h264_encoder.h).
+H264EncoderConfig::H264EncoderConfig() = default;
+H264EncoderConfig::~H264EncoderConfig() = default;
+H264EncoderConfig::H264EncoderConfig(const H264EncoderConfig&) = default;
+H264EncoderConfig& H264EncoderConfig::operator=(const H264EncoderConfig&) =
+    default;
+H264EncoderConfig::H264EncoderConfig(H264EncoderConfig&&) = default;
+H264EncoderConfig& H264EncoderConfig::operator=(H264EncoderConfig&&) = default;
 
 H264Encoder::H264Encoder(H264EncoderConfig config) : config_(std::move(config)) {}
 
