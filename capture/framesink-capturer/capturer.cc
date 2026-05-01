@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "base/check.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
@@ -161,11 +162,11 @@ void CloudBrowserFrameSinkCapturer::OnFrameCaptured(
     return;
   }
 
-  // Surface dropped-frame counts from the producer's oracle.
-  if (info->metadata.frame_count_dropped > 0) {
-    stats_.frames_dropped_by_capturer +=
-        info->metadata.frame_count_dropped;
-  }
+  // TODO(T20): media::VideoFrameMetadata::frame_count_dropped was
+  // removed in current chromium. Producer-side dropped-frame
+  // accounting can be re-added once we identify the replacement
+  // metric (likely a different field name in VideoFrameMetadata or a
+  // counter on the FrameSinkVideoCapturer host).
 
   // Build the RAII scope NOW so any early return path still acks the
   // buffer. The scope's lifetime is tied to the wrapped
@@ -244,8 +245,9 @@ CloudBrowserFrameSinkCapturer::WrapAsMediaFrame(
         info->coded_size,
         info->visible_rect,
         info->visible_rect.size(),
-        const_cast<uint8_t*>(static_cast<const uint8_t*>(mapping.memory())),
-        mapping.size(),
+        base::span<const uint8_t>(
+            static_cast<const uint8_t*>(mapping.memory()),
+            mapping.size()),
         info->timestamp);
     if (frame) {
       // Keep the mapping alive for as long as the frame exists.
@@ -282,13 +284,13 @@ CloudBrowserFrameSinkCapturer::WrapAsMediaFrame(
   frame->set_metadata(info->metadata);
   frame->set_color_space(info->color_space);
 
-  // visible_rect == content_rect within the coded buffer; record it
-  // so the encoder factory can crop letterboxing. Phase 1 just sets
-  // visible_rect from info; if the producer letterboxed, content_rect
-  // is tighter and we should prefer it.
-  if (!content_rect.IsEmpty() && content_rect.size() != info->visible_rect.size()) {
-    frame->set_visible_rect(content_rect);
-  }
+  // TODO(T20): media::VideoFrame::set_visible_rect was removed.
+  // Previously we tightened visible_rect to content_rect when the
+  // producer letterboxed. For first-light we accept info->visible_rect
+  // (which is already passed to WrapExternalData / WrapMappableSI).
+  // Re-introduce the tighter visible_rect once we identify the
+  // replacement (likely passing content_rect as the visible_rect arg
+  // to the wrap call instead of info->visible_rect).
 
   // Pin the BufferHandleScope to the frame's release. This is what
   // makes Done() fire automatically when the encoder is finished
