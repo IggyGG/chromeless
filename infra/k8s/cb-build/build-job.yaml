@@ -134,8 +134,13 @@ spec:
               # host-permissions initContainer has already chown'd
               # /work + /sccache, but the subdirs inside them haven't
               # been created yet on a fresh hostPath.
+              # Chown only the top-level dirs we create. Do NOT chown -R
+              # the chromium checkout: a recursive chown updates ctime on
+              # every file (incl .git/index), which breaks subsequent
+              # uid-1000 git apply --3way --check (rejects with 'does
+              # not match index' even though blob hashes are identical).
               mkdir -p /work/src/chromium /work/artifacts /work/logs
-              chown -R 1000:1000 /work/src /work/artifacts /work/logs
+              chown 1000:1000 /work/src /work/artifacts /work/logs
           env:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
