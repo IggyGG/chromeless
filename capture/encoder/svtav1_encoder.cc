@@ -104,7 +104,15 @@ bool SvtAv1Encoder::Impl::Initialize(const SvtAv1EncoderConfig& cfg,
   svt_cfg_.enc_mode = static_cast<int8_t>(std::clamp(cfg.preset_m, 0, 13));
   svt_cfg_.encoder_bit_depth = 8;
   svt_cfg_.encoder_color_format = EB_YUV420;
-  svt_cfg_.profile = static_cast<uint8_t>(cfg.profile);
+  // `EbSvtAv1EncConfiguration::profile` is an unscoped enum
+  // (`EbAv1SeqProfile` — MAIN_PROFILE / HIGH_PROFILE / PROFESSIONAL_PROFILE).
+  // C++ does not implicitly convert int (or uint8_t) to an unscoped
+  // enum, so the original `static_cast<uint8_t>(...)` triggered
+  // "cannot initialize EbAv1SeqProfile from uint8_t". Cast straight
+  // to the enum type. Validation of the input range (0..2) lives in
+  // SvtAv1EncoderConfig (header doc); out-of-range values would be
+  // rejected by svt_av1_enc_set_parameter at init time.
+  svt_cfg_.profile = static_cast<EbAv1SeqProfile>(cfg.profile);
 
   // No B-frames, no lookahead, no scene-change detection — same
   // rationale as VP9 / H.264 SW siblings.
@@ -128,7 +136,15 @@ bool SvtAv1Encoder::Impl::Initialize(const SvtAv1EncoderConfig& cfg,
   // SVT-AV1 means "infinite" / never insert another key frame
   // automatically.
   svt_cfg_.intra_period_length = -1;
-  svt_cfg_.intra_refresh_type  = 2;  // 1=closed-GOP IDR, 2=open-GOP key.
+  // Per <EbSvtAv1Enc.h>: 1 = SVT_AV1_FWDKF_REFRESH (CRA, open GOP),
+  // 2 = SVT_AV1_KF_REFRESH (IDR, closed GOP). The earlier draft
+  // wrote a bare `2` with the comment inverted ("open-GOP key");
+  // (a) C++ rejects implicit int -> unscoped-enum conversion, so
+  // assignment of a literal int to the SvtAv1IntraRefreshType field
+  // didn't compile, and (b) the rationale paragraph above asks for
+  // an open-GOP intra cadence ("relies on our IDR-on-demand path")
+  // which is value 1, not 2. Use the named constant.
+  svt_cfg_.intra_refresh_type  = SVT_AV1_FWDKF_REFRESH;
 
   // Browser content is text + UI + occasional video. Screen-content
   // mode is the right pick — it beats the default tune by 10–19%
@@ -170,6 +186,13 @@ bool SvtAv1Encoder::Impl::Encode(
   // Build the input EbBufferHeaderType pointing at the I420 planes.
   // SVT-AV1 reads from the pointers we hand it — we don't memcpy.
   EbSvtIOFormat input{};
+  // TODO(svt-av1-runtime): EbSvtIOFormat::color_fmt defaults to
+  // EB_YUV400 (= 0) under `{}` zero-init, but our encoder is
+  // configured for EB_YUV420 (see Initialize). The library may
+  // ignore the per-buffer color_fmt when the encoder-level
+  // encoder_color_format is set, but we should set it explicitly
+  // (input.color_fmt = EB_YUV420; input.bit_depth = EB_EIGHT_BIT;)
+  // once we exercise the real encode path (Track F3 runtime).
   input.luma = const_cast<uint8_t*>(y);
   input.cb   = const_cast<uint8_t*>(u);
   input.cr   = const_cast<uint8_t*>(v);
