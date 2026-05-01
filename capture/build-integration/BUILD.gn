@@ -142,7 +142,7 @@ source_set("encoder_factory") {
     "//third_party/abseil-cpp:absl",
     "//third_party/libvpx:libvpx",     # VP9 (T35).
     "//third_party/libyuv:libyuv",     # I420Scale (T83).
-    "//third_party/webrtc/api/units:units",            # DataRate (T58).
+    "//third_party/webrtc/api/units:data_rate",        # DataRate (T58).
     "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
     "//third_party/webrtc/modules/video_coding",
@@ -218,7 +218,6 @@ executable("cloud_browser_worker") {
   sources = [ "cloud_browser_worker_main.cc" ]
   deps = [
     ":embedder",
-    "//content:sandbox_helper_linux",
   ]
   # cloud_browser_worker is a Linux-server binary; we don't carry mac/
   # win configs.
@@ -248,7 +247,7 @@ test("cloud_browser_encoder_unittests") {
     ":encoder_factory",
     "//testing/gmock",
     "//testing/gtest",
-    "//third_party/webrtc/api/units:units",
+    "//third_party/webrtc/api/units:data_rate",
     "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video:video_frame",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
