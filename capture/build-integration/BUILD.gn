@@ -252,7 +252,7 @@ source_set("embedder") {
     "//media",
     "//mojo/public/cpp/bindings",
     "//services/viz/privileged/mojom",
-    "//third_party/inspector_protocol/crdtp",
+    "//third_party/inspector_protocol:crdtp",
     # NOTE — cb_devtools_agent.cc additionally includes
     # "content/browser/compositor/surface_utils.h" (with a //nogncheck
     # marker) to call content::GetHostFrameSinkManager(). That symbol
