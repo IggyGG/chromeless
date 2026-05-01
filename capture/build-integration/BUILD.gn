@@ -105,6 +105,16 @@ config("svt_av1") {
   }
 }
 
+# Project-relative include root (T17). The cloud-browser repo is symlinked
+# into chromium's src/ tree at //cloud-browser, but our source files use
+# "capture/..." / "framesink-capturer/..." include paths assuming the
+# repo root itself is on the include path. Targets that compile our
+# sources OR depend on those targets pick this up via public_configs so
+# the include path propagates transitively.
+config("cb_include_paths") {
+  include_dirs = [ "//cloud-browser" ]
+}
+
 # x264 gate (T36). libx264 is GPL-licensed and not redistributable inside
 # chromium, so we cannot use //third_party/x264 (it does not exist in the
 # upstream tree). Instead we link the system libx264 dynamically when
@@ -155,6 +165,8 @@ source_set("encoder_factory") {
     # TODO(T43): //third_party/svt_av1 once AV1 lands.
   ]
   configs += [
+    ":cb_include_paths",                         # T17 — repo-root
+                                                  # include path.
     ":nvenc_sdk",                                # T63 — gated on
                                                   # nvenc_sdk_path != "".
     ":vaapi",                                    # T70 — gated on
@@ -165,6 +177,10 @@ source_set("encoder_factory") {
                                                   # x264_libdir != "".
     "//build/config/compiler:no_chromium_code",
   ]
+  # Propagate the repo-root include path to anything that depends on us
+  # (test target, embedder source_set, cloud_browser_worker executable),
+  # so they don't each have to repeat include_dirs.
+  public_configs = [ ":cb_include_paths" ]
 }
 
 # ---------------------------------------------------------------------
@@ -192,6 +208,8 @@ source_set("framesink_capture") {
     "//third_party/abseil-cpp:absl",
     "//ui/gfx/geometry",
   ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
 }
 
 # ---------------------------------------------------------------------
