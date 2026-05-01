@@ -142,7 +142,12 @@ source_set("encoder_factory") {
     "//third_party/abseil-cpp:absl",
     "//third_party/libvpx:libvpx",     # VP9 (T35).
     "//third_party/libyuv:libyuv",     # I420Scale (T83).
-    "//third_party/webrtc/api/units:data_rate",        # DataRate (T58).
+    # Note (T58): webrtc::DataRate header is intentionally pulled in
+    # transitively via the webrtc-adjacent deps below. Direct deps on
+    # //third_party/webrtc/* are blocked by gn visibility — only
+    # //third_party/webrtc_overrides/* may depend on them, which we
+    # would only stand up if transitive availability proves
+    # insufficient at compile time.
     "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
     "//third_party/webrtc/modules/video_coding",
@@ -247,7 +252,6 @@ test("cloud_browser_encoder_unittests") {
     ":encoder_factory",
     "//testing/gmock",
     "//testing/gtest",
-    "//third_party/webrtc/api/units:data_rate",
     "//third_party/webrtc/api/video:video_bitrate_allocation",
     "//third_party/webrtc/api/video:video_frame",
     "//third_party/webrtc/api/video_codecs:video_codecs_api",
