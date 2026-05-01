@@ -141,13 +141,14 @@ bool Vp9Encoder::ApplyVp9Controls() {
   ok &= VpxControl(codec_.get(), VP8E_SET_CPUUSED, 8);  // fastest preset.
   ok &= VpxControl(codec_.get(), VP9E_SET_TUNE_CONTENT, VP9E_CONTENT_SCREEN);
   ok &= VpxControl(codec_.get(), VP9E_SET_AQ_MODE, 3);  // cyclic refresh.
-  ok &= VpxControl(codec_.get(), VP9E_SET_DELTAQ_MODE, 0);
+  // VP9E_SET_DELTAQ_MODE and VP9E_SET_AQ_MODE_CYCLIC_REFRESH_PERIOD are
+  // downstream libvpx extensions that aren't in chromium's bundled
+  // libvpx. The cyclic-refresh mode set above (VP9E_SET_AQ_MODE = 3)
+  // already enables the refresh policy; the period control is a finer
+  // tuning we'll re-enable if/when chromium's libvpx exposes it.
   ok &= VpxControl(codec_.get(), VP9E_SET_NOISE_SENSITIVITY, 0);
   ok &= VpxControl(codec_.get(), VP9E_SET_FRAME_PARALLEL_DECODING, 0);
   ok &= VpxControl(codec_.get(), VP9E_SET_ROW_MT, 1);
-  ok &= VpxControl(codec_.get(),
-                   VP9E_SET_AQ_MODE_CYCLIC_REFRESH_PERIOD,
-                   std::max(1, config_.intra_refresh_period_frames));
   return ok;
 }
 
@@ -161,10 +162,14 @@ int32_t Vp9Encoder::Encode(
     // v1: re-init on resolution change. Phase 2 may instead drop the
     // resize to a separate scaler upstream.
     Release();
-    webrtc::VideoCodec settings{};
-    settings.width = frame.width();
-    settings.height = frame.height();
-    if (InitEncode(&settings, /*settings=*/{}) != WEBRTC_VIDEO_CODEC_OK) {
+    webrtc::VideoCodec codec_settings{};
+    codec_settings.width = frame.width();
+    codec_settings.height = frame.height();
+    const webrtc::VideoEncoder::Settings webrtc_settings(
+        webrtc::VideoEncoder::Capabilities(/*loss_notification=*/false),
+        /*number_of_cores=*/1,
+        /*max_payload_size=*/1200);
+    if (InitEncode(&codec_settings, webrtc_settings) != WEBRTC_VIDEO_CODEC_OK) {
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
   }
