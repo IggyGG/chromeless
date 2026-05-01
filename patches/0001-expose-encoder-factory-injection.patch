@@ -59,7 +59,7 @@ diff --git a/content/public/browser/content_browser_client.cc b/content/public/b
 index d2dccc29b0..5c72f6a34e 100644
 --- a/content/public/browser/content_browser_client.cc
 +++ b/content/public/browser/content_browser_client.cc
-@@ -58,6 +58,7 @@
+@@ -58,6 +58,8 @@
  #include "content/public/browser/web_contents_view_delegate.h"
  #include "content/public/browser/webid/identity_request_dialog_controller.h"
  #include "content/public/common/alternative_error_page_override_info.mojom.h"
@@ -67,7 +67,8 @@ index d2dccc29b0..5c72f6a34e 100644
  #include "content/public/common/content_features.h"
  #include "content/public/common/url_utils.h"
  #include "media/audio/audio_manager.h"
-@@ -953,6 +954,28 @@ std::optional<base::FilePath> ContentBrowserClient::GetLocalTracesDirectory() {
++#include "third_party/webrtc/api/video_codecs/video_encoder_factory.h"
+@@ -953,6 +955,28 @@ std::optional<base::FilePath> ContentBrowserClient::GetLocalTracesDirectory() {
    return std::nullopt;
  }
  
