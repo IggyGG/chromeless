@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "base/memory/raw_ptr_exclusion.h"
+
 #include "api/video/i420_buffer.h"
 #include "api/video/video_bitrate_allocation.h"
 #include "modules/video_coding/include/video_codec_interface.h"
@@ -70,7 +72,14 @@ struct SimulcastEncoder::LayerState {
 
    private:
     const int spatial_index_;
-    raw_ptr<webrtc::EncodedImageCallback>* outer_;
+    // RAW_PTR_EXCLUSION: outer_ points at a raw_ptr<T> slot owned by
+    // the parent LayerState. The slot lives as long as the LayerState
+    // (and TaggingCallback is destructed before LayerState in the
+    // unique_ptr chain), so MiraclePtr's storage discipline doesn't
+    // apply. The plugin would otherwise flag `raw_ptr<T>* outer_` as
+    // a raw class-member pointer; this annotation is the canonical
+    // chromium escape hatch for that pattern.
+    RAW_PTR_EXCLUSION raw_ptr<webrtc::EncodedImageCallback>* outer_;
   };
 
   std::unique_ptr<TaggingCallback> tagging_callback;
