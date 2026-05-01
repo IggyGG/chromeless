@@ -67,6 +67,9 @@ RUN apt-get update \
         rsync \
         findutils \
         libglib2.0-0 \
+        gperf \
+        bison \
+        flex \
     && rm -rf /var/lib/apt/lists/*
 
 # depot_tools at /opt/depot_tools. Pinning happens by `git checkout`
