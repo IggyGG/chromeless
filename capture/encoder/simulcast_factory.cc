@@ -46,7 +46,7 @@ struct SimulcastEncoder::LayerState {
   // spatial / simulcast index, and forwards to `outer`.
   class TaggingCallback : public webrtc::EncodedImageCallback {
    public:
-    TaggingCallback(int spatial_index, webrtc::EncodedImageCallback** outer)
+    TaggingCallback(int spatial_index, raw_ptr<webrtc::EncodedImageCallback>* outer)
         : spatial_index_(spatial_index), outer_(outer) {}
 
     Result OnEncodedImage(
@@ -70,7 +70,7 @@ struct SimulcastEncoder::LayerState {
 
    private:
     const int spatial_index_;
-    webrtc::EncodedImageCallback** outer_;
+    raw_ptr<webrtc::EncodedImageCallback>* outer_;
   };
 
   std::unique_ptr<TaggingCallback> tagging_callback;
