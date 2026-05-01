@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000005 Mon Sep 17 00:00:00 2001
+From: Iggy <iggy@triform.ai>
+Date: Fri, 1 May 2026 21:00:00 +0200
+Subject: [PATCH] cloud-browser: expose embedder hook for HostFrameSinkManager
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds a CONTENT_EXPORT free function in content/public/browser/
+content_browser_client.h that returns the active viz::HostFrameSink
+Manager*, wrapping the content-internal content::GetHostFrameSink
+Manager() (defined in content/browser/compositor/surface_utils.cc).
+
+Why this patch exists:
+- Our cloud-browser worker (//cloud-browser/capture/build-integration/
+  cb_devtools_agent.cc — Track E) needs to call HostFrameSinkManager
+  ::CreateVideoCapturer() so the Cb.startFrameSinkCapture CDP command
+  can hand a producer-side mojo::Remote to a CloudBrowserFrameSinkCapturer
+  and validate the T55 capture path at runtime.
+- content::GetHostFrameSinkManager() is currently only declared in
+  content/browser/compositor/surface_utils.h, which lives in the
+  content/browser/ private include tree.
+- //content/browser:browser's gn visibility list is restricted to
+  //content/public/browser:browser_sources and content's own internal
+  fuzzer/test targets — out-of-tree consumers (//cloud-browser:embedder)
+  cannot depend on it directly. Without an exposure patch, gn check
+  passes (we mark our internal include with //nogncheck) but the link
+  step fails with an unresolved-symbol error for content::GetHostFrame
+  SinkManager.
+- A CONTENT_EXPORT free function in content/public/browser/ is the
+  same shape patch 0001 used for GetEmbedderWebRtcVideoEncoderFactory
+  — a stable, exported call site for embedders that funnels into the
+  content-internal symbol.
+
+Why not avoid the patch:
+- Public APIs that *don't* require this patch (RenderWidgetHostView::
+  CreateVideoCapturer) return std::unique_ptr<viz::ClientFrameSinkVideo
+  Capturer>, a viz-crash-resilient wrapper. Our CloudBrowserFrameSinkCapturer
+  constructor takes a raw mojo::Remote<viz::mojom::FrameSinkVideoCapturer>;
+  using ClientFrameSinkVideoCapturer would require either refactoring our
+  capturer's constructor (out of Track E scope) or holding two parallel
+  capturers in the agent. Going through HostFrameSinkManager keeps the
+  existing API intact and the embedder code minimal.
+- The other production-grade alternative (override an existing
+  ContentBrowserClient virtual to push a HostFrameSinkManager into the
+  embedder at startup) is heavier weight than a free-function accessor
+  and would be premature for a single Track E call site.
+
+Why a free-function wrapper (vs. widening surface_utils.h's visibility):
+- Loosening //content/browser:browser visibility to admit
+  //cloud-browser:embedder leaks the entire content/browser/ private
+  surface to us, not just GetHostFrameSinkManager. A targeted CONTENT_
+  EXPORT shim is the narrower seam.
+- Same reasoning as patch 0001 §"Why a free-function wrapper".
+
+Embedder-side update required after this patch lands:
+- capture/build-integration/cb_devtools_agent.cc currently includes
+  "content/browser/compositor/surface_utils.h" (with //nogncheck) and
+  calls content::GetHostFrameSinkManager() directly. With this patch
+  in place that include + call should be retired in favor of
+  content::GetEmbedderHostFrameSinkManager() — a one-line rename in
+  the embedder, plus dropping the //nogncheck. Done in a follow-up
+  embedder commit, not in this patch (which is chromium-only).
+
+Upstream considerations:
+- Upstream chromium does not currently expose HostFrameSinkManager via
+  a public header. Chromium's own non-content embedders (cast_shell,
+  weblayer, headless) use chromium-internal access either by being in-
+  tree or via separate carve-outs. If our embedder pattern proves
+  durable across two roll cycles, file an upstream bug to expose this
+  via content/public/browser/ proper — the shape would mirror this
+  patch.
+
+Touched files:
+- content/public/browser/content_browser_client.h  (forward decl,
+                                                     CONTENT_EXPORT free
+                                                     function decl)
+- content/public/browser/content_browser_client.cc (free function impl,
+                                                     surface_utils.h
+                                                     include)
+
+Resolved against branch-heads/7727 (Chromium 147 stable). Context lines
+are illustrative; the patch is shape-only until first build apply, per
+patches/README.md §"shape-only". Conflicts on rebase are fix-forward.
+---
+ content/public/browser/content_browser_client.cc | 14 ++++++++++++++
+ content/public/browser/content_browser_client.h  | 14 ++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index 5c72f6a34e..a5b1c2d0e1 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -29,6 +29,8 @@
+ #include "build/build_config.h"
+ #include "components/embedder_support/user_agent_utils.h"
+ #include "components/viz/common/features.h"
++#include "components/viz/host/host_frame_sink_manager.h"
++#include "content/browser/compositor/surface_utils.h"
+ #include "content/browser/ai/echo_ai_manager_impl.h"
+ #include "content/browser/cpu_performance/cpu_performance.h"
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+@@ -976,6 +978,18 @@ GetEmbedderWebRtcVideoEncoderFactory() {
+   return browser_client->GetWebRtcVideoEncoderFactory();
+ }
+
++viz::HostFrameSinkManager* GetEmbedderHostFrameSinkManager() {
++  // content::GetHostFrameSinkManager() is declared in
++  // content/browser/compositor/surface_utils.h, which is intentionally
++  // private to content/browser/. This wrapper lives inside the content
++  // library (CONTENT_IMPLEMENTATION is defined here) and re-exports the
++  // accessor as CONTENT_EXPORT so out-of-tree embedders (//cloud-browser:
++  // embedder consuming this through //content/public/browser) can reach
++  // the host without depending on //content/browser:browser, whose
++  // visibility list rejects out-of-tree consumers.
++  return content::GetHostFrameSinkManager();
++}
++
+ std::unique_ptr<ui::SelectFilePolicy>
+ ContentBrowserClient::CreateSelectFilePolicy(WebContents* web_contents) {
+   return nullptr;
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 9052f617e1..b7c95e1d8a 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -181,6 +181,10 @@ namespace webrtc {
+ class VideoEncoderFactory;
+ }  // namespace webrtc
+
++namespace viz {
++class HostFrameSinkManager;
++}  // namespace viz
++
+ namespace optimization_guide {
+ class ModelBrokerClient;
+ }  // namespace optimization_guide
+@@ -3469,6 +3473,16 @@ class CONTENT_EXPORT ContentBrowserClient {
+ CONTENT_EXPORT std::unique_ptr<webrtc::VideoEncoderFactory>
+ GetEmbedderWebRtcVideoEncoderFactory();
+
++// Returns the active viz::HostFrameSinkManager*, or nullptr if none is
++// available (e.g. between BrowserMainLoop teardown and process exit).
++// Lives in content/public/browser so out-of-tree embedders can reach
++// the host without depending on //content/browser:browser, which has
++// a restrictive visibility list. Funnels through the content-internal
++// content::GetHostFrameSinkManager() declared in
++// content/browser/compositor/surface_utils.h. See patch 0005.
++CONTENT_EXPORT viz::HostFrameSinkManager*
++GetEmbedderHostFrameSinkManager();
++
+ }  // namespace content
+
+ #endif  // CONTENT_PUBLIC_BROWSER_CONTENT_BROWSER_CLIENT_H_
+--
+2.43.0
+

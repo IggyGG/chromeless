@@ -68,9 +68,12 @@ seam) or upstreamed.
 | # | Patch | Purpose | Upstream tracking |
 |---|-------|---------|-------------------|
 | 0001 | `0001-expose-encoder-factory-injection.patch` | Adds `ContentBrowserClient::GetWebRtcVideoEncoderFactory()`; consulted from `PeerConnectionDependencyFactory::CreatePeerConnectionFactory()` so our embedder can plug `CloudBrowserVideoEncoderFactory` (T19) into libwebrtc. | None yet — file an upstream bug post-Phase-2 prototype if shape stabilises. |
+| 0005 | `0005-expose-host-frame-sink-manager.patch` | Adds `content::GetEmbedderHostFrameSinkManager()` — a CONTENT_EXPORT free function in `content/public/browser/content_browser_client.h` that re-exports the content-internal `content::GetHostFrameSinkManager()` so the cloud-browser embedder (`capture/build-integration/cb_devtools_agent.cc` — Track E / T55) can build a producer-side `mojo::Remote<viz::mojom::FrameSinkVideoCapturer>` without depending on `//content/browser:browser` (whose visibility list rejects out-of-tree consumers). | None yet — same disposition as 0001; file upstream bug if pattern proves durable across two roll cycles. |
 
-When patch 0002 lands, append it to the table above (don't reorder
-the list — patch numbers are stable references).
+When patch 0002/3/4/etc. lands, append it to the table above (don't
+reorder the list — patch numbers are stable references). 0002–0004
+already exist on disk but are not yet indexed here; add them in a
+follow-up doc-only commit.
 
 ## When NOT to add a patch
 
