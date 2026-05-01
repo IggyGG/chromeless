@@ -93,16 +93,25 @@ bool ResolvePresetGuid(const std::string& preset, GUID* out) {
   if (preset == "P5") { *out = NV_ENC_PRESET_P5_GUID; return true; }
   if (preset == "P6") { *out = NV_ENC_PRESET_P6_GUID; return true; }
   if (preset == "P7") { *out = NV_ENC_PRESET_P7_GUID; return true; }
-  // Legacy presets, useful on pre-Ada hardware (Pascal/Turing).
-  if (preset == "LL_HQ") {
-    *out = NV_ENC_PRESET_LOW_LATENCY_HQ_GUID; return true;
-  }
-  if (preset == "LL_HP") {
-    *out = NV_ENC_PRESET_LOW_LATENCY_HP_GUID; return true;
-  }
-  if (preset == "LL_DEFAULT") {
-    *out = NV_ENC_PRESET_LOW_LATENCY_DEFAULT_GUID; return true;
-  }
+  // The legacy `LOW_LATENCY_HQ / _HP / _DEFAULT` preset GUIDs were
+  // deprecated in NVIDIA Video Codec SDK 11.0 (2021) and removed
+  // outright in SDK 12.0 (2022) — they no longer exist as symbols
+  // in <nvEncodeAPI.h> against any modern header (verified against
+  // /usr/include/ffnvcodec/nvEncodeAPI.h on bookworm). Referencing
+  // them is now a compile error, not a runtime fallback. The
+  // modern P1..P7 presets cover every NVENC-capable generation
+  // back to Pascal, so the "LL_*" legacy branches no longer have
+  // a hardware basis. Callers that pass "LL_HQ" / "LL_HP" /
+  // "LL_DEFAULT" will hit the false return below; the factory
+  // already treats that as "preset not supported -> fall back to
+  // SW", so behaviour stays safe — the strings just stop
+  // resolving.
+  // TODO(nvenc-presets): once we run on a real NVENC card, decide
+  // whether to silently remap the LL_* strings to a P-preset
+  // (P5 for LL_HQ, P3 for LL_HP, P4 for LL_DEFAULT) so legacy
+  // configs keep working, or to surface a clearer error to the
+  // factory probe. For Phase 4 prep, the safe-fallback shape is
+  // sufficient.
   return false;
 }
 
@@ -422,7 +431,15 @@ bool NvencEncoder::ProbeAvailable(const std::string& codec_type) {
   // This trips early if the driver / GPU can't encode this codec
   // (e.g., AV1 on a T4 — see T43 cloud-GPU footnote).
   Impl probe;
-  bool ok = probe.Initialize(NvencEncoderConfig{.codec_type = codec_type},
+  // NvencEncoderConfig has user-declared (out-of-line) ctors / dtor /
+  // copy / move (see nvenc_encoder.h) — that makes the type
+  // non-aggregate, so designated initialisers (`{.codec_type = ...}`)
+  // do NOT compile. Build the probe config by assignment instead.
+  // Same shape we use elsewhere when probing configs (compare the
+  // VAAPI fix in commit fa2d201 — identical class of bug).
+  NvencEncoderConfig probe_cfg;
+  probe_cfg.codec_type = codec_type;
+  bool ok = probe.Initialize(std::move(probe_cfg),
                               160, 120,
                               cm.webrtc_type);
   probe.Destroy();
