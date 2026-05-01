@@ -182,11 +182,19 @@ int32_t H264Encoder::InitEncode(
 
   pic_in_  = std::make_unique<x264_picture_t>();
   pic_out_ = std::make_unique<x264_picture_t>();
-  if (x264_picture_alloc(pic_in_.get(), X264_CSP_I420, width_, height_) != 0) {
-    x264_encoder_close(encoder_);
-    encoder_ = nullptr;
-    return WEBRTC_VIDEO_CODEC_ERROR;
-  }
+  // x264_picture_init() — zero + defaults, NO buffer allocation. We
+  // use x264_picture_init (not x264_picture_alloc) because Encode()
+  // points pic_in_->img.plane[] at the caller's externally-managed
+  // I420 buffers (webrtc::I420BufferInterface::DataY/U/V) every
+  // call. x264_picture_alloc would allocate internal buffers libx264
+  // expects to read from — when we then overwrite the plane pointers
+  // with the external buffers (whose strides may differ from the
+  // alloc'd width-aligned strides), libx264 reads off the end of the
+  // external buffers and crashes inside dct/me code.
+  // Bug history: original code called x264_picture_alloc here and
+  // x264 SEGVed at libx264.so.164+0x6f25 on first Encode. Confirmed
+  // 2026-05-01 by H264EncoderTest.EncodeProducesNonEmptyAnnexBNalUnits.
+  x264_picture_init(pic_in_.get());
   std::memset(pic_out_.get(), 0, sizeof(*pic_out_));
 
   initialized_ = true;
@@ -306,10 +314,13 @@ int32_t H264Encoder::Release() {
     x264_encoder_close(encoder_);
     encoder_ = nullptr;
   }
-  if (pic_in_) {
-    x264_picture_clean(pic_in_.get());
-    pic_in_.reset();
-  }
+  // No x264_picture_clean(): we now use x264_picture_init() (not
+  // x264_picture_alloc()) in InitEncode + point img.plane[] at
+  // externally-owned I420 buffers in Encode(). x264_picture_clean
+  // would free buffers we never allocated (or worse, corrupt the
+  // heap if the plane[] pointers were set to webrtc-managed memory
+  // by the last Encode call).
+  pic_in_.reset();
   pic_out_.reset();
 #endif  // HAS_X264
   initialized_ = false;
