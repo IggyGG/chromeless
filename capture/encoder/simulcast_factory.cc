@@ -26,6 +26,14 @@ namespace cloud_browser {
 
 // Out-of-line lifecycle for SimulcastLayer (chromium-style).
 SimulcastLayer::SimulcastLayer() = default;
+SimulcastLayer::SimulcastLayer(std::string rid,
+                               int scale_resolution_down_by,
+                               int max_framerate_fps,
+                               int max_bitrate_bps)
+    : rid(std::move(rid)),
+      scale_resolution_down_by(scale_resolution_down_by),
+      max_framerate_fps(max_framerate_fps),
+      max_bitrate_bps(max_bitrate_bps) {}
 SimulcastLayer::~SimulcastLayer() = default;
 SimulcastLayer::SimulcastLayer(const SimulcastLayer&) = default;
 SimulcastLayer& SimulcastLayer::operator=(const SimulcastLayer&) = default;

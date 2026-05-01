@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
+
 #include "api/video/i420_buffer.h"
 #include "api/video/video_bitrate_allocation.h"
 #include "api/video/video_frame.h"
@@ -84,8 +86,8 @@ class FakeEncoder : public webrtc::VideoEncoder {
   EncoderInfo GetEncoderInfo() const override { return EncoderInfo(); }
 
  private:
-  Sink* sink_;
-  webrtc::EncodedImageCallback* callback_ = nullptr;
+  raw_ptr<Sink> sink_;
+  raw_ptr<webrtc::EncodedImageCallback> callback_ = nullptr;
 };
 
 class CapturingOuterCallback : public webrtc::EncodedImageCallback {

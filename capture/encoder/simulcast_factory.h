@@ -65,6 +65,11 @@ struct SimulcastLayer {
   // struct holds non-trivial members; pinning lifecycle bodies in
   // the .cc keeps them out of every TU that #includes this header.
   SimulcastLayer();
+  // Convenience ctor for brace-init test fixtures and explicit setup.
+  SimulcastLayer(std::string rid,
+                 int scale_resolution_down_by,
+                 int max_framerate_fps,
+                 int max_bitrate_bps);
   ~SimulcastLayer();
   SimulcastLayer(const SimulcastLayer&);
   SimulcastLayer& operator=(const SimulcastLayer&);
