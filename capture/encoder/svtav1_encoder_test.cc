@@ -53,7 +53,7 @@ class CapturingCallback : public webrtc::EncodedImageCallback {
 };
 
 webrtc::VideoFrame MakeFrame(int w, int h, int idx) {
-  rtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
+  webrtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
   std::memset(buf->MutableDataY(), 128, buf->StrideY() * h);
   std::memset(buf->MutableDataU(), 128, buf->StrideU() * (h / 2));
   std::memset(buf->MutableDataV(), 128, buf->StrideV() * (h / 2));
@@ -127,7 +127,7 @@ TEST(SvtAv1EncoderTest, InitAndEncodeSucceeds) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 30; ++i) {
     EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
               enc.Encode(MakeFrame(640, 360, i), nullptr));
@@ -148,7 +148,7 @@ TEST(SvtAv1EncoderTest, FirstFrameIsKey) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(320, 240, 30, 1'000'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 8; ++i) enc.Encode(MakeFrame(320, 240, i), nullptr);
   ASSERT_FALSE(cb.captured().empty());
   EXPECT_EQ(webrtc::VideoFrameType::kVideoFrameKey,
@@ -169,7 +169,7 @@ TEST(SvtAv1EncoderTest, NoBFramesEverEmitted) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 60; ++i) {
     enc.Encode(MakeFrame(640, 360, i), nullptr);
   }
@@ -188,7 +188,7 @@ TEST(SvtAv1EncoderTest, ForcedKeyframeProducesKey) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(320, 240, 30, 1'000'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 5; ++i) enc.Encode(MakeFrame(320, 240, i), nullptr);
   std::vector<webrtc::VideoFrameType> types{
       webrtc::VideoFrameType::kVideoFrameKey};
@@ -207,7 +207,7 @@ TEST(SvtAv1EncoderTest, SetRatesAdjustsBitrate) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(320, 240, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   webrtc::VideoBitrateAllocation alloc;
   alloc.SetBitrate(0, 0, 750'000);
   webrtc::VideoEncoder::RateControlParameters params(alloc, 30.0);

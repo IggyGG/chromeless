@@ -105,7 +105,7 @@ class CapturingOuterCallback : public webrtc::EncodedImageCallback {
 };
 
 webrtc::VideoFrame MakeFrame(int w, int h) {
-  rtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
+  webrtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
   std::memset(buf->MutableDataY(), 128, buf->StrideY() * h);
   std::memset(buf->MutableDataU(), 128, buf->StrideU() * (h / 2));
   std::memset(buf->MutableDataV(), 128, buf->StrideV() * (h / 2));
@@ -191,7 +191,7 @@ TEST(SimulcastEncoderTest, InitEncodeAllocatesNInnerEncoders) {
                                             // explicit ladder still wins
                                             // because layers_ is preset.
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   EXPECT_EQ(1, sinks[0].init_count);
   EXPECT_EQ(1, sinks[1].init_count);
   EXPECT_EQ(1, sinks[2].init_count);
@@ -216,7 +216,7 @@ TEST(SimulcastEncoderTest, EncodeFansOutToAllLayersWithCorrectDimensions) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto codec = SingleLayerCodec(640, 360);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Encode(MakeFrame(640, 360), nullptr));
   ASSERT_EQ(1u, sinks[0].encode_widths.size());
   EXPECT_EQ(640, sinks[0].encode_widths.back());
@@ -239,7 +239,7 @@ TEST(SimulcastEncoderTest, EncodeOutputCarriesSpatialIndex) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto codec = SingleLayerCodec(640, 360);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   enc.Encode(MakeFrame(640, 360), nullptr);
   ASSERT_EQ(2u, cb.spatial_indices().size());
   EXPECT_EQ(0, cb.spatial_indices()[0]);
@@ -265,7 +265,7 @@ TEST(SimulcastEncoderTest, SetRatesDistributesPerSpatialLayer) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto codec = SingleLayerCodec(640, 360);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
 
   // libwebrtc orders spatial layer 0 = lowest. Our states_[0] is
   // the top, so SetRates routes spatial 2 → states_[0], spatial 1
@@ -298,7 +298,7 @@ TEST(SimulcastEncoderTest, ReleaseTearsDownAllLayers) {
   CapturingOuterCallback cb;
   enc.RegisterEncodeCompleteCallback(&cb);
   auto codec = SingleLayerCodec(640, 360);
-  enc.InitEncode(&codec, webrtc::VideoEncoder::Settings());
+  enc.InitEncode(&codec, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200));
   enc.Release();
   EXPECT_EQ(1, sinks[0].release_count);
   EXPECT_EQ(1, sinks[1].release_count);
@@ -321,7 +321,7 @@ TEST(SimulcastEncoderTest, DeferredLadderPathDerivesLayersFromCodec) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto codec = ThreeLayerCodec(1920, 1080);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   EXPECT_EQ(3, built.load());
   EXPECT_EQ(1920, sinks[0].last_codec_width);
   EXPECT_EQ(960,  sinks[1].last_codec_width);
@@ -341,7 +341,7 @@ TEST(SimulcastEncoderTest, DeferredLadderSingleStreamFastPath) {
   enc.RegisterEncodeCompleteCallback(&cb);
   auto codec = SingleLayerCodec(640, 360);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&codec, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   EXPECT_EQ(1, built.load());
   enc.Encode(MakeFrame(640, 360), nullptr);
   ASSERT_EQ(1u, sinks[0].encode_widths.size());

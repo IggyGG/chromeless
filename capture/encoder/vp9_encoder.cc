@@ -172,7 +172,7 @@ int32_t Vp9Encoder::Encode(
   // Convert to libvpx's I420 view. We assume the buffer is already
   // I420; if not, the caller must ToI420() upstream.  This keeps the
   // hot path allocation-free.
-  rtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
+  webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
       frame.video_frame_buffer()->ToI420();
   if (!i420) return WEBRTC_VIDEO_CODEC_ERROR;
   raw_image_->planes[VPX_PLANE_Y] = const_cast<uint8_t*>(i420->DataY());
@@ -220,7 +220,7 @@ int32_t Vp9Encoder::Encode(
         : webrtc::VideoFrameType::kVideoFrameDelta;
     encoded_image._encodedWidth = width_;
     encoded_image._encodedHeight = height_;
-    encoded_image.SetTimestamp(frame.timestamp());
+    encoded_image.SetRtpTimestamp(frame.rtp_timestamp());
     encoded_image.capture_time_ms_ = frame.render_time_ms();
     encoded_image.rotation_ = frame.rotation();
 

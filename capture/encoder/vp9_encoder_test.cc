@@ -56,7 +56,7 @@ class CapturingCallback : public webrtc::EncodedImageCallback {
 // Build a single I420 VideoFrame filled with a mid-grey + colored
 // rectangle so successive frames have measurable inter-frame deltas.
 webrtc::VideoFrame MakeFrame(int width, int height, int frame_idx) {
-  rtc::scoped_refptr<webrtc::I420Buffer> buf =
+  webrtc::scoped_refptr<webrtc::I420Buffer> buf =
       webrtc::I420Buffer::Create(width, height);
   std::memset(buf->MutableDataY(), 128, buf->StrideY() * height);
   std::memset(buf->MutableDataU(), 128, buf->StrideU() * (height / 2));
@@ -90,7 +90,7 @@ TEST(Vp9EncoderTest, InitEncodeSucceeds) {
   Vp9Encoder enc(Vp9EncoderConfig{});
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Release());
 }
 
@@ -103,7 +103,7 @@ TEST(Vp9EncoderTest, EncodeProducesPackets) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 30; ++i) {
     auto frame = MakeFrame(640, 360, i);
     EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Encode(frame, /*frame_types=*/nullptr));
@@ -125,7 +125,7 @@ TEST(Vp9EncoderTest, ForcedKeyframeFlagsAreHonored) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   // First few delta frames.
   for (int i = 0; i < 5; ++i) {
     auto f = MakeFrame(640, 360, i);
@@ -156,7 +156,7 @@ TEST(Vp9EncoderTest, NoBFramesEmitted) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 60; ++i) {
     enc.Encode(MakeFrame(640, 360, i), /*frame_types=*/nullptr);
   }
@@ -172,7 +172,7 @@ TEST(Vp9EncoderTest, SetRatesUpdatesBitrate) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   // Cut bitrate in half; encoder should not crash.
   webrtc::VideoBitrateAllocation alloc;
   alloc.SetBitrate(0, 0, 750'000);

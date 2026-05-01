@@ -59,6 +59,17 @@ struct SimulcastLayer {
   int scale_resolution_down_by = 1;  // 1 = full, 2 = half, 4 = quarter.
   int max_framerate_fps = 0;  // 0 = inherit from outer config.
   int max_bitrate_bps = 0;    // 0 = let BWE decide.
+
+  // Declared out-of-line to satisfy chromium-style ("Complex
+  // class/struct needs an explicit out-of-line constructor"). The
+  // struct holds non-trivial members; pinning lifecycle bodies in
+  // the .cc keeps them out of every TU that #includes this header.
+  SimulcastLayer();
+  ~SimulcastLayer();
+  SimulcastLayer(const SimulcastLayer&);
+  SimulcastLayer& operator=(const SimulcastLayer&);
+  SimulcastLayer(SimulcastLayer&&);
+  SimulcastLayer& operator=(SimulcastLayer&&);
 };
 
 // Factory closure: produces a fresh single-layer encoder per layer.

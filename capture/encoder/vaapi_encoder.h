@@ -89,6 +89,17 @@ struct VaapiEncoderConfig {
   // and records it in the EncoderInfo so metrics can break out HW
   // path by vendor.
   bool low_latency_tag = true;
+
+  // Declared out-of-line to satisfy chromium-style ("Complex
+  // class/struct needs an explicit out-of-line constructor"). The
+  // struct holds non-trivial members; pinning lifecycle bodies in
+  // the .cc keeps them out of every TU that #includes this header.
+  VaapiEncoderConfig();
+  ~VaapiEncoderConfig();
+  VaapiEncoderConfig(const VaapiEncoderConfig&);
+  VaapiEncoderConfig& operator=(const VaapiEncoderConfig&);
+  VaapiEncoderConfig(VaapiEncoderConfig&&);
+  VaapiEncoderConfig& operator=(VaapiEncoderConfig&&);
 };
 
 class VaapiEncoder : public webrtc::VideoEncoder {

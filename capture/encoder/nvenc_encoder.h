@@ -87,6 +87,17 @@ struct NvencEncoderConfig {
 
   // Diagnostic; tagged into EncoderInfo::implementation_name.
   bool low_latency_tag = true;
+
+  // Declared out-of-line to satisfy chromium-style ("Complex
+  // class/struct needs an explicit out-of-line constructor"). The
+  // struct holds non-trivial members; pinning lifecycle bodies in
+  // the .cc keeps them out of every TU that #includes this header.
+  NvencEncoderConfig();
+  ~NvencEncoderConfig();
+  NvencEncoderConfig(const NvencEncoderConfig&);
+  NvencEncoderConfig& operator=(const NvencEncoderConfig&);
+  NvencEncoderConfig(NvencEncoderConfig&&);
+  NvencEncoderConfig& operator=(NvencEncoderConfig&&);
 };
 
 class NvencEncoder : public webrtc::VideoEncoder {

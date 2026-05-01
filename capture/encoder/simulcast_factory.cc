@@ -22,6 +22,14 @@
 
 namespace cloud_browser {
 
+// Out-of-line lifecycle for SimulcastLayer (chromium-style).
+SimulcastLayer::SimulcastLayer() = default;
+SimulcastLayer::~SimulcastLayer() = default;
+SimulcastLayer::SimulcastLayer(const SimulcastLayer&) = default;
+SimulcastLayer& SimulcastLayer::operator=(const SimulcastLayer&) = default;
+SimulcastLayer::SimulcastLayer(SimulcastLayer&&) = default;
+SimulcastLayer& SimulcastLayer::operator=(SimulcastLayer&&) = default;
+
 // ---------------------------------------------------------------------
 // LayerState — per-layer plumbing.
 // ---------------------------------------------------------------------
@@ -66,7 +74,7 @@ struct SimulcastEncoder::LayerState {
   };
 
   std::unique_ptr<TaggingCallback> tagging_callback;
-  rtc::scoped_refptr<webrtc::I420Buffer> scratch_buffer;  // reused per
+  webrtc::scoped_refptr<webrtc::I420Buffer> scratch_buffer;  // reused per
                                                             // layer, sized
                                                             // at InitEncode.
   int width = 0;
@@ -233,18 +241,18 @@ int32_t SimulcastEncoder::Encode(
     settings.width = frame.width();
     settings.height = frame.height();
     settings.numberOfSimulcastStreams = static_cast<unsigned char>(layers_.size());
-    if (InitEncode(&settings, webrtc::VideoEncoder::Settings())
+    if (InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200))
           != WEBRTC_VIDEO_CODEC_OK) {
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
   }
 
-  rtc::scoped_refptr<webrtc::I420BufferInterface> source =
+  webrtc::scoped_refptr<webrtc::I420BufferInterface> source =
       frame.video_frame_buffer()->ToI420();
   if (!source) return WEBRTC_VIDEO_CODEC_ERROR;
 
   for (const auto& state : states_) {
-    rtc::scoped_refptr<webrtc::I420BufferInterface> layer_buf;
+    webrtc::scoped_refptr<webrtc::I420BufferInterface> layer_buf;
     if (state->config.scale_resolution_down_by == 1) {
       // Top layer: pass the source through unchanged.
       layer_buf = source;
@@ -271,7 +279,7 @@ int32_t SimulcastEncoder::Encode(
     webrtc::VideoFrame layer_frame =
         webrtc::VideoFrame::Builder()
             .set_video_frame_buffer(layer_buf)
-            .set_timestamp_rtp(frame.timestamp())
+            .set_timestamp_rtp(frame.rtp_timestamp())
             .set_timestamp_ms(frame.render_time_ms())
             .set_rotation(frame.rotation())
             .build();

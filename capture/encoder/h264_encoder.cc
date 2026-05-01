@@ -206,13 +206,13 @@ int32_t H264Encoder::Encode(
     webrtc::VideoCodec settings{};
     settings.width = frame.width();
     settings.height = frame.height();
-    if (InitEncode(&settings, webrtc::VideoEncoder::Settings())
+    if (InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200))
           != WEBRTC_VIDEO_CODEC_OK) {
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
   }
 
-  rtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
+  webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
       frame.video_frame_buffer()->ToI420();
   if (!i420) return WEBRTC_VIDEO_CODEC_ERROR;
 
@@ -266,7 +266,7 @@ int32_t H264Encoder::Encode(
       : webrtc::VideoFrameType::kVideoFrameDelta;
   encoded_image._encodedWidth = width_;
   encoded_image._encodedHeight = height_;
-  encoded_image.SetTimestamp(frame.timestamp());
+  encoded_image.SetRtpTimestamp(frame.rtp_timestamp());
   encoded_image.capture_time_ms_ = frame.render_time_ms();
   encoded_image.rotation_ = frame.rotation();
 

@@ -37,6 +37,7 @@
 #include "api/units/data_rate.h"
 #include "api/video/video_bitrate_allocation.h"
 #include "api/video_codecs/video_encoder.h"
+#include "base/memory/raw_ptr.h"
 
 namespace cloud_browser {
 
@@ -101,7 +102,7 @@ class BweAdapter {
 
  private:
   struct EncoderEntry {
-    webrtc::VideoEncoder* encoder;
+    raw_ptr<webrtc::VideoEncoder> encoder;
     int layer_index;
   };
 

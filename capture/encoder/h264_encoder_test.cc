@@ -76,7 +76,7 @@ class CapturingCallback : public webrtc::EncodedImageCallback {
 };
 
 webrtc::VideoFrame MakeFrame(int w, int h, int idx) {
-  rtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
+  webrtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
   std::memset(buf->MutableDataY(), 128, buf->StrideY() * h);
   std::memset(buf->MutableDataU(), 128, buf->StrideU() * (h / 2));
   std::memset(buf->MutableDataV(), 128, buf->StrideV() * (h / 2));
@@ -108,7 +108,7 @@ TEST(H264EncoderTest, InitEncodeAcceptsBaselineDefault) {
   H264Encoder enc(H264EncoderConfig{});
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Release());
 }
 
@@ -118,7 +118,7 @@ TEST(H264EncoderTest, EncodeProducesNonEmptyAnnexBNalUnits) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 60; ++i) {
     enc.Encode(MakeFrame(640, 360, i), nullptr);
   }
@@ -145,7 +145,7 @@ TEST(H264EncoderTest, NoBSlicesEverEmitted) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 90; ++i) {
     enc.Encode(MakeFrame(640, 360, i), nullptr);
   }
@@ -168,7 +168,7 @@ TEST(H264EncoderTest, ForcedKeyframeProducesIDR) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 5; ++i) {
     enc.Encode(MakeFrame(640, 360, i), nullptr);
   }
@@ -192,7 +192,7 @@ TEST(H264EncoderTest, BitrateTrackingWithinTolerance) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, cfg.target_bitrate_bps);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   // 3 seconds of frames.
   for (int i = 0; i < 90; ++i) {
     enc.Encode(MakeFrame(640, 360, i), nullptr);
@@ -215,7 +215,7 @@ TEST(H264EncoderTest, SetRatesAdjustsBitrateLive) {
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   webrtc::VideoBitrateAllocation alloc;
   alloc.SetBitrate(0, 0, 750'000);
   webrtc::VideoEncoder::RateControlParameters params(alloc, 30.0);

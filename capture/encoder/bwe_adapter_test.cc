@@ -222,7 +222,7 @@ TEST(WrapWithBweAdapterTest, RegistersOnInitAndUnregistersOnRelease) {
   settings.height = 240;
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
             wrapped->InitEncode(&settings,
-                                 webrtc::VideoEncoder::Settings()));
+                                 webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   EXPECT_EQ(1u, a.encoder_count())
       << "InitEncode should register with adapter";
 
@@ -248,7 +248,7 @@ TEST(WrapWithBweAdapterTest, DestructorUnregistersIfReleaseSkipped) {
     webrtc::VideoCodec settings{};
     settings.width = 320;
     settings.height = 240;
-    wrapped->InitEncode(&settings, webrtc::VideoEncoder::Settings());
+    wrapped->InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200));
     EXPECT_EQ(1u, a.encoder_count());
     // ... drop wrapped without calling Release.
   }

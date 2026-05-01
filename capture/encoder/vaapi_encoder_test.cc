@@ -49,7 +49,7 @@ class CapturingCallback : public webrtc::EncodedImageCallback {
 };
 
 webrtc::VideoFrame MakeFrame(int w, int h, int idx) {
-  rtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
+  webrtc::scoped_refptr<webrtc::I420Buffer> buf = webrtc::I420Buffer::Create(w, h);
   std::memset(buf->MutableDataY(), 128, buf->StrideY() * h);
   std::memset(buf->MutableDataU(), 128, buf->StrideU() * (h / 2));
   std::memset(buf->MutableDataV(), 128, buf->StrideV() * (h / 2));
@@ -127,7 +127,7 @@ TEST(VaapiEncoderTest, UnknownCodecTypeFailsInitEncode) {
   VaapiEncoder enc(cfg);
   auto settings = DefaultSettings(640, 360, 30, 1'500'000,
                                     webrtc::kVideoCodecGeneric);
-  auto rc = enc.InitEncode(&settings, webrtc::VideoEncoder::Settings());
+  auto rc = enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200));
   EXPECT_TRUE(rc == WEBRTC_VIDEO_CODEC_ERR_PARAMETER ||
               rc == WEBRTC_VIDEO_CODEC_ERROR);
 }
@@ -151,7 +151,7 @@ TEST(VaapiEncoderTest, H264InitAndEncodeOnRealDevice) {
   auto settings = DefaultSettings(640, 360, 30, 2'000'000,
                                     webrtc::kVideoCodecH264);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 30; ++i) {
     EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
               enc.Encode(MakeFrame(640, 360, i), nullptr));
@@ -180,7 +180,7 @@ TEST(VaapiEncoderTest, HevcInitOnRealDevice) {
   auto settings = DefaultSettings(640, 360, 30, 1'500'000,
                                     webrtc::kVideoCodecH265);
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
 }
 
 TEST(VaapiEncoderTest, AV1InitOnlyOnQsvOrAmfRdna3Plus) {
@@ -194,7 +194,7 @@ TEST(VaapiEncoderTest, AV1InitOnlyOnQsvOrAmfRdna3Plus) {
   auto settings = DefaultSettings(640, 360, 30, 1'500'000,
                                     webrtc::kVideoCodecAV1);
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
 }
 
 TEST(VaapiEncoderTest, VP9OnIntelOnly) {
@@ -208,7 +208,7 @@ TEST(VaapiEncoderTest, VP9OnIntelOnly) {
   auto settings = DefaultSettings(640, 360, 30, 1'500'000,
                                     webrtc::kVideoCodecVP9);
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
 }
 
 TEST(VaapiEncoderTest, ForcedKeyframeOnRealDevice) {
@@ -221,7 +221,7 @@ TEST(VaapiEncoderTest, ForcedKeyframeOnRealDevice) {
   auto settings = DefaultSettings(640, 360, 30, 1'500'000,
                                     webrtc::kVideoCodecH264);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
   for (int i = 0; i < 5; ++i) enc.Encode(MakeFrame(640, 360, i), nullptr);
   std::vector<webrtc::VideoFrameType> types{
       webrtc::VideoFrameType::kVideoFrameKey};
@@ -241,7 +241,7 @@ TEST(VaapiEncoderTest, SetRatesOnRealDevice) {
   auto settings = DefaultSettings(640, 360, 30, 1'500'000,
                                     webrtc::kVideoCodecH264);
   ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK,
-            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings()));
+            enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
 
   webrtc::VideoBitrateAllocation alloc;
   alloc.SetBitrate(0, 0, 750'000);
