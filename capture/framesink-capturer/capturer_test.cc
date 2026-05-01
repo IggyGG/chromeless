@@ -216,13 +216,13 @@ class FrameSinkCapturerTest : public ::testing::Test {
 };
 
 TEST_F(FrameSinkCapturerTest, StartForwardsToProducer) {
-  capturer_->Start(viz::VideoCaptureTarget());
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
   EXPECT_TRUE(producer_.start_called());
 }
 
 TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
-  capturer_->Start(viz::VideoCaptureTarget());
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
 
   producer_.SendFrame();
@@ -248,7 +248,7 @@ TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
 }
 
 TEST_F(FrameSinkCapturerTest, MultipleFramesAllAcked) {
-  capturer_->Start(viz::VideoCaptureTarget());
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
 
   for (int i = 0; i < 5; ++i) producer_.SendFrame();
@@ -266,7 +266,7 @@ TEST_F(FrameSinkCapturerTest, MultipleFramesAllAcked) {
 // Re-enable once we identify the replacement metric or move dropped-frame
 // accounting to a different signal.
 TEST_F(FrameSinkCapturerTest, DISABLED_DroppedFrameCountSurfacesInStats) {
-  capturer_->Start(viz::VideoCaptureTarget());
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
 
   producer_.SendFrame(/*dropped=*/3);
@@ -279,7 +279,7 @@ TEST_F(FrameSinkCapturerTest, DoneFiresEvenIfWrapFails) {
   // Force WrapExternalData failure by sending a malformed
   // VideoFrameInfoPtr (null). The capturer should still ack the
   // buffer.
-  capturer_->Start(viz::VideoCaptureTarget());
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
   // Manually invoke OnFrameCaptured with null info.
   auto region = base::ReadOnlySharedMemoryRegion::Create(64);
@@ -313,7 +313,7 @@ TEST_F(FrameSinkCapturerTest, DoneFiresEvenIfWrapFails) {
 }
 
 TEST_F(FrameSinkCapturerTest, StopForwardsToProducer) {
-  capturer_->Start(viz::VideoCaptureTarget());
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
   capturer_->Stop();
   FlushPendingIPC();
@@ -321,8 +321,8 @@ TEST_F(FrameSinkCapturerTest, StopForwardsToProducer) {
 }
 
 TEST_F(FrameSinkCapturerTest, StartIsIdempotent) {
-  capturer_->Start(viz::VideoCaptureTarget());
-  capturer_->Start(viz::VideoCaptureTarget());
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
   // FakeProducer flips start_called_ on every Start; we only want to
   // assert that we observe Start at least once. The relevant
