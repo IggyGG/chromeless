@@ -25,6 +25,7 @@
 #include "api/video_codecs/video_codec.h"
 #include "api/video_codecs/video_encoder.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
 
 // Forward declarations for the x264 C struct so this header doesn't
 // drag <x264.h> into every translation unit. The struct lives in the
@@ -112,7 +113,18 @@ class H264Encoder : public webrtc::VideoEncoder {
 
   H264EncoderConfig config_;
 
-  raw_ptr<webrtc::EncodedImageCallback> callback_ = nullptr;
+  // Same RAW_PTR_EXCLUSION pattern as SimulcastEncoder fields (commit
+  // 277b859). The webrtc gtest harness destroys the H264Encoder while
+  // the EncodedImageCallback fixture is still bound, which under
+  // chromium's MiraclePtr raw_ptr<T> implementation triggers
+  // BackupRefPtr's dangling-pointer detector at fixture teardown — a
+  // FATAL crash with the dangling_ptr_guide.md link in the output.
+  // The lifetime is genuinely well-managed (callback_ is cleared in
+  // Release() before any caller drops it); the detector's
+  // overzealous and the production code uses the same pattern.
+  // Bypass via RAW_PTR_EXCLUSION which leaves the field as a plain
+  // raw pointer untracked by the dangling detector.
+  RAW_PTR_EXCLUSION webrtc::EncodedImageCallback* callback_ = nullptr;
   bool initialized_ = false;
 
 #if defined(HAS_X264)
@@ -122,7 +134,12 @@ class H264Encoder : public webrtc::VideoEncoder {
   // disabled path. Heap-allocated so the C types don't bleed into the
   // header beyond the forward declarations of struct x264_t /
   // x264_picture_t at the top of this file.
-  raw_ptr<x264_t> encoder_ = nullptr;
+  //
+  // Same RAW_PTR_EXCLUSION reason as callback_ above: x264_encoder_close
+  // is called in Release() and the pointer is nulled, but the
+  // dangling-detector still flags this on test-suite teardown when an
+  // x264 init returns a partial object.
+  RAW_PTR_EXCLUSION x264_t* encoder_ = nullptr;
   std::unique_ptr<x264_picture_t> pic_in_;
   std::unique_ptr<x264_picture_t> pic_out_;
 
