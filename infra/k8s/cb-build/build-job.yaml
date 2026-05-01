@@ -192,7 +192,16 @@ spec:
           # handoff path; T113 placed it at build/cb-build.sh in our
           # repo and CB_REPO=/workspace, so the actual path is
           # /workspace/build/cb-build.sh. README.md documents this.
-          command: ["bash", "/workspace/build/cb-build.sh"]
+          command:
+            - bash
+            - -c
+            - |
+              # The cb-build-runner image ships /opt/depot_tools without
+              # python3_bin_reldir.txt — gn fails with "need to initialize
+              # depot_tools" until bootstrap_python3 is run. The bootstrap
+              # is idempotent, so doing it on every pod start is cheap.
+              (cd /opt/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3
+              exec bash /workspace/build/cb-build.sh
           env:
             # Diagnostic only — cb-build.sh derives CB_GIT_SHA from
             # CB_REPO/.git when this is unset, so we provide it for
