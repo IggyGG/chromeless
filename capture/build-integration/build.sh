@@ -100,6 +100,17 @@ cmd_apply_patches() {
     # state. Both are fatal to subsequent runs and require out-of-band
     # cleanup via a debug pod (per vaapi-builder's session 2026-05-01).
     # Recover both upfront so retries are self-healing.
+    #
+    # Also: prior runs that *succeeded* at apply-patches leave HEAD
+    # advanced by 5 commits (the patches as commits). Re-running
+    # apply-patches against that HEAD produces "needs merge" conflicts
+    # because the patch context lines reference the pre-patch base.
+    # Reset HEAD + worktree back to the LKGM base before the apply loop
+    # so re-runs (after Pod OOM, node eviction, etc.) are idempotent.
+    # observed 2026-05-02 by embedder-bootstrap, after repeated job
+    # restarts left the tree in a state where apply-patches could
+    # neither succeed nor cleanly retry.
+    local lkgm_base="2731573cc6"
     if (cd "${CHROMIUM_SRC}" && git rev-parse --git-dir >/dev/null 2>&1); then
         # `git am --abort` is a no-op when no rebase-apply state exists,
         # but cleanly tears it down when one does. Suppress its noise so
@@ -107,6 +118,18 @@ cmd_apply_patches() {
         (cd "${CHROMIUM_SRC}" && git am --abort) >/dev/null 2>&1 || true
         rm -f  "${CHROMIUM_SRC}/.git/index.lock"
         rm -rf "${CHROMIUM_SRC}/.git/rebase-apply"
+        # Reset HEAD + worktree to the LKGM base. -c required because
+        # the chromium worktree on the build host has no committer
+        # identity configured.
+        if (cd "${CHROMIUM_SRC}" && git cat-file -e "${lkgm_base}^{commit}" 2>/dev/null); then
+            (cd "${CHROMIUM_SRC}" && git \
+                -c user.email=cb-build@triform.ai \
+                -c user.name='cb-build' \
+                reset --hard "${lkgm_base}") >/dev/null 2>&1 || \
+                log "WARN: reset to ${lkgm_base} failed; continuing"
+        else
+            log "WARN: LKGM base ${lkgm_base} not present; skipping reset"
+        fi
     fi
 
     log "Applying ${#patches[@]} patch(es) to ${CHROMIUM_SRC}..."
