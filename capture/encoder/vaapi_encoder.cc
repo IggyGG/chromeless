@@ -346,8 +346,13 @@ bool VaapiEncoder::Impl::SubmitSequenceParams() {
     seq.intra_period = (intra_period_ > 0) ? intra_period_ : 0xffffffffu;
     seq.ip_period = 1;
     seq.bits_per_second = static_cast<unsigned int>(target_bitrate_bps_);
-    seq.max_frame_width_minus_1 = static_cast<uint16_t>(width_ - 1);
-    seq.max_frame_height_minus_1 = static_cast<uint16_t>(height_ - 1);
+    // NOTE — AV1 frame dimensions are encoded at the picture level
+    // (`pic.frame_width_minus_1` / `frame_height_minus_1`, set below at
+    // the picture-buffer fill). libva's `_VAEncSequenceParameterBufferAV1`
+    // does not carry max_frame_width / max_frame_height fields; the
+    // earlier draft of this file used the AV1 spec field names which
+    // don't appear in the libva struct. T70-followup: revisit once we
+    // exercise this path against real hardware (Track F2-runtime).
     if (vaCreateBuffer(display_, context_id_,
                         VAEncSequenceParameterBufferType,
                         sizeof(seq), 1, &seq, &seq_buf) != VA_STATUS_SUCCESS) {
@@ -539,22 +544,29 @@ bool VaapiEncoder::Impl::SubmitPictureAndSlice(uint64_t pts,
                         sizeof(pic), 1, &pic, &pic_buf) != VA_STATUS_SUCCESS) {
       return false;
     }
-    VAEncSliceParameterBufferVP9 slice{};
-    if (vaCreateBuffer(display_, context_id_,
-                        VAEncSliceParameterBufferType,
-                        sizeof(slice), 1, &slice, &slice_buf) != VA_STATUS_SUCCESS) {
-      return false;
-    }
+    // VP9 frames have no slice-level structure in libva — there is no
+    // `VAEncSliceParameterBufferVP9` typedef in <va/va_enc_vp9.h>
+    // (only sequence + picture params + segment misc params; refs:
+    // _VAEncSequenceParameterBufferVP9 / _VAEncPictureParameterBufferVP9
+    // / _VAEncSegParamVP9). The earlier draft assumed the H.264 / AV1
+    // shape and referenced a type that doesn't exist. Picture-only
+    // vaRenderPicture is the correct VP9 submit shape; slice_buf
+    // stays VA_INVALID_ID and the render call below picks `bufs, 1`
+    // instead of `bufs, 2` for VP9.
   } else {
     return false;
   }
 
+  // VP9 has no slice-param buffer (see VP9 branch above); render the
+  // picture-only buffer in that case. H.264 / HEVC / AV1 always set
+  // both bufs.
   VABufferID bufs[2] = {pic_buf, slice_buf};
+  const int n_bufs = (slice_buf != VA_INVALID_ID) ? 2 : 1;
   if (vaBeginPicture(display_, context_id_,
                       surfaces_[surface_index_]) != VA_STATUS_SUCCESS) {
     return false;
   }
-  if (vaRenderPicture(display_, context_id_, bufs, 2) != VA_STATUS_SUCCESS) {
+  if (vaRenderPicture(display_, context_id_, bufs, n_bufs) != VA_STATUS_SUCCESS) {
     return false;
   }
   if (vaEndPicture(display_, context_id_) != VA_STATUS_SUCCESS) return false;
@@ -697,7 +709,14 @@ bool VaapiEncoder::ProbeAvailable(const std::string& codec_type) {
   if (!ResolveCodecType(codec_type, "42e01f", &cm)) return false;
   Impl probe;
   std::string vendor;
-  bool ok = probe.Initialize(VaapiEncoderConfig{.codec_type = codec_type},
+  // VaapiEncoderConfig has user-declared (out-of-line) ctors / dtor /
+  // copy / move — that makes the type non-aggregate, so designated
+  // initialisers (`{.codec_type = ...}`) do NOT compile. Build it by
+  // assignment instead. Same shape we use elsewhere when probing
+  // configs.
+  VaapiEncoderConfig probe_cfg;
+  probe_cfg.codec_type = codec_type;
+  bool ok = probe.Initialize(std::move(probe_cfg),
                               160, 120, cm.webrtc_type, &vendor);
   probe.Destroy();
   return ok;
