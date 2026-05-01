@@ -58,8 +58,10 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   }
 
   // Convenience: send a synthetic frame downstream after Start has
-  // been called. `dropped` populates info.metadata.frame_count_dropped.
-  void SendFrame(int dropped = 0,
+  // been called. `dropped` is ignored for now — see Wall #28 TODO in
+  // capturer.cc; VideoFrameMetadata::frame_count_dropped was removed
+  // from chromium and our capturer.cc no longer tracks it.
+  void SendFrame(int /*dropped*/ = 0,
                  media::VideoPixelFormat fmt = media::PIXEL_FORMAT_I420) {
     ASSERT_TRUE(consumer_.is_bound()) << "Start not yet called";
     auto info = media::mojom::VideoFrameInfo::New();
@@ -67,7 +69,6 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
     info->visible_rect = gfx::Rect(0, 0, 640, 360);
     info->pixel_format = fmt;
     info->timestamp = base::Microseconds(++ts_us_);
-    info->metadata.frame_count_dropped = dropped;
 
     // Allocate a tiny shmem region so WrapExternalData has something
     // to bind against.
@@ -238,7 +239,11 @@ TEST_F(FrameSinkCapturerTest, MultipleFramesAllAcked) {
   EXPECT_EQ(5u, capturer_->GetStats().buffers_done);
 }
 
-TEST_F(FrameSinkCapturerTest, DroppedFrameCountSurfacesInStats) {
+// DISABLED: capturer.cc no longer reads VideoFrameMetadata::frame_count_dropped
+// (removed from chromium's media::VideoFrameMetadata — see Wall #28 TODO).
+// Re-enable once we identify the replacement metric or move dropped-frame
+// accounting to a different signal.
+TEST_F(FrameSinkCapturerTest, DISABLED_DroppedFrameCountSurfacesInStats) {
   capturer_->Start(viz::VideoCaptureTarget());
   FlushPendingIPC();
 
