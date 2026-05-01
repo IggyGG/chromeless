@@ -7,8 +7,10 @@
 // content::ContentMain.
 //
 // Linux-only by design (BUILD.gn asserts !is_linux is unsupported).
-// We don't carry sandbox_info here because the linux sandbox is
-// initialised inside the content runner via :sandbox_helper_linux.
+// No sandbox_info plumbing here — on Linux, content's zygote/setuid
+// sandbox is initialised transitively through //content/public/app:*
+// (pulled in by the :embedder source_set). There is no
+// sandbox_helper_linux target in chromium; only Windows ships one.
 //
 // Cross-references:
 //   * content/shell/app/shell_main.cc       (template)
