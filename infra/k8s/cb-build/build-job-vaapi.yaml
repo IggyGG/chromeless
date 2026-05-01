@@ -103,16 +103,22 @@ spec:
               chown -R 1000:1000 /work/depot_tools /work/depot_tools-bin
 
               # ---- Phase 6: libva staging (idempotent) -----------
-              # libva-dev provides va.h + the va_enc_*.h encoder headers
-              # the source includes; libva-drm-dev provides va_drm.h +
-              # libva-drm.so (chromium's GPU path uses the DRM backend
-              # on headless Linux). We don't stage libva-x11 / libva-glx
-              # — capture/build-integration/BUILD.gn:config(":vaapi")
-              # only links `va` and `va-drm`, and the headless worker
-              # has no X11 surface.
+              # On Debian bookworm libva-dev is a single package that
+              # provides all the va_*.h headers (including va_drm.h +
+              # the va_enc_*.h encoder headers the source includes) and
+              # the .so symlinks for libva, libva-drm, libva-glx,
+              # libva-wayland, libva-x11. apt pulls libva2 + libva-drm2
+              # transitively for the runtime libs. There is no separate
+              # libva-drm-dev package on Debian — that name is Ubuntu-
+              # only and breaks the apt-get install with a "Unable to
+              # locate package" exit-code-100 (cost us one bootstrap run).
+              #
+              # We stage only the libs config(":vaapi") in BUILD.gn
+              # actually links: `va` (libva.so) + `va-drm` (libva-drm.so).
+              # The headless worker has no X11 surface, so libva-x11 /
+              # libva-glx / libva-wayland are skipped.
               if [ ! -e /work/system-libs/include/va/va.h ]; then
-                apt-get install -y --no-install-recommends \
-                  libva-dev libva-drm-dev
+                apt-get install -y --no-install-recommends libva-dev
                 mkdir -p /work/system-libs/include/va /work/system-libs/lib
                 cp -a /usr/include/va/. /work/system-libs/include/va/
                 cp -aP /usr/lib/x86_64-linux-gnu/libva.so*       /work/system-libs/lib/
