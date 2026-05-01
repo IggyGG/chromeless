@@ -1,14 +1,23 @@
 // Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 //
-// CloudBrowserContentBrowserClient — minimal content::ContentBrowserClient
-// subclass whose only job in Phase 2 is to install our
-// CloudBrowserVideoEncoderFactory (T19 / T35 / T36) on libwebrtc via the
-// virtual added by patches/0001-expose-encoder-factory-injection.patch
-// (T49). Everything else is the chromium default; we'll grow specific
+// CloudBrowserContentBrowserClient — content::ContentBrowserClient
+// subclass with two narrow overrides:
+//
+//   1. GetWebRtcVideoEncoderFactory() — installs our
+//      CloudBrowserVideoEncoderFactory (T19 / T35 / T36) on libwebrtc
+//      via the virtual added by
+//      patches/0001-expose-encoder-factory-injection.patch (T49).
+//   2. CreateDevToolsManagerDelegate() — returns a
+//      CbDevToolsManagerDelegate so the embedder-defined CDP method
+//      Cb.startFrameSinkCapture is reachable from Playwright (T55
+//      runtime-engagement, see cb_devtools_agent.h).
+//
+// Everything else is the chromium default; we'll grow specific
 // overrides only when the worker's behaviour demands them.
 //
 // Cross-references:
 //   * capture/encoder/encoder_factory.h
+//   * capture/build-integration/cb_devtools_agent.h
 //   * patches/0001-expose-encoder-factory-injection.patch
 //   * docs/internal/encoder-factory-design.md
 
@@ -18,6 +27,10 @@
 #include <memory>
 
 #include "content/public/browser/content_browser_client.h"
+
+namespace content {
+class DevToolsManagerDelegate;
+}  // namespace content
 
 namespace webrtc {
 class VideoEncoderFactory;
@@ -44,6 +57,14 @@ class CloudBrowserContentBrowserClient : public content::ContentBrowserClient {
   // the patch description for the call site.
   std::unique_ptr<webrtc::VideoEncoderFactory> GetWebRtcVideoEncoderFactory()
       override;
+
+  // Hands chromium our DevToolsManagerDelegate. The base implementation
+  // returns nullptr (default chromium behaviour: no embedder-side CDP
+  // extensions). We override to wire CbDevToolsManagerDelegate, which
+  // adds Cb.startFrameSinkCapture so the e2e test can flip the T55
+  // capture path on at runtime. See cb_devtools_agent.h.
+  std::unique_ptr<content::DevToolsManagerDelegate>
+  CreateDevToolsManagerDelegate() override;
 };
 
 }  // namespace cloud_browser

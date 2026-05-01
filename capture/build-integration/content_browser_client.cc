@@ -7,7 +7,9 @@
 #include <memory>
 #include <utility>
 
+#include "capture/build-integration/cb_devtools_agent.h"
 #include "capture/encoder/encoder_factory.h"
+#include "content/public/browser/devtools_manager_delegate.h"
 
 namespace cloud_browser {
 
@@ -26,6 +28,17 @@ CloudBrowserContentBrowserClient::GetWebRtcVideoEncoderFactory() {
   // through to here.
   CloudBrowserVideoEncoderFactory::Config config;
   return std::make_unique<CloudBrowserVideoEncoderFactory>(std::move(config));
+}
+
+std::unique_ptr<content::DevToolsManagerDelegate>
+CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
+  // Per content_browser_client.h:1614 the base implementation returns
+  // nullptr (chromium then runs without an embedder delegate, so
+  // embedder-defined CDP methods are unreachable). We return our
+  // delegate so Cb.startFrameSinkCapture is dispatchable from the
+  // remote-debugging endpoint enabled by --remote-debugging-port on
+  // launch-chromium-phase2.sh.
+  return std::make_unique<CbDevToolsManagerDelegate>();
 }
 
 }  // namespace cloud_browser

@@ -230,6 +230,8 @@ source_set("framesink_capture") {
 # ---------------------------------------------------------------------
 source_set("embedder") {
   sources = [
+    "cb_devtools_agent.cc",
+    "cb_devtools_agent.h",
     "cloud_browser_main.cc",
     "cloud_browser_main.h",
     "content_browser_client.cc",
@@ -239,8 +241,26 @@ source_set("embedder") {
     ":encoder_factory",
     ":framesink_capture",
     "//base",
+    # cb_devtools_agent.cc uses inspector_protocol's CBOR + dispatch
+    # primitives to parse the incoming Cb.* command and emit the
+    # response. crdtp is the same library every upstream embedder
+    # delegate (content_shell + headless) uses for the same job.
+    "//components/viz/common",
+    "//components/viz/host",
     "//content/public/app",
     "//content/public/browser",
+    "//media",
+    "//mojo/public/cpp/bindings",
+    "//services/viz/privileged/mojom",
+    "//third_party/inspector_protocol/crdtp",
+    # NOTE — cb_devtools_agent.cc additionally includes
+    # "content/browser/compositor/surface_utils.h" (with a //nogncheck
+    # marker) to call content::GetHostFrameSinkManager(). That symbol
+    # lives in //content/browser:browser, whose visibility list does
+    # NOT include out-of-tree consumers. The link will fail until we
+    # add patches/0005-expose-host-frame-sink-manager.patch (planned —
+    # see cb_devtools_agent.cc file-header note); this dep list is
+    # otherwise complete and gn-check-clean.
   ]
   # Apply the repo-root include path explicitly. public_configs from
   # :encoder_factory and :framesink_capture only propagate to direct
