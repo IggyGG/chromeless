@@ -142,15 +142,14 @@ source_set("encoder_factory") {
     "//third_party/abseil-cpp:absl",
     "//third_party/libvpx:libvpx",     # VP9 (T35).
     "//third_party/libyuv:libyuv",     # I420Scale (T83).
-    # Note (T58): webrtc::DataRate header is intentionally pulled in
-    # transitively via the webrtc-adjacent deps below. Direct deps on
-    # //third_party/webrtc/* are blocked by gn visibility — only
-    # //third_party/webrtc_overrides/* may depend on them, which we
-    # would only stand up if transitive availability proves
-    # insufficient at compile time.
-    "//third_party/webrtc/api/video:video_bitrate_allocation",
-    "//third_party/webrtc/api/video_codecs:video_codecs_api",
-    "//third_party/webrtc/modules/video_coding",
+    # All webrtc public-API deps go through the passthrough source_set in
+    # //third_party/webrtc_overrides/cloud_browser/ — chromium's
+    # rtc_library template restricts visibility on every webrtc internal
+    # target to [ //third_party/webrtc/*, //third_party/webrtc_overrides/* ],
+    # and the passthrough lives in the second of those, re-exporting via
+    # public_deps. Add new webrtc deps there, not here. Authored by
+    # patches/0003-add-cloud-browser-webrtc-overrides.patch.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
     # T36 (libx264) is now linked via config(":x264") + system libx264 —
     # chromium does not ship //third_party/x264:x264 (GPL).
     # TODO(T43): //third_party/svt_av1 once AV1 lands.
@@ -252,9 +251,10 @@ test("cloud_browser_encoder_unittests") {
     ":encoder_factory",
     "//testing/gmock",
     "//testing/gtest",
-    "//third_party/webrtc/api/video:video_bitrate_allocation",
-    "//third_party/webrtc/api/video:video_frame",
-    "//third_party/webrtc/api/video_codecs:video_codecs_api",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    # NB: //third_party/webrtc/test:test_support has the same visibility
+    # rule. If this dep also gets rejected, add it to the passthrough's
+    # public_deps in 0003 (or a follow-up patch).
     "//third_party/webrtc/test:test_support",
   ]
   configs += [
