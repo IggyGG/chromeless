@@ -1,14 +1,14 @@
-From 8fd88a098054b421d57cef6fa00023f55f4f6a3a Mon Sep 17 00:00:00 2001
+From 2ce6f60c5aab85117480b1a9af26e6e9cbfb7a61 Mon Sep 17 00:00:00 2001
 From: Iggy <iggy@triform.ai>
-Date: Fri, 1 May 2026 03:33:41 +0200
-Subject: [PATCH] cloud-browser: add webrtc_overrides passthrough for
+Date: Fri, 1 May 2026 03:39:33 +0200
+Subject: [PATCH] cloud-browser: add webrtc_overrides passthroughs for
  cloud-browser
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-Adds //third_party/webrtc_overrides/cloud_browser/BUILD.gn — a thin
-passthrough source_set whose only job is to re-export the webrtc
+Adds //third_party/webrtc_overrides/cloud_browser/BUILD.gn — two
+passthrough source_sets whose only job is to re-export the webrtc
 public-API targets that //cloud-browser/* needs, via public_deps.
 
 Why this patch exists:
@@ -20,36 +20,43 @@ Why this patch exists:
 - The chromium-canonical fix is a passthrough source_set inside
   webrtc_overrides — that path IS in the visibility list, so it can
   depend on webrtc internals and re-export them as public_deps.
-- public_deps (vs deps) propagates header visibility to dependents,
-  so consumers don't need to know which specific webrtc subtarget
-  owns each header.
+
+Two passthroughs because gn enforces 'non-testonly cannot depend on
+testonly' — folding test:test_support into webrtc_api_passthrough
+would force the production worker to inherit testonly. Splitting
+keeps :webrtc_api_passthrough non-testonly (production worker uses
+it) and :webrtc_test_passthrough testonly (only the unit-test target
+uses it).
 
 Targets re-exported:
-- api/units:data_rate                   (webrtc::DataRate)
-- api/video:encoded_image               (webrtc::EncodedImage)
-- api/video:video_bitrate_allocation    (webrtc::VideoBitrateAllocation)
-- api/video:video_frame                 (webrtc::VideoFrame, I420Buffer)
-- api/video_codecs:video_codecs_api     (VideoEncoder, EncoderFactory,
-                                          SdpVideoFormat, VideoCodec)
-- modules/video_coding                  (CodecSpecificInfo, h264_globals,
-                                          video_codec_interface, error_codes)
-- rtc_base:logging                      (RTC_LOG)
+  webrtc_api_passthrough (non-testonly):
+    api/units:data_rate                   (webrtc::DataRate)
+    api/video:encoded_image               (webrtc::EncodedImage)
+    api/video:video_bitrate_allocation    (webrtc::VideoBitrateAllocation)
+    api/video:video_frame                 (webrtc::VideoFrame, I420Buffer)
+    api/video_codecs:video_codecs_api     (VideoEncoder, EncoderFactory,
+                                            SdpVideoFormat, VideoCodec)
+    modules/video_coding                  (CodecSpecificInfo, h264_globals,
+                                            video_codec_interface, error_codes)
+    rtc_base:logging                      (RTC_LOG)
+  webrtc_test_passthrough (testonly):
+    test:test_support                     (gtest fixtures, helpers)
 
 Touched file:
-- third_party/webrtc_overrides/cloud_browser/BUILD.gn  (new file, +41 lines)
+- third_party/webrtc_overrides/cloud_browser/BUILD.gn  (new file)
 
 Resolved against branch-heads/7727 (Chromium 147 stable).
 ---
- .../webrtc_overrides/cloud_browser/BUILD.gn   | 38 +++++++++++++++++++
- 1 file changed, 38 insertions(+)
+ .../webrtc_overrides/cloud_browser/BUILD.gn   | 57 +++++++++++++++++++
+ 1 file changed, 57 insertions(+)
  create mode 100644 third_party/webrtc_overrides/cloud_browser/BUILD.gn
 
 diff --git a/third_party/webrtc_overrides/cloud_browser/BUILD.gn b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
 new file mode 100644
-index 0000000000..5f11be7a38
+index 0000000000..f4503f144e
 --- /dev/null
 +++ b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,57 @@
 +# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 +#
 +# Use of this source code is governed by a BSD-style license that can be
@@ -62,10 +69,16 @@ index 0000000000..5f11be7a38
 +#   [ //third_party/webrtc/*, //third_party/webrtc_overrides/* ]
 +#
 +# This file lives inside webrtc_overrides/, so it CAN depend on those
-+# internals; cloud-browser depends on this passthrough's `public_deps`
-+# instead, which re-exports the headers transitively. Add a new entry
-+# here whenever cloud-browser's encoder/capturer code needs another
-+# webrtc public-API target.
++# internals; cloud-browser depends on these passthrough source_sets'
++# `public_deps` instead, which re-export the headers transitively.
++#
++# Two passthroughs because gn enforces "non-testonly cannot depend on
++# testonly". The :webrtc_api_passthrough below ships in the production
++# worker; the :webrtc_test_passthrough is testonly and only consumed
++# by unit-test targets.
++#
++# Add a new entry here whenever cloud-browser's encoder/capturer code
++# (or its tests) needs another webrtc public-API target.
 +#
 +# Cross-references:
 +#   * //cloud-browser/capture/build-integration/BUILD.gn  (consumer)
@@ -75,6 +88,7 @@ index 0000000000..5f11be7a38
 +
 +import("//build/config/features.gni")
 +
++# Production passthrough — used by both worker and test target.
 +source_set("webrtc_api_passthrough") {
 +  # public_deps so the headers + their transitive types are visible to
 +  # any //cloud-browser/* target that depends on us.
@@ -86,6 +100,18 @@ index 0000000000..5f11be7a38
 +    "//third_party/webrtc/api/video_codecs:video_codecs_api",
 +    "//third_party/webrtc/modules/video_coding",
 +    "//third_party/webrtc/rtc_base:logging",
++  ]
++}
++
++# Test-only passthrough — gtest fixtures + helpers used by encoder
++# unit tests. Kept in its own source_set because gn forbids
++# non-testonly targets from depending on testonly ones; merging this
++# into :webrtc_api_passthrough would force the production worker to
++# inherit the testonly flag.
++source_set("webrtc_test_passthrough") {
++  testonly = true
++  public_deps = [
++    "//third_party/webrtc/test:test_support",
 +  ]
 +}
 -- 
