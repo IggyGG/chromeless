@@ -185,7 +185,7 @@ spec:
               mountPath: /workspace
       containers:
         - name: build
-          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.1
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.2
           imagePullPolicy: IfNotPresent
           # Invoke T113's script directly from the cloned repo. The
           # earlier brief proposed /work/src/build/cb-build.sh as the
