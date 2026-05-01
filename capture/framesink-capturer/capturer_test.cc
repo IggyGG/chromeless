@@ -21,6 +21,7 @@
 #include "capture/framesink-capturer/capturer.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -102,12 +103,17 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   // viz::mojom::FrameSinkVideoCapturer:
   void SetFormat(media::VideoPixelFormat /*format*/) override {}
   void SetMinCapturePeriod(base::TimeDelta /*period*/) override {}
+  void SetMinSizeChangePeriod(base::TimeDelta /*min_period*/) override {}
   void SetResolutionConstraints(const gfx::Size& /*min*/,
                                  const gfx::Size& /*max*/,
                                  bool /*fixed*/) override {}
+  void SetAutoThrottlingEnabled(bool /*enabled*/) override {}
+  void SetAnimationFpsLockIn(bool /*enabled*/,
+                              float /*majority_damaged_pixel_min_ratio*/)
+      override {}
   void ChangeTarget(
-      const viz::VideoCaptureTarget& /*target*/,
-      uint32_t /*sub_capture_target_version*/) override {}
+      const std::optional<viz::VideoCaptureTarget>& /*target*/,
+      uint32_t /*sub_capture_version*/) override {}
   void Start(
       mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumer> consumer,
       viz::mojom::BufferFormatPreference /*pref*/) override {
