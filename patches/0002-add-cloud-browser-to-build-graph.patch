@@ -1,0 +1,57 @@
+From 9357c95b52add39d6881e2d39c04e196cfdda014 Mon Sep 17 00:00:00 2001
+From: Iggy <iggy@triform.ai>
+Date: Fri, 1 May 2026 02:50:53 +0200
+Subject: [PATCH] cloud-browser: add cloud_browser_all group to root BUILD.gn
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Anchor //cloud-browser/capture/build-integration:* targets in chromium's
+gn dependency closure so 'gn gen' crawls our BUILD.gn and the worker +
+unit tests are reachable from the build graph.
+
+Why this patch exists:
+- 'autoninja //cloud-browser/...:cloud_browser_worker' was failing with
+  'unknown target' (build run at 00:47:38Z). Even fully-qualified target
+  paths don't resolve unless something the gn root reaches references
+  them.
+- The standard Chromium shape for this is a top-level group in the root
+  //BUILD.gn — see all_rust, rust_build_tests for the same pattern.
+- testonly=true matches gn_all and all_rust; both unit-test deps require
+  testonly inheritance.
+
+Touched file:
+- BUILD.gn (+13 lines, 1 hunk, between gn_all and all_rust)
+
+Resolved against branch-heads/7727 (Chromium 147 stable).
+---
+ BUILD.gn | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index f8b354bf16..41ff62539c 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -828,6 +828,19 @@ group("gn_all") {
+   }
+ }
+ 
++# Cloud Browser WebRTC worker (Phase 2). Anchored here so `gn gen` crawls
++# //cloud-browser/ and the worker + its unit tests become reachable from
++# chromium's gn dependency closure. See //cloud-browser/capture/build-
++# integration/BUILD.gn for the actual targets.
++group("cloud_browser_all") {
++  testonly = true
++  deps = [
++    "//cloud-browser/capture/build-integration:cloud_browser_worker",
++    "//cloud-browser/capture/build-integration:cloud_browser_encoder_unittests",
++    "//cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests",
++  ]
++}
++
+ # All Rust targets. This is provided for convenience while developing Rust to
+ # e.g. test build config or toolchain changes.
+ group("all_rust") {
+-- 
+2.43.0
+
