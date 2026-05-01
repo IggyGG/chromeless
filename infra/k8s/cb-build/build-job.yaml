@@ -229,7 +229,12 @@ spec:
             # operators reach for first when iterating. Override path:
             #   kubectl -n cb-build set env job/cb-build CB_BUILD_TARGETS="cloud_browser_worker"
             - name: CB_BUILD_TARGETS
-              value: "cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests"
+              # Fully-qualified gn paths so autoninja addresses the
+              # targets directly. Bare names fail with "unknown target"
+              # because //cloud-browser/... isn't in chromium's root
+              # build graph (a separate fix may also be needed to make
+              # gn parse the BUILD.gn at all).
+              value: "//cloud-browser/capture/build-integration:cloud_browser_worker //cloud-browser/capture/build-integration:cloud_browser_encoder_unittests //cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             # Ninja parallelism. autoninja's auto-detect picks
             # nproc=32 on triform-6, which over-subscribes the
             # 30-CPU container cap; gives lto + sccache server headroom.
