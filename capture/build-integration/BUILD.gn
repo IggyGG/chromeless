@@ -245,6 +245,14 @@ executable("cloud_browser_worker") {
   sources = [ "cloud_browser_worker_main.cc" ]
   deps = [
     ":embedder",
+    # //base brings in partition_alloc transitively, which the
+    # base/memory/raw_ptr_exclusion.h facade header forwards into
+    # via #include "partition_alloc/pointers/raw_ptr_exclusion.h".
+    # Without this dep the worker exec compile fails with a missing-
+    # include for partition_alloc/pointers/raw_ptr_exclusion.h
+    # (Wall #31). Source sets like :encoder_factory get this
+    # transitively through other deps; the bare exec doesn't.
+    "//base",
   ]
   configs += [ ":cb_include_paths" ]               # T17.
   # cloud_browser_worker is a Linux-server binary; we don't carry mac/
