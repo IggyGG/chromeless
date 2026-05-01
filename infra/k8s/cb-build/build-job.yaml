@@ -100,7 +100,7 @@ spec:
         # this container so a single chown -R covers both subdirs in
         # one shot.
         - name: bootstrap-our-repo
-          image: alpine/git:v2.45.2
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.3
           command:
             - sh
             - -euxc
