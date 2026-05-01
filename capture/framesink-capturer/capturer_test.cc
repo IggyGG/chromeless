@@ -26,7 +26,6 @@
 #include <vector>
 
 #include "base/memory/scoped_refptr.h"
-#include "base/no_destructor.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
@@ -177,12 +176,16 @@ class FrameSinkCapturerTest : public ::testing::Test {
     // process. You must call mojo::core::Init() as an embedder."
     // (mojo/public/c/system/thunks.cc:40).
     //
-    // We use a base::NoDestructor singleton so Init runs exactly
-    // once regardless of how many test fixtures instantiate.
-    [[maybe_unused]] static base::NoDestructor<bool> kMojoInited([] {
+    // We use a function-local static initialized via lambda so Init
+    // runs exactly once regardless of how many test fixtures
+    // instantiate. base::NoDestructor<bool> static_asserts because
+    // bool is trivially constructible/destructible — for a one-shot
+    // side-effect initializer, a plain `static const bool` is the
+    // canonical pattern.
+    [[maybe_unused]] static const bool kMojoInited = []() {
       mojo::core::Init();
       return true;
-    }());
+    }();
 
     auto producer_remote = producer_.BindAndPassRemote();
     capturer_ = std::make_unique<CloudBrowserFrameSinkCapturer>(
