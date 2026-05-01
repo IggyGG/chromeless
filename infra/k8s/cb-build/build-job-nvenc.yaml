@@ -1,0 +1,452 @@
+# build-job-nvenc.yaml — Chromium build Job, NVENC profile (Track F3 / T63).
+#
+# ============================================================================
+# PREREQUISITE: nvenc-sdk Secret must exist before this Job will run.
+# ============================================================================
+#
+# The NVIDIA Video Codec SDK is licensed under NVIDIA's proprietary EULA and
+# is NOT redistributable in this repo. The user procures it once, out-of-band:
+#
+#   1. Register at https://developer.nvidia.com/ (free, accept EULA).
+#   2. Download the NVIDIA Video Codec SDK tarball from
+#      https://developer.nvidia.com/nvidia-video-codec-sdk
+#      (current at time of writing: Video_Codec_SDK_12.x.zip).
+#   3. Extract. Inside the unpacked tree there is an `Interface/` directory
+#      containing nvEncodeAPI.h, nvEncodeAPI.h.LICENSE, and the
+#      cuviddec.h / nvcuvid.h / nvEncodeAPI*.h headers.
+#   4. Create the Secret in the cb-build namespace:
+#
+#        kubectl -n cb-build create secret generic nvenc-sdk \
+#          --from-file=Interface=/path/to/extracted/sdk/Interface/
+#
+#      (the --from-file=Interface=<dir> form puts each file in the directory
+#       under the key "Interface/<filename>", which volumeMount projects as
+#       /opt/nvenc-sdk/Interface/<filename> — exactly what
+#       capture/build-integration/BUILD.gn:config(":nvenc_sdk") expects.)
+#
+#   5. Apply this Job: `kubectl apply -f build-job-nvenc.yaml`.
+#
+# Without the Secret, the pod startup will fail at Init:
+#   MountVolume.SetUp failed for volume "nvenc-sdk" : secret "nvenc-sdk" not found
+# That's the gate. The Job is otherwise authored to be apply-and-go.
+# ============================================================================
+#
+# ============================================================================
+# Node targeting: triform-5 (the NVIDIA-equipped node).
+# ============================================================================
+#
+# triform-5 has the label `nvidia.com/gpu.present=true` and the
+# `nvidia.com/gpu=present:NoSchedule` taint. The build itself is CPU-only
+# (CUDA libs are needed at link time but not at compute time — no GPU
+# device is requested), so we don't need to request `nvidia.com/gpu: 1`
+# on the container, but we DO need a toleration to schedule onto the
+# tainted node. The selector pins us to the GPU node so the device-driver-
+# managed CUDA library paths under /usr/lib/x86_64-linux-gnu are usable
+# if the kernel module is loaded (informational; we install our own CUDA
+# toolkit for build-time link resolution below).
+#
+# triform-2 (the x264 build host) is intentionally NOT used here: x264 is
+# CPU-only and triform-2 is being repaired for orphan-in-DB containerd
+# corruption (see build-job-x264.yaml header). triform-5 has a healthy
+# containerd snapshot chain so the cb-build-runner image would also work,
+# but we keep the debian:bookworm-slim base to mirror the x264 path until
+# both Tracks F1+F3 stabilise on the same image.
+# ============================================================================
+#
+# ============================================================================
+# CUDA toolkit (link-time dependency).
+# ============================================================================
+#
+# capture/build-integration/BUILD.gn:config(":nvenc_sdk") references
+# /usr/local/cuda/include and /usr/local/cuda/lib64, plus libs
+# `nvidia-encode` and `cuda` (i.e. -lnvidia-encode -lcuda on the link
+# line). We install Debian's `nvidia-cuda-toolkit` (which lives in the
+# `contrib` component, NOT in main; bookworm-slim only enables `main`
+# by default — we add `contrib` in the bootstrap apt sources) and
+# symlink /usr/local/cuda into the Debian-installed layout so the
+# include/lib paths resolve. libnvidia-encode.so comes from the
+# `libnvidia-encode-dev` virtual provided by the same contrib repo.
+#
+# This is link-time only; at runtime the cb-chromium image inherits
+# the host's NVIDIA driver stubs via the NVIDIA Container Toolkit when
+# scheduled on a GPU node with `nvidia.com/gpu: 1` requested. (The
+# encoder factory's runtime probe handles the case where libnvidia-
+# encode is missing — falls back to libwebrtc software paths.)
+#
+# TODO: if the Debian contrib package layout drifts or the contrib
+# mirror is unreachable from the cluster, switch to NVIDIA's official
+# CUDA repo (https://developer.download.nvidia.com/compute/cuda/repos/
+# debian12/x86_64/) which installs at /usr/local/cuda directly. That
+# pulls ~3 GB though; we prefer the smaller Debian package.
+# ============================================================================
+#
+# Profile selector: CB_BUILD_PROFILE=nvenc in the main env. cb-build.sh
+# step 3.5 verifies /opt/nvenc-sdk/Interface/ is mounted; build.sh:cmd_gen
+# imports args.nvenc.gn instead of args.gn.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cb-build-nvenc
+  namespace: cb-build
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: build
+    app.kubernetes.io/variant: nvenc
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 28800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloud-browser-webrtc
+        app.kubernetes.io/component: build
+        app.kubernetes.io/variant: nvenc
+    spec:
+      restartPolicy: OnFailure
+      # Pin to the GPU node so the in-tree NVIDIA driver libs are
+      # reachable from the build container (informational: link
+      # resolution comes from the apt-installed CUDA toolkit below;
+      # this just keeps the topology coherent with where NVENC will
+      # eventually run).
+      nodeName: triform-5
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        # triform-5 is tainted nvidia.com/gpu=present:NoSchedule to keep
+        # generic workloads off it. The build job has to opt in.
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        - name: bootstrap-our-repo
+          image: debian:bookworm-slim
+          command:
+            - bash
+            - -euxc
+            - |
+              # ---- Phase 1: install OS deps + CUDA toolkit -------
+              # Mirrors Dockerfile.build-runner's apt-install set so the
+              # main container can rely on the same baseline. We
+              # additionally enable the `contrib` component so
+              # nvidia-cuda-toolkit is reachable.
+              export DEBIAN_FRONTEND=noninteractive
+
+              # Add `contrib` to bookworm-slim's main-only sources.
+              # bookworm-slim ships /etc/apt/sources.list.d/debian.sources
+              # in deb822 format; rewriting in-place is the supported
+              # way to enable additional components.
+              if grep -q '^Components: main$' /etc/apt/sources.list.d/debian.sources 2>/dev/null; then
+                sed -i 's/^Components: main$/Components: main contrib/' \
+                  /etc/apt/sources.list.d/debian.sources
+              fi
+
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git python3 python3-pip \
+                build-essential pkg-config sudo lsb-release file \
+                xz-utils zstd rsync findutils libglib2.0-0 gperf \
+                bison flex
+
+              # ---- Phase 2: clone chromeless to /workspace --------
+              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              if [ ! -d /workspace/.git ]; then
+                git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                  "${AUTH_REPO}" /workspace
+                git -C /workspace remote set-url origin "${OUR_REPO}"
+              else
+                cd /workspace \
+                  && git fetch --depth 1 origin "${OUR_REPO_REF}" \
+                  && git reset --hard FETCH_HEAD
+              fi
+              [ -x /workspace/build/cb-build.sh ] || {
+                echo "ERROR: /workspace/build/cb-build.sh missing"; exit 1; }
+
+              # ---- Phase 3: depot_tools (idempotent) -------------
+              if [ ! -x /work/depot_tools/gn ] && [ ! -d /work/depot_tools/.git ]; then
+                git clone --depth 200 \
+                  https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+                  /work/depot_tools
+              else
+                cd /work/depot_tools && git pull --ff-only || true
+              fi
+
+              # ---- Phase 4: sccache (idempotent) -----------------
+              SCCACHE_VERSION=v0.8.2
+              if [ ! -x /work/depot_tools-bin/sccache ]; then
+                mkdir -p /work/depot_tools-bin
+                curl -fSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+                  -o /tmp/sccache.tar.gz
+                tar -xzf /tmp/sccache.tar.gz -C /tmp
+                install -m 0755 \
+                  "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" \
+                  /work/depot_tools-bin/sccache
+                rm -rf /tmp/sccache.tar.gz "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl"
+              fi
+
+              # ---- Phase 5: workdirs -----------------------------
+              mkdir -p /work/src/chromium /work/artifacts /work/logs
+              chown 1000:1000 /work/src /work/artifacts /work/logs
+              chown -R 1000:1000 /work/depot_tools /work/depot_tools-bin
+
+              # ---- Phase 6a: NVENC SDK presence check ------------
+              # The /opt/nvenc-sdk volume is projected from the
+              # `nvenc-sdk` Secret. If the Secret was created with
+              # --from-file=Interface=<dir>, the keys are
+              # "Interface/<filename>" and the projection lays them
+              # out as /opt/nvenc-sdk/Interface/<filename>. Verify
+              # that here so failures surface in init-time logs
+              # rather than mid-build.
+              if [ ! -f /opt/nvenc-sdk/Interface/nvEncodeAPI.h ]; then
+                echo "ERROR: /opt/nvenc-sdk/Interface/nvEncodeAPI.h missing"
+                echo "ERROR: the nvenc-sdk Secret either doesn't exist or"
+                echo "ERROR: was created with the wrong --from-file layout."
+                echo "ERROR: see this manifest's header for the correct"
+                echo "ERROR: kubectl create secret invocation."
+                ls -la /opt/nvenc-sdk/ 2>/dev/null || echo "(/opt/nvenc-sdk empty)"
+                exit 1
+              fi
+              echo "NVENC SDK present: $(ls /opt/nvenc-sdk/Interface | wc -l) files in Interface/"
+
+              # ---- Phase 6b: CUDA toolkit (idempotent) -----------
+              # nvidia-cuda-toolkit lives in `contrib`. Install it +
+              # libcuda1 (provides /usr/lib/x86_64-linux-gnu/libcuda.so.1)
+              # and create the /usr/local/cuda layout that BUILD.gn:
+              # config(":nvenc_sdk") expects.
+              #
+              # NOTE: the Debian contrib package set is the cheap path;
+              # if the link fails for missing libnvidia-encode or libcuda
+              # symbols, swap to NVIDIA's official CUDA repo (see header).
+              if [ ! -L /usr/local/cuda ] && [ ! -d /usr/local/cuda ]; then
+                apt-get install -y --no-install-recommends \
+                  nvidia-cuda-toolkit nvidia-cuda-dev || {
+                    echo "WARN: nvidia-cuda-toolkit install failed"
+                    echo "WARN: this is expected if the contrib repo is"
+                    echo "WARN: unreachable from the cluster. Fall back"
+                    echo "WARN: to NVIDIA's official CUDA repo (see manifest"
+                    echo "WARN: header)."
+                    exit 1
+                  }
+
+                # Lay out /usr/local/cuda the way BUILD.gn expects:
+                #   /usr/local/cuda/include/cuda*.h         <- headers
+                #   /usr/local/cuda/lib64/libcuda.so        <- libs
+                # Debian installs to /usr/include and
+                # /usr/lib/x86_64-linux-gnu respectively, so we symlink.
+                mkdir -p /usr/local/cuda
+                ln -sf /usr/include                /usr/local/cuda/include
+                ln -sf /usr/lib/x86_64-linux-gnu   /usr/local/cuda/lib64
+                # libnvidia-encode.so may not exist as an unversioned
+                # symlink; create one if the SO-name version is present.
+                if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1 ] \
+                   && [ ! -e /usr/lib/x86_64-linux-gnu/libnvidia-encode.so ]; then
+                  ln -sf libnvidia-encode.so.1 \
+                    /usr/lib/x86_64-linux-gnu/libnvidia-encode.so
+                fi
+                # Same for libcuda.
+                if [ -f /usr/lib/x86_64-linux-gnu/libcuda.so.1 ] \
+                   && [ ! -e /usr/lib/x86_64-linux-gnu/libcuda.so ]; then
+                  ln -sf libcuda.so.1 \
+                    /usr/lib/x86_64-linux-gnu/libcuda.so
+                fi
+              fi
+              ls -la /usr/local/cuda/include/cuda.h /usr/local/cuda/lib64/libcuda.so 2>&1 || \
+                echo "WARN: CUDA toolkit symlinks not fully resolved (link may fail)"
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # CHOWN/FOWNER/DAC_OVERRIDE: workdir setup
+              # SETUID/SETGID: apt drops to _apt user during fetch
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+            - name: nvenc-sdk
+              mountPath: /opt/nvenc-sdk
+              readOnly: true
+      containers:
+        - name: build
+          image: debian:bookworm-slim
+          imagePullPolicy: IfNotPresent
+          # Runs as root — debian:bookworm-slim doesn't ship a builder
+          # user, and apt-get install (needed for the OS deps the build
+          # uses) requires root. We create a uid-1000 builder user
+          # inline, install OS deps as root, then drop to builder for
+          # the chromium compile. The chromium-src hostPath has been
+          # owned 1000:1000 since the cb-build-runner runs, so the
+          # ownership scheme is preserved across both build paths.
+          command:
+            - bash
+            - -c
+            - |
+              set -euxo pipefail
+
+              # ---- OS deps (root) --------------------------------
+              # Same set as the bootstrap initContainer + the contrib
+              # component for the CUDA toolkit (the symlinks at
+              # /usr/local/cuda are in the workdir's hostPath layout
+              # via the bootstrap, but the .so / .h files themselves
+              # live in /usr — installed in the bootstrap container's
+              # filesystem, NOT visible here. We re-install in the
+              # main container too. apt cache makes this cheap.)
+              export DEBIAN_FRONTEND=noninteractive
+
+              if grep -q '^Components: main$' /etc/apt/sources.list.d/debian.sources 2>/dev/null; then
+                sed -i 's/^Components: main$/Components: main contrib/' \
+                  /etc/apt/sources.list.d/debian.sources
+              fi
+
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git python3 python3-pip \
+                build-essential pkg-config lsb-release file \
+                xz-utils zstd rsync findutils libglib2.0-0 gperf \
+                bison flex \
+                nvidia-cuda-toolkit nvidia-cuda-dev || true
+
+              # Lay out /usr/local/cuda the same way the bootstrap did,
+              # in this container's filesystem. Idempotent.
+              if [ ! -L /usr/local/cuda ] && [ ! -d /usr/local/cuda ]; then
+                mkdir -p /usr/local/cuda
+                ln -sf /usr/include              /usr/local/cuda/include
+                ln -sf /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64
+                if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1 ] \
+                   && [ ! -e /usr/lib/x86_64-linux-gnu/libnvidia-encode.so ]; then
+                  ln -sf libnvidia-encode.so.1 \
+                    /usr/lib/x86_64-linux-gnu/libnvidia-encode.so
+                fi
+                if [ -f /usr/lib/x86_64-linux-gnu/libcuda.so.1 ] \
+                   && [ ! -e /usr/lib/x86_64-linux-gnu/libcuda.so ]; then
+                  ln -sf libcuda.so.1 \
+                    /usr/lib/x86_64-linux-gnu/libcuda.so
+                fi
+              fi
+
+              # ---- builder user ---------------------------------
+              if ! id builder >/dev/null 2>&1; then
+                useradd -m -u 1000 -s /bin/bash builder
+              fi
+              mkdir -p /home/builder/.cache
+              chown -R 1000:1000 /home/builder
+
+              # ---- drop to builder + exec the build --------------
+              su builder -c '
+                set -euxo pipefail
+                export PATH=/work/depot_tools:/work/depot_tools-bin:/usr/local/bin:/usr/bin:/bin
+                export DEPOT_TOOLS_UPDATE=0
+                export HOME=/home/builder
+                (cd /work/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3 || true
+                exec bash /workspace/build/cb-build.sh
+              '
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: CHROMIUM_BRANCH_NUMBER
+              value: "7727"
+            - name: CB_REPO
+              value: "/workspace"
+            - name: CB_WORK_ROOT
+              value: "/work"
+            - name: SCCACHE_DIR
+              value: "/sccache"
+            - name: CB_BUILD_TARGETS
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+            - name: NINJA_PARALLELISM
+              value: "14"
+            - name: SKIP_FETCH
+              value: "1"
+            - name: STUB_MODE
+              value: ""
+            - name: SCCACHE_IDLE_TIMEOUT
+              value: "0"
+            - name: SCCACHE_CACHE_SIZE
+              value: "80G"
+            - name: CB_BUILD_PROFILE
+              value: "nvenc"
+            - name: NVENC_SDK_PATH
+              value: "/opt/nvenc-sdk"
+          resources:
+            requests:
+              cpu: "16"
+              memory: "96Gi"
+            limits:
+              cpu: "16"
+              memory: "96Gi"
+              ephemeral-storage: "8Gi"
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+            - name: nvenc-sdk
+              mountPath: /opt/nvenc-sdk
+              readOnly: true
+          # Main container runs as root so apt-get install works;
+          # the bash command then `useradd builder` (uid 1000) and
+          # `su builder -c` for the chromium compile so the in-tree
+          # writes inherit 1000:1000 ownership consistent with the
+          # cb-build-runner-based path.
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # SETUID/SETGID for su to drop to builder; CHOWN/FOWNER
+              # for the inline /home/builder ownership setup; DAC_OVERRIDE
+              # for cross-uid file access during the apt+useradd setup.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: workdir
+          hostPath:
+            # triform-5-specific path. The x264 build uses /mnt/data/cb-build-t2/
+            # on triform-2; we use a sibling t5 path here so each node's
+            # build state is isolated.
+            path: /mnt/data/cb-build-t5/chromium-src
+            type: DirectoryOrCreate
+        - name: sccache
+          hostPath:
+            path: /mnt/data/cb-build-t5/sccache
+            type: DirectoryOrCreate
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: nvenc-sdk
+          secret:
+            secretName: nvenc-sdk
+            # defaultMode 0444 — the SDK is read-only at build time;
+            # neither root nor builder writes back into the mount.
+            defaultMode: 0444

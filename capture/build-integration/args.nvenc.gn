@@ -1,0 +1,42 @@
+# gn args overlay for the NVENC build profile (Track F3 / T63).
+#
+# Imports the base args.gn unchanged, then enables the NVIDIA Video
+# Codec SDK path by setting nvenc_sdk_path = "/opt/nvenc-sdk". The
+# build-job-nvenc.yaml mounts a Kubernetes Secret named `nvenc-sdk` at
+# that path, exposing the SDK's `Interface/` directory (nvEncodeAPI.h
+# et al). The user creates that Secret out-of-band — see the README
+# block at the top of build-job-nvenc.yaml for the procurement and
+# `kubectl create secret` steps.
+#
+# capture/build-integration/BUILD.gn:config("nvenc_sdk") gates the
+# HAS_NVENC=1 define on `nvenc_sdk_path != ""`, so this overlay is the
+# only thing the encoder factory needs to flip the NVENC path on at
+# build time. The same config pulls system CUDA headers/libs from
+# /usr/local/cuda/{include,lib64} — the build-job bootstrap installs
+# the CUDA toolkit there so libnvidia-encode.so + libcuda.so are
+# present at link time. (Runtime resolution happens against the host's
+# NVIDIA driver libs, surfaced via the device plugin.)
+#
+# Selected by setting CB_BUILD_PROFILE=nvenc in the build job env;
+# cb-build.sh step 3.5 verifies /opt/nvenc-sdk/Interface/ is mounted
+# and build.sh:cmd_gen imports this file.
+#
+# Track F1 (x264) and Track F2 (vaapi) follow the same pattern via
+# args.x264.gn / args.vaapi.gn — but those stage system-libs from
+# apt-get rather than a Secret-mounted SDK, because libx264 and libva
+# are freely redistributable while the NVIDIA Video Codec SDK is
+# not. T63.
+
+import("//cloud-browser/capture/build-integration/args.gn")
+
+# NVENC SDK mounted by the build-job-nvenc.yaml bootstrap initContainer
+# from the `nvenc-sdk` Kubernetes Secret. Layout that
+# capture/build-integration/BUILD.gn:config(":nvenc_sdk") expects:
+#   ${nvenc_sdk_path}/Interface/nvEncodeAPI.h
+#   ${nvenc_sdk_path}/Interface/nvEncodeAPI.h.LICENSE
+#   ${nvenc_sdk_path}/Interface/...
+#
+# The CUDA include + lib paths (/usr/local/cuda/{include,lib64}) are
+# hardcoded inside config(":nvenc_sdk") and supplied by the bootstrap's
+# CUDA toolkit install — they don't need a separate gn arg here.
+nvenc_sdk_path = "/opt/nvenc-sdk"
