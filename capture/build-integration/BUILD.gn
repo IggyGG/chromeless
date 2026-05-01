@@ -284,6 +284,10 @@ source_set("embedder") {
     "//services/viz/privileged/mojom",
     "//third_party/inspector_protocol:crdtp",
     "//ui/base",
+    # cloud_browser_browser_main_parts.cc creates a default
+    # display::ScreenBase so chromium's Screen::Get() returns non-null.
+    "//ui/display",
+    "//ui/gfx/geometry",
     "//url",
     # NOTE — cb_devtools_agent.cc additionally includes
     # "content/browser/compositor/surface_utils.h" (with a //nogncheck

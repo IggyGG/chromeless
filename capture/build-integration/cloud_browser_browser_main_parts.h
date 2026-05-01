@@ -42,6 +42,10 @@ namespace content {
 class WebContents;
 }  // namespace content
 
+namespace display {
+class ScreenBase;
+}  // namespace display
+
 namespace cloud_browser {
 
 class CloudBrowserBrowserContext;
@@ -72,6 +76,17 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // Symmetric counterpart called from PostMainMessageLoopRun. Calls
   // StopRemoteDebuggingServer iff StartDevToolsHttpHandler ran.
   void StopDevToolsHttpHandler();
+
+  // Owned global display::Screen instance. chromium fatals on
+  // `Check failed: Screen::Get()` from ui/display/display_observer.cc:32
+  // during browser-process init when something registers a
+  // DisplayObserver against a null Screen — the worker hits this even
+  // though it never paints to a real surface, because internal
+  // subsystems (audio, prefetch, ...) attach observers as part of
+  // their startup. Constructed in PreMainMessageLoopRun before the
+  // BrowserContext + initial WebContents so the registration order is
+  // safe.
+  std::unique_ptr<display::ScreenBase> screen_;
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;

@@ -28,6 +28,10 @@
 #include "net/socket/server_socket.h"
 #include "net/socket/tcp_server_socket.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/display/display.h"
+#include "ui/display/screen.h"
+#include "ui/display/screen_base.h"
+#include "ui/gfx/geometry/rect.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
 
@@ -100,7 +104,38 @@ CloudBrowserBrowserMainParts::CloudBrowserBrowserMainParts() = default;
 
 CloudBrowserBrowserMainParts::~CloudBrowserBrowserMainParts() = default;
 
+namespace {
+
+// Internal default display geometry. Matches the Xvfb resolution the
+// cb-chromium pod brings up (`Xvfb :99 -screen 0 1280x720x24`) so the
+// virtual display the embedder reports is the same one chromium would
+// have observed if it were Aura-driven on the X11 server.
+constexpr int64_t kDefaultDisplayId = 1;
+constexpr int kDefaultDisplayWidth = 1280;
+constexpr int kDefaultDisplayHeight = 720;
+
+}  // namespace
+
 int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
+  // 0. Global display::Screen. chromium subsystems register
+  //    DisplayObservers against the global Screen during init; without
+  //    one set the worker fatals at
+  //    `Check failed: Screen::Get()` (ui/display/display_observer.cc:32).
+  //    A bare ScreenBase with a single 1280x720 display matches the
+  //    Xvfb resolution the cb-chromium pod brings up and gives those
+  //    observers something to attach to. Done before any chromium code
+  //    that might register an observer runs.
+  if (!display::Screen::GetScreen()) {
+    screen_ = std::make_unique<display::ScreenBase>();
+    display::Display default_display(
+        kDefaultDisplayId,
+        gfx::Rect(0, 0, kDefaultDisplayWidth, kDefaultDisplayHeight));
+    default_display.set_device_scale_factor(1.0f);
+    screen_->display_list().AddDisplay(default_display,
+                                       display::DisplayList::Type::PRIMARY);
+    display::Screen::SetScreenInstance(screen_.get());
+  }
+
   // 1. Profile.
   browser_context_ = std::make_unique<CloudBrowserBrowserContext>();
 
@@ -150,6 +185,15 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // reversing the order trips a CHECK in chromium.
   initial_web_contents_.reset();
   browser_context_.reset();
+
+  // Tear down the global Screen last (and only if we created it —
+  // observer-attached subsystems may still hold raw pointers, so
+  // dropping earlier risks a UAF). SetScreenInstance(nullptr) clears
+  // the global before the unique_ptr destructor frees the memory.
+  if (screen_) {
+    display::Screen::SetScreenInstance(nullptr);
+    screen_.reset();
+  }
 }
 
 void CloudBrowserBrowserMainParts::StartDevToolsHttpHandler() {
