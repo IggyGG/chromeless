@@ -47,6 +47,15 @@ ozone_platform_headless  = true
 ozone_platform_x11       = true    # Phase 1 still uses Xvfb.
 ozone_platform_wayland   = false
 
+# ---- V8 snapshot -----------------------------------------------------
+# Embed the V8 startup snapshot in the binary instead of loading
+# snapshot_blob.bin at runtime. Avoids base::DIR_ASSETS path-
+# resolution fragility for the standalone worker binary (which
+# doesn't ship under a chromium framework bundle on Linux). Costs
+# ~3 MiB on the stripped binary; trade is worth it for runtime
+# robustness.
+v8_use_external_startup_data = false
+
 # ---- Toolchain -------------------------------------------------------
 treat_warnings_as_errors = false   # rolls hurt less.
 clang_use_chrome_plugins = true
