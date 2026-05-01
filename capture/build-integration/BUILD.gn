@@ -120,12 +120,23 @@ config("cb_include_paths") {
 # upstream tree). Instead we link the system libx264 dynamically when
 # present. Empty `x264_libdir` = HAS_X264 undefined → ProbeAvailable
 # returns false → factory falls through.
+#
+# --allow-shlib-undefined: chromium pins its sysroot to debian bullseye
+# (glibc 2.31) for ABI stability, but the libx264 we stage from the
+# build host is built against bookworm (glibc 2.36). At link time, lld
+# sees libx264 references pthread_join@GLIBC_2.34, dlopen@GLIBC_2.34,
+# fstat64@GLIBC_2.33, etc. (these were merged from libpthread/libdl
+# into libc.so.6 in glibc 2.34) and rejects the link with
+# --no-allow-shlib-undefined (lld's default). Allowing it lets the
+# binary link; at runtime the cb-chromium image (debian bookworm,
+# glibc 2.36) supplies the symbols.
 config("x264") {
   if (x264_libdir != "") {
     defines = [ "HAS_X264=1" ]
     include_dirs = [ "$x264_libdir/include" ]
     libs = [ "x264" ]
     lib_dirs = [ "$x264_libdir/lib" ]
+    ldflags = [ "-Wl,--allow-shlib-undefined" ]
   }
 }
 
