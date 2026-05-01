@@ -99,39 +99,6 @@ spec:
         # newly-created dir. We mount the parent /data/cb-build for
         # this container so a single chown -R covers both subdirs in
         # one shot.
-        - name: host-permissions
-          image: alpine:3.20
-          command:
-            - sh
-            - -euxc
-            - |
-              # Both subdirs may be empty (first run) or populated
-              # (subsequent run). chown -R is idempotent in either
-              # case.
-              mkdir -p /work /sccache
-              chown -R 1000:1000 /work /sccache
-              ls -la /work /sccache
-          securityContext:
-            runAsUser: 0
-            runAsNonRoot: false
-            allowPrivilegeEscalation: false
-            capabilities:
-              # We need DAC_OVERRIDE + CHOWN to chown a dir we don't
-              # already own. Drop the rest.
-              drop: ["ALL"]
-              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
-          volumeMounts:
-            - name: workdir
-              mountPath: /work
-            - name: sccache
-              mountPath: /sccache
-        # 2/2: bootstrap-our-repo — clone our repo into /workspace
-        # (the path T113's cb-build.sh expects via CB_REPO=/workspace).
-        # Runs after host-permissions so /work and /sccache are
-        # already 1000-owned by the time the main container starts.
-        #
-        # Idempotent: re-running on the same Pod refreshes via
-        # `git fetch` + `git reset --hard`.
         - name: bootstrap-our-repo
           image: alpine/git:v2.45.2
           command:
