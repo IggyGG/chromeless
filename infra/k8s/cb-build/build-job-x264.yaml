@@ -1,0 +1,206 @@
+# build-job-x264.yaml — Chromium build Job, x264 profile (Track F1).
+#
+# Variant of build-job.yaml with two functional changes:
+#   1. The bootstrap initContainer additionally apt-installs libx264-dev
+#      and stages /usr/include/x264.h + /usr/lib/.../libx264.so* into
+#      /work/system-libs/{include,lib}. The main build container is
+#      sandboxed (runAsUser:1000, allowPrivilegeEscalation:false,
+#      drop ALL caps) so it cannot apt-install on its own — the install
+#      lives in the root-privileged init.
+#   2. The main container sets CB_BUILD_PROFILE=x264, which in cb-build.sh
+#      verifies /work/system-libs is staged correctly and in build.sh
+#      switches the gn-args overlay from args.gn to args.x264.gn.
+#
+# Why install at run time instead of in cb-build-runner Dockerfile:
+# the runner image is profile-agnostic on purpose — image rebuilds
+# require kaniko orchestration that we don't have wired up yet, and
+# baking every codec's deps in would inflate it for every consumer.
+# The init-container approach gives O(seconds) iteration on a profile
+# without an image bump.
+#
+# All other settings — node, hostPath workdirs, sccache, env vars,
+# resources, security context — are identical to build-job.yaml.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cb-build-x264
+  namespace: cb-build
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: build
+    app.kubernetes.io/variant: x264
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 28800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloud-browser-webrtc
+        app.kubernetes.io/component: build
+        app.kubernetes.io/variant: x264
+    spec:
+      restartPolicy: OnFailure
+      nodeName: triform-2
+      nodeSelector:
+        kubernetes.io/hostname: triform-2
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        - name: bootstrap-our-repo
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.3
+          command:
+            - sh
+            - -euxc
+            - |
+              # Clone or refresh our repo at OUR_REPO_REF.
+              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              if [ ! -d /workspace/.git ]; then
+                git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                  "${AUTH_REPO}" /workspace
+                git -C /workspace remote set-url origin "${OUR_REPO}"
+              else
+                cd /workspace \
+                  && git fetch --depth 1 origin "${OUR_REPO_REF}" \
+                  && git reset --hard FETCH_HEAD
+              fi
+
+              if [ ! -x /workspace/build/cb-build.sh ]; then
+                echo "ERROR: /workspace/build/cb-build.sh missing or not executable" >&2
+                exit 1
+              fi
+
+              mkdir -p /work/src/chromium /work/artifacts /work/logs
+              chown 1000:1000 /work/src /work/artifacts /work/logs
+
+              # ---- x264 profile staging --------------------------
+              # Install libx264-dev into THIS container's rootfs, then
+              # copy the headers + .so files into /work/system-libs
+              # (a hostPath volume the main build container also
+              # mounts). args.x264.gn points x264_libdir at this prefix.
+              #
+              # Idempotent: a second invocation finds the files already
+              # in place. apt-get update + install on bookworm-slim
+              # picks up libx264-dev from the main repo.
+              if [ ! -e /work/system-libs/include/x264.h ]; then
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update
+                apt-get install -y --no-install-recommends libx264-dev
+                mkdir -p /work/system-libs/include /work/system-libs/lib
+                cp -a /usr/include/x264.h         /work/system-libs/include/
+                cp -a /usr/include/x264_config.h  /work/system-libs/include/
+                # libx264.so + the SONAME-versioned files; cp -P
+                # preserves symlinks so the linker can resolve -lx264.
+                cp -aP /usr/lib/x86_64-linux-gnu/libx264.so* /work/system-libs/lib/
+                chown -R 1000:1000 /work/system-libs
+                ls -la /work/system-libs/include /work/system-libs/lib
+              else
+                echo "[x264-stage] /work/system-libs already populated; skipping apt"
+              fi
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # Need DAC_OVERRIDE+CHOWN for the workdir setup; SETUID/SETGID
+              # for apt's drop-to-_apt user during fetch.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: build
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.3
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -c
+            - |
+              (cd /opt/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3
+              exec bash /workspace/build/cb-build.sh
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: CHROMIUM_BRANCH_NUMBER
+              value: "7727"
+            - name: CB_REPO
+              value: "/workspace"
+            - name: CB_WORK_ROOT
+              value: "/work"
+            - name: SCCACHE_DIR
+              value: "/sccache"
+            - name: CB_BUILD_TARGETS
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+            - name: NINJA_PARALLELISM
+              value: "14"
+            - name: SKIP_FETCH
+              value: "1"
+            - name: STUB_MODE
+              value: ""
+            - name: SCCACHE_IDLE_TIMEOUT
+              value: "0"
+            - name: SCCACHE_CACHE_SIZE
+              value: "80G"
+            # ---- profile selector — Track F1 ----
+            - name: CB_BUILD_PROFILE
+              value: "x264"
+          resources:
+            requests:
+              cpu: "16"
+              memory: "96Gi"
+            limits:
+              cpu: "16"
+              memory: "96Gi"
+              ephemeral-storage: "8Gi"
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: workdir
+          hostPath:
+            path: /mnt/data/cb-build-t2/chromium-src
+            type: DirectoryOrCreate
+        - name: sccache
+          hostPath:
+            path: /mnt/data/cb-build-t2/sccache
+            type: DirectoryOrCreate
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi

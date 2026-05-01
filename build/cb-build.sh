@@ -227,6 +227,87 @@ fi
 step_done
 
 # ---------------------------------------------------------------------
+# Step 3.5 — verify profile system libraries are staged.
+#
+# Each CB_BUILD_PROFILE flips on a different encoder gate in
+# capture/build-integration/BUILD.gn:config(":x264"|":vaapi"|":nvenc"
+# |":svt_av1"). The gate references a system library that lives outside
+# chromium's third_party/ tree (libx264 / libva / NVENC SDK / libSvtAv1Enc).
+#
+# The MAIN build container runs with allowPrivilegeEscalation=false, so
+# sudo is unusable here. The libs are instead installed by the
+# bootstrap initContainer in build-job-<profile>.yaml, which runs as
+# root and copies headers/libs into /work/system-libs (a hostPath
+# location reachable by both the build container and the test pod).
+#
+# This step verifies the expected staging layout is present and fails
+# fast with an actionable message if not, rather than letting `gn gen`
+# emit a cryptic "include not found" error 30s later.
+# ---------------------------------------------------------------------
+
+step "3.5/9 profile system-deps verify"
+
+profile="${CB_BUILD_PROFILE:-sw}"
+log "build profile: ${profile}"
+
+verify_libs() {
+    local prefix="$1"
+    shift
+    local missing=()
+    while [[ $# -gt 0 ]]; do
+        if [[ ! -e "${prefix}/$1" ]]; then
+            missing+=("${prefix}/$1")
+        fi
+        shift
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "ERROR: profile '${profile}' is missing the following files at ${prefix}:"
+        printf '  %s\n' "${missing[@]}"
+        die "stage these via the build-job-${profile}.yaml bootstrap initContainer"
+    fi
+    log "profile '${profile}' libs verified at ${prefix}"
+}
+
+case "${profile}" in
+    sw)
+        log "no profile-specific system deps (sw build)"
+        ;;
+    x264|all)
+        # Track F1 (T36). libx264 expected at /work/system-libs.
+        if [[ -z "${STUB_MODE}" ]]; then
+            verify_libs /work/system-libs include/x264.h lib/libx264.so
+        else
+            log "[stub] would verify /work/system-libs for libx264"
+        fi
+        ;;
+    vaapi)
+        # Track F2 (T70). libva expected at /work/system-libs.
+        if [[ -z "${STUB_MODE}" ]]; then
+            verify_libs /work/system-libs include/va/va.h lib/libva.so
+        else
+            log "[stub] would verify /work/system-libs for libva"
+        fi
+        ;;
+    nvenc)
+        # Track F3 (T63). NVENC SDK is mounted via a Secret-as-volume
+        # by the build-job-nvenc.yaml at /opt/nvenc-sdk.
+        : "${NVENC_SDK_PATH:=/opt/nvenc-sdk}"
+        if [[ ! -d "${NVENC_SDK_PATH}/Interface" ]]; then
+            die "NVENC profile requires ${NVENC_SDK_PATH}/Interface/ — mount the SDK Secret in the Job"
+        fi
+        log "NVENC SDK at ${NVENC_SDK_PATH}"
+        ;;
+    *)
+        die "unknown CB_BUILD_PROFILE=${profile} (expected sw|x264|vaapi|nvenc|all)"
+        ;;
+esac
+
+# Export so build.sh sees it during gn gen.
+export CB_BUILD_PROFILE="${profile}"
+
+step_done
+
+# ---------------------------------------------------------------------
 # Step 4 — sccache.
 #
 # Set sccache up BEFORE gn gen so cc_wrapper="sccache" in args.gn

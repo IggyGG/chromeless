@@ -24,8 +24,15 @@
 #include "rtc_base/logging.h"
 
 #if defined(HAS_X264)
+// libx264 is GPL and not vendored in chromium's third_party tree; we
+// dynamic-link the system libx264 (Debian: libx264-dev provides
+// /usr/include/x264.h). The build-integration BUILD.gn:x264 config
+// adds $x264_libdir/include to the include path, so a system-style
+// include resolves directly. Earlier drafts wrote
+// "third_party/x264/x264.h" which never existed and only compiled
+// in stub mode — see commit 6db8a... for the documentation pass.
 extern "C" {
-#include "third_party/x264/x264.h"
+#include <x264.h>
 }
 #endif  // HAS_X264
 // In the disabled path, the field declarations themselves are gated out

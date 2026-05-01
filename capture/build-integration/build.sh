@@ -115,10 +115,26 @@ cmd_apply_patches() {
 cmd_gen() {
     require_chromium_src
     require_depot_tools
-    log "gn gen ${OUT_DIR} (importing //cloud-browser/capture/build-integration/args.gn)..."
+    # CB_BUILD_PROFILE selects which args.<profile>.gn overlay to import.
+    # Each overlay imports the base args.gn first, then sets its
+    # profile-specific *_libdir / *_sdk_path to flip the matching
+    # encoder gate on. "sw" (default) imports the base args.gn directly
+    # — no HW or x264 path enabled.
+    #
+    # Valid values: sw (default), x264, vaapi, nvenc, all.
+    local profile="${CB_BUILD_PROFILE:-sw}"
+    local overlay
+    case "${profile}" in
+        sw)             overlay="args.gn";;
+        x264|vaapi|nvenc|all)
+                        overlay="args.${profile}.gn";;
+        *)              die "unknown CB_BUILD_PROFILE=${profile} (expected sw|x264|vaapi|nvenc|all)";;
+    esac
+    local args_path="//cloud-browser/capture/build-integration/${overlay}"
+    log "gn gen ${OUT_DIR} (profile=${profile}, importing ${args_path})..."
     (cd "${CHROMIUM_SRC}" && \
         gn gen "${OUT_DIR}" \
-            --args='import("//cloud-browser/capture/build-integration/args.gn")')
+            --args="import(\"${args_path}\")")
     log "gn gen done."
 }
 

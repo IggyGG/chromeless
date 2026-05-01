@@ -1,0 +1,28 @@
+# gn args overlay for the x264 build profile (Track F1).
+#
+# Imports the base args.gn unchanged, then enables the libx264 dependency
+# by setting x264_libdir = "/usr" — system layout from the Debian
+# `libx264-dev` package:
+#   /usr/include/x264.h
+#   /usr/lib/x86_64-linux-gnu/libx264.so
+#
+# capture/build-integration/BUILD.gn:config("x264") gates the
+# HAS_X264=1 define on `x264_libdir != ""`, so this overlay is the
+# only thing the encoder factory needs to flip the H264 path on at
+# build time.
+#
+# Selected by setting CB_BUILD_PROFILE=x264 in the build job env;
+# cb-build.sh emits an args.gn that imports this file.
+
+import("//cloud-browser/capture/build-integration/args.gn")
+
+# libx264 staged at /work/system-libs by the build-job-x264.yaml
+# bootstrap initContainer (runs as root, can apt-get install libx264-dev,
+# then copies x264.h + libx264.so* into /work/system-libs/{include,lib}).
+# Main build container can then read this prefix without needing root.
+#
+# Layout that capture/build-integration/BUILD.gn:config(":x264")
+# expects:
+#   ${x264_libdir}/include/x264.h
+#   ${x264_libdir}/lib/libx264.so
+x264_libdir = "/work/system-libs"
