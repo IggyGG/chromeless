@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/logging.h"
 
 namespace cloud_browser {
@@ -169,7 +170,7 @@ class BweRegisteringEncoder : public webrtc::VideoEncoder {
 
  private:
   std::unique_ptr<webrtc::VideoEncoder> inner_;
-  BweAdapter* const adapter_;
+  const raw_ptr<BweAdapter> adapter_;
   const int layer_index_;
   bool registered_ = false;
 };
