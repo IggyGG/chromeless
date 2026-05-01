@@ -75,11 +75,23 @@ config("nvenc_sdk") {
   }
 }
 
-# VAAPI gate (T70). libva is an Apache-2.0-licensed library typically
-# installed system-wide via the libva-dev / libva-drm-dev Debian/
-# Ubuntu packages; we link it dynamically. When `vaapi_libdir` is set
-# we add the include + lib paths and define HAS_VAAPI; otherwise the
-# encoder falls back to software via runtime probe.
+# VAAPI gate (T70). libva is an Apache-2.0-licensed library packaged
+# on Debian as `libva-dev` (single dev package; no libva-drm-dev on
+# Debian — that name is Ubuntu-only); we link it dynamically. When
+# `vaapi_libdir` is set we add the include + lib paths and define
+# HAS_VAAPI; otherwise the encoder falls back to software via runtime
+# probe.
+#
+# --allow-shlib-undefined: same bookworm/bullseye glibc skew the
+# `:x264` config below already documents. The libva we stage from the
+# build host is built against bookworm (glibc 2.36); chromium pins
+# its sysroot to bullseye (glibc 2.31) for ABI stability. At link
+# time, lld sees libva.so referencing dlopen@GLIBC_2.34,
+# dlerror@GLIBC_2.34, dlsym@GLIBC_2.34, dlclose@GLIBC_2.34 (libdl was
+# merged into libc.so.6 in glibc 2.34) and rejects the link with
+# --no-allow-shlib-undefined (lld's default). Allowing it lets the
+# binary link; at runtime the cb-chromium image (debian bookworm,
+# glibc 2.36) supplies the symbols.
 config("vaapi") {
   if (vaapi_libdir != "") {
     defines = [ "HAS_VAAPI=1" ]
@@ -89,6 +101,7 @@ config("vaapi") {
       "va-drm",
     ]
     lib_dirs = [ "$vaapi_libdir/lib" ]
+    ldflags = [ "-Wl,--allow-shlib-undefined" ]
   }
 }
 
