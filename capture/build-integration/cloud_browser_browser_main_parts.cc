@@ -43,31 +43,33 @@ namespace {
 // constants used by content_shell + headless.
 constexpr int kBackLog = 10;
 
-// TCP server-socket factory bound to 127.0.0.1:<port>. Mirrors the
-// shape of content_shell's TCPServerSocketFactory and headless's
-// equivalent — chromium's DevToolsAgentHost calls CreateForHttpServer
-// once at start, then the server lives on the returned socket for the
-// lifetime of the handler.
-class LoopbackTCPServerSocketFactory : public content::DevToolsSocketFactory {
+// TCP server-socket factory bound to <address>:<port>. The address
+// comes from --remote-debugging-address (default 127.0.0.1).
+// Required for cb-browserless deployment so the kubelet readiness
+// probe + ClusterIP service routing can reach the listener — when
+// hardcoded to loopback, only intra-pod curl works.
+class ConfigurableTCPServerSocketFactory : public content::DevToolsSocketFactory {
  public:
-  explicit LoopbackTCPServerSocketFactory(uint16_t port) : port_(port) {}
+  ConfigurableTCPServerSocketFactory(net::IPAddress address, uint16_t port)
+      : address_(std::move(address)), port_(port) {}
 
-  LoopbackTCPServerSocketFactory(const LoopbackTCPServerSocketFactory&) =
+  ConfigurableTCPServerSocketFactory(const ConfigurableTCPServerSocketFactory&) =
       delete;
-  LoopbackTCPServerSocketFactory& operator=(
-      const LoopbackTCPServerSocketFactory&) = delete;
+  ConfigurableTCPServerSocketFactory& operator=(
+      const ConfigurableTCPServerSocketFactory&) = delete;
 
  private:
   std::unique_ptr<net::ServerSocket> CreateForHttpServer() override {
     auto socket =
         std::make_unique<net::TCPServerSocket>(nullptr, net::NetLogSource());
-    const std::string address = net::IPAddress::IPv4Localhost().ToString();
-    if (socket->ListenWithAddressAndPort(address, port_, kBackLog) != net::OK) {
-      LOG(ERROR) << "DevTools HTTP listener: failed to bind 127.0.0.1:"
-                 << port_;
+    const std::string address_str = address_.ToString();
+    if (socket->ListenWithAddressAndPort(address_str, port_, kBackLog) != net::OK) {
+      LOG(ERROR) << "DevTools HTTP listener: failed to bind "
+                 << address_str << ":" << port_;
       return nullptr;
     }
-    LOG(INFO) << "DevTools HTTP listener bound on 127.0.0.1:" << port_;
+    LOG(INFO) << "DevTools HTTP listener bound on "
+              << address_str << ":" << port_;
     return socket;
   }
 
@@ -76,6 +78,7 @@ class LoopbackTCPServerSocketFactory : public content::DevToolsSocketFactory {
     return nullptr;
   }
 
+  const net::IPAddress address_;
   const uint16_t port_;
 };
 
@@ -96,6 +99,27 @@ uint16_t ReadRemoteDebuggingPort() {
     return 0;
   }
   return static_cast<uint16_t>(parsed);
+}
+
+// Reads --remote-debugging-address from the command line. Returns
+// IPv4Localhost when the flag is missing OR malformed (matches
+// content_shell's behaviour and avoids accidental "open to the
+// internet" if a typo lands). Pods that need cluster-internal
+// reachability (cb-browserless deployment) pass 0.0.0.0 explicitly.
+net::IPAddress ReadRemoteDebuggingAddress() {
+  const base::CommandLine& cmd = *base::CommandLine::ForCurrentProcess();
+  if (!cmd.HasSwitch(::switches::kRemoteDebuggingAddress)) {
+    return net::IPAddress::IPv4Localhost();
+  }
+  const std::string value =
+      cmd.GetSwitchValueASCII(::switches::kRemoteDebuggingAddress);
+  net::IPAddress parsed;
+  if (!parsed.AssignFromIPLiteral(value)) {
+    LOG(WARNING) << "Invalid --remote-debugging-address value '" << value
+                 << "'; falling back to 127.0.0.1.";
+    return net::IPAddress::IPv4Localhost();
+  }
+  return parsed;
 }
 
 }  // namespace
@@ -173,7 +197,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   std::ignore = content::DevToolsAgentHost::GetOrCreateFor(
       initial_web_contents_.get());
 
-  // 4. DevTools HTTP listener — bind 127.0.0.1:<--remote-debugging-port>.
+  // 4. DevTools HTTP listener — bind <--remote-debugging-address>:<--remote-debugging-port>.
   StartDevToolsHttpHandler();
 
   return content::RESULT_CODE_NORMAL_EXIT;
@@ -211,7 +235,9 @@ void CloudBrowserBrowserMainParts::StartDevToolsHttpHandler() {
     return;
   }
   const uint16_t port = ReadRemoteDebuggingPort();
-  auto factory = std::make_unique<LoopbackTCPServerSocketFactory>(port);
+  net::IPAddress address = ReadRemoteDebuggingAddress();
+  auto factory = std::make_unique<ConfigurableTCPServerSocketFactory>(
+      std::move(address), port);
   // active_port_output_directory + debug_frontend_dir intentionally
   // empty: we rely on the e2e test querying /json/version to discover
   // the port (matches the BUGS-512-style "no DevToolsActivePort file"
