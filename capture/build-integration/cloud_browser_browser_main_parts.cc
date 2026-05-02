@@ -108,11 +108,11 @@ uint16_t ReadRemoteDebuggingPort() {
 // reachability (cb-browserless deployment) pass 0.0.0.0 explicitly.
 net::IPAddress ReadRemoteDebuggingAddress() {
   const base::CommandLine& cmd = *base::CommandLine::ForCurrentProcess();
-  if (!cmd.HasSwitch(::switches::kRemoteDebuggingAddress)) {
+  if (!cmd.HasSwitch("remote-debugging-address")) {
     return net::IPAddress::IPv4Localhost();
   }
   const std::string value =
-      cmd.GetSwitchValueASCII(::switches::kRemoteDebuggingAddress);
+      cmd.GetSwitchValueASCII("remote-debugging-address");
   net::IPAddress parsed;
   if (!parsed.AssignFromIPLiteral(value)) {
     LOG(WARNING) << "Invalid --remote-debugging-address value '" << value
