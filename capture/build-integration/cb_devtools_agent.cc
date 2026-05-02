@@ -48,6 +48,8 @@
 #include <string>
 #include <utility>
 
+#include "capture/build-integration/cloud_browser_browser_context.h"
+
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/logging.h"
@@ -240,6 +242,61 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
             << frame_sink_id.ToString();
 
   return EncodeStartResponse(frame_sink_id.ToString());
+}
+
+
+// ============================================================================
+// BrowserContext lifecycle
+// ============================================================================
+
+content::BrowserContext* CbDevToolsManagerDelegate::CreateBrowserContext() {
+  // Each new context is a fresh in-memory profile. CloudBrowserBrowser
+  // Context's ctor does the storage-partition + URL-loader-factory wiring.
+  auto context = std::make_unique<CloudBrowserBrowserContext>();
+  content::BrowserContext* raw = context.get();
+  contexts_.push_back(std::move(context));
+  LOG(INFO) << "CbDevToolsManagerDelegate: created browser context #"
+            << contexts_.size() << " ptr=" << raw;
+  return raw;
+}
+
+std::vector<content::BrowserContext*>
+CbDevToolsManagerDelegate::GetBrowserContexts() {
+  std::vector<content::BrowserContext*> out;
+  out.reserve(contexts_.size());
+  for (const auto& ctx : contexts_) {
+    out.push_back(ctx.get());
+  }
+  return out;
+}
+
+content::BrowserContext*
+CbDevToolsManagerDelegate::GetDefaultBrowserContext() {
+  return default_browser_context_;
+}
+
+void CbDevToolsManagerDelegate::DisposeBrowserContext(
+    content::BrowserContext* context,
+    DisposeCallback callback) {
+  // Refuse to dispose the default — main_parts owns it.
+  if (context == default_browser_context_) {
+    std::move(callback).Run(false,
+                            "Default browser context cannot be disposed");
+    return;
+  }
+  for (auto it = contexts_.begin(); it != contexts_.end(); ++it) {
+    if (it->get() == context) {
+      contexts_.erase(it);  // unique_ptr dtor destroys the context
+      std::move(callback).Run(true, "");
+      return;
+    }
+  }
+  std::move(callback).Run(false, "Browser context not found");
+}
+
+void CbDevToolsManagerDelegate::SetDefaultBrowserContext(
+    content::BrowserContext* context) {
+  default_browser_context_ = context;
 }
 
 }  // namespace cloud_browser

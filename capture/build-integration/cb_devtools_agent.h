@@ -45,14 +45,17 @@
 #include <vector>
 
 #include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
 namespace content {
+class BrowserContext;
 class DevToolsAgentHostClientChannel;
 }  // namespace content
 
 namespace cloud_browser {
 
+class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkCapturer;
 
 // Owns at most one active CloudBrowserFrameSinkCapturer at a time.
@@ -78,6 +81,50 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
                      base::span<const uint8_t> message,
                      NotHandledCallback callback) override;
 
+  // Implements Target.createBrowserContext. The default impl in
+  // content::DevToolsManagerDelegate returns nullptr — chromium then
+  // emits 'Failed to create browser context.' to the caller. We
+  // override to spawn a fresh CloudBrowserBrowserContext, retain
+  // ownership in |contexts_|, and hand back the raw pointer that
+  // chromium uses as the lookup key for subsequent
+  // Target.createTarget{browserContextId} calls.
+  //
+  // Each context is fully isolated — own profile dir, own cookie
+  // store, own localStorage. Matches the per-element session model
+  // physics uses: every chromeless element gets its own context so
+  // cross-element cookie / storage bleed doesn't happen.
+  content::BrowserContext* CreateBrowserContext() override;
+
+  // Returns every context this delegate has created via
+  // CreateBrowserContext, in insertion order. Excludes the default
+  // browser context (owned by main_parts, registered via
+  // SetDefaultBrowserContext). Used by chromium's auto-attach
+  // bookkeeping to enumerate all contexts that should be torn down
+  // on shutdown.
+  std::vector<content::BrowserContext*> GetBrowserContexts() override;
+
+  // Default context is the one main_parts creates at startup —
+  // owns about:blank tabs, gets exposed as the |targetInfos| in
+  // Target.getTargets. Registered by main_parts immediately after
+  // construction (see CloudBrowserBrowserMainParts::PreMainMessage
+  // LoopRun) so the delegate knows which context to return here.
+  content::BrowserContext* GetDefaultBrowserContext() override;
+
+  // Removes the named context from |contexts_| (which destroys it
+  // via unique_ptr) and runs |callback| with success=true. If the
+  // context wasn't created by us (i.e. it's the default), runs
+  // |callback| with success=false + an error message — main_parts
+  // owns the default's lifecycle, the delegate must not destroy it.
+  void DisposeBrowserContext(content::BrowserContext* context,
+                             DisposeCallback callback) override;
+
+  // Called by CloudBrowserBrowserMainParts::PreMainMessageLoopRun
+  // once the default BrowserContext is constructed. Stored as a
+  // raw_ptr because main_parts owns the lifetime — the delegate
+  // outlives the default context only during chromium teardown,
+  // and we never deref the pointer past PostMainMessageLoopRun.
+  void SetDefaultBrowserContext(content::BrowserContext* context);
+
  private:
   // Implementation of the Cb.startFrameSinkCapture method. Returns the
   // CBOR-encoded response payload that should be wrapped in a
@@ -94,6 +141,17 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // BufferHandleScopes still call Done() through their own RAII path,
   // see capture/framesink-capturer/capturer.cc::BufferHandleScope).
   std::unique_ptr<CloudBrowserFrameSinkCapturer> active_capturer_;
+
+  // Default context registered by main_parts. NOT owned — main_parts
+  // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser
+  // Context().
+  raw_ptr<content::BrowserContext> default_browser_context_ = nullptr;
+
+  // Contexts created via Target.createBrowserContext, owned by us.
+  // unique_ptr because each must be destroyed when DisposeBrowser
+  // Context is called; vector preserves insertion order so
+  // GetBrowserContexts returns a stable enumeration.
+  std::vector<std::unique_ptr<CloudBrowserBrowserContext>> contexts_;
 };
 
 }  // namespace cloud_browser
