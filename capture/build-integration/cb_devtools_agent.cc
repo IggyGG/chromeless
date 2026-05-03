@@ -50,6 +50,10 @@
 
 #include "base/threading/thread_restrictions.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/web_contents.h"
+#include "ui/base/page_transition_types.h"
+#include "url/gurl.h"
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
@@ -304,6 +308,57 @@ void CbDevToolsManagerDelegate::DisposeBrowserContext(
 void CbDevToolsManagerDelegate::SetDefaultBrowserContext(
     content::BrowserContext* context) {
   default_browser_context_ = context;
+}
+
+
+// ============================================================================
+// Target.createTarget — spawn a WebContents in our delegate-owned context
+// ============================================================================
+
+scoped_refptr<content::DevToolsAgentHost>
+CbDevToolsManagerDelegate::CreateNewTarget(
+    const GURL& url,
+    content::DevToolsManagerDelegate::TargetType target_type,
+    bool /*new_window*/) {
+  // Pick a BrowserContext: most recently created (matches the linear
+  // createBrowserContext+createTarget pattern physics emits at session
+  // setup), or fall back to default if main_parts has registered one.
+  content::BrowserContext* browser_context = nullptr;
+  if (!contexts_.empty()) {
+    browser_context = contexts_.back().get();
+  } else if (default_browser_context_) {
+    browser_context = default_browser_context_;
+  } else {
+    LOG(ERROR) << "CbDevToolsManagerDelegate::CreateNewTarget: no context "
+                  "available (no createBrowserContext yet, and main_parts "
+                  "didn't call SetDefaultBrowserContext)";
+    return nullptr;
+  }
+
+  content::WebContents::CreateParams create_params(browser_context);
+  auto web_contents = content::WebContents::Create(create_params);
+  if (!web_contents) {
+    LOG(ERROR) << "CbDevToolsManagerDelegate::CreateNewTarget: WebContents::"
+                  "Create returned nullptr";
+    return nullptr;
+  }
+
+  content::NavigationController::LoadURLParams load_params(url);
+  load_params.transition_type = ui::PAGE_TRANSITION_TYPED;
+  web_contents->GetController().LoadURLWithParams(load_params);
+
+  scoped_refptr<content::DevToolsAgentHost> agent_host =
+      target_type == content::DevToolsManagerDelegate::kTab
+          ? content::DevToolsAgentHost::GetOrCreateForTab(web_contents.get())
+          : content::DevToolsAgentHost::GetOrCreateFor(web_contents.get());
+
+  // Retain the WebContents — DevToolsAgentHost holds only a weak ref.
+  web_contents_holders_.push_back(std::move(web_contents));
+
+  LOG(INFO) << "CbDevToolsManagerDelegate::CreateNewTarget: url="
+            << url.spec() << " target_id=" << agent_host->GetId()
+            << " target_type=" << static_cast<int>(target_type);
+  return agent_host;
 }
 
 }  // namespace cloud_browser

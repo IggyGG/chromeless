@@ -46,12 +46,17 @@
 
 #include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
 namespace content {
 class BrowserContext;
+class DevToolsAgentHost;
 class DevToolsAgentHostClientChannel;
+class WebContents;
 }  // namespace content
+
+class GURL;
 
 namespace cloud_browser {
 
@@ -118,6 +123,23 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   void DisposeBrowserContext(content::BrowserContext* context,
                              DisposeCallback callback) override;
 
+  // Implements Target.createTarget. Default impl returns nullptr —
+  // chromium's TargetHandler then emits 'Not supported' to the caller.
+  // We override to create a WebContents in the most recently-created
+  // BrowserContext (or default if none exist) and wrap it in a
+  // DevToolsAgentHost.
+  //
+  // SINGLE-TENANT NOTE: chromium's content-layer TargetHandler does
+  // NOT pass browserContextId to this hook (only the URL + target
+  // type), so multi-context routing has to be inferred. We pick the
+  // most recently created context as a best-effort proxy. Concurrent
+  // callers across multiple physics replicas would race on this; for
+  // cb-browserless (replicas=1) this is fine.
+  scoped_refptr<content::DevToolsAgentHost> CreateNewTarget(
+      const GURL& url,
+      content::DevToolsManagerDelegate::TargetType target_type,
+      bool new_window) override;
+
   // Called by CloudBrowserBrowserMainParts::PreMainMessageLoopRun
   // once the default BrowserContext is constructed. Stored as a
   // raw_ptr because main_parts owns the lifetime — the delegate
@@ -152,6 +174,13 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // Context is called; vector preserves insertion order so
   // GetBrowserContexts returns a stable enumeration.
   std::vector<std::unique_ptr<CloudBrowserBrowserContext>> contexts_;
+
+  // WebContents created via CreateNewTarget. DevToolsAgentHost holds
+  // only a weak ref to the underlying WebContents — if we don't keep
+  // the unique_ptr, the WebContents is destroyed and the host is
+  // immediately invalid. Same lifetime model as content_shell's
+  // ShellBrowserMainParts::CreateAndShowWebContents pattern.
+  std::vector<std::unique_ptr<content::WebContents>> web_contents_holders_;
 };
 
 }  // namespace cloud_browser
