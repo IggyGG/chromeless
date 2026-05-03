@@ -35,13 +35,33 @@ export const scenario = {
   async run(s) {
     const wire = await s.setupWire();
 
+    // Resolve actual source/target centers from the rendered DOM. The
+    // hardcoded SOURCE/TARGET coordinates assume stock-Chrome layout but
+    // cb-chromium renders the fixture with a different box flow;
+    // getBoundingClientRect() makes the test layout-independent.
+    const dndRaw = await s.runtimeEval(`JSON.stringify({
+      src: document.getElementById("dndSource").getBoundingClientRect().toJSON(),
+      tgt: document.getElementById("dndTarget").getBoundingClientRect().toJSON(),
+    })`);
+    const dnd = JSON.parse(dndRaw);
+    const dynSrc = {
+      x: Math.round(dnd.src.left + dnd.src.width / 2),
+      y: Math.round(dnd.src.top + dnd.src.height / 2),
+    };
+    const dynTgt = {
+      x: Math.round(dnd.tgt.left + dnd.tgt.width / 2),
+      y: Math.round(dnd.tgt.top + dnd.tgt.height / 2),
+    };
+    s.log("info", "[wire-drag] resolved source+target centers from rendered DOM",
+          { src: dynSrc, tgt: dynTgt });
+
     // Settle hover on source.
-    await wire.mouseMove(SOURCE.x, SOURCE.y);
+    await wire.mouseMove(dynSrc.x, dynSrc.y);
     await sleep(150);
     await s.runtimeEval(`window.__events.length = 0; null`);
 
     s.marker("wire-drag-start");
-    await wire.drag(SOURCE.x, SOURCE.y, TARGET.x, TARGET.y, {
+    await wire.drag(dynSrc.x, dynSrc.y, dynTgt.x, dynTgt.y, {
       steps: 16, settleMs: 18,
     });
     s.marker("wire-drag-end");

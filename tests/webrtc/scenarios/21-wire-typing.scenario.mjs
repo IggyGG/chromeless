@@ -27,8 +27,23 @@ export const scenario = {
     const wire = await s.setupWire();
 
     // Focus text1 via wire-path click (proves clicks set focus).
+    // Resolve the actual text1 center from the rendered DOM — the
+    // hardcoded TEXT1_FOCUS coordinates assume stock-Chrome layout but
+    // cb-chromium renders the fixture with a slightly different box
+    // flow; getBoundingClientRect() makes the test layout-independent.
+    const text1RawRect = await s.runtimeEval(
+      `JSON.stringify(document.getElementById("text1").getBoundingClientRect().toJSON())`,
+    );
+    const r = JSON.parse(text1RawRect);
+    const text1Center = {
+      x: Math.round(r.left + r.width / 2),
+      y: Math.round(r.top + r.height / 2),
+    };
+    s.log("info", "[wire-typing] resolved text1 center from rendered DOM",
+          text1Center);
+
     s.marker("wire-focus-text1");
-    await wire.click(TEXT1_FOCUS.x, TEXT1_FOCUS.y);
+    await wire.click(text1Center.x, text1Center.y);
     await sleep(200);
     await s.runtimeEval(`window.__events.length = 0; null`);
 

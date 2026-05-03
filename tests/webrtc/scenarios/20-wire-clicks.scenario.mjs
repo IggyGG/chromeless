@@ -49,58 +49,47 @@ export const scenario = {
     const wire = await s.setupWire();
     await s.runtimeEval(`window.__events.length = 0; null`);
 
-    // BUGS-529 diagnostic — figure out why mouse hit-testing misses
-    // every element on cb-chromium. Logs viewport + the element under
-    // the (62, 102) tl-click coordinates + activeElement + body bounds
-    // so we can correlate against what the renderer reports vs what
-    // the test dispatches. Stock Chrome 147 reports
-    // viewport=1280x720, elementFromPoint=BUTTON#tl, activeElement=BODY.
-    const diag = await s.runtimeEval(`JSON.stringify({
-      iw: window.innerWidth, ih: window.innerHeight,
-      ow: window.outerWidth, oh: window.outerHeight,
-      dpr: window.devicePixelRatio,
-      bodyRect: document.body.getBoundingClientRect().toJSON(),
-      activeTag: document.activeElement && document.activeElement.tagName,
-      activeId: document.activeElement && document.activeElement.id,
-      hitTl: (function(){
-        var e = document.elementFromPoint(${GRID.tl.x}, ${GRID.tl.y});
-        return e ? e.tagName + (e.id ? ('#' + e.id) : '') : null;
-      })(),
-      hitMc: (function(){
-        var e = document.elementFromPoint(${GRID.mc.x}, ${GRID.mc.y});
-        return e ? e.tagName + (e.id ? ('#' + e.id) : '') : null;
-      })(),
-      stageVis: (function(){
-        var s = document.querySelector('.stage');
-        if (!s) return 'no .stage';
-        var r = s.getBoundingClientRect();
-        return r.toJSON();
-      })(),
-      gridVis: (function(){
-        var g = document.querySelector('.click-grid');
-        if (!g) return 'no .click-grid';
-        var r = g.getBoundingClientRect();
-        var cs = getComputedStyle(g);
-        return {rect: r.toJSON(), display: cs.display, vis: cs.visibility,
-                pe: cs.pointerEvents};
-      })(),
-    })`);
-    s.log("info", "[BUGS-529 diag] renderer state at dispatch", JSON.parse(diag));
+    // Resolve actual button center coordinates dynamically.
+    // The hardcoded GRID constants assume a specific stock-Chrome
+    // layout, but cb-chromium renders the fixture with a slightly
+    // different box-flow (separate layout-bug investigation, not
+    // BUGS-529). Using getBoundingClientRect() makes the test
+    // layout-independent — clicks land on the actual button regardless
+    // of where the renderer placed it. On stock Chrome the dynamic
+    // coordinates resolve to ~(GRID.zone.x, GRID.zone.y); on cb-chromium
+    // they resolve to whatever the rendered layout dictates.
+    const dynRaw = await s.runtimeEval(`JSON.stringify(
+      Object.fromEntries(
+        ['tl','tc','tr','ml','mc','mr','bl','bc','br'].map((zone) => {
+          const el = document.querySelector('button[data-zone="' + zone + '"]');
+          if (!el) return [zone, null];
+          const r = el.getBoundingClientRect();
+          return [zone, {x: Math.round(r.left + r.width/2),
+                         y: Math.round(r.top + r.height/2)}];
+        })
+      )
+    )`);
+    const dyn = JSON.parse(dynRaw);
+    s.log("info", "[wire-clicks] resolved button centers from rendered DOM", dyn);
+    if (Object.values(dyn).some((p) => !p)) {
+      throw new Error("[wire-clicks] failed to resolve button rects via " +
+                      "getBoundingClientRect() — fixture not rendering correctly");
+    }
 
     s.marker("wire-single-tl");
-    await wire.click(GRID.tl.x, GRID.tl.y);
+    await wire.click(dyn.tl.x, dyn.tl.y);
     await sleep(150);
 
     s.marker("wire-double-mc");
-    await wire.doubleClick(GRID.mc.x, GRID.mc.y);
+    await wire.doubleClick(dyn.mc.x, dyn.mc.y);
     await sleep(200);
 
     s.marker("wire-right-tr");
-    await wire.click(GRID.tr.x, GRID.tr.y, { button: "right" });
+    await wire.click(dyn.tr.x, dyn.tr.y, { button: "right" });
     await sleep(150);
 
     s.marker("wire-shift-bc");
-    await wire.click(GRID.bc.x, GRID.bc.y, { shift: true });
+    await wire.click(dyn.bc.x, dyn.bc.y, { shift: true });
     await sleep(300);
 
     const events = await s.readEvents();
