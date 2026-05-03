@@ -72,7 +72,7 @@ spec:
               # even on flagged-public repos. Same auth dance as
               # cb-build/build-job.yaml: inline creds at clone, scrub
               # them from the stored remote post-clone.
-              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              AUTH_REPO="${OUR_REPO%%://*}://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#*://}"
               git clone --depth 1 --branch "${OUR_REPO_REF}" \
                 "${AUTH_REPO}" /workspace
               git -C /workspace remote set-url origin "${OUR_REPO}"
@@ -84,7 +84,7 @@ spec:
               ls -la /workspace/tests/cdp
           env:
             - name: OUR_REPO
-              value: "https://forgejo.triform.dev/triform/chromeless.git"
+              value: "http://forgejo-http.forgejo.svc.cluster.local:3000/triform/chromeless.git"
             - name: OUR_REPO_REF
               value: "main"
             - name: FORGEJO_USERNAME
