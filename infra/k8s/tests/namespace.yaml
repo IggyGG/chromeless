@@ -1,0 +1,34 @@
+# cb-tests namespace — runs validation Jobs against the deployed
+# cb-chromium binary. Parallel to cb-build (image-build env) and
+# triform-wtf (production runtime).
+#
+# Why a dedicated ns:
+# - Test Jobs need different image-pull + lifecycle wiring than the
+#   long-lived runtime pods in triform-wtf. Keeping Jobs out of the
+#   runtime ns keeps `kubectl get pod -n triform-wtf` legible.
+# - Failed test pods + their logs accumulate here without polluting
+#   the production ns. ttlSecondsAfterFinished:86400 on the Jobs
+#   bounds the clutter.
+# - cb-build's per-purpose-ns model carries over: build → cb-build,
+#   test → cb-tests, prod → cb-prod / triform-wtf.
+#
+# Operator prerequisites before `kubectl apply -k infra/k8s/tests/`:
+#   1. registry-pull Secret (kubernetes.io/dockerconfigjson) — mirror
+#      from cb-build into cb-tests so the WebRTC Job can pull
+#      registry.triform.cloud/cloud-browser-webrtc/cb-chromium.
+#   2. forgejo-credentials Secret (Opaque, username + password) —
+#      mirror from cb-build for the git-clone initContainers that
+#      pull the in-repo test code at apply-time.
+#
+# Both Secrets are pre-applied by the operator. See README.md for
+# the one-liner that copies them across.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cb-tests
+  labels:
+    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/component: test
+    app.kubernetes.io/part-of: cloud-browser-webrtc
+    triform.ai/purpose: test
