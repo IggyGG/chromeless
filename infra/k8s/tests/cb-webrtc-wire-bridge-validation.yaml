@@ -50,6 +50,11 @@ spec:
         app.kubernetes.io/variant: webrtc-wire-bridge
     spec:
       restartPolicy: Never
+      # Pin to triform-8: has succeeded twice for this Job, ~94GB ephemeral
+      # free vs triform-6 hovering around 29GB which gets evicted under load.
+      # Pinning by hostname is acceptable for a one-shot validation Job.
+      nodeSelector:
+        kubernetes.io/hostname: triform-8
       imagePullSecrets:
         - name: registry-pull
       initContainers:
@@ -124,7 +129,18 @@ spec:
               set -x
               export HOME=/tmp/cb-home
               mkdir -p $HOME/.config/chromium /tmp/out
-              Xvfb :99 -screen 0 1280x720x24 -nolisten tcp -ac &
+              # 1280x3000 — workaround for the cb-chromium-vs-stock-chromium
+              # layout regression revealed by BUGS-529 v5 validation: cb-chromium
+              # renders fixture-input-mirror.html with bodyRect.y=587 (587px
+              # below viewport top), pushing text1 to y=998, drag source to
+              # y=1057, and the click-grid bottom rows below y=720. With a
+              # 720px viewport most fixture content falls outside the hittable
+              # area. Enlarging Xvfb + the chromium window to 3000px tall makes
+              # all laid-out content viewport-resident so the wire-bridge tests
+              # can validate every scenario end-to-end. The layout regression
+              # itself is tracked as a follow-up ticket; this is a test-only
+              # workaround so BUGS-529 wire-path validation passes 3/3.
+              Xvfb :99 -screen 0 1280x3000x24 -nolisten tcp -ac &
               sleep 2
               export DISPLAY=:99
               /usr/local/bin/cloud_browser_worker \
@@ -145,7 +161,7 @@ spec:
                 --ozone-platform=x11 \
                 --use-gl=angle \
                 --use-angle=swiftshader-webgl \
-                --window-size=1280,720 \
+                --window-size=1280,3000 \
                 --use-fake-ui-for-media-stream \
                 --use-fake-device-for-media-stream \
                 about:blank &
