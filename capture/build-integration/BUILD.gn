@@ -243,8 +243,19 @@ source_set("framesink_capture") {
 # ---------------------------------------------------------------------
 source_set("embedder") {
   sources = [
+    # BUGS-529 second-layer fix — Aura subsystem so WebContents the
+    # embedder creates get parented into a real focus chain. See
+    # cb_aura_platform_data.h for the full chain. Added on top of
+    # 9703db5 (WebContents::WasShown + Focus calls), which were
+    # necessary but not sufficient on their own.
+    "cb_aura_platform_data.cc",
+    "cb_aura_platform_data.h",
     "cb_devtools_agent.cc",
     "cb_devtools_agent.h",
+    "cb_focus_client.cc",
+    "cb_focus_client.h",
+    "cb_window_parenting_client.cc",
+    "cb_window_parenting_client.h",
     "cloud_browser_browser_context.cc",
     "cloud_browser_browser_context.h",
     "cloud_browser_browser_main_parts.cc",
@@ -283,11 +294,27 @@ source_set("embedder") {
     "//net",
     "//services/viz/privileged/mojom",
     "//third_party/inspector_protocol:crdtp",
+    # BUGS-529 second-layer — cb_aura_platform_data + cb_focus_client +
+    # cb_window_parenting_client wire the Aura subsystem so WebContents
+    # the embedder creates get parented into a real focus chain. Real
+    # ozone-X11-backed WindowTreeHost (cb-chromium runs Xvfb on :99 +
+    # --ozone-platform=x11). Mirrors content_shell's
+    # ShellPlatformDataAura pattern minus the ui/aura:test_support
+    # dependency (testonly = true; not consumable from a non-test
+    # executable). Focus + parenting clients are roll-our-own copies of
+    # the headless versions.
+    "//ui/aura",
     "//ui/base",
     # cloud_browser_browser_main_parts.cc creates a default
     # display::ScreenBase so chromium's Screen::Get() returns non-null.
     "//ui/display",
     "//ui/gfx/geometry",
+    # PlatformWindowInitProperties — passed to aura::WindowTreeHost::
+    # Create() to give the host an initial bounds.
+    "//ui/platform_window",
+    # wm::DefaultActivationClient — registered on the root window so
+    # Aura activation routing works for the WebContents we attach.
+    "//ui/wm",
     "//url",
     # NOTE — cb_devtools_agent.cc additionally includes
     # "content/browser/compositor/surface_utils.h" (with a //nogncheck

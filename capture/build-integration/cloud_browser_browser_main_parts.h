@@ -24,11 +24,28 @@
 // Cross-references:
 //   * content/public/browser/browser_main_parts.h
 //   * headless/lib/browser/headless_browser_main_parts.{h,cc}
-//     (canonical reference for a non-aura, server-side embedder)
+//     (canonical server-side embedder — uses its own per-WebContents
+//     WindowTreeHost subclass; we use the real ozone-X11-backed one
+//     instead because cb-chromium has Xvfb on :99)
 //   * content/shell/browser/shell_browser_main_parts.{h,cc}
-//     (heavier reference; uses Aura — we deliberately don't)
+//     + content/shell/browser/shell_platform_data_aura.{h,cc}
+//     (closer reference — same shape we now use for Aura init,
+//     minus the ui/aura:test_support dep that's testonly = true and
+//     unreachable from a non-test executable)
 //   * content/shell/browser/shell_devtools_manager_delegate.cc
 //     (DevTools HTTP handler bootstrap pattern)
+//
+// BUGS-529 history: 9703db5 added WebContents::WasShown + Focus on
+// every WebContents we create (necessary), but Focus() is a silent
+// no-op on Aura without a registered FocusClient + parenting chain.
+// This file's PreMainMessageLoopRun now also constructs a
+// CbAuraPlatformData and pins WebContents::CreateParams::context to
+// the resulting root window so WebContentsViewAura::CreateAuraWindow's
+// ParentWindowWithContext call resolves into our parenting client and
+// the new view lands in Aura's focus chain. With both pieces in
+// place, RenderWidgetHostViewAura::HasFocus() returns true and the
+// renderer-side WidgetInputHandler accepts CDP Input.dispatch* events
+// instead of dropping them as background-tab input.
 
 #ifndef CAPTURE_BUILD_INTEGRATION_CLOUD_BROWSER_BROWSER_MAIN_PARTS_H_
 #define CAPTURE_BUILD_INTEGRATION_CLOUD_BROWSER_BROWSER_MAIN_PARTS_H_
@@ -43,12 +60,17 @@ class BrowserContext;
 class WebContents;
 }  // namespace content
 
+namespace aura {
+class Window;
+}  // namespace aura
+
 namespace display {
 class ScreenBase;
 }  // namespace display
 
 namespace cloud_browser {
 
+class CbAuraPlatformData;
 class CloudBrowserBrowserContext;
 
 class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
@@ -80,6 +102,19 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // the derived class definition.
   content::BrowserContext* browser_context() const;
 
+  // Public read-only accessor for the Aura root window owned by our
+  // CbAuraPlatformData. nullptr until PreMainMessageLoopRun has set
+  // aura_ up. CloudBrowserContentBrowserClient::CreateDevToolsManager
+  // Delegate forwards this to CbDevToolsManagerDelegate at delegate-
+  // construction time so every Target.createTarget WebContents gets
+  // its CreateParams::context populated and parented under the same
+  // root we use for the boot WebContents (BUGS-529 second-layer
+  // closeout). Defined out-of-line so the header doesn't need to pull
+  // in cb_aura_platform_data.h or ui/aura/window_tree_host.h. See
+  // ShellBrowserMainParts::browser_context() for the analogous
+  // upstream pattern.
+  aura::Window* aura_root_window() const;
+
  private:
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
   // and starts content::DevToolsAgentHost::StartRemoteDebuggingServer
@@ -101,6 +136,24 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // BrowserContext + initial WebContents so the registration order is
   // safe.
   std::unique_ptr<display::ScreenBase> screen_;
+
+  // Aura subsystem (root WindowTreeHost + focus / parenting / capture
+  // / activation clients + fill layout). Constructed in PreMain
+  // MessageLoopRun BEFORE the initial WebContents so the boot tab
+  // can pass aura_->host()->window() as its CreateParams::context
+  // and get parented into a real focus chain. This is the deeper
+  // root cause of BUGS-529: 9703db5 called WebContents::Focus() but
+  // it was a no-op without an Aura focus client + parenting client
+  // registered on the WebContents view's root window.
+  //
+  // INTENTIONALLY LEAKED on PostMainMessageLoopRun (release()) — the
+  // CbDevToolsManagerDelegate held by content's DevToolsManager
+  // singleton owns WebContents children of aura_->host()->window(),
+  // and that singleton is destroyed by AtExitManager AFTER main_parts
+  // dies. Tearing aura_ down here would UAF those still-live children
+  // when their dtors walk their parent pointer. Process is exiting
+  // within seconds; OS reclaims memory and the X11 connection cleanly.
+  std::unique_ptr<CbAuraPlatformData> aura_;
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;

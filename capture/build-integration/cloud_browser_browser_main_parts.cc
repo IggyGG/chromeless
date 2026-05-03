@@ -15,6 +15,7 @@
 #include "base/logging.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
+#include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_socket_factory.h"
@@ -27,11 +28,14 @@
 #include "net/log/net_log_source.h"
 #include "net/socket/server_socket.h"
 #include "net/socket/tcp_server_socket.h"
+#include "ui/aura/window.h"
+#include "ui/aura/window_tree_host.h"
 #include "ui/base/page_transition_types.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/display/screen_base.h"
 #include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/geometry/size.h"
 #include "url/gurl.h"
 #include "url/url_constants.h"
 
@@ -132,6 +136,17 @@ content::BrowserContext* CloudBrowserBrowserMainParts::browser_context() const {
   return browser_context_.get();
 }
 
+aura::Window* CloudBrowserBrowserMainParts::aura_root_window() const {
+  // aura_->host() is the WindowTreeHost; ->window() is the host's
+  // root aura::Window — the same handle WebContentsViewAura needs as
+  // its ParentWindowWithContext target. Returns nullptr before
+  // PreMainMessageLoopRun has constructed aura_.
+  if (!aura_) {
+    return nullptr;
+  }
+  return aura_->host()->window();
+}
+
 namespace {
 
 // Internal default display geometry. Matches the Xvfb resolution the
@@ -177,11 +192,40 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // 1. Profile.
   browser_context_ = std::make_unique<CloudBrowserBrowserContext>();
 
+  // 1a. Aura platform data — root WindowTreeHost + focus / parenting /
+  //     activation / capture clients. Constructed BEFORE the initial
+  //     WebContents so the boot tab can pass aura_->host()->window()
+  //     as its CreateParams::context, which makes WebContentsViewAura::
+  //     CreateAuraWindow's ParentWindowWithContext call succeed (see
+  //     content/browser/web_contents/web_contents_view_aura.cc:992 in
+  //     pinned 7727). Without this, the WebContents view floats outside
+  //     Aura's focus chain, WebContents::Focus() is a silent no-op, and
+  //     the renderer-side WidgetInputHandler binds in "no focused page"
+  //     state — CDP Input.dispatch{Mouse,Key}Event is then dropped on
+  //     the floor by the renderer despite acking at the protocol layer.
+  //     This was the deeper root cause of BUGS-529 (the second-layer
+  //     fix on top of 9703db5's WebContents::WasShown + Focus calls).
+  //
+  //     1280x720 matches the Xvfb resolution the cb-chromium pod brings
+  //     up (see infra/launch-chromium.sh + the cb-webrtc-wire-bridge-
+  //     validation.yaml init container). PageRenderingViewport scales
+  //     beyond this via the standard renderer-side viewport machinery;
+  //     this is just the host window's initial bounds.
+  aura_ = std::make_unique<CbAuraPlatformData>(gfx::Size(1280, 720));
+
   // 2. Initial WebContents on about:blank — this is what hangs off the
   //    BrowserContext and gives DevToolsAgentHost a target to publish
   //    in /json. Without at least one WebContents, /json returns [] and
   //    the e2e test cannot attach to anything.
   content::WebContents::CreateParams create_params(browser_context_.get());
+  // Pin the parenting context to the Aura root we own. WebContentsView
+  // Aura::CreateAuraWindow walks |context|->GetRootWindow() and calls
+  // aura::client::ParentWindowWithContext on that, which our
+  // CbWindowParentingClient resolves to aura_->host()->window().
+  // Without this, the WebContents view is not parented to anything
+  // and falls outside the focus chain — see PreMainMessageLoopRun
+  // step 1a comment for the BUGS-529 chain.
+  create_params.context = aura_->host()->window();
   initial_web_contents_ = content::WebContents::Create(create_params);
   CHECK(initial_web_contents_)
       << "WebContents::Create returned null — chromium browser process "
@@ -247,6 +291,15 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // reversing the order trips a CHECK in chromium.
   initial_web_contents_.reset();
   browser_context_.reset();
+
+  // Intentionally LEAK aura_ — see header. The CbDevToolsManagerDelegate
+  // owned by content's DevToolsManager singleton holds WebContents that
+  // are children of aura_->host()->window(); that singleton is destroyed
+  // by AtExitManager AFTER main_parts dies. Calling reset() here would
+  // UAF those still-live children when their dtors walk their parent
+  // pointer. The release()'d object lives until process exit; OS reclaims
+  // memory + closes the X11 connection cleanly.
+  std::ignore = aura_.release();
 
   // Tear down the global Screen last (and only if we created it —
   // observer-attached subsystems may still hold raw pointers, so

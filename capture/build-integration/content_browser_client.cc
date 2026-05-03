@@ -69,9 +69,19 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   // context built in PreMainMessageLoopRun — by the time the FIRST
   // DevToolsAgentHost is created (also from PreMainMessageLoopRun, on
   // the initial about:blank target), the context is already populated.
+  //
+  // Also pass main_parts_'s Aura root window so each WebContents the
+  // delegate creates inherits the embedder's focus chain. Both the
+  // browser context AND the aura root are populated by
+  // PreMainMessageLoopRun before the first GetOrCreateFor lazily
+  // triggers this hook. See CbDevToolsManagerDelegate ctor doc + the
+  // BUGS-529 chain in cloud_browser_browser_main_parts.cc.
   content::BrowserContext* default_context =
       main_parts_ ? main_parts_->browser_context() : nullptr;
-  return std::make_unique<CbDevToolsManagerDelegate>(default_context);
+  aura::Window* aura_context =
+      main_parts_ ? main_parts_->aura_root_window() : nullptr;
+  return std::make_unique<CbDevToolsManagerDelegate>(default_context,
+                                                     aura_context);
 }
 
 }  // namespace cloud_browser

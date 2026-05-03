@@ -77,6 +77,7 @@
 #include "third_party/inspector_protocol/crdtp/dispatch.h"
 #include "third_party/inspector_protocol/crdtp/serializable.h"
 #include "third_party/inspector_protocol/crdtp/span.h"
+#include "ui/aura/window.h"
 
 namespace cloud_browser {
 
@@ -130,8 +131,10 @@ void LogReceivedFrame(scoped_refptr<media::VideoFrame> frame) {
 }  // namespace
 
 CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
-    content::BrowserContext* default_browser_context)
-    : default_browser_context_(default_browser_context) {
+    content::BrowserContext* default_browser_context,
+    aura::Window* aura_context_window)
+    : default_browser_context_(default_browser_context),
+      aura_context_window_(aura_context_window) {
   if (default_browser_context_) {
     LOG(INFO) << "CbDevToolsManagerDelegate: constructed with default "
                  "browser context ptr="
@@ -141,6 +144,18 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
                     "browser context — Target.createTarget without an "
                     "explicit browserContextId will fail until "
                     "Target.createBrowserContext has been called.";
+  }
+  if (aura_context_window_) {
+    LOG(INFO) << "CbDevToolsManagerDelegate: aura context window ptr="
+              << aura_context_window_.get()
+              << " — created targets will parent into the embedder's "
+                 "Aura focus chain (BUGS-529 closeout).";
+  } else {
+    LOG(WARNING) << "CbDevToolsManagerDelegate: no aura context window "
+                    "supplied — created targets will exhibit BUGS-529's "
+                    "Input.dispatch* drop symptom; check "
+                    "CloudBrowserContentBrowserClient::CreateDevToolsManager"
+                    "Delegate wiring.";
   }
 }
 
@@ -351,6 +366,17 @@ CbDevToolsManagerDelegate::CreateNewTarget(
   }
 
   content::WebContents::CreateParams create_params(browser_context);
+  // BUGS-529 closeout — pin the parenting context to the embedder's
+  // Aura root so WebContentsViewAura::CreateAuraWindow's
+  // ParentWindowWithContext call resolves through our parenting client
+  // and parents the new view under the same root the boot WebContents
+  // uses. Without this, the WebContents view is not attached to any
+  // aura tree and falls outside the focus chain — WebContents::Focus()
+  // below would be a silent no-op on Aura, the renderer-side
+  // WidgetInputHandler binds in "no focused page" state, and CDP
+  // Input.dispatch* are dropped on the floor. See cloud_browser_browser
+  // _main_parts.cc PreMainMessageLoopRun step 1a for the fuller chain.
+  create_params.context = aura_context_window_;
   auto web_contents = content::WebContents::Create(create_params);
   if (!web_contents) {
     LOG(ERROR) << "CbDevToolsManagerDelegate::CreateNewTarget: WebContents::"
@@ -367,6 +393,12 @@ CbDevToolsManagerDelegate::CreateNewTarget(
   // the renderer awake), so the failure mode is invisible at the wire
   // layer — exactly the BUGS-529 symptom. Matches HeadlessWebContentsImpl
   // and content_shell's Shell::PlatformSetContents semantics.
+  //
+  // NOTE: WasShown() + Focus() were necessary but not sufficient on
+  // their own — see CreateParams::context above. Both layers (this
+  // call + the parenting context) are required for renderer-side
+  // input to land. The 9703db5 patch did the WasShown / Focus half;
+  // this patch closes the parenting half.
   web_contents->WasShown();
   web_contents->Focus();
 

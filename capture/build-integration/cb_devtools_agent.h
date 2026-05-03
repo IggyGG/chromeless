@@ -49,6 +49,10 @@
 #include "base/memory/scoped_refptr.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
+namespace aura {
+class Window;
+}  // namespace aura
+
 namespace content {
 class BrowserContext;
 class DevToolsAgentHost;
@@ -73,8 +77,22 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // nullptr in tests / paths where main_parts hasn't created a context
   // yet — Target.createTarget callers in that state must pass an
   // explicit browserContextId via Target.createBrowserContext first.
+  //
+  // |aura_context_window| is the embedder's Aura root (owned by main_
+  // parts via CbAuraPlatformData; intentionally leaked at process exit
+  // so this raw pointer never dangles). Each WebContents we create in
+  // CreateNewTarget uses this as CreateParams::context so the resulting
+  // WebContentsViewAura is parented under the same root the boot tab
+  // uses — which is what makes WebContents::Focus() actually move
+  // focus and lets the renderer-side WidgetInputHandler treat the page
+  // as foreground/focused. Without this, CDP Input.dispatch* are
+  // silently dropped by the renderer (BUGS-529 second-layer). nullptr
+  // is tolerated for safety; the targets created in that path will
+  // exhibit the original BUGS-529 symptom (input drops) but the
+  // delegate itself stays functional.
   explicit CbDevToolsManagerDelegate(
-      content::BrowserContext* default_browser_context = nullptr);
+      content::BrowserContext* default_browser_context = nullptr,
+      aura::Window* aura_context_window = nullptr);
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -178,6 +196,14 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser
   // Context().
   raw_ptr<content::BrowserContext> default_browser_context_ = nullptr;
+
+  // Aura root for parenting WebContents we create. NOT owned —
+  // CbAuraPlatformData (held by main_parts) is intentionally leaked
+  // at PostMainMessageLoopRun so this raw pointer outlives both
+  // main_parts and this delegate. Used in CreateNewTarget to populate
+  // CreateParams::context so the new WebContents view is parented into
+  // Aura's focus chain. See ctor doc + BUGS-529 chain for the why.
+  raw_ptr<aura::Window> aura_context_window_ = nullptr;
 
   // Contexts created via Target.createBrowserContext, owned by us.
   // unique_ptr because each must be destroyed when DisposeBrowser
