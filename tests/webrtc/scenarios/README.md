@@ -176,23 +176,24 @@ TEST_ARTIFACTS_DIR=/tmp/cb-wire-test \
   node scenarios/runner.mjs --only=wire
 ```
 
-### Bridge bugs surfaced by the wire tests
+### What the wire tests pin (post-fix)
 
-The wire scenarios surface **four genuine production bugs** in
-`capture/input-bridge/main.go` — these aren't test errors, they're
-invariants the bridge must hold and currently doesn't:
+The wire scenarios surfaced four production bugs in
+`capture/input-bridge/main.go` when the framework first ran. All
+four landed as fixes (see git log for the patch); the scenarios now
+serve as regression suite — green is the contract:
 
-| Bug | Location | Symptom | Fix |
-|---|---|---|---|
-| **#1 clickCount** | `main.go:554` | `mouse_button` always emits `clickCount: 1` → no dblclick events | Track time-of-last-mousedown, ramp clickCount on rapid successive clicks (~500ms threshold) |
-| **#2 modifiers** | `main.go:555` | `mouse_button` always emits `modifiers: 0` → shift-click loses modifier on the wire | Maintain held-key state machine across `key_down`/`key_up` envelopes; OR-mask into `modifiers` on mouse events |
-| **#3 buttons during drag** | `main.go:528` | `mouse_move` always emits `button: "none", buttons: 0` → drag detector aborts → no dragstart/drag/drop fires | Track pointer-button state across messages; OR last-down-without-up into `buttons` on mouse_move CDP dispatch |
-| **#4 Enter newline** | `main.go` keyboard path | `key_down {key:"Enter"}` dispatched without `text: "\r"` → textarea doesn't receive newline | Synthesise `text` from `key`: Enter→\r, Tab→\t, printable single char→itself |
+| Invariant | Where | Risk |
+|---|---|---|
+| **clickCount ramp** — bridge elevates clickCount on rapid successive same-button clicks within ~500 ms / ~5 px so chromium fires dblclick | `dispatcher.lastClick` state | Was hardcoded `clickCount: 1` |
+| **Held-modifier state machine** — `key_down`/`key_up` of Shift/Ctrl/Alt/Meta updates `dispatcher.heldMods`; mouse events read current bitmask so shift-click's modifier survives the wire | `dispatcher.heldMods` + `keyToProtocolMod()` | Was hardcoded `modifiers: 0` on mouse events |
+| **Held-button state machine** — `mouse_button` down/up updates `dispatcher.heldButtons`; subsequent `mouse_move` dispatches send the held bitmask + the corresponding `button` so chromium's drag detector keeps the gesture alive | `dispatcher.heldButtons` + `protocolButtonToBit()` | Was hardcoded `button: "none", modifiers: 0` on mouse_move; drag never fired |
+| **Special-key text synthesis** — Enter→`\r`, Tab→`\t`, Backspace→`\b`, single printable→itself; navigation keys (Arrow*/Home/End/PageUp/PageDown) correctly omit `text` | `keyTextMap` | Was missing — Enter into textarea didn't insert newline |
 
-A green run of `--only=wire` against a patched bridge means all four
-fixes landed. Ship those fixes upstream in the bridge crate —
-**this scenario set is the regression suite** that proves the
-production wire path holds under real chromium dispatch.
+Any future bridge change that breaks one of these invariants surfaces
+as a failed assertion at the named scenario. The labels intentionally
+name the state-machine pieces in main.go so a regression points
+straight at the right code path.
 
 ## Cluster integration
 

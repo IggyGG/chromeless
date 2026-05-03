@@ -61,70 +61,41 @@ export const scenario = {
       { expected: ">=17 forwarded (1 down + 16 moves + 1 up), 0 dropped",
         actual: relay });
 
-    // KNOWN BRIDGE BUG #3: drag breaks because mouse_move during
-    // mousedown loses the held-button state.
-    //
-    // capture/input-bridge/main.go:528 sends every mouse_move event
-    // to CDP as `button: "none", modifiers: 0`. There's no `buttons`
-    // field on the wire (the v1 protocol's mouse_move shape is just
-    // `{x, y}`) and the bridge has no state machine that infers
-    // "button is held because the last mouse_button was a 'down'
-    // without a matching 'up'." So during a drag, chromium sees:
-    //
-    //   mouseDown  buttons=1  (correct)
-    //   mouseMove  buttons=0  (WRONG — break)
-    //   mouseMove  buttons=0  ...
-    //   mouseUp    buttons=0  (chromium thinks nothing was held)
-    //
-    // Chromium's drag detector aborts when it sees an unbuttoned
-    // mouseMove during what should be a drag, so dragstart/drag/drop
-    // never fire. The page-level drag never happens.
-    //
-    // Fix: bridge maintains pointer-button state across messages —
-    // track which buttons were last `mouse_button` down without a
-    // matching up, and OR them into `buttons` on mouse_move CDP
-    // dispatch. (Same state machine pattern as the modifier fix.)
-    //
-    // ALL six drag assertions below fail until the bridge is patched.
-    // The recording shows the cursor moving from source to target
-    // but no drop highlighting — visible evidence of the bug.
-    s.assert("[wire] [BRIDGE-BUG #3] dragstart fired on source — buttons=1 survived",
+    // Bridge held-button-during-drag regression test: the v1
+    // mouse_move envelope shape is just `{x,y}` — no buttons field.
+    // The bridge tracks held buttons from mouse_button down/up
+    // envelopes (heldButtons state) and applies the current bitmask
+    // to mouse_move CDP dispatch, so chromium's drag detector keeps
+    // the gesture alive: dragstart→drag→dragenter→dragover→drop→
+    // dragend all fire correctly.
+    s.assert("[wire] dragstart fired on source — buttons survived through drag",
       () => dragstart.length === 1 && dragstart[0].source === "A",
-      { expected: "1 dragstart — but bridge mouse_move drops buttons state",
-        actual: dragstart });
+      { expected: "1 dragstart with source A", actual: dragstart });
 
-    s.assert("[wire] [BRIDGE-BUG #3] drag events fired during move sequence",
+    s.assert("[wire] drag events fired during move sequence",
       () => drags.length >= 1,
-      { expected: ">=1 drag — but bridge mouse_move drops buttons state",
-        actual: drags.length });
+      { expected: ">=1 drag", actual: drags.length });
 
-    s.assert("[wire] [BRIDGE-BUG #3] dragenter fired on target",
-      () => dragenter.length >= 1,
-      { expected: ">=1 dragenter — but bridge mouse_move drops buttons state",
-        actual: dragenter.length });
+    s.assert("[wire] dragenter fired on target",
+      () => dragenter.length >= 1, { actual: dragenter.length });
 
-    s.assert("[wire] [BRIDGE-BUG #3] dragover engaged target's preventDefault",
-      () => dragover.length >= 1,
-      { expected: ">=1 dragover — but bridge mouse_move drops buttons state",
-        actual: dragover.length });
+    s.assert("[wire] dragover engaged target's preventDefault",
+      () => dragover.length >= 1, { actual: dragover.length });
 
-    s.assert("[wire] [BRIDGE-BUG #3] drop fired with source's data payload",
+    s.assert("[wire] drop fired with source's data payload",
       () => drops.length === 1 && drops[0].data === "data:source-A",
-      { expected: "1 drop with data:source-A — but bridge mouse_move drops buttons state",
-        actual: drops });
+      { expected: "1 drop with data:source-A", actual: drops });
 
-    s.assert("[wire] [BRIDGE-BUG #3] dragend fired on source",
+    s.assert("[wire] dragend fired on source",
       () => dragend.length === 1,
-      { expected: "1 dragend — but bridge mouse_move drops buttons state",
-        actual: dragend });
+      { expected: "1 dragend", actual: dragend });
 
     const dropText = await s.runtimeEval(
       `document.getElementById("dndTarget").textContent`,
     );
-    s.assert("[wire] [BRIDGE-BUG #3] target DOM updated by drop handler",
+    s.assert("[wire] target DOM updated by drop handler",
       () => dropText && dropText.includes("data:source-A"),
-      { expected: "target text contains 'data:source-A' — but drop never fires",
-        actual: dropText });
+      { expected: "target text contains 'data:source-A'", actual: dropText });
   },
 };
 

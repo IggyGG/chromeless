@@ -244,6 +244,54 @@ func protocolModsToCDP(mods int) int {
 	return out
 }
 
+// keyToProtocolMod returns the protocol modifier bit for a Shift /
+// Control / Alt / Meta key event, or 0 for any other key. Used by the
+// dispatcher's cross-envelope modifier state machine — pressing one
+// of these keys sets the bit in heldMods, releasing clears it.
+//
+// We accept either KeyboardEvent.key (e.g. "Shift") or
+// KeyboardEvent.code (e.g. "ShiftLeft") because clients vary in
+// which they populate. The protocol spec carries both fields, so we
+// match either.
+func keyToProtocolMod(key, code string) int {
+	switch key {
+	case "Shift":
+		return modShift
+	case "Control":
+		return modCtrl
+	case "Alt":
+		return modAlt
+	case "Meta", "OS", "Super":
+		return modMeta
+	}
+	switch code {
+	case "ShiftLeft", "ShiftRight":
+		return modShift
+	case "ControlLeft", "ControlRight":
+		return modCtrl
+	case "AltLeft", "AltRight":
+		return modAlt
+	case "MetaLeft", "MetaRight", "OSLeft", "OSRight":
+		return modMeta
+	}
+	return 0
+}
+
+// keyTextMap covers the special keys whose CDP keyDown needs an
+// explicit `text` field for the renderer to actually insert the
+// character into a focused text input. Without `text`, chromium
+// treats e.g. Enter as a navigational keypress (which in a plain
+// textarea does nothing) instead of a character insertion.
+//
+// Other special keys (Arrow*, Home, End, PageUp, PageDown, F-keys)
+// MUST NOT have a `text` field — they're cursor / navigation
+// controls, not text-producing.
+var keyTextMap = map[string]string{
+	"Enter":     "\r",
+	"Tab":       "\t",
+	"Backspace": "\b",
+}
+
 // CDP button name from protocol button index.
 func protocolButtonToCDP(b int) string {
 	switch b {
@@ -486,7 +534,67 @@ type dispatcher struct {
 	wheelMu        sync.Mutex
 	wheelInGesture bool
 
+	// inputMu guards the cross-envelope pointer + modifier state.
+	// The protocol's per-envelope shapes (mouse_move {x,y},
+	// mouse_button {button,action,x,y}, key_{down,up} {key,code,mods})
+	// don't carry the held-button or held-modifier state needed for
+	// chromium's CDP renderer dispatch:
+	//
+	//   * mouse_move during a drag MUST send buttons!=0 or chromium's
+	//     drag detector aborts (no dragstart fires).
+	//   * mouse_button MUST send modifiers!=0 if a Shift/Ctrl/Alt/Meta
+	//     key is held, otherwise click events lose their modifier bits.
+	//   * mouse_button MUST ramp clickCount on rapid successive clicks
+	//     within ~500 ms / ~5 px, otherwise dblclick never fires.
+	//
+	// We track all three here. Reads/writes are guarded by inputMu so
+	// concurrent envelopes from a single source serialize cleanly.
+	inputMu      sync.Mutex
+	heldMods     int       // protocol modifier bitmask (modShift|modCtrl|...)
+	heldButtons  int       // CDP buttons bitfield (bit 0=left, 1=right, 2=middle, 3=back, 4=forward)
+	lastClick    clickRamp // most recent mouseDown for clickCount ramp logic
+
 	metrics *metrics
+}
+
+// clickRamp tracks the most recent mouseDown so the dispatcher can
+// elevate clickCount on rapid successive clicks of the same button at
+// the same approximate position — chromium's renderer keys dblclick
+// detection off a non-1 clickCount in the dispatched mouseEvent.
+type clickRamp struct {
+	button int       // protocol button index (0=left)
+	x, y   int       // last mouseDown position
+	at     time.Time // time of last mouseDown
+	count  int       // current clickCount (1 / 2 / 3)
+}
+
+// Browser convention: dblclick within 500 ms and within 5 px slop.
+const (
+	clickRampWindow = 500 * time.Millisecond
+	clickRampSlopPx = 5
+)
+
+// CDP buttons bit per protocol button index (matches WebDevTools spec):
+//
+//	0 left   → bit 0  (1)
+//	1 middle → bit 2  (4)
+//	2 right  → bit 1  (2)
+//	3 back   → bit 3  (8)
+//	4 forward→ bit 4  (16)
+func protocolButtonToBit(b int) int {
+	switch b {
+	case 0:
+		return 1 // left
+	case 1:
+		return 4 // middle
+	case 2:
+		return 2 // right
+	case 3:
+		return 8
+	case 4:
+		return 16
+	}
+	return 0
 }
 
 func newDispatcher(cdp cdpSender, m *metrics, log *slog.Logger) *dispatcher {
@@ -521,12 +629,30 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return d.fail(env.Type, fmt.Errorf("mouse_move: %w", err))
 		}
+		// Apply held button + modifier state so drag detection and
+		// hover-with-modifiers work correctly. Without this, chromium's
+		// drag detector aborts when it sees `buttons=0` during what
+		// should be the move portion of a mousedown→drag→mouseup
+		// gesture.
+		d.inputMu.Lock()
+		buttons := d.heldButtons
+		mods := protocolModsToCDP(d.heldMods)
+		d.inputMu.Unlock()
+		button := "none"
+		if buttons&1 != 0 {
+			button = "left"
+		} else if buttons&2 != 0 {
+			button = "right"
+		} else if buttons&4 != 0 {
+			button = "middle"
+		}
 		params := map[string]any{
 			"type":      "mouseMoved",
 			"x":         data.X,
 			"y":         data.Y,
-			"button":    "none",
-			"modifiers": 0,
+			"button":    button,
+			"buttons":   buttons,
+			"modifiers": mods,
 		}
 		_, err := d.cdp.Send(ctx, "Input.dispatchMouseEvent", params)
 		return d.fail(env.Type, err)
@@ -545,14 +671,69 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		default:
 			return d.fail(env.Type, fmt.Errorf("invalid action %q", data.Action))
 		}
+		// State updates for both directions of a click:
+		//   * On `down`, ramp clickCount if this matches the last
+		//     mouseDown within ~500 ms / ~5 px (chromium dblclick
+		//     detection); set the held-button bit so subsequent
+		//     mouse_move dispatches carry buttons!=0 (drag detection).
+		//   * On `up`, clear the held-button bit but PRESERVE the
+		//     ramp state — the next mouseDown still needs to see
+		//     the previous count to elevate (clickCount=2 on the
+		//     second pair, =3 on the third).
+		//
+		// Modifiers are picked up from the cross-envelope held-key
+		// state (key_down "Shift" without a matching key_up sets
+		// modShift in d.heldMods), so a shift-click sequence
+		// `key_down Shift / mouse_button down / mouse_button up /
+		// key_up Shift` lands a shift-modifier on both the
+		// mousePressed and mouseReleased events.
+		clickCount := 1
+		now := time.Now()
+		buttonBit := protocolButtonToBit(data.Button)
+		d.inputMu.Lock()
+		if data.Action == "down" {
+			elapsed := now.Sub(d.lastClick.at)
+			dx := data.X - d.lastClick.x
+			dy := data.Y - d.lastClick.y
+			if dx < 0 {
+				dx = -dx
+			}
+			if dy < 0 {
+				dy = -dy
+			}
+			if d.lastClick.button == data.Button &&
+				elapsed <= clickRampWindow &&
+				dx <= clickRampSlopPx && dy <= clickRampSlopPx &&
+				d.lastClick.count > 0 {
+				clickCount = d.lastClick.count + 1
+			}
+			d.lastClick = clickRamp{
+				button: data.Button,
+				x:      data.X,
+				y:      data.Y,
+				at:     now,
+				count:  clickCount,
+			}
+			d.heldButtons |= buttonBit
+		} else { // "up"
+			// The release of an N-th click reports clickCount=N — the
+			// browser uses this to fire `click` and (if N>=2) `dblclick`.
+			if d.lastClick.button == data.Button && d.lastClick.count > 0 {
+				clickCount = d.lastClick.count
+			}
+			d.heldButtons &^= buttonBit
+		}
+		modifiers := protocolModsToCDP(d.heldMods)
+		d.inputMu.Unlock()
+
 		params := map[string]any{
 			"type":       t,
 			"x":          data.X,
 			"y":          data.Y,
 			"button":     protocolButtonToCDP(data.Button),
-			"buttons":    1 << data.Button, // CDP buttons bitmask
-			"clickCount": 1,
-			"modifiers":  0,
+			"buttons":    buttonBit, // bitmask of THIS button (kept for compat)
+			"clickCount": clickCount,
+			"modifiers":  modifiers,
 		}
 		_, err := d.cdp.Send(ctx, "Input.dispatchMouseEvent", params)
 		return d.fail(env.Type, err)
@@ -640,16 +821,45 @@ func (d *dispatcher) Dispatch(ctx context.Context, env inputEnvelope) error {
 		if env.Type == "key_up" {
 			t = "keyUp"
 		}
+		// Cross-envelope modifier state machine: pressing Shift /
+		// Control / Alt / Meta sets the corresponding bit in
+		// d.heldMods, releasing clears it. Subsequent mouse and key
+		// events read from this state so a shift-click works as
+		// `key_down Shift / mouse_button / key_up Shift` even though
+		// the mouse_button envelope has no `mods` field on the wire.
+		modBit := keyToProtocolMod(data.Key, data.Code)
+		d.inputMu.Lock()
+		if modBit != 0 {
+			if env.Type == "key_down" {
+				d.heldMods |= modBit
+			} else {
+				d.heldMods &^= modBit
+			}
+		}
+		// The envelope's own `mods` field overrides + augments — a
+		// client that explicitly tracks modifier state per envelope
+		// (some hand-rolled clients do) can OR additional bits in.
+		mods := protocolModsToCDP(d.heldMods | data.Mods)
+		d.inputMu.Unlock()
+
 		params := map[string]any{
 			"type":      t,
 			"code":      data.Code,
 			"key":       data.Key,
-			"modifiers": protocolModsToCDP(data.Mods),
+			"modifiers": mods,
 		}
-		// For printable characters, also include `text` so the
-		// renderer fires `input` events.
-		if env.Type == "key_down" && len(data.Key) == 1 {
-			params["text"] = data.Key
+		// For printable characters AND the special keys that produce
+		// text in textareas (Enter / Tab), include `text` so the
+		// renderer fires `input` events and inserts the character.
+		// Without this, Enter dispatched into a textarea is treated
+		// as a navigational keypress (which in a plain textarea
+		// does nothing); pages don't see the newline.
+		if env.Type == "key_down" {
+			if t, ok := keyTextMap[data.Key]; ok {
+				params["text"] = t
+			} else if len(data.Key) == 1 {
+				params["text"] = data.Key
+			}
 		}
 		_, err := d.cdp.Send(ctx, "Input.dispatchKeyEvent", params)
 		return d.fail(env.Type, err)

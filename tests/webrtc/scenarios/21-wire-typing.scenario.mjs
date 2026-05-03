@@ -71,24 +71,17 @@ export const scenario = {
       () => text1Value === "hello",
       { expected: "hello", actual: text1Value });
 
-    // KNOWN BRIDGE BUG #4: capture/input-bridge/main.go translates
-    // key_down {key:"Enter"} into CDP keyDown without setting
-    // `text: "\r"` or `text: "\n"`. Chromium needs the `text` field
-    // for printable / line-break characters to actually be inserted
-    // into a textarea — without it, the keydown is treated as a
-    // navigational Enter (which in a textarea does nothing). So
-    // the test types "line one" + Enter + "two" but textarea ends
-    // up "line onetwo" (no newline).
-    //
-    // Fix: bridge synthesises `text` based on `key`:
-    //   "Enter" → "\r"
-    //   "Tab"   → "\t"
-    //   single-char printable → that char
-    //   special keys (Arrow*, Home, End, ...) → no text
-    s.assert("[wire] [BRIDGE-BUG #4] text2 ended with 'line one\\ntwo' (Tab + Enter + 'two')",
+    // Bridge text-synthesis regression test: the v1 envelope spec
+    // doesn't carry a `text` field on key_down (only `key` + `code`
+    // + `mods`), but chromium's CDP keyDown needs `text:"\r"` for
+    // textareas to actually insert a newline. The bridge synthesises
+    // `text` from `key` for Enter, Tab, Backspace, and single-char
+    // printables (keyTextMap in main.go); special keys like Arrow*
+    // / Home / End correctly have no `text` (they're navigation,
+    // not text-producing).
+    s.assert("[wire] text2 ended with 'line one\\ntwo' (Enter inserts newline)",
       () => text2Value === "line one\ntwo",
-      { expected: "line one\\ntwo — but Enter doesn't insert newline (no text field on wire)",
-        actual: JSON.stringify(text2Value) });
+      { expected: "line one\\ntwo", actual: JSON.stringify(text2Value) });
 
     s.assert("[wire] every printable char produced a keydown event with correct key",
       () => {

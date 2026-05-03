@@ -81,15 +81,15 @@ export const scenario = {
       { expected: "click on tl with detail=1",
         actual: clicks.map((e) => e.zone) });
 
-    // KNOWN BRIDGE BUG: capture/input-bridge/main.go:554 hard-codes
-    // clickCount=1 on every mouse_button envelope. Two rapid down/up
-    // pairs land as TWO single clicks instead of one dblclick. Fix:
-    // bridge needs to track time-of-last-mousedown and ramp clickCount
-    // on rapid successive clicks (chromium uses ~500ms threshold).
-    s.assert("[wire] [BRIDGE-BUG #1] MC double click produced 1 dblclick + 2 clicks",
+    // Bridge clickCount-ramp regression test: the bridge must elevate
+    // clickCount on rapid successive same-button clicks within
+    // ~500 ms / ~5 px so chromium's renderer fires dblclick. Was bug
+    // before the ramp state-machine landed (main.go: clickCount field
+    // on dispatcher's input state).
+    s.assert("[wire] MC double click produced 1 dblclick + 2 clicks (clickCount ramp)",
       () => dblclicks.some((e) => e.zone === "mc")
          && clicks.filter((e) => e.zone === "mc").length === 2,
-      { expected: "1 dblclick + 2 clicks on mc — but bridge hardcodes clickCount=1",
+      { expected: "1 dblclick + 2 clicks on mc",
         actual: { dblclicks: dblclicks.map((e) => e.zone),
                   clicks: clicks.filter((e) => e.zone === "mc") } });
 
@@ -100,18 +100,14 @@ export const scenario = {
         actual: { contextmenu: contextmenu.map((e) => e.zone),
                   aux: auxclicks } });
 
-    // KNOWN BRIDGE BUG: capture/input-bridge/main.go:555 hard-codes
-    // modifiers=0 on every mouse_button event. The wire format brackets
-    // a shift-click with key_down "Shift" → mouse_button down → up →
-    // key_up "Shift", but the bridge doesn't track held-modifier state
-    // from key_down envelopes. The mouse_button CDP dispatch goes out
-    // with modifiers=0, so the page's click event has shiftKey=false.
-    // Fix: bridge needs a per-source modifier state machine that
-    // tracks key_down/key_up of Shift/Ctrl/Alt/Meta and applies the
-    // current modifiers bitmask to mouse events.
-    s.assert("[wire] [BRIDGE-BUG #2] shift-modifier on click reached the page",
+    // Bridge modifier-state regression test: the wire shape brackets
+    // a shift-click as `key_down Shift / mouse_button down / up /
+    // key_up Shift`. The bridge tracks Shift/Ctrl/Alt/Meta key_down/up
+    // envelopes in heldMods state and applies the current bitmask to
+    // mouse events — so the page's click event has shiftKey=true.
+    s.assert("[wire] shift-modifier on click reached the page (held-mod state)",
       () => clicks.some((e) => e.zone === "bc" && e.shift === true),
-      { expected: "click on bc with shift=true — but bridge hardcodes modifiers=0",
+      { expected: "click on bc with shift=true",
         actual: clicks.filter((e) => e.zone === "bc") });
 
     // Sanity: every click envelope we sent produced a corresponding

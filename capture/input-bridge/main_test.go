@@ -1141,3 +1141,289 @@ func TestParseFlags(t *testing.T) {
 		t.Errorf("expected error for invalid --source")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// State-machine tests — cross-envelope state added for the wire-path
+// integration tests in tests/webrtc/scenarios/. Each verifies one of the
+// four invariants that landed in the dispatcher:
+//
+//   - clickCount ramp on rapid successive mouseDowns
+//   - held-modifier state across key_down/up envelopes
+//   - held-button state across mouse_button down/up envelopes
+//   - special-key text synthesis (Enter→\r, Tab→\t, Backspace→\b)
+//
+// Each reads `params` of the recorded CDP calls and asserts on the
+// fields that production cares about (the renderer keys dblclick
+// detection on clickCount; drag detection on buttons; modifier
+// propagation to click events; textarea newline insertion on text).
+// ---------------------------------------------------------------------------
+
+// callsParam returns a typed view of the i-th recorded call's params,
+// stopping the test if the index is out of range or the JSON is bad.
+func callsParam(t *testing.T, calls []recordedCall, i int) map[string]any {
+	t.Helper()
+	if i >= len(calls) {
+		t.Fatalf("call index %d out of range (have %d)", i, len(calls))
+	}
+	var p map[string]any
+	if err := json.Unmarshal(calls[i].Params, &p); err != nil {
+		t.Fatalf("unmarshal call[%d] params: %v", i, err)
+	}
+	return p
+}
+
+// dispatchAll feeds a list of raw envelope JSON strings through the
+// dispatcher in order. Helper used by the state-machine tests below.
+func dispatchAll(t *testing.T, disp *dispatcher, ctx context.Context, raws []string) {
+	t.Helper()
+	for _, raw := range raws {
+		env, err := parseEnvelope([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if err := disp.Dispatch(ctx, env); err != nil {
+			t.Errorf("dispatch %s: %v", env.Type, err)
+		}
+	}
+}
+
+// callsWithMethod returns the subset of recorded calls with the given
+// CDP method (typically Input.dispatchMouseEvent). Skips
+// Page.bringToFront and other infrastructure calls.
+func callsWithMethod(calls []recordedCall, method string) []recordedCall {
+	out := []recordedCall{}
+	for _, c := range calls {
+		if c.Method == method {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func TestDispatchClickCountRamp(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// Two rapid mouse_button down/up pairs at the same coordinates.
+	// Renderer should see clickCount=1 on the first pair, clickCount=2
+	// on the second — that's what fires the dblclick event.
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"mouse_button","t":1,"seq":0,"data":{"button":0,"action":"down","x":100,"y":100}}`,
+		`{"v":1,"type":"mouse_button","t":2,"seq":1,"data":{"button":0,"action":"up","x":100,"y":100}}`,
+		`{"v":1,"type":"mouse_button","t":3,"seq":2,"data":{"button":0,"action":"down","x":100,"y":100}}`,
+		`{"v":1,"type":"mouse_button","t":4,"seq":3,"data":{"button":0,"action":"up","x":100,"y":100}}`,
+	})
+
+	mouseEvents := callsWithMethod(f.Calls(), "Input.dispatchMouseEvent")
+	if len(mouseEvents) != 4 {
+		t.Fatalf("expected 4 mouse events, got %d", len(mouseEvents))
+	}
+
+	// First down: clickCount=1, first up: clickCount=1, second down:
+	// clickCount=2 (RAMP), second up: clickCount=2.
+	wantCounts := []int{1, 1, 2, 2}
+	for i, want := range wantCounts {
+		var p map[string]any
+		_ = json.Unmarshal(mouseEvents[i].Params, &p)
+		got, _ := p["clickCount"].(float64)
+		if int(got) != want {
+			t.Errorf("call[%d] clickCount = %v, want %d", i, got, want)
+		}
+	}
+}
+
+func TestDispatchClickCountResetOnDistance(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, _ := dialCDP(ctx, f.URL(), quietLogger())
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// Two clicks but the second is >5px away from the first — must NOT
+	// ramp clickCount, both pairs should be clickCount=1 (no dblclick).
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"mouse_button","t":1,"seq":0,"data":{"button":0,"action":"down","x":100,"y":100}}`,
+		`{"v":1,"type":"mouse_button","t":2,"seq":1,"data":{"button":0,"action":"up","x":100,"y":100}}`,
+		`{"v":1,"type":"mouse_button","t":3,"seq":2,"data":{"button":0,"action":"down","x":200,"y":200}}`,
+		`{"v":1,"type":"mouse_button","t":4,"seq":3,"data":{"button":0,"action":"up","x":200,"y":200}}`,
+	})
+
+	mouseEvents := callsWithMethod(f.Calls(), "Input.dispatchMouseEvent")
+	for i, want := range []int{1, 1, 1, 1} {
+		var p map[string]any
+		_ = json.Unmarshal(mouseEvents[i].Params, &p)
+		got, _ := p["clickCount"].(float64)
+		if int(got) != want {
+			t.Errorf("distance-reset call[%d] clickCount = %v, want %d", i, got, want)
+		}
+	}
+}
+
+func TestDispatchHeldModifierOnMouseEvent(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, _ := dialCDP(ctx, f.URL(), quietLogger())
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// Wire shape: key_down Shift / mouse_button down / mouse_button up
+	// / key_up Shift. The mouse events MUST land with modifiers=8 (CDP
+	// shift bit) even though the mouse_button envelope has no `mods`
+	// field on the wire — bridge has to track held-modifier state.
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"key_down","t":1,"seq":0,"data":{"key":"Shift","code":"ShiftLeft","mods":1}}`,
+		`{"v":1,"type":"mouse_button","t":2,"seq":1,"data":{"button":0,"action":"down","x":100,"y":100}}`,
+		`{"v":1,"type":"mouse_button","t":3,"seq":2,"data":{"button":0,"action":"up","x":100,"y":100}}`,
+		`{"v":1,"type":"key_up","t":4,"seq":3,"data":{"key":"Shift","code":"ShiftLeft","mods":0}}`,
+	})
+
+	calls := f.Calls()
+	mouseEvents := callsWithMethod(calls, "Input.dispatchMouseEvent")
+	if len(mouseEvents) != 2 {
+		t.Fatalf("expected 2 mouse events, got %d", len(mouseEvents))
+	}
+	for i, name := range []string{"mouseDown", "mouseUp"} {
+		var p map[string]any
+		_ = json.Unmarshal(mouseEvents[i].Params, &p)
+		got, _ := p["modifiers"].(float64)
+		if int(got) != 8 {
+			t.Errorf("%s modifiers = %v, want 8 (Shift held)", name, got)
+		}
+	}
+
+	// After key_up, the held state must reset — a subsequent
+	// mouse_button down should land with modifiers=0.
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"mouse_button","t":5,"seq":4,"data":{"button":0,"action":"down","x":200,"y":200}}`,
+	})
+	post := callsWithMethod(f.Calls(), "Input.dispatchMouseEvent")
+	var p map[string]any
+	_ = json.Unmarshal(post[len(post)-1].Params, &p)
+	if got, _ := p["modifiers"].(float64); int(got) != 0 {
+		t.Errorf("after key_up Shift, modifiers = %v, want 0", got)
+	}
+}
+
+func TestDispatchHeldButtonsOnMouseMove(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, _ := dialCDP(ctx, f.URL(), quietLogger())
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// Drag-shape sequence: mouse_button down, mouse_move (during
+	// drag), mouse_button up, mouse_move (after drag). The middle
+	// move MUST report buttons=1 + button="left" so chromium's drag
+	// detector keeps the gesture alive. The trailing move (after up)
+	// must report buttons=0 + button="none".
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"mouse_button","t":1,"seq":0,"data":{"button":0,"action":"down","x":100,"y":100}}`,
+		`{"v":1,"type":"mouse_move","t":2,"seq":1,"data":{"x":110,"y":105}}`,
+		`{"v":1,"type":"mouse_button","t":3,"seq":2,"data":{"button":0,"action":"up","x":110,"y":105}}`,
+		`{"v":1,"type":"mouse_move","t":4,"seq":3,"data":{"x":120,"y":110}}`,
+	})
+
+	mouseEvents := callsWithMethod(f.Calls(), "Input.dispatchMouseEvent")
+	if len(mouseEvents) != 4 {
+		t.Fatalf("expected 4 mouse events, got %d", len(mouseEvents))
+	}
+
+	// During-drag move (index 1) must have buttons=1 + button=left.
+	var dragMove map[string]any
+	_ = json.Unmarshal(mouseEvents[1].Params, &dragMove)
+	if buttons, _ := dragMove["buttons"].(float64); int(buttons) != 1 {
+		t.Errorf("during-drag move buttons = %v, want 1", buttons)
+	}
+	if button, _ := dragMove["button"].(string); button != "left" {
+		t.Errorf("during-drag move button = %q, want left", button)
+	}
+
+	// After-up move (index 3) must have buttons=0 + button=none.
+	var afterMove map[string]any
+	_ = json.Unmarshal(mouseEvents[3].Params, &afterMove)
+	if buttons, _ := afterMove["buttons"].(float64); int(buttons) != 0 {
+		t.Errorf("after-up move buttons = %v, want 0", buttons)
+	}
+	if button, _ := afterMove["button"].(string); button != "none" {
+		t.Errorf("after-up move button = %q, want none", button)
+	}
+}
+
+func TestDispatchKeyTextSynthesis(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, _ := dialCDP(ctx, f.URL(), quietLogger())
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// Enter / Tab / Backspace / printable / arrow.
+	// Enter, Tab, Backspace and printable get `text`; arrow keys
+	// don't.
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"key_down","t":1,"seq":0,"data":{"key":"Enter","code":"Enter","mods":0}}`,
+		`{"v":1,"type":"key_down","t":2,"seq":1,"data":{"key":"Tab","code":"Tab","mods":0}}`,
+		`{"v":1,"type":"key_down","t":3,"seq":2,"data":{"key":"Backspace","code":"Backspace","mods":0}}`,
+		`{"v":1,"type":"key_down","t":4,"seq":3,"data":{"key":"a","code":"KeyA","mods":0}}`,
+		`{"v":1,"type":"key_down","t":5,"seq":4,"data":{"key":"ArrowUp","code":"ArrowUp","mods":0}}`,
+	})
+
+	keyEvents := callsWithMethod(f.Calls(), "Input.dispatchKeyEvent")
+	if len(keyEvents) != 5 {
+		t.Fatalf("expected 5 key events, got %d", len(keyEvents))
+	}
+	wantText := []string{"\r", "\t", "\b", "a", ""}
+	for i, want := range wantText {
+		var p map[string]any
+		_ = json.Unmarshal(keyEvents[i].Params, &p)
+		text, _ := p["text"].(string)
+		if want == "" {
+			if _, has := p["text"]; has {
+				t.Errorf("key[%d] should have no text field, got %q", i, text)
+			}
+		} else if text != want {
+			t.Errorf("key[%d] text = %q, want %q", i, text, want)
+		}
+	}
+}
+
+func TestKeyToProtocolMod(t *testing.T) {
+	cases := []struct {
+		key, code string
+		want      int
+	}{
+		{"Shift", "", modShift},
+		{"Control", "", modCtrl},
+		{"Alt", "", modAlt},
+		{"Meta", "", modMeta},
+		{"OS", "", modMeta},
+		{"", "ShiftLeft", modShift},
+		{"", "ShiftRight", modShift},
+		{"", "ControlLeft", modCtrl},
+		{"", "AltRight", modAlt},
+		{"", "MetaLeft", modMeta},
+		{"a", "KeyA", 0},
+		{"Enter", "Enter", 0},
+	}
+	for _, tc := range cases {
+		got := keyToProtocolMod(tc.key, tc.code)
+		if got != tc.want {
+			t.Errorf("keyToProtocolMod(%q, %q) = %d, want %d", tc.key, tc.code, got, tc.want)
+		}
+	}
+}
