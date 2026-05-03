@@ -255,6 +255,16 @@ spec:
               TEST_ARTIFACTS_DIR=/tmp/out \
                 node scenarios/runner.mjs --only=wire || true
 
+              # Bridge metrics — proves whether envelopes were
+              # received and dispatched. Useful when scenarios show
+              # zero page events: distinguishes "bridge never got
+              # the wire" from "bridge dispatched but chromium
+              # didn't reflect."
+              echo "[validation] bridge metrics:"
+              curl -fsS http://localhost:9101/metrics 2>&1 \
+                | grep -E "^input_bridge_(events|dispatch|parse|unknown)" \
+                | head -30
+
               echo "[validation] artifacts:"
               ls -la /tmp/out/
 
