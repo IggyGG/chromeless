@@ -264,7 +264,8 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
     LOG(INFO) << "CloudBrowserBrowserMainParts: boot WebContents post-Focus "
                  "RWHV bounds=" << rwhv->GetViewBounds().ToString()
               << " hasFocus=" << rwhv->HasFocus()
-              << " isHidden=" << initial_web_contents_->IsHidden();
+              << " visibility="
+              << static_cast<int>(initial_web_contents_->GetVisibility());
   } else {
     LOG(WARNING) << "CloudBrowserBrowserMainParts: boot WebContents has "
                     "no RenderWidgetHostView yet (renderer not up?)";

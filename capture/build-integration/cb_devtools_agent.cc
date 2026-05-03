@@ -410,7 +410,7 @@ CbDevToolsManagerDelegate::CreateNewTarget(
     LOG(INFO) << "CbDevToolsManagerDelegate::CreateNewTarget: post-Focus "
                  "RWHV bounds=" << rwhv->GetViewBounds().ToString()
               << " hasFocus=" << rwhv->HasFocus()
-              << " isHidden=" << web_contents->IsHidden();
+              << " visibility=" << static_cast<int>(web_contents->GetVisibility());
   }
 
   content::NavigationController::LoadURLParams load_params(url);
