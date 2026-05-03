@@ -128,6 +128,10 @@ CloudBrowserBrowserMainParts::CloudBrowserBrowserMainParts() = default;
 
 CloudBrowserBrowserMainParts::~CloudBrowserBrowserMainParts() = default;
 
+content::BrowserContext* CloudBrowserBrowserMainParts::browser_context() const {
+  return browser_context_.get();
+}
+
 namespace {
 
 // Internal default display geometry. Matches the Xvfb resolution the
@@ -182,6 +186,30 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   CHECK(initial_web_contents_)
       << "WebContents::Create returned null — chromium browser process "
       << "is misconfigured (renderer host process not yet up?).";
+
+  // 2a. Mark the WebContents as visible + focused. Without WasShown(),
+  //     chromium leaves the WebContents in Visibility::HIDDEN — the
+  //     RenderWidgetHostView never receives ShowWithVisibility() and
+  //     the renderer-side WidgetInputHandler is bound in a state where
+  //     CDP-injected Input.dispatch{Mouse,Key}Event silently no-op
+  //     because the renderer treats the page as backgrounded. Frames
+  //     still render (canvas captureStream / framesink capture force
+  //     the renderer to keep producing output via separate capturer
+  //     refcounts), so the failure is invisible at the wire layer.
+  //     This was BUGS-529.
+  //
+  //     Mirrors HeadlessWebContentsImpl which calls WasShown() on every
+  //     contents at construction, and content_shell which gets WasShown
+  //     transitively via Shell::PlatformSetContents. Without a platform
+  //     window we have no implicit caller, so we do it explicitly.
+  //
+  //     Focus() is the analogue of Shell::PlatformSetContents'
+  //     parent->AddChild + content->Show + web_contents_->Focus chain;
+  //     without it, the page never receives focus and certain key
+  //     event paths (those that route through the focused frame)
+  //     drop input on the floor.
+  initial_web_contents_->WasShown();
+  initial_web_contents_->Focus();
 
   content::NavigationController::LoadURLParams load_params{
       GURL(url::kAboutBlankURL)};

@@ -39,6 +39,7 @@
 #include "content/public/browser/browser_main_parts.h"
 
 namespace content {
+class BrowserContext;
 class WebContents;
 }  // namespace content
 
@@ -66,6 +67,18 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   void WillRunMainMessageLoop(
       std::unique_ptr<base::RunLoop>& run_loop) override;
   void PostMainMessageLoopRun() override;
+
+  // Public read-only accessor for the default BrowserContext. Returns
+  // nullptr until PreMainMessageLoopRun has executed (the context is
+  // constructed there). Used by CloudBrowserContentBrowserClient to
+  // hand the default context to CbDevToolsManagerDelegate at delegate-
+  // construction time so Target.createTarget without an explicit
+  // browserContextId picks up a sensible default. See
+  // ShellBrowserMainParts::browser_context() for the analogous upstream
+  // accessor in content_shell. Defined out-of-line because the
+  // CloudBrowserBrowserContext → content::BrowserContext upcast needs
+  // the derived class definition.
+  content::BrowserContext* browser_context() const;
 
  private:
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)

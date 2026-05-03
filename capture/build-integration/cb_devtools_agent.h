@@ -68,7 +68,13 @@ class CloudBrowserFrameSinkCapturer;
 // keeps alive for the duration of remote-debugging service.
 class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
  public:
-  CbDevToolsManagerDelegate();
+  // |default_browser_context| is the BrowserContext owned by main_parts;
+  // we hold a raw_ptr because main_parts outlives the delegate. May be
+  // nullptr in tests / paths where main_parts hasn't created a context
+  // yet — Target.createTarget callers in that state must pass an
+  // explicit browserContextId via Target.createBrowserContext first.
+  explicit CbDevToolsManagerDelegate(
+      content::BrowserContext* default_browser_context = nullptr);
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -110,9 +116,11 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
 
   // Default context is the one main_parts creates at startup —
   // owns about:blank tabs, gets exposed as the |targetInfos| in
-  // Target.getTargets. Registered by main_parts immediately after
-  // construction (see CloudBrowserBrowserMainParts::PreMainMessage
-  // LoopRun) so the delegate knows which context to return here.
+  // Target.getTargets. Wired in via the constructor from
+  // CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate,
+  // which reads CloudBrowserBrowserMainParts::browser_context().
+  // SetDefaultBrowserContext() can override post-construction (kept
+  // for parity with chromium's interface, currently unused).
   content::BrowserContext* GetDefaultBrowserContext() override;
 
   // Removes the named context from |contexts_| (which destroys it
@@ -140,11 +148,13 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       content::DevToolsManagerDelegate::TargetType target_type,
       bool new_window) override;
 
-  // Called by CloudBrowserBrowserMainParts::PreMainMessageLoopRun
-  // once the default BrowserContext is constructed. Stored as a
-  // raw_ptr because main_parts owns the lifetime — the delegate
-  // outlives the default context only during chromium teardown,
-  // and we never deref the pointer past PostMainMessageLoopRun.
+  // Replace the default BrowserContext stored at construction. Stored
+  // as a raw_ptr because main_parts owns the lifetime — the delegate
+  // outlives the default context only during chromium teardown, and
+  // we never deref the pointer past PostMainMessageLoopRun. Currently
+  // unused; the canonical path is to pass the context via the
+  // constructor (set up by CloudBrowserContentBrowserClient::
+  // CreateDevToolsManagerDelegate).
   void SetDefaultBrowserContext(content::BrowserContext* context);
 
  private:

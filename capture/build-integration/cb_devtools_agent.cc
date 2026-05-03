@@ -129,7 +129,20 @@ void LogReceivedFrame(scoped_refptr<media::VideoFrame> frame) {
 
 }  // namespace
 
-CbDevToolsManagerDelegate::CbDevToolsManagerDelegate() = default;
+CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
+    content::BrowserContext* default_browser_context)
+    : default_browser_context_(default_browser_context) {
+  if (default_browser_context_) {
+    LOG(INFO) << "CbDevToolsManagerDelegate: constructed with default "
+                 "browser context ptr="
+              << default_browser_context_.get();
+  } else {
+    LOG(WARNING) << "CbDevToolsManagerDelegate: constructed with no default "
+                    "browser context — Target.createTarget without an "
+                    "explicit browserContextId will fail until "
+                    "Target.createBrowserContext has been called.";
+  }
+}
 
 CbDevToolsManagerDelegate::~CbDevToolsManagerDelegate() = default;
 
@@ -330,8 +343,10 @@ CbDevToolsManagerDelegate::CreateNewTarget(
     browser_context = default_browser_context_;
   } else {
     LOG(ERROR) << "CbDevToolsManagerDelegate::CreateNewTarget: no context "
-                  "available (no createBrowserContext yet, and main_parts "
-                  "didn't call SetDefaultBrowserContext)";
+                  "available (no createBrowserContext yet, and the default "
+                  "context wasn't passed via the constructor — check "
+                  "CloudBrowserContentBrowserClient::"
+                  "CreateDevToolsManagerDelegate wiring)";
     return nullptr;
   }
 
@@ -342,6 +357,18 @@ CbDevToolsManagerDelegate::CreateNewTarget(
                   "Create returned nullptr";
     return nullptr;
   }
+
+  // Mark the WebContents visible + focused so the renderer-side
+  // WidgetInputHandler is wired into the visible/focused page-input
+  // pipeline. Without this, CDP-injected Input.dispatch{Mouse,Key}Event
+  // is silently no-op'd by the renderer because it treats the page as
+  // a hidden background tab. Frame production is unaffected (the
+  // streamer page's canvas captureStream + framesink capturer keep
+  // the renderer awake), so the failure mode is invisible at the wire
+  // layer — exactly the BUGS-529 symptom. Matches HeadlessWebContentsImpl
+  // and content_shell's Shell::PlatformSetContents semantics.
+  web_contents->WasShown();
+  web_contents->Focus();
 
   content::NavigationController::LoadURLParams load_params(url);
   load_params.transition_type = ui::PAGE_TRANSITION_TYPED;

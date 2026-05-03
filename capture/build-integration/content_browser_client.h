@@ -33,6 +33,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "content/public/browser/content_browser_client.h"
 
 namespace content {
@@ -45,6 +46,8 @@ class VideoEncoderFactory;
 }  // namespace webrtc
 
 namespace cloud_browser {
+
+class CloudBrowserBrowserMainParts;
 
 class CloudBrowserContentBrowserClient : public content::ContentBrowserClient {
  public:
@@ -82,8 +85,24 @@ class CloudBrowserContentBrowserClient : public content::ContentBrowserClient {
   // extensions). We override to wire CbDevToolsManagerDelegate, which
   // adds Cb.startFrameSinkCapture so the e2e test can flip the T55
   // capture path on at runtime. See cb_devtools_agent.h.
+  //
+  // Threading note: chromium calls CreateBrowserMainParts very early
+  // (BrowserMainLoop::Init) and CreateDevToolsManagerDelegate later
+  // (lazily, on first DevToolsAgentHost::GetOrCreateFor). By the time
+  // the delegate is constructed, BrowserMainParts::PreMainMessageLoopRun
+  // has already created the default BrowserContext, so reading
+  // |main_parts_->browser_context()| from this hook is safe.
   std::unique_ptr<content::DevToolsManagerDelegate>
   CreateDevToolsManagerDelegate() override;
+
+ private:
+  // Stashed by CreateBrowserMainParts so CreateDevToolsManagerDelegate
+  // can read the default BrowserContext at delegate-construction time
+  // without going through a global singleton. raw_ptr because chromium
+  // owns the unique_ptr returned by CreateBrowserMainParts and keeps it
+  // alive for the entire process lifetime — same lifetime model as
+  // ShellContentBrowserClient::shell_browser_main_parts_.
+  raw_ptr<CloudBrowserBrowserMainParts> main_parts_ = nullptr;
 };
 
 }  // namespace cloud_browser

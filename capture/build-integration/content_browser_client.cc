@@ -10,6 +10,7 @@
 #include "capture/build-integration/cb_devtools_agent.h"
 #include "capture/build-integration/cloud_browser_browser_main_parts.h"
 #include "capture/encoder/encoder_factory.h"
+#include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_main_parts.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
@@ -28,7 +29,13 @@ CloudBrowserContentBrowserClient::CreateBrowserMainParts(
   // browser process to its message-loop without ever creating a
   // BrowserContext, which leaves DevToolsAgentHost with no targets to
   // publish — see cloud_browser_browser_main_parts.h for the reasoning.
-  return std::make_unique<CloudBrowserBrowserMainParts>();
+  auto parts = std::make_unique<CloudBrowserBrowserMainParts>();
+  // Stash a raw pointer for CreateDevToolsManagerDelegate so it can
+  // read the default BrowserContext when the delegate is constructed
+  // (BUGS-529 — wires the default context that previously had to come
+  // through Target.createBrowserContext as a workaround).
+  main_parts_ = parts.get();
+  return parts;
 }
 
 std::unique_ptr<webrtc::VideoEncoderFactory>
@@ -52,7 +59,19 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   // delegate so Cb.startFrameSinkCapture is dispatchable from the
   // remote-debugging endpoint enabled by --remote-debugging-port on
   // launch-chromium-phase2.sh.
-  return std::make_unique<CbDevToolsManagerDelegate>();
+  //
+  // Pass main_parts_'s BrowserContext as the default so
+  // Target.createTarget without an explicit browserContextId succeeds
+  // out of the box. main_parts_ is set by CreateBrowserMainParts, which
+  // chromium calls before this hook (BrowserMainLoop::Init runs first;
+  // CreateDevToolsManagerDelegate is lazy on first GetOrCreateFor in
+  // PreMainMessageLoopRun). main_parts_->browser_context() returns the
+  // context built in PreMainMessageLoopRun — by the time the FIRST
+  // DevToolsAgentHost is created (also from PreMainMessageLoopRun, on
+  // the initial about:blank target), the context is already populated.
+  content::BrowserContext* default_context =
+      main_parts_ ? main_parts_->browser_context() : nullptr;
+  return std::make_unique<CbDevToolsManagerDelegate>(default_context);
 }
 
 }  // namespace cloud_browser
