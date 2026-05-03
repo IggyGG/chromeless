@@ -48,6 +48,7 @@
 #include <string>
 #include <utility>
 
+#include "base/threading/thread_restrictions.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 
 #include "base/functional/bind.h"
@@ -250,8 +251,14 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
 // ============================================================================
 
 content::BrowserContext* CbDevToolsManagerDelegate::CreateBrowserContext() {
-  // Each new context is a fresh in-memory profile. CloudBrowserBrowser
-  // Context's ctor does the storage-partition + URL-loader-factory wiring.
+  // CloudBrowserBrowserContext's ctor does blocking I/O — creates the
+  // profile dir, wires storage-partition state, registers URL loader
+  // factories. At startup PreMainMessageLoopRun allows blocking, but
+  // this override fires from a CDP handler thread that has
+  // tls_blocking_disallowed=1, so an unwrapped construction SIGABRTs
+  // on the DCHECK in base/threading/thread_restrictions.cc:62.
+  // ScopedAllowBlocking marks the scope as intentionally permissive.
+  base::ScopedAllowBlocking allow_blocking;
   auto context = std::make_unique<CloudBrowserBrowserContext>();
   content::BrowserContext* raw = context.get();
   contexts_.push_back(std::move(context));
