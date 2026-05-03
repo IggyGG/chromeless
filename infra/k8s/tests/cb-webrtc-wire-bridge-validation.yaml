@@ -307,7 +307,11 @@ spec:
           volumeMounts:
             - name: workspace
               mountPath: /workspace
-              readOnly: true
+              # NOT readOnly — npm install writes node_modules into
+              # /workspace/tests/webrtc/. The bootstrap-tests
+              # initContainer is the only other writer and it has
+              # already exited by the time test-driver runs, so
+              # there's no producer/consumer race to guard against.
             - name: out-vol
               mountPath: /tmp/out
 
