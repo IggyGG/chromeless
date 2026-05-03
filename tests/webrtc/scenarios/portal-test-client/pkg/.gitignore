@@ -1,0 +1,8 @@
+# wasm-pack writes `*` here to mark the artefact as build output.
+# We override that — the pkg/ contents are committed to chromeless so
+# the test fixture works without a Rust toolchain on the runner.
+# Rebuild with:
+#   cd <tf-multiverse>/portal/leptos-input-encoder-test-client
+#   wasm-pack build --release --target web \
+#     --out-dir <chromeless>/tests/webrtc/scenarios/portal-test-client/pkg
+!*
