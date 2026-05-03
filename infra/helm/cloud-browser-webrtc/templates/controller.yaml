@@ -81,6 +81,9 @@ spec:
     spec:
       serviceAccountName: browser-session-controller
       automountServiceAccountToken: true
+      {{- if .Values.priorityClasses.enabled }}
+      priorityClassName: {{ .Values.priorityClasses.controller.name }}
+      {{- end }}
       {{- with .Values.images.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

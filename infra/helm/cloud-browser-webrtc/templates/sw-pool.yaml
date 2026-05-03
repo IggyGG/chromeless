@@ -1,46 +1,60 @@
-{{- if .Values.defaultPool.enabled -}}
+{{- if .Values.swPool.enabled -}}
+{{- /*
+T119: software-encoder BrowserSessionPool. Mirrors default-pool.yaml
+in shape; differs in resource shape (no GPU pin), placement (no
+GPU node), and recycle cadence. Kept as a separate template (rather
+than refactoring default-pool into a generic loop) so the existing
+defaultPool values shape stays stable for callers that don't enable
+the SW pool.
+
+Pool name is fixed to "sw-pool" — it's not a settable knob today
+because the only other pool name is .Values.controller.defaultPool,
+and the controller's defaultPool wiring already covers that.
+*/ -}}
 {{- $ns := include "cb.namespace" . -}}
+{{- $poolName := "sw-pool" -}}
 apiVersion: cloud-browser-webrtc.example.com/v1alpha1
 kind: BrowserSessionPool
 metadata:
-  name: {{ .Values.controller.defaultPool }}
+  name: {{ $poolName }}
   namespace: {{ $ns }}
   labels:
     {{- include "cb.labels" . | nindent 4 }}
     app.kubernetes.io/component: pool
+    cb.session/pool: {{ $poolName | quote }}
 spec:
-  warmReplicas: {{ .Values.defaultPool.warmReplicas }}
-  maxSessions: {{ .Values.defaultPool.maxSessions }}
-  maxAgeSeconds: {{ .Values.defaultPool.maxAgeSeconds }}
-  recyclePolicy: {{ .Values.defaultPool.recyclePolicy }}
+  warmReplicas: {{ .Values.swPool.warmReplicas }}
+  maxSessions: {{ .Values.swPool.maxSessions }}
+  maxAgeSeconds: {{ .Values.swPool.maxAgeSeconds }}
+  recyclePolicy: {{ .Values.swPool.recyclePolicy }}
   template:
     metadata:
       labels:
         {{- include "cb.labels" . | nindent 8 }}
         app.kubernetes.io/component: session
         cb.session/state: warm
-        cb.session/pool: {{ .Values.controller.defaultPool | quote }}
+        cb.session/pool: {{ $poolName | quote }}
       annotations:
         cb.io/snapshot-id: ""
     spec:
-      {{- if .Values.defaultPool.runtimeClassName }}
-      runtimeClassName: {{ .Values.defaultPool.runtimeClassName | quote }}
+      {{- if .Values.swPool.runtimeClassName }}
+      runtimeClassName: {{ .Values.swPool.runtimeClassName | quote }}
       {{- else if .Values.gvisor.enabled }}
       runtimeClassName: gvisor
       {{- end }}
-      {{- with .Values.defaultPool.nodeSelector }}
+      {{- with .Values.swPool.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.defaultPool.tolerations }}
+      {{- with .Values.swPool.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.defaultPool.affinity }}
+      {{- with .Values.swPool.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.defaultPool.topologySpreadConstraints }}
+      {{- with .Values.swPool.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -90,7 +104,12 @@ spec:
             - name: STREAMER_FPS
               value: "30"
             - name: IDLE_TIMEOUT_S
-              value: "999999"
+              value: {{ .Values.swPool.idleTimeoutSeconds | quote }}
+            # T119: SW encoder hint. The cb-chromium image checks for
+            # CBWRTC_ENCODER_PREFERENCE on startup; "sw" pins libvpx /
+            # libx264 zero-latency and skips the NVENC factory probe.
+            - name: CBWRTC_ENCODER_PREFERENCE
+              value: "sw"
             {{- $region := include "cb.region" (dict "context" . "component" "") }}
             {{- if $region }}
             - name: CBWRTC_REGION
@@ -109,7 +128,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
             - { name: x11-socket, mountPath: /tmp/.X11-unix }
           resources:
-            {{- toYaml .Values.defaultPool.resources | nindent 12 }}
+            {{- toYaml .Values.swPool.resources | nindent 12 }}
           readinessProbe:
             httpGet: { path: /json/version, port: devtools }
             initialDelaySeconds: 15

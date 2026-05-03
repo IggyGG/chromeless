@@ -1,0 +1,52 @@
+{{- /*
+T119: PriorityClasses for the cb-* control-plane workloads.
+
+PriorityClass is a cluster-scoped resource — opt-in via
+.Values.priorityClasses.enabled so a `helm install` doesn't
+materialise cluster-scoped objects without operator consent.
+
+When enabled, the chart writes:
+  - cb-signaling-priority   (value 1000)
+  - cb-controller-priority  (value 1000)
+
+Pool session pods deliberately have NO PriorityClass (default
+priority 0) — they're interchangeable, preempt-eligible workloads.
+Preempting a session to keep signaling up is the right trade.
+
+The deployment templates pick these up via priorityClassName.
+*/ -}}
+{{- if .Values.priorityClasses.enabled -}}
+{{- if .Values.signaling.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priorityClasses.signaling.name }}
+  labels:
+    {{- include "cb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: signaling
+value: {{ .Values.priorityClasses.signaling.value }}
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: |
+  cloud-browser-webrtc signaling tier. Worth preempting a session
+  pod for; signaling is the control-plane edge that lets new
+  sessions connect at all.
+---
+{{- end }}
+{{- if .Values.controller.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priorityClasses.controller.name }}
+  labels:
+    {{- include "cb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+value: {{ .Values.priorityClasses.controller.value }}
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: |
+  cloud-browser-webrtc session controller. Worth preempting a
+  session pod for; without the controller the warm pool stops
+  replenishing and new BrowserSessions can't bind.
+{{- end }}
+{{- end }}

@@ -185,10 +185,53 @@ defaultPool:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # T115: optional pod-level topology spread; the chart applies these
+  # verbatim under the pool template's pod spec when set. Use this to
+  # spread session pods across hostnames / zones without baking the
+  # constraint into every overlay. Empty list = scheduler decides.
+  topologySpreadConstraints: []
   # T95: opt-in runtimeClass. When set (e.g. "nvidia"), the chart
   # writes runtimeClassName on the session Pod. Cluster admin must
   # ensure the RuntimeClass exists. Empty = falls back to
   # gvisor.enabled below.
+  runtimeClassName: ""
+  # T119: idle-timeout in seconds. NOT rendered into the pool spec
+  # today (BrowserSessionPool CRD doesn't carry it; see
+  # crds/browsersessionpools.yaml) — kept here so the overlay can
+  # document intent. The value belongs on individual BrowserSession
+  # specs (CRD allows .spec.idleTimeoutSeconds, default 600). When
+  # the controller learns to default per-session timeouts from the
+  # owning pool, wire this through then.
+  idleTimeoutSeconds: 600
+
+# T119: software-encoder pool (no GPU pin). Enable in the cluster
+# overlay to add a second BrowserSessionPool for sessions that don't
+# need NVENC — lets the cluster scale beyond the GPU node's slot
+# count by spreading sessions across non-GPU workers using libvpx /
+# libx264 zero-latency encoding.
+#
+# Identical shape to defaultPool. Disabled by default so naive
+# `helm install` doesn't materialise a second pool.
+swPool:
+  enabled: false
+  warmReplicas: 0
+  maxSessions: 100
+  maxAgeSeconds: 1800
+  idleTimeoutSeconds: 300
+  recyclePolicy: RecreatePod
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 3Gi
+      ephemeral-storage: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
   runtimeClassName: ""
 
 # Optional gVisor isolation per T44 sandbox primer. When enabled,
@@ -202,3 +245,57 @@ gvisor:
 # pods. Set to false if you use ServiceMonitor / PodMonitor instead.
 prometheusAnnotations:
   enabled: true
+
+# T119: PodDisruptionBudgets. Disabled by default in the chart
+# because PDBs interact with cluster-autoscaler / drains in ways an
+# operator should opt into deliberately. The cb-prod overlay flips
+# this on. Per-component knobs below tune the budgets the templates
+# render.
+podDisruptionBudgets:
+  enabled: false
+  signaling:
+    minAvailable: 1
+  controller:
+    # Single-replica controller deployments cannot tolerate
+    # disruption; maxUnavailable=0 blocks PDB-aware evictions.
+    # Operators draining a node with maxUnavailable=0 PDBs will
+    # have to scale the controller out (replicas: 2) first or
+    # bypass the PDB explicitly.
+    maxUnavailable: 0
+  pool:
+    # Applies to both defaultPool + swPool session pods.
+    minAvailable: "50%"
+
+# T119: PriorityClasses. Disabled by default because PriorityClass
+# is a cluster-scoped resource and a chart shouldn't create
+# cluster-scoped objects without operator consent. Flip on in the
+# overlay; the templates render two cluster-scoped PriorityClasses
+# (signaling-priority, controller-priority) and the deployment
+# templates pick them up via priorityClassName when enabled.
+priorityClasses:
+  enabled: false
+  signaling:
+    name: cb-signaling-priority
+    value: 1000
+  controller:
+    name: cb-controller-priority
+    value: 1000
+  # Pool session pods deliberately have NO PriorityClass — they're
+  # interchangeable, preempt-eligible workloads. Default priority 0.
+
+# T119: NetworkPolicies. Disabled by default. When enabled, the
+# chart writes a default-deny + per-component allow set scoped to
+# the chart's namespace. Calico GlobalNetworkPolicies are NOT
+# generated here; if your cluster needs cluster-scoped enforcement
+# on top of these, author the GNPs separately.
+networkPolicies:
+  enabled: false
+  # CIDR for kube-apiserver egress from the controller. Most
+  # clusters route apiserver via the kubernetes.default service IP
+  # (10.96.0.1 / 10.43.0.1) but for hardened clusters the operator
+  # may need to point at the actual control-plane node CIDR.
+  apiServerCIDR: "0.0.0.0/0"
+  # DNS namespace + selector for the kube-dns / coredns pods.
+  dnsNamespace: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns

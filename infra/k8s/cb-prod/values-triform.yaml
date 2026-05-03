@@ -73,10 +73,13 @@ signaling:
   enabled: true
   replicas: 2
   hpa:
-    # Pin the replica count for the first deploy. Re-enable HPA once
-    # we have load-shape numbers from T117 and the GPU pool isn't
-    # the bottleneck.
-    enabled: false
+    # T119 — re-enabled now that we're sizing the cluster for 100+
+    # concurrent sessions across the GPU + SW pools. Two-floor /
+    # six-ceiling matches the pinned-host affinity below: the HPA
+    # cannot grow past 2 useful replicas without un-pinning from
+    # triform-2/3, but leaving the ceiling at 6 means a future
+    # affinity loosening doesn't need a chart change.
+    enabled: true
     minReplicas: 2
     maxReplicas: 6
     cpuTargetUtilization: 60
@@ -220,10 +223,86 @@ defaultPool:
       operator: Equal
       value: present
       effect: NoSchedule
+  # T119: spread within the GPU node — only one host today
+  # (triform-5), so this is mostly cosmetic until the cluster grows
+  # a second GPU box. ScheduleAnyway because we can't satisfy with
+  # one host; the constraint just ranks placements when multiple
+  # GPU nodes appear.
+  topologySpreadConstraints:
+    - maxSkew: 2
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          cb.session/pool: default-pool
   # No NVIDIA RuntimeClass is registered cluster-wide today. The
   # nvidia-device-plugin DaemonSet exposes nvidia.com/gpu via the
   # default runtime, which is enough for non-isolated GPU access.
   # Re-enable once T95's gvisor + nvproxy work lands at the cluster.
+  runtimeClassName: ""
+
+# ---------------------------------------------------------------------
+# T119: software-encoder pool. Adds a second BrowserSessionPool that
+# uses libvpx VP9 / x264 zero-latency encoding (no GPU pin), letting
+# the cluster scale beyond triform-5's GPU-slot count by spreading
+# session pods across the non-GPU workers.
+#
+# Memory floor (1Gi req / 3Gi limit) is the measured-floor target
+# from the brief; physics-chromeless can validate via spike. A
+# realistic ceiling at ~440 GiB cluster RAM minus 50% system reserve
+# is ~150-200 sessions; the maxSessions=100 here keeps headroom.
+# ---------------------------------------------------------------------
+
+swPool:
+  enabled: true
+  warmReplicas: 8
+  maxSessions: 100
+  maxAgeSeconds: 1800       # 30 min — recycle aggressively
+  idleTimeoutSeconds: 300   # 5 min — kick idle tabs (per-session knob;
+                            # not in CRD, propagates via controller default)
+  recyclePolicy: RecreatePod
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 3Gi
+      ephemeral-storage: 1Gi
+  # No GPU pin, no nodeSelector — let the scheduler pick. The
+  # affinity below de-prioritises co-locating sw-pool pods on the
+  # same node, and the topology spread caps skew so we don't dogpile.
+  nodeSelector: {}
+  # Skip triform-5 (GPU box reserved for defaultPool — its 8 GPUs +
+  # 263 GiB RAM stay free for hardware-encode sessions) and skip
+  # triform-6 (build node — busy under T112 image bakes). Use
+  # nodeAntiAffinity rather than a tolerations gate because neither
+  # node carries a NoSchedule taint we'd be tolerating.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values: ["triform-5", "triform-6"]
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                cb.session/pool: sw-pool
+            topologyKey: kubernetes.io/hostname
+  topologySpreadConstraints:
+    - maxSkew: 2
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          cb.session/pool: sw-pool
+  tolerations: []
   runtimeClassName: ""
 
 # ---------------------------------------------------------------------
@@ -242,3 +321,55 @@ gvisor:
 
 prometheusAnnotations:
   enabled: true
+
+# ---------------------------------------------------------------------
+# T119: PodDisruptionBudgets. Pool session pods cap eviction to 50%
+# so a node drain can't take out more than half of any pool's warm
+# slots at once. Signaling is replicas=2 → minAvailable=1 keeps at
+# least one signaler reachable mid-drain. Controller is single-
+# replica + leader-elect; maxUnavailable=0 blocks PDB-aware
+# evictions, so node drains will need `--disable-eviction` (or scale
+# the controller to 2 first).
+# ---------------------------------------------------------------------
+
+podDisruptionBudgets:
+  enabled: true
+  signaling:
+    minAvailable: 1
+  controller:
+    maxUnavailable: 0
+  pool:
+    minAvailable: "50%"
+
+# ---------------------------------------------------------------------
+# T119: PriorityClasses. Two cluster-scoped classes at value=1000 so
+# signaling + controller preempt a session pod when the cluster runs
+# hot. Sessions stay at default priority 0 — they're replaceable;
+# preempting one to keep signaling up is the right trade.
+# ---------------------------------------------------------------------
+
+priorityClasses:
+  enabled: true
+  signaling:
+    name: cb-signaling-priority
+    value: 1000
+  controller:
+    name: cb-controller-priority
+    value: 1000
+
+# ---------------------------------------------------------------------
+# T119: NetworkPolicies. Default-deny in cb-prod, plus per-component
+# allow rules. Egress to kube-dns is wide open (0.0.0.0/0 for the DNS
+# service IP works in this cluster); session pods get egress to
+# 80/443 + STUN/TURN UDP 3478. Calico GlobalNetworkPolicies are
+# layered separately if cluster-scoped enforcement is needed (per
+# memory rule: every namespace needs its own allow-X-egress GNP, not
+# rendered by this chart).
+# ---------------------------------------------------------------------
+
+networkPolicies:
+  enabled: true
+  apiServerCIDR: "0.0.0.0/0"
+  dnsNamespace: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns

@@ -55,6 +55,9 @@ spec:
     spec:
       serviceAccountName: signaling
       automountServiceAccountToken: false
+      {{- if .Values.priorityClasses.enabled }}
+      priorityClassName: {{ .Values.priorityClasses.signaling.name }}
+      {{- end }}
       {{- with .Values.images.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
