@@ -1,0 +1,19 @@
+{
+  "name": "cb-chromium-webrtc-tests",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Standalone WebRTC harness that drives cb-chromium via CDP, acts as the Node.js peer, records the stream, and asserts encoder identity. See drive-recorder.mjs for the entry point and ../../docs/capture/path-of-least-resistance.md (T15) for upstream context.",
+  "type": "module",
+  "scripts": {
+    "test": "node drive-recorder.mjs",
+    "test:debug": "node --inspect-brk drive-recorder.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@roamhq/wrtc": "^0.10",
+    "chrome-remote-interface": "^0.33",
+    "ws": "^8"
+  }
+}

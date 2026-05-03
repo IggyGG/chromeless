@@ -1,0 +1,172 @@
+<!doctype html>
+<!--
+  tests/webrtc/fixtures/spinner.html — animated motion fixture for the
+  WebRTC harness.
+
+  Loaded INTO cb-chromium as the page that streamer-page.html captures
+  via getDisplayMedia. The harness opens streamer-page.html which in
+  turn drives capture; spinner.html only needs to provide enough motion
+  that the encoder emits non-trivial frames (so out.webm has actual
+  visible content when a human inspects it) and enough state change
+  that the timestamp rolling proves frames were captured at separate
+  instants and not deduped by the codec.
+
+  Rules of self-containment (see drive-recorder.mjs for the matching
+  reasons in the harness):
+    - No external fetches. Sandboxed test environments may have no
+      egress; everything must render from inline CSS/JS only.
+    - No fonts beyond ui-monospace fallbacks; CSS-only animation so
+      we don't depend on requestAnimationFrame fidelity inside the
+      headless container.
+    - One setInterval-driven number to prove time passed even if the
+      conic-gradient happens to render identically across frames.
+
+  Same-origin note: this page must be loaded from the same origin as
+  streamer-page.html for getDisplayMedia/getUserMedia capture to
+  succeed without security prompts. The harness's tiny http.createServer
+  serves both from 127.0.0.1:<port>, satisfying same-origin trivially.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>cb-chromium webrtc fixture — spinner</title>
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #0b0e14;
+        color: #d6e3ff;
+        font: 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow: hidden;
+      }
+
+      .stage {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 24px;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+
+      .label {
+        text-align: center;
+        font-size: 18px;
+        opacity: 0.85;
+      }
+
+      .spinner-wrap {
+        display: grid;
+        place-items: center;
+      }
+
+      /*
+       * The spinner: a conic-gradient that rotates continuously plus a
+       * counter-rotating inner ring. Two rotations at incommensurate
+       * speeds means the visual pattern never repeats within the test
+       * duration — guarantees the encoder cannot collapse motion to a
+       * single keyframe.
+       */
+      .spinner {
+        width: 360px;
+        height: 360px;
+        border-radius: 50%;
+        background: conic-gradient(
+          from 0deg,
+          #ff5577 0deg,
+          #ffaa00 60deg,
+          #44dd66 120deg,
+          #00bbff 180deg,
+          #aa66ff 240deg,
+          #ff66dd 300deg,
+          #ff5577 360deg
+        );
+        animation: spin 1.5s linear infinite;
+        position: relative;
+        box-shadow: 0 0 60px rgba(120, 160, 255, 0.4);
+      }
+
+      .spinner::after {
+        content: "";
+        position: absolute;
+        inset: 60px;
+        border-radius: 50%;
+        background: #0b0e14;
+        box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.6);
+      }
+
+      .spinner::before {
+        content: "";
+        position: absolute;
+        inset: 30px;
+        border-radius: 50%;
+        background: conic-gradient(
+          from 90deg,
+          transparent 0deg,
+          rgba(255, 255, 255, 0.18) 30deg,
+          transparent 60deg,
+          transparent 360deg
+        );
+        animation: counterspin 2.7s linear infinite;
+      }
+
+      @keyframes spin        { to { transform: rotate(360deg);  } }
+      @keyframes counterspin { to { transform: rotate(-360deg); } }
+
+      .timestamp {
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+        font-size: 22px;
+        letter-spacing: 0.05em;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 4px;
+        background: #1c2433;
+        margin: 0 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stage">
+      <div class="label">
+        cb-chromium WebRTC harness — capture fixture
+        <div style="opacity: 0.55; font-size: 13px; margin-top: 6px;">
+          spinner provides motion so encoder emits real frames; timestamp
+          proves frames are captured at distinct instants.
+        </div>
+      </div>
+      <div class="spinner-wrap">
+        <div class="spinner" aria-label="rotating gradient"></div>
+      </div>
+      <div class="timestamp">
+        <span class="badge">t</span>
+        <span id="t">0.000</span>
+        s
+        <span class="badge">frames</span>
+        <span id="ticks">0</span>
+      </div>
+    </div>
+    <script>
+      // Tight-ish ticker — 50 ms == 20 Hz updates, comfortably above the
+      // 30 fps capture rate so consecutive captured frames see distinct
+      // values. Doesn't need to be requestAnimationFrame: we want this
+      // to run in the headless container even if compositing pauses
+      // between captures, and the captured surface only re-samples at
+      // the screen-capturer cadence anyway.
+      const start = performance.now();
+      const tEl = document.getElementById("t");
+      const tickEl = document.getElementById("ticks");
+      let ticks = 0;
+      setInterval(() => {
+        ticks += 1;
+        const elapsed = (performance.now() - start) / 1000;
+        tEl.textContent = elapsed.toFixed(3);
+        tickEl.textContent = String(ticks);
+      }, 50);
+    </script>
+  </body>
+</html>

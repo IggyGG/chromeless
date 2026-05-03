@@ -1,0 +1,314 @@
+<!doctype html>
+<!--
+  tests/webrtc/streamer-page.html — self-contained WebRTC streamer page
+  loaded INTO cb-chromium by drive-recorder.mjs.
+
+  Forked from scrapebrowse:capture/streamer-page/streamer.js
+  (the getDisplayMedia + RTCPeerConnection + window.pc hook pattern
+  around lines 476–547). Differences from the upstream streamer:
+
+    1. Signaling is NOT a WebSocket. The harness drives the page via
+       Chrome DevTools Protocol's Runtime.evaluate / Runtime.consoleAPICalled
+       instead. This avoids:
+         - bringing up a real signaling server in the test harness,
+         - any networking surface beyond CDP itself (which we already
+           need anyway), and
+         - the supervisord / launch.md plumbing that the upstream
+           streamer takes for granted.
+       Outbound messages: console.log("CBTEST:" + JSON.stringify(msg)).
+       Inbound messages: harness calls window.__cbtest.handle({...}).
+       See drive-recorder.mjs:onConsoleApi() for the receiver and
+       drive-recorder.mjs:pushInbound() for the sender.
+
+    2. We use getUserMedia (cb-chromium runs with
+       --use-fake-device-for-media-stream, see infra/launch-chromium.sh),
+       not getDisplayMedia, so the test does not depend on Xvfb /
+       window-picker plumbing. The fake device synthesizes a known
+       moving pattern; the spinner.html fixture provides supplementary
+       motion when the test wants "real" page capture.
+
+    3. window.pc is exposed for the harness's getStats() probe (matches
+       the upstream window-hook pattern; see scrapebrowse streamer.js:550
+       for the original rationale around watchdog + Phase-1 E2E
+       introspection).
+
+    4. Optional ?codec=vp9|h264|av1 query param applies
+       RTCRtpTransceiver.setCodecPreferences() so the harness can pin
+       the encoder under test. Default: leave codec selection to the
+       browser's preference order (matches scrapebrowse's default).
+
+    5. NO simulcast, NO passthrough, NO probe_result, NO heartbeat.
+       Those upstream features expand the surface area and aren't part
+       of the encoder-identity story this harness validates. They
+       belong in dedicated specs added later (Test 4 / Test 5 in
+       fizzy-beaming-shamir.md "Out of scope tonight").
+
+  IMPORTANT: this page must be loaded from the same origin as
+  fixtures/spinner.html so getUserMedia/getDisplayMedia inherit the
+  same permission decisions. The harness serves both from
+  http://127.0.0.1:<port> via a single http.createServer.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>cb-chromium webrtc test streamer</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #101418;
+                   color: #eee; font: 13px ui-monospace, Menlo, Consolas, monospace; }
+      #wrap { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+      #status { padding: 8px 12px; background: #1a1f25; }
+      #log    { padding: 6px 12px; overflow: auto; white-space: pre-wrap;
+                font-size: 11px; opacity: 0.8; max-height: 200px; }
+      video   { width: 100%; max-height: 60vh; background: #000; object-fit: contain; }
+      .ok   { color: #6cd; }
+      .warn { color: #fc6; }
+      .err  { color: #f66; }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <div id="status">streamer booting…</div>
+      <video id="local" autoplay muted playsinline></video>
+      <div id="log"></div>
+    </div>
+
+    <script>
+      "use strict";
+
+      // ----- bridge ---------------------------------------------------
+      //
+      // Inbound (harness → page) lands here via Runtime.evaluate calls
+      // shaped as `window.__cbtest.handle({type:'sdp-answer', sdp:...})`
+      // and `window.__cbtest.handle({type:'ice', candidate:...})`. The
+      // page also publishes the inbound queue length so the harness can
+      // confirm message receipt.
+      //
+      // Outbound (page → harness) goes through console.log with a
+      // "CBTEST:" prefix, picked up by drive-recorder.mjs's
+      // Runtime.consoleAPICalled subscription. We deliberately use
+      // console.log rather than window.postMessage(*, '*') because
+      // postMessage cannot reach the harness (the harness is in
+      // Node.js, not in any browsing context); CDP's console relay is
+      // the natural channel.
+      window.__cbtest = {
+        sdp_in: null,
+        ice_in: [],
+        ready: false,
+        codec: new URLSearchParams(location.search).get("codec") || "",
+        handle(msg) {
+          // Defer to start() once it's bound a real handler; until
+          // then queue so the harness can fire-and-forget.
+          if (window.__cbtest._impl) return window.__cbtest._impl(msg);
+          window.__cbtest._pending ||= [];
+          window.__cbtest._pending.push(msg);
+          return null;
+        },
+      };
+
+      // ----- log + status --------------------------------------------
+      const statusEl = document.getElementById("status");
+      const logEl = document.getElementById("log");
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = cls || "";
+      }
+      function emit(level, msg, extra) {
+        const ts = new Date().toISOString().slice(11, 23);
+        const tail = extra === undefined
+          ? ""
+          : "  " + (typeof extra === "string" ? extra : safeStringify(extra));
+        const line = document.createElement("div");
+        line.className = level;
+        line.textContent = `${ts} ${level.padEnd(4).toUpperCase()} ${msg}${tail}`;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+        // Mirror to console so cb-chromium stderr captures it AND
+        // CDP Runtime.consoleAPICalled can be inspected by the harness.
+        const c = level === "err" ? console.error
+                : level === "warn" ? console.warn
+                : console.log;
+        c(`[streamer ${level}]`, msg, extra ?? "");
+      }
+      function safeStringify(v) {
+        try { return JSON.stringify(v); } catch { return String(v); }
+      }
+      function send(msg) {
+        // The harness reads stdout for the magic prefix.
+        console.log("CBTEST:" + JSON.stringify(msg));
+      }
+
+      // ----- main lifecycle ------------------------------------------
+      async function start() {
+        emit("info", "streamer boot", { codec: window.__cbtest.codec || "(default)" });
+
+        // 1. Capture. We try getDisplayMedia first (matches the
+        //    upstream production path) and fall back to getUserMedia
+        //    so the harness still runs against a chromium without
+        //    Xvfb display capture wired up.
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: 30 },
+            audio: false,
+          });
+          emit("ok", "getDisplayMedia ok",
+               { videoTracks: stream.getVideoTracks().length });
+        } catch (err) {
+          emit("warn", "getDisplayMedia failed; falling back to getUserMedia",
+               { name: err?.name, message: err?.message });
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { width: 640, height: 480, frameRate: 30 },
+              audio: false,
+            });
+            emit("ok", "getUserMedia ok",
+                 { videoTracks: stream.getVideoTracks().length });
+          } catch (err2) {
+            emit("err", "getUserMedia also failed", String(err2));
+            send({ type: "fatal", reason: "no-capture",
+                   detail: { displayMedia: String(err), userMedia: String(err2) } });
+            throw err2;
+          }
+        }
+
+        // Local preview (the harness can screenshot the page to confirm
+        // capture was wired through; not required for the test, but
+        // useful for human debugging).
+        document.getElementById("local").srcObject = stream;
+
+        // 2. Build the peer connection.
+        //
+        // No iceServers: the harness peer is in the same network
+        // namespace via host loopback (the harness's Node.js peer
+        // listens on 127.0.0.1, the chromium binary is also on
+        // 127.0.0.1 for our local-mac dev or share kube-net for the
+        // cluster Job). Host candidates are sufficient — STUN would
+        // just slow first-frame.
+        const pc = new RTCPeerConnection({});
+        // window.pc — same hook the upstream streamer exposes for
+        // window watchdog + introspection (scrapebrowse:streamer.js:550).
+        // The harness may also call `pc.getStats()` directly via
+        // Runtime.evaluate; window.pc is the entry point.
+        window.pc = pc;
+
+        // 3. Add tracks (with optional codec pinning via transceiver).
+        const videoTrack = stream.getVideoTracks()[0];
+        const tx = pc.addTransceiver(videoTrack, {
+          direction: "sendonly",
+          streams: [stream],
+        });
+
+        // 3a. Codec preference. RTCRtpSender.getCapabilities returns
+        //     the FULL ordered codec list (vp8, vp9, h264, av1, …) plus
+        //     RTX/red/ulpfec/comfort-noise. We re-order so the
+        //     requested codec wins, but keep the rest in original
+        //     order so SDP negotiation still has a fallback if the
+        //     receiver doesn't support our preferred one.
+        if (window.__cbtest.codec) {
+          try {
+            const all = RTCRtpSender.getCapabilities("video").codecs;
+            const wanted = window.__cbtest.codec.toLowerCase();
+            const matchers = {
+              vp9: (c) => c.mimeType.toLowerCase() === "video/vp9",
+              vp8: (c) => c.mimeType.toLowerCase() === "video/vp8",
+              h264: (c) => c.mimeType.toLowerCase() === "video/h264",
+              av1: (c) => c.mimeType.toLowerCase() === "video/av1",
+            };
+            const matcher = matchers[wanted];
+            if (matcher) {
+              const preferred = all.filter(matcher);
+              const rest = all.filter((c) => !matcher(c));
+              tx.setCodecPreferences([...preferred, ...rest]);
+              emit("ok", "codec preference applied",
+                   { wanted, matched: preferred.length });
+            } else {
+              emit("warn", "unknown codec preference", { wanted });
+            }
+          } catch (err) {
+            emit("warn", "setCodecPreferences failed", String(err));
+          }
+        }
+
+        // 4. PC event wiring.
+        pc.onsignalingstatechange = () => {
+          emit("info", `signalingState=${pc.signalingState}`);
+        };
+        pc.oniceconnectionstatechange = () => {
+          const lvl = pc.iceConnectionState === "failed" ? "err" : "info";
+          emit(lvl, `iceConnectionState=${pc.iceConnectionState}`);
+          send({ type: "ice-state", state: pc.iceConnectionState });
+        };
+        pc.onconnectionstatechange = () => {
+          const lvl = pc.connectionState === "failed" ? "err" : "info";
+          emit(lvl, `connectionState=${pc.connectionState}`);
+          send({ type: "pc-state", state: pc.connectionState });
+        };
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate) {
+            send({ type: "ice", candidate: ev.candidate.toJSON() });
+          } else {
+            send({ type: "ice", candidate: null }); // end-of-candidates
+          }
+        };
+
+        // 5. Inbound bridge — the harness pushes SDP answer + remote
+        //    ICE candidates here.
+        window.__cbtest._impl = async (msg) => {
+          try {
+            switch (msg?.type) {
+              case "sdp-answer":
+                await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+                emit("ok", "← sdp-answer applied",
+                     { sdpBytes: (msg.sdp || "").length });
+                return { ok: true };
+              case "ice":
+                if (msg.candidate === null) {
+                  emit("info", "← remote end-of-candidates");
+                } else {
+                  await pc.addIceCandidate(msg.candidate);
+                  emit("info", "← ice added");
+                }
+                return { ok: true };
+              default:
+                emit("warn", "unknown inbound type", msg);
+                return { ok: false, error: "unknown-type" };
+            }
+          } catch (err) {
+            emit("err", "inbound handler failed", String(err));
+            return { ok: false, error: String(err) };
+          }
+        };
+        // Drain anything queued before the impl was bound.
+        if (Array.isArray(window.__cbtest._pending)) {
+          for (const msg of window.__cbtest._pending) {
+            window.__cbtest._impl(msg);
+          }
+          window.__cbtest._pending = [];
+        }
+
+        // 6. Create + send the offer.
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          send({ type: "sdp-offer", sdp: offer.sdp });
+          emit("ok", "→ sdp-offer", { sdpBytes: offer.sdp?.length ?? 0 });
+        } catch (err) {
+          emit("err", "createOffer/setLocalDescription failed", String(err));
+          send({ type: "fatal", reason: "offer-failed", detail: String(err) });
+          throw err;
+        }
+
+        // 7. Mark page ready so the harness's poll knows the offer has
+        //    been emitted (otherwise a fast harness might miss the
+        //    console line).
+        window.__cbtest.ready = true;
+        send({ type: "ready" });
+        setStatus("streamer ready — offer sent", "ok");
+      }
+
+      start().catch((err) => {
+        setStatus(`streamer failed: ${err?.message ?? err}`, "err");
+      });
+    </script>
+  </body>
+</html>
