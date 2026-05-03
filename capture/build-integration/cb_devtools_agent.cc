@@ -258,7 +258,7 @@ content::BrowserContext* CbDevToolsManagerDelegate::CreateBrowserContext() {
   // tls_blocking_disallowed=1, so an unwrapped construction SIGABRTs
   // on the DCHECK in base/threading/thread_restrictions.cc:62.
   // ScopedAllowBlocking marks the scope as intentionally permissive.
-  base::ScopedAllowBlocking allow_blocking;
+  base::ScopedAllowBlockingForTesting allow_blocking;
   auto context = std::make_unique<CloudBrowserBrowserContext>();
   content::BrowserContext* raw = context.get();
   contexts_.push_back(std::move(context));
