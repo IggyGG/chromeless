@@ -646,26 +646,41 @@ export class Scenario {
     this._browser = await CDP({ target: wsUrl, local: true });
     this.log("ok", "browser CDP attached");
 
-    // In wire mode the input-bridge sidecar discovers its CDP target
-    // via /json/list at startup and stays attached to whatever
-    // target it found (typically the initial about:blank). For the
-    // bridge's dispatched CDP events to land on the same renderer
-    // the scenario reads __events from, we must REUSE the bridge's
-    // target rather than creating a fresh one. Multiple flat-mode
-    // sessions on the same target multiplex fine.
+    // BUGS-529 workaround (test-only): cb-chromium's flat-mode CDP
+    // session DOES follow Page.frameNavigated correctly (verified by
+    // input-bridge's diagnostic Page.frameNavigated logging — sessionId
+    // stays stable across navigation), but Input.dispatch* on a session
+    // bound through a navigation never reaches the renderer. This
+    // appears to be a chromium-tree bug in cb-chromium's InputRouter
+    // binding-update path.
+    //
+    // Sidestep by creating a NEW page target boot-loaded directly to
+    // the fixture URL: the input-bridge's flat-mode auto-attach picks
+    // up that target as a fresh session bound to a RenderFrameHost
+    // that never navigated, so the InputRouter binding is stable.
+    //
+    // Implementation:
+    //   * wire mode: Target.createTarget({url: navUrl}) — the bridge
+    //     auto-switches its currentSID to this new target's session
+    //     and dispatches all input there. We attach our own flat-mode
+    //     session for assertion-side reads (Runtime.evaluate of
+    //     window.__events).
+    //   * non-wire: unchanged — non-wire scenarios already createTarget
+    //     against a fresh BrowserContext.
+    //
+    // This keeps the production cb-browserless deployment path
+    // unchanged (production never navigates; the streamer page IS
+    // the boot URL), and is exactly the test-only workaround the
+    // BUGS-529 description names #2.
     let browserContextId, targetId;
     if (this.wire) {
-      const targets = await this._browser.Target.getTargets();
-      const pageTarget = (targets.targetInfos || []).find(
-        (t) => t.type === "page",
-      );
-      if (!pageTarget) {
-        throw new Error("wire mode: no page target found via Target.getTargets");
-      }
-      targetId = pageTarget.targetId;
-      browserContextId = pageTarget.browserContextId || null;
-      this.log("ok", "wire mode: reusing first page target",
-          { targetId, browserContextId });
+      ({ targetId } = await this._browser.Target.createTarget({
+        url: navUrl,
+      }));
+      browserContextId = null;
+      this.log("ok",
+          "wire mode: created target boot-loaded to fixture (BUGS-529 workaround)",
+          { targetId, navUrl });
     } else {
       ({ browserContextId } = await this._browser.Target.createBrowserContext({}));
       ({ targetId } = await this._browser.Target.createTarget({
@@ -675,7 +690,11 @@ export class Scenario {
     }
     this._browserContextId = browserContextId;
     this._targetId = targetId;
-    this._reusedTarget = !!this.wire;
+    // Wire-mode targets are now fresh-per-scenario, so they get the
+    // same teardown path as non-wire (closeTarget). Set false so the
+    // teardown branch doesn't try to navigate-to-about:blank a target
+    // that's about to be closed anyway.
+    this._reusedTarget = false;
 
     const { sessionId } = await this._browser.Target.attachToTarget({
       targetId, flatten: true,
@@ -705,8 +724,36 @@ export class Scenario {
       deviceScaleFactor: 1, mobile: false,
     });
 
-    await this._session.Page.navigate({ url: navUrl });
-    this.log("info", "navigated", { navUrl });
+    if (this.wire) {
+      // Target was boot-loaded to navUrl via Target.createTarget above
+      // (BUGS-529 workaround). Skip the explicit navigate so the
+      // input-bridge's session stays bound to the RFH that loaded the
+      // fixture from boot — never navigated, so cb-chromium's broken
+      // InputRouter binding-update path doesn't engage. We still need
+      // to wait for the page to finish loading before continuing,
+      // since createTarget returns synchronously after the URL is
+      // queued.
+      //
+      // We poll Runtime.evaluate for document.readyState rather than
+      // subscribing to Page.loadEventFired — the load event may fire
+      // before subscribe() is registered (race), and the readyState
+      // approach is robust to that.
+      const readyDeadline = Date.now() + 5000;
+      while (Date.now() < readyDeadline) {
+        try {
+          const r = await this._session.Runtime.evaluate({
+            expression: "document.readyState",
+            returnByValue: true,
+          });
+          if (r?.result?.value === "complete") break;
+        } catch { /* tolerate evaluation race during early init */ }
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      this.log("info", "boot-loaded fixture (no navigate)", { navUrl });
+    } else {
+      await this._session.Page.navigate({ url: navUrl });
+      this.log("info", "navigated", { navUrl });
+    }
 
     // Build the WebRTC peer + start recording. The streamer-page
     // (loaded above) drives the offer; we answer.
@@ -921,8 +968,34 @@ export class Scenario {
       } catch { /* page may not be ready */ }
     };
 
+    // Two paths to resolving the offer:
+    //   1. Live console subscription (above) — works when subscribe
+    //      ran before the page emitted CBTEST:sdp-offer.
+    //   2. Polled Runtime.evaluate of window.__cbtest.sdpOffer — the
+    //      fixture stores the offer on window state so the harness can
+    //      retrieve it even if its console subscription attached too
+    //      late. Required for the BUGS-529 workaround where wire-mode
+    //      scenarios boot a fresh target directly to the fixture URL,
+    //      so page emission can race ahead of subscribe.
+    const polledOffer = (async () => {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        try {
+          const r = await this._session.Runtime.evaluate({
+            expression: "window.__cbtest && window.__cbtest.sdpOffer",
+            returnByValue: true,
+          });
+          const sdp = r?.result?.value;
+          if (typeof sdp === "string" && sdp.length > 0) return sdp;
+        } catch { /* page early init — tolerate */ }
+        await sleep(100);
+      }
+      throw new Error("sdp-offer never appeared on window.__cbtest.sdpOffer");
+    })();
+
     const offerSdp = await Promise.race([
       offerReady,
+      polledOffer,
       new Promise((_, rej) => setTimeout(
         () => rej(new Error("sdp-offer never arrived")), 30_000)),
     ]);

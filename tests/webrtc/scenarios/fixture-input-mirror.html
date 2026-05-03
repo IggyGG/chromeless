@@ -335,6 +335,15 @@
           window.__cbtest._pending.push(msg);
           return null;
         },
+        // Retrievable buffer of "outbound" CDP-bridged messages — set
+        // by send() below as soon as it emits. Lets the harness poll
+        // via Runtime.evaluate when its Runtime.consoleAPICalled
+        // subscription hasn't been attached in time (e.g. wire mode's
+        // BUGS-529 workaround creates a fresh target booted directly
+        // to this fixture, so the page's SDP-offer emission can race
+        // ahead of the harness's subscribe). Storing the latest offer
+        // in window state makes the handshake retry-tolerant.
+        sdpOffer: null,
       };
 
       // ─── Wire-path InputRelay ──────────────────────────────────────
@@ -903,6 +912,12 @@
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        // Store on window so the harness can poll it via Runtime.evaluate
+        // even if its Runtime.consoleAPICalled subscription hadn't
+        // attached by the time the console.log fires (BUGS-529 wire-mode
+        // path creates a fresh target booted to this URL — page boot
+        // can race ahead of harness subscribe).
+        window.__cbtest.sdpOffer = offer.sdp;
         send({ type: "sdp-offer", sdp: offer.sdp });
         window.__cbtest.ready = true;
         send({ type: "ready" });
