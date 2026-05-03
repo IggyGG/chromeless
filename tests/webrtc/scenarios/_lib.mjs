@@ -340,6 +340,175 @@ function makeInputBag(session, opts = {}) {
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 // ---------------------------------------------------------------------------
+// Wire-path InputBag — emits v1 envelopes (per docs/protocols/input-channel.md)
+// onto a WebRTC DataChannel. The streamer page's InputRelay forwards each
+// message verbatim to the input-bridge sidecar at ws://127.0.0.1:9100/input.
+// The bridge translates envelopes back into CDP Input.dispatch* calls. This
+// is the production wire path — what runs when an LLM agent or human user
+// drives the browser via the chromeless protocol.
+// ---------------------------------------------------------------------------
+
+// Modifier bitmask per chromeless protocol v1:
+//   1 = Shift, 2 = Ctrl, 4 = Alt, 8 = Meta
+const WIRE_MOD = { Shift: 1, Ctrl: 2, Alt: 4, Meta: 8 };
+
+function wireModBits(mods = {}) {
+  return (mods.shift ? WIRE_MOD.Shift : 0)
+       | (mods.ctrl  ? WIRE_MOD.Ctrl  : 0)
+       | (mods.alt   ? WIRE_MOD.Alt   : 0)
+       | (mods.meta  ? WIRE_MOD.Meta  : 0);
+}
+
+const WIRE_BUTTON = { left: 0, middle: 1, right: 2, back: 3, forward: 4 };
+
+function wireKeyDescriptor(keyOrChar) {
+  // Reuse the CDP key map (same KeyboardEvent.key/code semantics as
+  // the wire format), but only emit `key` + `code` + `mods`. Wire
+  // format omits text — bridge synthesises it from `key` if needed.
+  if (KEY_MAP[keyOrChar]) {
+    return { key: KEY_MAP[keyOrChar].key, code: KEY_MAP[keyOrChar].code };
+  }
+  if (keyOrChar.length === 1) {
+    const upper = keyOrChar.toUpperCase();
+    const codeName = /[A-Z]/.test(upper) ? `Key${upper}`
+                   : /[0-9]/.test(keyOrChar) ? `Digit${keyOrChar}`
+                   : /\s/.test(keyOrChar) ? "Space" : "";
+    return { key: keyOrChar, code: codeName };
+  }
+  throw new Error(`unknown key: ${keyOrChar}`);
+}
+
+/**
+ * Build a WireInputBag bound to a particular RTCDataChannel. Emits
+ * v1 envelopes that match the wire format the input-bridge expects.
+ * The bag deliberately mirrors the CDP-direct InputBag's surface
+ * (click, drag, type, wheel, ...) so scenarios can swap between
+ * "page-level" and "wire-format" tests by switching which bag they
+ * use.
+ */
+function makeWireInputBag(dataChannel, opts = {}) {
+  const log = opts.log || (() => {});
+  const tag = opts.tag || "wire";
+  let seq = 0;
+
+  function send(type, data) {
+    if (!dataChannel || dataChannel.readyState !== "open") {
+      throw new Error(`wire DC not open (state=${dataChannel?.readyState})`);
+    }
+    const envelope = {
+      v: 1,
+      type,
+      t: Date.now(),
+      seq: seq++,
+      data,
+    };
+    dataChannel.send(JSON.stringify(envelope));
+    log("dbg", `wire ${type}`, { seq: envelope.seq, data });
+  }
+
+  return {
+    tag,
+    seq: () => seq,
+
+    async mouseMove(x, y) {
+      send("mouse_move", { x, y });
+    },
+
+    async mouseDown(x, y, opts2 = {}) {
+      const button = WIRE_BUTTON[opts2.button || "left"] ?? 0;
+      send("mouse_button", { button, action: "down", x, y });
+    },
+
+    async mouseUp(x, y, opts2 = {}) {
+      const button = WIRE_BUTTON[opts2.button || "left"] ?? 0;
+      send("mouse_button", { button, action: "up", x, y });
+    },
+
+    async click(x, y, opts2 = {}) {
+      // The protocol has no "click" envelope — it's down + up, with
+      // the bridge applying its own double-click timing rules.
+      // Modifiers travel via key_down envelopes that bracket the
+      // mouse_button events; for simple clicks we just send raw
+      // mouse_button. (The bridge's CDP dispatch reads modifier
+      // state from any held key_down events — but for tests we
+      // emit transient key_down/key_up around the click to mimic
+      // a real "shift-click" wire pattern.)
+      const heldKeys = [];
+      if (opts2.shift) heldKeys.push("Shift");
+      if (opts2.ctrl)  heldKeys.push("Control");
+      if (opts2.alt)   heldKeys.push("Alt");
+      if (opts2.meta)  heldKeys.push("Meta");
+      for (const k of heldKeys) {
+        send("key_down", { key: k, code: k === "Control" ? "ControlLeft" : `${k}Left`,
+                           mods: wireModBits(opts2) });
+      }
+      await this.mouseDown(x, y, opts2);
+      await this.mouseUp(x, y, opts2);
+      for (const k of heldKeys.reverse()) {
+        send("key_up", { key: k, code: k === "Control" ? "ControlLeft" : `${k}Left`,
+                         mods: 0 });
+      }
+    },
+
+    async doubleClick(x, y, opts2 = {}) {
+      await this.click(x, y, opts2);
+      // Bridge applies double-click timing — pause < bridge's
+      // dblclick interval.
+      await sleep(40);
+      await this.click(x, y, opts2);
+    },
+
+    async drag(x1, y1, x2, y2, opts2 = {}) {
+      const steps = opts2.steps ?? 16;
+      const settleMs = opts2.settleMs ?? 18;
+      await this.mouseDown(x1, y1, opts2);
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const x = Math.round(x1 + (x2 - x1) * t);
+        const y = Math.round(y1 + (y2 - y1) * t);
+        send("mouse_move", { x, y });
+        if (settleMs > 0) await sleep(settleMs);
+      }
+      await this.mouseUp(x2, y2, opts2);
+    },
+
+    async wheel(x, y, deltaX, deltaY, mods = {}) {
+      send("mouse_wheel", {
+        dx: deltaX, dy: deltaY, mode: 0, delta_mode: "pixel",
+        phase: "changed", momentum: false, x, y,
+      });
+    },
+
+    async keyDown(key, mods = {}) {
+      const d = wireKeyDescriptor(key);
+      send("key_down", { key: d.key, code: d.code, mods: wireModBits(mods) });
+    },
+
+    async keyUp(key, mods = {}) {
+      const d = wireKeyDescriptor(key);
+      send("key_up", { key: d.key, code: d.code, mods: wireModBits(mods) });
+    },
+
+    async press(key, mods = {}) {
+      await this.keyDown(key, mods);
+      await this.keyUp(key, mods);
+    },
+
+    async type(text, opts2 = {}) {
+      // No insertText path on the wire — every printable character
+      // ships as a key_down + key_up pair. Bridge synthesises the
+      // CDP key event with `text` derived from `key`.
+      const intervalMs = opts2.intervalMs ?? 12;
+      for (const ch of text) {
+        await this.keyDown(ch, opts2);
+        await this.keyUp(ch, opts2);
+        if (intervalMs > 0) await sleep(intervalMs);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Static server — same shape as drive-recorder.mjs, scoped to scenarios/
 // so each scenario can serve its own fixture page from a known origin.
 // ---------------------------------------------------------------------------
@@ -413,12 +582,13 @@ function fetchJsonWithHostOverride(urlStr, hostHeader) {
 // ---------------------------------------------------------------------------
 
 export class Scenario {
-  constructor({ name, page, durationMs, cbUrl, artifactsDir }) {
+  constructor({ name, page, durationMs, cbUrl, artifactsDir, wire }) {
     this.name = name;
     this.page = page;
     this.durationMs = durationMs ?? 5_000;
     this.cbUrl = cbUrl;
     this.artifactsDir = artifactsDir;
+    this.wire = wire || null;  // { url } enables ?wire=1 + DC capture
     this.log = makeLogger(name);
     this.assertions = []; // {label, ok, expected, actual, atMs}
     this.markers = [];    // {label, atMs}
@@ -436,6 +606,7 @@ export class Scenario {
     this._frameWidth = 0;
     this._frameHeight = 0;
     this._server = null;
+    this._wireDc = null;       // RTCDataChannel from pc.ondatachannel
   }
 
   // ---- static server + CDP attach ----
@@ -447,8 +618,14 @@ export class Scenario {
     // with a `?fixture=` param pointing at a fixture HTML).
     const sv = await startStaticServer("127.0.0.1", 0, HERE);
     this._server = sv.server;
-    const navUrl = `http://${sv.host}:${sv.port}/${this.page}`;
-    this.log("info", "static server", { host: sv.host, port: sv.port, page: this.page });
+    const wireQs = this.wire
+      ? `?wire=1&wire-url=${encodeURIComponent(this.wire.url)}`
+      : "";
+    const navUrl = `http://${sv.host}:${sv.port}/${this.page}${wireQs}`;
+    this.log("info", "static server", {
+      host: sv.host, port: sv.port, page: this.page,
+      wire: this.wire ? this.wire.url : null,
+    });
 
     // /json/version handshake (DNS-rebinding mitigation: Host: localhost)
     const u = new URL(this.cbUrl);
@@ -461,13 +638,36 @@ export class Scenario {
     this._browser = await CDP({ target: wsUrl });
     this.log("ok", "browser CDP attached");
 
-    const { browserContextId } = await this._browser.Target.createBrowserContext({});
-    const { targetId } = await this._browser.Target.createTarget({
-      url: "about:blank", browserContextId,
-    });
+    // In wire mode the input-bridge sidecar discovers its CDP target
+    // via /json/list at startup and stays attached to whatever
+    // target it found (typically the initial about:blank). For the
+    // bridge's dispatched CDP events to land on the same renderer
+    // the scenario reads __events from, we must REUSE the bridge's
+    // target rather than creating a fresh one. Multiple flat-mode
+    // sessions on the same target multiplex fine.
+    let browserContextId, targetId;
+    if (this.wire) {
+      const targets = await this._browser.Target.getTargets();
+      const pageTarget = (targets.targetInfos || []).find(
+        (t) => t.type === "page",
+      );
+      if (!pageTarget) {
+        throw new Error("wire mode: no page target found via Target.getTargets");
+      }
+      targetId = pageTarget.targetId;
+      browserContextId = pageTarget.browserContextId || null;
+      this.log("ok", "wire mode: reusing first page target",
+          { targetId, browserContextId });
+    } else {
+      ({ browserContextId } = await this._browser.Target.createBrowserContext({}));
+      ({ targetId } = await this._browser.Target.createTarget({
+        url: "about:blank", browserContextId,
+      }));
+      this.log("ok", "target created", { targetId, browserContextId });
+    }
     this._browserContextId = browserContextId;
     this._targetId = targetId;
-    this.log("ok", "target created", { targetId, browserContextId });
+    this._reusedTarget = !!this.wire;
 
     const { sessionId } = await this._browser.Target.attachToTarget({
       targetId, flatten: true,
@@ -516,6 +716,80 @@ export class Scenario {
   }
 
   /**
+   * Wait for the page's "input" DataChannel to arrive via
+   * pc.ondatachannel and reach readyState=="open", then return a
+   * WireInputBag bound to it. Throws if wire mode wasn't enabled
+   * on the scenario or the channel never opens within the timeout.
+   *
+   * Also reads the page's relay-state diagnostic to confirm the
+   * page has dialed the input-bridge WebSocket — if the bridge
+   * isn't reachable we surface that as a setup failure rather
+   * than letting downstream send() calls fail with cryptic
+   * timeouts.
+   */
+  async setupWire(opts = {}) {
+    if (!this.wire) {
+      throw new Error("setupWire called but scenario.wire was not configured");
+    }
+    const dcDeadline = Date.now() + (opts.dcTimeoutMs ?? 8_000);
+    while (!this._wireDc) {
+      if (Date.now() > dcDeadline) {
+        throw new Error("wire DC never arrived from page (pc.ondatachannel timeout)");
+      }
+      await sleep(50);
+    }
+    const dc = this._wireDc;
+    if (dc.readyState !== "open") {
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(
+          () => reject(new Error(`wire DC stuck in ${dc.readyState}`)),
+          (opts.dcOpenTimeoutMs ?? 4_000),
+        );
+        dc.addEventListener("open", () => { clearTimeout(t); resolve(); }, { once: true });
+        dc.addEventListener("error", (e) => {
+          clearTimeout(t);
+          reject(new Error("wire DC error: " + (e.error?.message || String(e))));
+        }, { once: true });
+      });
+    }
+    this.log("ok", "wire DC open", { label: dc.label });
+
+    // Confirm the page-side relay actually connected to the
+    // input-bridge. The relay state is exposed via window.__cbtest.relay
+    // — wait briefly for ws_state to flip to "open".
+    const wsDeadline = Date.now() + (opts.wsTimeoutMs ?? 4_000);
+    while (Date.now() < wsDeadline) {
+      const relay = await this.runtimeEval(
+        `JSON.stringify(window.__cbtest && window.__cbtest.relay || {})`,
+      );
+      const r = JSON.parse(relay || "{}");
+      if (r.ws_state === "open") {
+        this.log("ok", "page→bridge relay open", r);
+        break;
+      }
+      if (r.ws_state === "error" || r.ws_state === "closed") {
+        throw new Error(
+          `page→bridge relay failed (state=${r.ws_state} err=${r.last_error})`,
+        );
+      }
+      await sleep(100);
+    }
+
+    return makeWireInputBag(dc, { log: this.log, tag: "wire" });
+  }
+
+  /**
+   * Read the page-side relay diagnostic. Useful for assertions that
+   * the wire path actually carried traffic.
+   */
+  async readWireRelay() {
+    const raw = await this.runtimeEval(
+      `JSON.stringify(window.__cbtest && window.__cbtest.relay || null)`,
+    );
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  /**
    * Open a SECOND CDP session attached to the SAME target.
    * Used for concurrency scenarios: this represents an "agent" driving
    * the browser via CDP while the harness's primary session represents
@@ -541,6 +815,17 @@ export class Scenario {
 
   async _setupRecording() {
     this._peer.addTransceiver("video", { direction: "recvonly" });
+    // Capture any DataChannel the page creates (the wire-path
+    // "input" channel when wire mode is on). The harness sends v1
+    // envelopes on this channel; the page's InputRelay forwards
+    // them to the input-bridge sidecar.
+    this._peer.ondatachannel = (ev) => {
+      const dc = ev.channel;
+      this.log("ok", "← page-created DataChannel", {
+        label: dc.label, ordered: dc.ordered,
+      });
+      if (dc.label === "input") this._wireDc = dc;
+    };
     this._peer.ontrack = (ev) => {
       const track = ev.track;
       if (track.kind !== "video") return;
@@ -763,12 +1048,25 @@ export class Scenario {
     );
 
     try { this._peer.close(); } catch { /* */ }
-    try {
-      await this._browser.Target.closeTarget({ targetId: this._targetId });
-      await this._browser.Target.disposeBrowserContext({
-        browserContextId: this._browserContextId,
-      });
-    } catch { /* tolerate */ }
+    if (!this._reusedTarget) {
+      // Wire-mode scenarios share the bridge's target — leaving it
+      // alive across scenarios is intentional.
+      try {
+        await this._browser.Target.closeTarget({ targetId: this._targetId });
+        if (this._browserContextId) {
+          await this._browser.Target.disposeBrowserContext({
+            browserContextId: this._browserContextId,
+          });
+        }
+      } catch { /* tolerate */ }
+    } else {
+      // Scrub state on the reused target so the next scenario starts
+      // clean. Navigate to about:blank — the bridge stays attached to
+      // the same targetId, just with a fresh document.
+      try {
+        await this._session.Page.navigate({ url: "about:blank" });
+      } catch { /* */ }
+    }
     try { await this._browser.close(); } catch { /* */ }
     try { this._server.close(); } catch { /* */ }
 
@@ -808,6 +1106,7 @@ export async function runScenario(scenario, opts = {}) {
     durationMs: scenario.durationMs,
     cbUrl,
     artifactsDir,
+    wire: scenario.wire,  // { url } enables the wire-path mode
   });
   let runErr = null;
   try {

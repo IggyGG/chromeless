@@ -28,6 +28,7 @@ resources:
   - namespace.yaml
   - cb-cdp-validation.yaml
   - cb-webrtc-validation.yaml
+  - cb-webrtc-wire-bridge-validation.yaml
 
 labels:
   - includeSelectors: false

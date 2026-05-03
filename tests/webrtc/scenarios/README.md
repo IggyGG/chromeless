@@ -144,16 +144,61 @@ fresh Target, fresh recording. No state leaks between scenarios.
 Modifier bag: `{ alt, ctrl, meta, shift }` → CDP modifier bitfield.
 Button bag: `{ button: "left"|"middle"|"right", clickCount: 1|2|3 }`.
 
+## Wire-path scenarios (production roundtrip)
+
+Scenarios `20-22` exercise the **full production wire path**:
+
+```
+harness.dc.send(envelope)
+  → page.dc.onmessage
+  → page.InputRelay.forward()
+  → ws://127.0.0.1:9100/input
+  → input-bridge sidecar
+  → CDP Input.dispatchMouseEvent / dispatchKeyEvent
+  → renderer
+  → page event listener → window.__events
+```
+
+Local prerequisites:
+```bash
+# Build input-bridge (Go binary):
+cd /private/tmp/chromeless/capture/input-bridge && go build -o /tmp/input-bridge .
+
+# Start chromium with remote debugging:
+chromium --headless=new --remote-debugging-port=9222 \
+         --remote-allow-origins=* --window-size=1280,720 about:blank &
+
+# Start input-bridge AFTER chromium is up:
+/tmp/input-bridge --source ws --cdp-url http://127.0.0.1:9222 &
+
+# Run wire-only scenarios:
+TEST_ARTIFACTS_DIR=/tmp/cb-wire-test \
+  node scenarios/runner.mjs --only=wire
+```
+
+### Bridge bugs surfaced by the wire tests
+
+The wire scenarios surface **four genuine production bugs** in
+`capture/input-bridge/main.go` — these aren't test errors, they're
+invariants the bridge must hold and currently doesn't:
+
+| Bug | Location | Symptom | Fix |
+|---|---|---|---|
+| **#1 clickCount** | `main.go:554` | `mouse_button` always emits `clickCount: 1` → no dblclick events | Track time-of-last-mousedown, ramp clickCount on rapid successive clicks (~500ms threshold) |
+| **#2 modifiers** | `main.go:555` | `mouse_button` always emits `modifiers: 0` → shift-click loses modifier on the wire | Maintain held-key state machine across `key_down`/`key_up` envelopes; OR-mask into `modifiers` on mouse events |
+| **#3 buttons during drag** | `main.go:528` | `mouse_move` always emits `button: "none", buttons: 0` → drag detector aborts → no dragstart/drag/drop fires | Track pointer-button state across messages; OR last-down-without-up into `buttons` on mouse_move CDP dispatch |
+| **#4 Enter newline** | `main.go` keyboard path | `key_down {key:"Enter"}` dispatched without `text: "\r"` → textarea doesn't receive newline | Synthesise `text` from `key`: Enter→\r, Tab→\t, printable single char→itself |
+
+A green run of `--only=wire` against a patched bridge means all four
+fixes landed. Ship those fixes upstream in the bridge crate —
+**this scenario set is the regression suite** that proves the
+production wire path holds under real chromium dispatch.
+
 ## Cluster integration
 
-The single-source-of-input scenarios (01–05) and the CDP-concurrency
-scenarios (10–12) all run via direct CDP, no input-bridge required —
-they fit in any chromium pod with `--remote-debugging-port=9222`
-exposed.
+The CDP-direct scenarios (01–12) run via the existing
+`cb-webrtc-validation.yaml` Job — no input-bridge needed.
 
-A separate cluster Job (planned: `cb-webrtc-input-bridge-validation.yaml`)
-will run an additional set of scenarios that exercise the full
-**production wire path**: harness creates `RTCDataChannel("input")`,
-streamer-page relays to a localhost WebSocket, input-bridge sidecar
-translates v1 envelopes into CDP `Input.dispatch*`. That set covers
-the wire-format roundtrip; this set covers the page-level behaviour.
+The wire scenarios (20+) run via `cb-webrtc-wire-bridge-validation.yaml`
+— same shape but with an additional `input-bridge` sidecar
+container alongside cb-chromium and the test-driver.

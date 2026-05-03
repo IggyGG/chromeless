@@ -312,6 +312,23 @@
         ready: false,
         codec: new URLSearchParams(location.search).get("codec") || "",
         scenario: new URLSearchParams(location.search).get("scenario") || "",
+        // Wire-path test mode (DataChannel → input-bridge → CDP).
+        //   ?wire=1                     enable wire-input relay
+        //   ?wire-url=ws://...:9100/input  bridge endpoint (default below)
+        wireMode: new URLSearchParams(location.search).get("wire") === "1",
+        wireUrl:  new URLSearchParams(location.search).get("wire-url")
+                  || "ws://127.0.0.1:9100/input",
+        // Diagnostic counters surfaced via window.__cbtest for the
+        // harness to read back (proves the relay actually connected
+        // to the bridge and forwarded messages).
+        relay: {
+          state: "idle",       // "idle"|"dialing"|"open"|"closed"|"error"
+          ws_state: "idle",
+          dc_messages: 0,
+          ws_forwarded: 0,
+          ws_dropped: 0,
+          last_error: null,
+        },
         handle(msg) {
           if (window.__cbtest._impl) return window.__cbtest._impl(msg);
           window.__cbtest._pending ||= [];
@@ -319,6 +336,81 @@
           return null;
         },
       };
+
+      // ─── Wire-path InputRelay ──────────────────────────────────────
+      //
+      // When ?wire=1 is set, the page itself creates an "input"
+      // RTCDataChannel and forwards every message it receives to a
+      // localhost WebSocket (the input-bridge sidecar at
+      // ws://127.0.0.1:9100/input by default). This mirrors the
+      // production scrapebrowse streamer pattern verbatim: the
+      // streamer page is the relay between the WebRTC data channel
+      // and the bridge that translates v1 envelopes into CDP
+      // Input.dispatch* calls.
+      //
+      // The harness sees the page-created channel via
+      // pc.ondatachannel and sends v1 envelopes on it; the page
+      // forwards each verbatim. We deliberately don't parse here —
+      // the bridge owns the schema, and re-parsing in the page would
+      // duplicate validation that has to stay in lock-step with the
+      // bridge's code.
+      class InputRelay {
+        constructor(dc, url) {
+          this.dc = dc;
+          this.url = url;
+          this.ws = null;
+          this.queue = [];
+          this.closed = false;
+          dc.onmessage = (ev) => this.forward(ev.data);
+          dc.onclose = () => this.close();
+          dc.onerror = (e) => {
+            window.__cbtest.relay.last_error = String(e);
+          };
+          this.connect();
+        }
+        connect() {
+          if (this.closed) return;
+          window.__cbtest.relay.state = "dialing";
+          window.__cbtest.relay.ws_state = "connecting";
+          const ws = new WebSocket(this.url);
+          this.ws = ws;
+          ws.onopen = () => {
+            window.__cbtest.relay.state = "open";
+            window.__cbtest.relay.ws_state = "open";
+            // Drain any messages buffered before the WS came up.
+            for (const m of this.queue) ws.send(m);
+            this.queue.length = 0;
+          };
+          ws.onmessage = () => { /* bridge doesn't echo */ };
+          ws.onclose = () => {
+            window.__cbtest.relay.ws_state = "closed";
+            this.ws = null;
+          };
+          ws.onerror = (e) => {
+            window.__cbtest.relay.ws_state = "error";
+            window.__cbtest.relay.last_error = String(e?.message || e);
+          };
+        }
+        forward(msg) {
+          window.__cbtest.relay.dc_messages += 1;
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            try { this.ws.send(msg); window.__cbtest.relay.ws_forwarded += 1; }
+            catch (err) {
+              window.__cbtest.relay.ws_dropped += 1;
+              window.__cbtest.relay.last_error = String(err);
+            }
+          } else {
+            // Buffer until the bridge connection is up.
+            this.queue.push(msg);
+          }
+        }
+        close() {
+          this.closed = true;
+          window.__cbtest.relay.state = "closed";
+          try { this.ws?.close(); } catch { /* */ }
+        }
+      }
+      window.__cbtest._InputRelay = InputRelay;
 
       function send(msg) { console.log("CBTEST:" + JSON.stringify(msg)); }
 
@@ -731,6 +823,25 @@
         const tx = pc.addTransceiver(videoTrack, {
           direction: "sendonly", streams: [stream],
         });
+
+        // Wire-path mode: create the "input" DataChannel BEFORE
+        // createOffer so the SDP includes m=application. The harness
+        // (answerer) receives the channel via pc.ondatachannel and
+        // sends v1 envelopes on it; the InputRelay attached here
+        // forwards those to ws://localhost:9100/input where the
+        // input-bridge sidecar translates them into CDP
+        // Input.dispatch* calls.
+        if (window.__cbtest.wireMode) {
+          const inputDC = pc.createDataChannel("input", { ordered: true });
+          // Attach the relay immediately so dc.onmessage is wired up
+          // BEFORE the channel opens — any messages the harness sends
+          // before the WS-to-bridge connection is established get
+          // buffered in the relay's queue and drained on WS open.
+          new window.__cbtest._InputRelay(inputDC, window.__cbtest.wireUrl);
+          // Ack via console so the harness's log confirms the page
+          // is in wire mode and the channel was created.
+          send({ type: "wire-mode-ready", url: window.__cbtest.wireUrl });
+        }
 
         try {
           const params = tx.sender.getParameters();
