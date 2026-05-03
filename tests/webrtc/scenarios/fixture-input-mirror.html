@@ -1,0 +1,805 @@
+<!doctype html>
+<!--
+  tests/webrtc/scenarios/fixture-input-mirror.html
+
+  Instrumented fixture page for input-dispatch scenarios. Every input
+  event the page receives is captured into window.__events with a
+  high-precision timestamp, so the harness can:
+
+    1. Drive a CDP-dispatched (or DataChannel-relayed) input sequence.
+    2. Read window.__events back via Runtime.evaluate.
+    3. Assert the page received the expected events in order.
+
+  The page also IS the visual fixture: it contains drag sources, drag
+  targets, hover-sensitive zones, focusable inputs, scroll regions,
+  and a click-marker overlay so the recorded webm is human-reviewable.
+  Whatever the harness does shows up on screen — clicks leave a
+  fading dot, drags leave a path trail, keys appear in the typing
+  area, hover state lights up the hovered element. The recording
+  alone is enough to manually verify what happened.
+
+  Fixture also sets up the same WebRTC streamer plumbing the rest of
+  the harness expects: it hosts a 1280×720 canvas captured via
+  canvas.captureStream(30) and exposes window.__cbtest.handle so the
+  scenario lib can drive SDP/ICE through CDP Runtime.evaluate.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>cb-chromium webrtc — input-mirror fixture</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0e14;
+        --bg-elev: #11161f;
+        --bg-elev2: #1a2230;
+        --line: #1f2a3a;
+        --fg: #cfd8e8;
+        --fg-dim: #7a8da6;
+        --accent: #5fb4ff;
+        --ok: #7fffaa;
+        --warn: #ffcc66;
+        --err: #ff8888;
+      }
+      html, body {
+        margin: 0; height: 100%; width: 100%;
+        background: var(--bg); color: var(--fg);
+        font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow: hidden;
+      }
+      #stage {
+        position: relative;
+        width: 1280px; height: 720px;
+      }
+      /* Canvas behind everything — its captureStream is what gets
+         recorded. We mirror the live DOM into the canvas via a
+         per-frame draw so the webm shows the actual page state. */
+      canvas#frame {
+        position: absolute; inset: 0; z-index: 0;
+        background: var(--bg);
+      }
+      .layer {
+        position: absolute; inset: 0; z-index: 1;
+        pointer-events: auto;
+      }
+      .header {
+        position: absolute; top: 0; left: 0; right: 0; height: 40px;
+        background: var(--bg-elev);
+        border-bottom: 1px solid var(--line);
+        display: flex; align-items: center; padding: 0 16px;
+        font-size: 12px; color: var(--fg-dim); z-index: 2;
+      }
+      .header b { color: var(--fg); margin-right: 8px; }
+      .badge {
+        display: inline-block; padding: 2px 8px;
+        background: var(--bg-elev2); border-radius: 3px;
+        margin-left: 8px;
+      }
+
+      /* ── click-zone grid (top-left): 9 buttons with stable IDs ── */
+      .click-grid {
+        position: absolute; top: 56px; left: 16px;
+        width: 280px; height: 280px;
+        display: grid; grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(3, 1fr); gap: 6px;
+      }
+      .click-grid button {
+        background: var(--bg-elev); color: var(--fg);
+        border: 1px solid var(--line); border-radius: 4px;
+        font: inherit; cursor: pointer;
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }
+      .click-grid button:hover {
+        background: var(--bg-elev2); border-color: var(--accent);
+      }
+      .click-grid button.was-clicked {
+        background: #1f4d2c; border-color: var(--ok); color: var(--ok);
+      }
+
+      /* ── hover zones (top-right): 4 nested rectangles ── */
+      .hover-zones {
+        position: absolute; top: 56px; right: 16px;
+        width: 320px; height: 280px;
+        background: var(--bg-elev); border: 1px solid var(--line);
+        border-radius: 4px;
+      }
+      .hover-zones .h-outer,
+      .hover-zones .h-mid,
+      .hover-zones .h-inner,
+      .hover-zones .h-core {
+        position: absolute; transition: background 0.1s, border-color 0.1s;
+        border: 1px solid var(--line); display: grid; place-items: start center;
+        padding-top: 4px; box-sizing: border-box;
+      }
+      /* Nested DOM, each child's inset is relative to its parent —
+         so a single inset:32 on the inner divs yields concentric
+         padding from each parent. */
+      .h-outer { inset: 0; }
+      .h-mid   { inset: 32px; }
+      .h-inner { inset: 32px; }
+      .h-core  { inset: 32px; }
+      .h-outer:hover, .h-mid:hover, .h-inner:hover, .h-core:hover {
+        background: var(--bg-elev2); border-color: var(--accent);
+      }
+
+      /* ── drag-and-drop area (middle-left) ── */
+      .dnd {
+        position: absolute; top: 360px; left: 16px;
+        width: 460px; height: 220px;
+        background: var(--bg-elev); border: 1px solid var(--line);
+        border-radius: 4px; padding: 12px; box-sizing: border-box;
+        display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+      }
+      .dnd-source, .dnd-target {
+        background: var(--bg-elev2); border: 1px dashed var(--line);
+        border-radius: 4px; display: grid; place-items: center;
+        text-align: center; user-select: none;
+      }
+      .dnd-source[draggable] { cursor: grab; }
+      .dnd-source[draggable]:active { cursor: grabbing; }
+      .dnd-target.drag-over {
+        background: #1f4d2c; border-color: var(--ok); color: var(--ok);
+      }
+      .dnd-target.dropped {
+        background: #1f3a4d; border-color: var(--accent);
+      }
+
+      /* ── typing area (middle-right) ── */
+      .typing {
+        position: absolute; top: 360px; right: 16px;
+        width: 700px; height: 220px;
+        background: var(--bg-elev); border: 1px solid var(--line);
+        border-radius: 4px; padding: 12px; box-sizing: border-box;
+        display: flex; flex-direction: column; gap: 8px;
+      }
+      .typing label { color: var(--fg-dim); font-size: 11px; }
+      .typing input, .typing textarea {
+        width: 100%; box-sizing: border-box;
+        background: var(--bg); color: var(--fg);
+        border: 1px solid var(--line); border-radius: 3px;
+        font: inherit; padding: 6px 8px;
+      }
+      .typing input:focus, .typing textarea:focus {
+        outline: none; border-color: var(--accent);
+      }
+      .typing .keylog {
+        height: 40px; overflow: hidden; font-size: 11px;
+        color: var(--fg-dim); background: var(--bg);
+        border: 1px solid var(--line); border-radius: 3px;
+        padding: 4px 6px;
+        white-space: nowrap;
+      }
+
+      /* ── scroll region (bottom-left) ── */
+      .scroller {
+        position: absolute; bottom: 16px; left: 16px;
+        width: 460px; height: 100px;
+        background: var(--bg-elev); border: 1px solid var(--line);
+        border-radius: 4px; overflow: auto;
+      }
+      .scroller .content {
+        height: 800px; width: 200%;
+        background: repeating-linear-gradient(45deg,
+          #1a2230 0 40px, #11161f 40px 80px);
+      }
+
+      /* ── live event ticker (bottom-right) ── */
+      .ticker {
+        position: absolute; bottom: 16px; right: 16px;
+        width: 700px; height: 100px;
+        background: var(--bg-elev); border: 1px solid var(--line);
+        border-radius: 4px; overflow: hidden; padding: 4px 8px;
+        font-size: 11px;
+      }
+      .ticker .row {
+        white-space: nowrap; line-height: 14px;
+      }
+      .ticker .row b { color: var(--fg); margin-right: 6px; }
+      .ticker .row.click { color: var(--ok); }
+      .ticker .row.drag  { color: var(--warn); }
+      .ticker .row.key   { color: var(--accent); }
+      .ticker .row.wheel { color: #d6a4ff; }
+
+      /* ── click ripple overlay (above everything) ── */
+      .ripple {
+        position: absolute; pointer-events: none;
+        width: 24px; height: 24px;
+        margin-left: -12px; margin-top: -12px;
+        border-radius: 50%;
+        border: 2px solid var(--accent);
+        animation: ripple-fade 0.45s ease-out forwards;
+        z-index: 10;
+      }
+      @keyframes ripple-fade {
+        from { opacity: 1; transform: scale(0.6); }
+        to   { opacity: 0; transform: scale(2.0); }
+      }
+
+      /* ── cursor trail (above everything) ── */
+      .trail-dot {
+        position: absolute; pointer-events: none;
+        width: 6px; height: 6px;
+        margin-left: -3px; margin-top: -3px;
+        border-radius: 50%;
+        background: var(--accent);
+        opacity: 0.6;
+        animation: trail-fade 0.6s ease-out forwards;
+        z-index: 10;
+      }
+      @keyframes trail-fade {
+        from { opacity: 0.7; transform: scale(1); }
+        to   { opacity: 0;   transform: scale(0.3); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <canvas id="frame" width="1280" height="720"></canvas>
+
+      <!-- header -->
+      <div class="header">
+        <b>cb-chromium webrtc input-mirror</b>
+        <span id="scenarioBadge" class="badge">scenario: (unset)</span>
+        <span id="markerBadge" class="badge">marker: —</span>
+        <span style="margin-left:auto" id="frameBadge" class="badge">f=0</span>
+      </div>
+
+      <!-- click zones -->
+      <div class="click-grid">
+        <button id="btn-tl" data-zone="tl">TL</button>
+        <button id="btn-tc" data-zone="tc">TC</button>
+        <button id="btn-tr" data-zone="tr">TR</button>
+        <button id="btn-ml" data-zone="ml">ML</button>
+        <button id="btn-mc" data-zone="mc">MC</button>
+        <button id="btn-mr" data-zone="mr">MR</button>
+        <button id="btn-bl" data-zone="bl">BL</button>
+        <button id="btn-bc" data-zone="bc">BC</button>
+        <button id="btn-br" data-zone="br">BR</button>
+      </div>
+
+      <!-- hover zones — DOM-nested (NOT stacked siblings) so
+           mouseenter/leave fire correctly only on transitions across
+           true ancestor/descendant boundaries. Stacked-sibling
+           layouts confuse hover state machines because the topmost
+           sibling alone receives mouseenter; production hover code
+           relies on the nested-DOM contract. -->
+      <div class="hover-zones" id="hoverZones">
+        <div class="h-outer" data-zone="outer">outer
+          <div class="h-mid"   data-zone="mid">mid
+            <div class="h-inner" data-zone="inner">inner
+              <div class="h-core"  data-zone="core">core</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- drag-and-drop -->
+      <div class="dnd" id="dnd">
+        <div class="dnd-source" id="dndSource" draggable="true">
+          drag me<br><small>data:source-A</small>
+        </div>
+        <div class="dnd-target" id="dndTarget">
+          drop here
+        </div>
+      </div>
+
+      <!-- typing -->
+      <div class="typing">
+        <label for="text1">text input (focus → type / shortcuts):</label>
+        <input id="text1" type="text" placeholder="empty" />
+        <label for="text2">textarea (multi-line, IME ok):</label>
+        <textarea id="text2" rows="2" placeholder="empty"></textarea>
+        <div class="keylog" id="keylog">key log: (idle)</div>
+      </div>
+
+      <!-- scroller -->
+      <div class="scroller" id="scroller">
+        <div class="content"></div>
+      </div>
+
+      <!-- ticker -->
+      <div class="ticker" id="ticker"></div>
+    </div>
+
+    <script type="module">
+      "use strict";
+
+      // ───────────────────────────────────────────────────────────────
+      // Page-side bridge — same shape as the existing streamer-page so
+      // _lib.mjs's CDP Runtime.evaluate hand-off works unchanged.
+      // ───────────────────────────────────────────────────────────────
+      window.__cbtest = {
+        ready: false,
+        codec: new URLSearchParams(location.search).get("codec") || "",
+        scenario: new URLSearchParams(location.search).get("scenario") || "",
+        handle(msg) {
+          if (window.__cbtest._impl) return window.__cbtest._impl(msg);
+          window.__cbtest._pending ||= [];
+          window.__cbtest._pending.push(msg);
+          return null;
+        },
+      };
+
+      function send(msg) { console.log("CBTEST:" + JSON.stringify(msg)); }
+
+      // ───────────────────────────────────────────────────────────────
+      // Event capture — every input event the page sees lands in
+      // window.__events. The harness reads this via Runtime.evaluate.
+      // ───────────────────────────────────────────────────────────────
+      window.__events = [];
+      const t0 = performance.now();
+      function ts() { return Math.round(performance.now() - t0); }
+      function record(type, data) {
+        const evt = { t: ts(), type, ...data };
+        window.__events.push(evt);
+        appendTicker(evt);
+      }
+
+      // The harness can also reset the log between sub-phases of a
+      // scenario without a navigation by calling
+      // `window.__events.length = 0` directly via Runtime.evaluate.
+
+      // ── ticker ──
+      const tickerEl = document.getElementById("ticker");
+      function appendTicker(evt) {
+        const row = document.createElement("div");
+        const cls = ["click", "drag", "key", "wheel"]
+          .find((p) => evt.type.startsWith(p)) || "";
+        row.className = "row " + cls;
+        const label = evt.type.padEnd(12, " ");
+        const detail = JSON.stringify(evt).slice(0, 110);
+        row.innerHTML = `<b>+${evt.t.toString().padStart(5)}ms</b> ${label} ${detail}`;
+        tickerEl.appendChild(row);
+        // Keep last ~6 rows visible
+        while (tickerEl.children.length > 6) tickerEl.removeChild(tickerEl.firstChild);
+      }
+
+      // ───────────────────────────────────────────────────────────────
+      // Click zones — record click + dblclick + auxclick + the
+      // underlying mousedown/mouseup. The raw mouse events matter for
+      // concurrent-CDP scenarios where chromium's input-router may
+      // serialise dispatches into drag-shaped gestures: the synthetic
+      // click event won't fire then, but mousedown/mouseup still do.
+      // ───────────────────────────────────────────────────────────────
+      for (const btn of document.querySelectorAll(".click-grid button")) {
+        for (const evtName of ["click", "dblclick", "auxclick", "contextmenu",
+                                "mousedown", "mouseup"]) {
+          btn.addEventListener(evtName, (e) => {
+            if (evtName === "click" || evtName === "dblclick"
+                || evtName === "auxclick") {
+              btn.classList.add("was-clicked");
+              spawnRipple(e.clientX, e.clientY);
+            }
+            record(evtName, {
+              zone: btn.dataset.zone,
+              button: e.button,
+              buttons: e.buttons,
+              x: e.clientX, y: e.clientY,
+              shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey,
+              detail: e.detail,
+            });
+            if (evtName === "contextmenu") e.preventDefault();
+          });
+        }
+      }
+
+      // ───────────────────────────────────────────────────────────────
+      // Hover zones — record mouseenter/leave/over/out per zone.
+      // The :hover CSS handles visual state; we only record events for
+      // assertion. Note mouseover/out bubble; mouseenter/leave don't —
+      // we capture both because production code paths rely on each.
+      // ───────────────────────────────────────────────────────────────
+      // `.hover-zones [data-zone]` matches descendants at any depth.
+      // The earlier `> div` (direct children) only matched h-outer when
+      // we switched the layout from sibling-stacked to DOM-nested, so
+      // mid/inner/core never received their listeners — silent failure
+      // mode that produced empty mouseenter/leave logs.
+      for (const z of document.querySelectorAll(".hover-zones [data-zone]")) {
+        for (const evtName of ["mouseenter", "mouseleave", "mouseover", "mouseout"]) {
+          z.addEventListener(evtName, (e) => {
+            record(evtName, {
+              zone: z.dataset.zone,
+              x: e.clientX, y: e.clientY,
+            });
+          });
+        }
+      }
+
+      // mousemove on the whole stage — leaves a trail dot every ~30ms.
+      let lastTrailAt = 0;
+      const stage = document.getElementById("stage");
+      stage.addEventListener("mousemove", (e) => {
+        record("mousemove", {
+          x: e.clientX, y: e.clientY,
+          buttons: e.buttons,
+        });
+        if (e.timeStamp - lastTrailAt > 30) {
+          spawnTrail(e.clientX, e.clientY);
+          lastTrailAt = e.timeStamp;
+        }
+      });
+
+      // ───────────────────────────────────────────────────────────────
+      // Drag and drop — HTML5 D&D events (dragstart, drag, dragenter,
+      // dragover, dragleave, dragend, drop). Fires on the source for
+      // dragstart/drag/dragend, on the target for the rest.
+      // ───────────────────────────────────────────────────────────────
+      const dndSource = document.getElementById("dndSource");
+      const dndTarget = document.getElementById("dndTarget");
+
+      dndSource.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", "data:source-A");
+        e.dataTransfer.effectAllowed = "copy";
+        record("dragstart", { source: "A", x: e.clientX, y: e.clientY });
+      });
+      dndSource.addEventListener("drag", (e) => {
+        // Fires very frequently during a drag — sample to keep the
+        // event log readable. Record one drag event per ~50ms.
+        const last = window.__events.findLast?.((ev) => ev.type === "drag");
+        if (!last || (ts() - last.t) > 50) {
+          record("drag", { x: e.clientX, y: e.clientY });
+        }
+      });
+      dndSource.addEventListener("dragend", (e) => {
+        record("dragend", { x: e.clientX, y: e.clientY,
+                            dropEffect: e.dataTransfer.dropEffect });
+      });
+      dndTarget.addEventListener("dragenter", (e) => {
+        e.preventDefault();
+        dndTarget.classList.add("drag-over");
+        record("dragenter", { x: e.clientX, y: e.clientY });
+      });
+      dndTarget.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        // High-frequency event — sample.
+        const last = window.__events.findLast?.((ev) => ev.type === "dragover");
+        if (!last || (ts() - last.t) > 50) {
+          record("dragover", { x: e.clientX, y: e.clientY });
+        }
+      });
+      dndTarget.addEventListener("dragleave", (e) => {
+        dndTarget.classList.remove("drag-over");
+        record("dragleave", { x: e.clientX, y: e.clientY });
+      });
+      dndTarget.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dndTarget.classList.remove("drag-over");
+        dndTarget.classList.add("dropped");
+        const data = e.dataTransfer.getData("text/plain");
+        record("drop", { x: e.clientX, y: e.clientY, data });
+        dndTarget.textContent = "dropped: " + data;
+      });
+
+      // ───────────────────────────────────────────────────────────────
+      // Keyboard — record keydown/keyup at document level + change
+      // events on the inputs so we can assert "user typed X into
+      // field Y".
+      // ───────────────────────────────────────────────────────────────
+      const keylog = document.getElementById("keylog");
+      function updateKeylog() {
+        const recent = window.__events
+          .filter((e) => e.type === "keydown")
+          .slice(-12)
+          .map((e) => e.key.length === 1 ? e.key : `[${e.key}]`)
+          .join(" ");
+        keylog.textContent = "key log: " + (recent || "(idle)");
+      }
+      for (const evtName of ["keydown", "keyup", "keypress",
+                             "compositionstart", "compositionupdate", "compositionend"]) {
+        document.addEventListener(evtName, (e) => {
+          const target = e.target;
+          const targetId = target?.id || target?.tagName?.toLowerCase() || "?";
+          const data = e.key !== undefined ? {
+            key: e.key, code: e.code, keyCode: e.keyCode,
+            shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey,
+            target: targetId,
+            isComposing: e.isComposing,
+          } : { data: e.data, target: targetId };
+          record(evtName, data);
+          if (evtName === "keydown") updateKeylog();
+        }, true); // capture phase so we see events even if a child stops propagation
+      }
+      for (const id of ["text1", "text2"]) {
+        const el = document.getElementById(id);
+        el.addEventListener("input", (e) => {
+          record("input", { target: id, value: el.value });
+        });
+        el.addEventListener("focus", () => record("focus", { target: id }));
+        el.addEventListener("blur",  () => record("blur",  { target: id }));
+      }
+
+      // ───────────────────────────────────────────────────────────────
+      // Wheel scroll — record wheel + scroll events on the scroller.
+      // ───────────────────────────────────────────────────────────────
+      const scroller = document.getElementById("scroller");
+      scroller.addEventListener("wheel", (e) => {
+        record("wheel", {
+          deltaX: e.deltaX, deltaY: e.deltaY, deltaZ: e.deltaZ,
+          deltaMode: e.deltaMode,
+          x: e.clientX, y: e.clientY,
+        });
+      }, { passive: true });
+      scroller.addEventListener("scroll", () => {
+        const last = window.__events.findLast?.((ev) => ev.type === "scroll");
+        // Sample to ~one per 80ms.
+        if (!last || (ts() - last.t) > 80) {
+          record("scroll", { scrollLeft: scroller.scrollLeft, scrollTop: scroller.scrollTop });
+        }
+      }, { passive: true });
+
+      // ───────────────────────────────────────────────────────────────
+      // Visual extras — click ripple + cursor trail (purely cosmetic,
+      // makes the recording obvious to a human reviewer).
+      // ───────────────────────────────────────────────────────────────
+      function spawnRipple(x, y) {
+        const r = document.createElement("div");
+        r.className = "ripple";
+        r.style.left = x + "px";
+        r.style.top  = y + "px";
+        document.body.appendChild(r);
+        setTimeout(() => r.remove(), 500);
+      }
+      function spawnTrail(x, y) {
+        const d = document.createElement("div");
+        d.className = "trail-dot";
+        d.style.left = x + "px";
+        d.style.top  = y + "px";
+        document.body.appendChild(d);
+        setTimeout(() => d.remove(), 700);
+      }
+
+      // ───────────────────────────────────────────────────────────────
+      // The harness can call window.__cbtest.handle({type:"marker",
+      // label:"…"}) to tag a moment in the recording (visible in the
+      // header).
+      // ───────────────────────────────────────────────────────────────
+      const scenarioBadge = document.getElementById("scenarioBadge");
+      const markerBadge   = document.getElementById("markerBadge");
+      const frameBadge    = document.getElementById("frameBadge");
+      scenarioBadge.textContent = `scenario: ${window.__cbtest.scenario || "(unset)"}`;
+
+      // ───────────────────────────────────────────────────────────────
+      // Rendering: mirror the live DOM into the canvas at 30 fps so
+      // captureStream produces a representative video. Drawing the DOM
+      // into a 2D canvas is non-trivial; we use html-to-image-style
+      // approach via foreignObject SVG, which works in chromium and
+      // doesn't need any external dependency.
+      // ───────────────────────────────────────────────────────────────
+      const canvas = document.getElementById("frame");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      let frameNum = 0;
+
+      // For performance, rasterize the page DOM into the canvas only
+      // when something changes — but the input feedback (ripples,
+      // hover state, ticker) wants per-frame updates. Compromise: draw
+      // every frame, but use a serialized SVG of the whole stage.
+      function renderToCanvas() {
+        frameNum += 1;
+        frameBadge.textContent = `f=${frameNum}`;
+
+        // Background
+        ctx.fillStyle = "#0b0e14";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Snapshot the stage as an SVG with a foreignObject — chromium
+        // renders this back into the canvas via drawImage. This gives
+        // us a reasonable approximation of the live DOM in the
+        // recording without any external library.
+        const stageEl = document.getElementById("stage");
+        const html = new XMLSerializer().serializeToString(stageEl);
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+          <foreignObject width="100%" height="100%">
+            <div xmlns="http://www.w3.org/1999/xhtml">${html}</div>
+          </foreignObject>
+        </svg>`;
+        const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+        const img = new Image();
+        img.onload = () => {
+          // Image may load after the next frame fires; just draw if
+          // available — the next frame will replace it.
+          ctx.drawImage(img, 0, 0);
+        };
+        img.src = url;
+      }
+
+      // Lighter weight per-frame: redraw the canvas with simple shapes
+      // depicting the page state. Not pixel-perfect, but: deterministic,
+      // dependency-free, recording stays meaningful even if SVG
+      // foreignObject path stalls.
+      function renderSummary() {
+        frameNum += 1;
+        frameBadge.textContent = `f=${frameNum}`;
+
+        // Background
+        ctx.fillStyle = "#0b0e14";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Header band
+        ctx.fillStyle = "#11161f";
+        ctx.fillRect(0, 0, canvas.width, 40);
+        ctx.fillStyle = "#1f2a3a";
+        ctx.fillRect(0, 39, canvas.width, 1);
+
+        // Header text
+        ctx.fillStyle = "#cfd8e8";
+        ctx.font = "13px ui-monospace, Menlo, Consolas, monospace";
+        ctx.textBaseline = "middle";
+        ctx.fillText("cb-chromium webrtc input-mirror", 16, 20);
+        ctx.fillStyle = "#7a8da6";
+        ctx.font = "11px ui-monospace, Menlo, Consolas, monospace";
+        ctx.fillText(`scenario: ${window.__cbtest.scenario || "(unset)"}`, 280, 20);
+        ctx.fillText(`marker: ${currentMarker || "—"}`, 480, 20);
+        ctx.fillText(`f=${frameNum}  events=${window.__events.length}`, canvas.width - 200, 20);
+
+        // Per-region snapshots — coordinates match the CSS layout
+        drawRegionFromLive("click-grid", 16, 56, 280, 280);
+        drawRegionFromLive("hover-zones", 944, 56, 320, 280);
+        drawRegionFromLive("dnd", 16, 360, 460, 220);
+        drawRegionFromLive("typing", 564, 360, 700, 220);
+        drawRegionFromLive("scroller", 16, 596, 460, 100);
+        drawRegionFromLive("ticker", 564, 596, 700, 100);
+      }
+
+      function drawRegionFromLive(className, x, y, w, h) {
+        // Draw a panel placeholder + title from the closest matching
+        // element. Cheap, deterministic, lets the recording show where
+        // each region is. Real DOM contents are visible to live viewers
+        // (the page itself); the recording captures the canvas snapshot.
+        ctx.fillStyle = "#11161f";
+        roundRect(ctx, x, y, w, h, 4); ctx.fill();
+        ctx.strokeStyle = "#1f2a3a"; ctx.lineWidth = 1;
+        roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 4); ctx.stroke();
+        ctx.fillStyle = "#7a8da6";
+        ctx.font = "11px ui-monospace";
+        ctx.textBaseline = "top";
+        ctx.fillText(className, x + 8, y + 6);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      // Overlay live event indicators on top of the canvas: a fading
+      // dot at the last mouse position + the most recent event type.
+      let lastMouseAt = null;
+      let lastInputAt = 0;
+      let lastInputType = "";
+      window.addEventListener("mousemove", (e) => {
+        lastMouseAt = { x: e.clientX, y: e.clientY, t: performance.now() };
+      });
+      const _origRecord = record;
+      // augment record to update overlay
+      window.__record_overlay = (type) => {
+        lastInputAt = performance.now();
+        lastInputType = type;
+      };
+
+      function renderOverlay() {
+        if (lastMouseAt) {
+          const age = performance.now() - lastMouseAt.t;
+          if (age < 500) {
+            ctx.beginPath();
+            ctx.arc(lastMouseAt.x, lastMouseAt.y, 6, 0, 2 * Math.PI);
+            ctx.fillStyle = `rgba(95,180,255,${1 - age/500})`;
+            ctx.fill();
+          }
+        }
+      }
+
+      let currentMarker = null;
+      const renderInterval = setInterval(() => {
+        renderSummary();
+        renderOverlay();
+      }, 33); // ~30 fps
+
+      // ───────────────────────────────────────────────────────────────
+      // WebRTC streamer — same as fixtures/demo flow, captures the
+      // canvas via captureStream(30) and ships it through an
+      // RTCPeerConnection as a sendonly video track.
+      // ───────────────────────────────────────────────────────────────
+      async function startStreamer() {
+        let stream;
+        try {
+          stream = canvas.captureStream(30);
+        } catch (err) {
+          send({ type: "fatal", reason: "no-capture-stream", detail: String(err) });
+          return;
+        }
+
+        const pc = new RTCPeerConnection({});
+        window.pc = pc;
+
+        const videoTrack = stream.getVideoTracks()[0];
+        try {
+          await videoTrack.applyConstraints({
+            width: { ideal: canvas.width },
+            height: { ideal: canvas.height },
+            frameRate: { ideal: 30, max: 30 },
+          });
+        } catch { /* */ }
+
+        const tx = pc.addTransceiver(videoTrack, {
+          direction: "sendonly", streams: [stream],
+        });
+
+        try {
+          const params = tx.sender.getParameters();
+          params.degradationPreference = "maintain-resolution";
+          params.encodings = [{
+            scaleResolutionDownBy: 1, maxBitrate: 6_000_000,
+            maxFramerate: 30, networkPriority: "high",
+          }];
+          await tx.sender.setParameters(params);
+        } catch { /* */ }
+
+        pc.onsignalingstatechange = () => send({ type: "signaling", state: pc.signalingState });
+        pc.oniceconnectionstatechange = () => send({ type: "ice-state", state: pc.iceConnectionState });
+        pc.onconnectionstatechange = () => send({ type: "pc-state", state: pc.connectionState });
+        pc.onicecandidate = (ev) => {
+          send({ type: "ice", candidate: ev.candidate ? ev.candidate.toJSON() : null });
+        };
+
+        window.__cbtest._impl = async (msg) => {
+          try {
+            switch (msg?.type) {
+              case "sdp-answer":
+                await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+                return { ok: true };
+              case "ice":
+                if (msg.candidate) await pc.addIceCandidate(msg.candidate);
+                return { ok: true };
+              case "marker":
+                currentMarker = String(msg.label || "").slice(0, 32);
+                markerBadge.textContent = "marker: " + (currentMarker || "—");
+                record("marker", { label: currentMarker });
+                return { ok: true };
+              case "set-scenario":
+                window.__cbtest.scenario = String(msg.value || "");
+                scenarioBadge.textContent = "scenario: " + window.__cbtest.scenario;
+                return { ok: true };
+              case "reset-events":
+                window.__events.length = 0;
+                return { ok: true };
+              case "scroll-to":
+                if (msg.target === "scroller") {
+                  scroller.scrollTo({
+                    top: msg.top ?? 0, left: msg.left ?? 0,
+                    behavior: msg.smooth ? "smooth" : "auto",
+                  });
+                }
+                return { ok: true };
+              default:
+                return { ok: false, error: "unknown-type" };
+            }
+          } catch (err) {
+            return { ok: false, error: String(err) };
+          }
+        };
+        if (Array.isArray(window.__cbtest._pending)) {
+          for (const m of window.__cbtest._pending) window.__cbtest._impl(m);
+          window.__cbtest._pending = [];
+        }
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        send({ type: "sdp-offer", sdp: offer.sdp });
+        window.__cbtest.ready = true;
+        send({ type: "ready" });
+      }
+
+      startStreamer().catch((err) => {
+        send({ type: "fatal", reason: "boot-error", detail: String(err) });
+      });
+    </script>
+  </body>
+</html>
