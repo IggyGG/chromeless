@@ -635,7 +635,15 @@ export class Scenario {
     if (!wsUrl) throw new Error("no webSocketDebuggerUrl in /json/version");
     wsUrl = wsUrl.replace(/ws:\/\/[^/]+/, `ws://${u.host}`);
 
-    this._browser = await CDP({ target: wsUrl });
+    // local:true uses chrome-remote-interface's bundled protocol
+    // descriptor instead of fetching /json/protocol from the target
+    // at connect time. The cb-chromium build at cr7727-sw FATALs in
+    // devtools_http_handler.cc:724 ("Could not load protocol") when
+    // /json/protocol is requested — the embedder's resource pak is
+    // missing the bundled descriptor file. Stock chromium has it
+    // baked in; cb-chromium will need a separate fix to package it.
+    // For now the harness sidesteps the path entirely.
+    this._browser = await CDP({ target: wsUrl, local: true });
     this.log("ok", "browser CDP attached");
 
     // In wire mode the input-bridge sidecar discovers its CDP target
