@@ -311,21 +311,42 @@ func protocolButtonToCDP(b int) string {
 }
 
 // ---------------------------------------------------------------------------
-// CDP client
+// CDP client — flat-mode (BUGS-529)
 //
-// We speak CDP over a single WebSocket to a page-level target. The
-// target's webSocketDebuggerUrl is discovered via the JSON HTTP
-// endpoint at http://<host>:<port>/json (Chromium devtools-frontend
-// convention) and reused until the connection drops.
+// We speak CDP over a single WebSocket dialled at the BROWSER level
+// (the URL exposed by /json/version's `webSocketDebuggerUrl`), then
+// configure flat-mode auto-attach so chromium delivers a session for
+// every page target on the same connection. Each frame on the wire
+// carries an optional `sessionId` field; outgoing commands are routed
+// to a specific session by setting it.
+//
+// Why not the legacy `/devtools/page/<id>` direct-page-WS we used pre-
+// BUGS-529? On cb-chromium, that style of session silently stops
+// reaching the renderer when a separate CDP client navigates the
+// target — `Input.dispatch*` continues to ack at the protocol layer
+// but produces no page-level events. Flat-mode sessions follow
+// navigation correctly on stock chromium and on cb-chromium, so the
+// bridge migrates to flat-mode as the BUGS-529 long-term fix.
+//
+// The browser↔bridge wire shape (per chromedevtools.github.io/devtools-
+// protocol/tot/Target/, "flatten" semantics):
+//
+//   request:  {"id": N, "sessionId": "<sid>", "method": "Foo.bar", "params": {...}}
+//   reply:    {"id": N, "sessionId": "<sid>", "result": {...}}    or {"error": {...}}
+//   event:    {"sessionId": "<sid>", "method": "Foo.event", "params": {...}}
+//
+// `sessionId` is omitted on commands aimed at the browser session
+// itself (Target.setDiscoverTargets / Target.setAutoAttach).
 // ---------------------------------------------------------------------------
 
 type cdpClient struct {
-	mu         sync.Mutex
-	conn       *websocket.Conn
-	nextID     int64
-	pending    map[int64]chan cdpResponse
-	disconnect chan struct{}
-	log        *slog.Logger
+	mu           sync.Mutex
+	conn         *websocket.Conn
+	nextID       int64
+	pending      map[int64]chan cdpResponse
+	disconnect   chan struct{}
+	log          *slog.Logger
+	eventHandler func(method, sessionID string, params json.RawMessage)
 }
 
 type cdpResponse struct {
@@ -340,18 +361,34 @@ type cdpError struct {
 
 func (e *cdpError) Error() string { return fmt.Sprintf("cdp error %d: %s", e.Code, e.Message) }
 
-type cdpEnvelope struct {
-	ID     int64           `json:"id,omitempty"`
-	Method string          `json:"method,omitempty"`
-	Params any             `json:"params,omitempty"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *cdpError       `json:"error,omitempty"`
+// cdpRequest is the outgoing frame shape. Outgoing params is `any` so
+// callers can pass map[string]any literals; encoding/json marshals the
+// structure as-is.
+type cdpRequest struct {
+	ID        int64  `json:"id"`
+	SessionID string `json:"sessionId,omitempty"`
+	Method    string `json:"method"`
+	Params    any    `json:"params,omitempty"`
 }
 
-// dialCDP performs target discovery and opens the WebSocket. It returns
-// a usable client or an error. Caller must Close() when done.
-func dialCDP(ctx context.Context, baseURL string, log *slog.Logger) (*cdpClient, error) {
-	wsURL, err := discoverPageWS(ctx, baseURL)
+// cdpIncoming is the union shape for both replies (carrying ID +
+// Result/Error) and events (carrying Method + Params + optional
+// SessionID). We discriminate on whether ID is non-zero.
+type cdpIncoming struct {
+	ID        int64           `json:"id,omitempty"`
+	SessionID string          `json:"sessionId,omitempty"`
+	Method    string          `json:"method,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     *cdpError       `json:"error,omitempty"`
+}
+
+// dialCDP opens the browser-level CDP WebSocket, configures flat-mode
+// auto-attach, and returns a session-aware sender that routes every
+// dispatch through the most-recently-attached page session. Caller
+// must Close() the returned sender when done.
+func dialCDP(ctx context.Context, baseURL string, log *slog.Logger) (*pageSessionSender, error) {
+	wsURL, err := discoverBrowserWS(ctx, baseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -367,16 +404,43 @@ func dialCDP(ctx context.Context, baseURL string, log *slog.Logger) (*cdpClient,
 		disconnect: make(chan struct{}),
 		log:        log,
 	}
+	sender := newPageSessionSender(c, log)
+	c.eventHandler = sender.handleEvent
 	go c.readLoop()
-	return c, nil
+
+	// Configure flat-mode auto-attach on the BROWSER session (no
+	// sessionId — these commands target the connection itself).
+	//
+	//   setDiscoverTargets(true) emits Target.targetCreated for each
+	//   existing target and for every new one going forward.
+	//
+	//   setAutoAttach(true, false, true) tells chromium to attach a
+	//   flat-mode session to every related target (with flatten=true,
+	//   sessionIds carry on every envelope on this same WS instead of
+	//   being demuxed via Target.sendMessageToTarget). chromium emits
+	//   Target.attachedToTarget for each one — we read sessionId out of
+	//   that event in pageSessionSender.handleEvent.
+	if _, err := c.Send(ctx, "", "Target.setDiscoverTargets",
+		map[string]any{"discover": true}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("Target.setDiscoverTargets: %w", err)
+	}
+	if _, err := c.Send(ctx, "", "Target.setAutoAttach", map[string]any{
+		"autoAttach":             true,
+		"waitForDebuggerOnStart": false,
+		"flatten":                true,
+	}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("Target.setAutoAttach: %w", err)
+	}
+	return sender, nil
 }
 
-// discoverPageWS hits /json/list and returns the first page target's
-// debugger WS URL.
-func discoverPageWS(ctx context.Context, baseURL string) (string, error) {
-	// CDP exposes both /json and /json/list; /json/list is the
-	// canonical alias.
-	u := strings.TrimRight(baseURL, "/") + "/json/list"
+// discoverBrowserWS hits /json/version and returns the browser-level
+// debugger WS URL. With flat-mode this is the SINGLE WS we open;
+// every page session is multiplexed over it via sessionId.
+func discoverBrowserWS(ctx context.Context, baseURL string) (string, error) {
+	u := strings.TrimRight(baseURL, "/") + "/json/version"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return "", err
@@ -389,20 +453,16 @@ func discoverPageWS(ctx context.Context, baseURL string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET %s: status %d", u, resp.StatusCode)
 	}
-	var targets []struct {
-		Type                 string `json:"type"`
+	var info struct {
 		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-		URL                  string `json:"url"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
-		return "", fmt.Errorf("decode targets: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return "", fmt.Errorf("decode /json/version: %w", err)
 	}
-	for _, t := range targets {
-		if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-			return t.WebSocketDebuggerURL, nil
-		}
+	if info.WebSocketDebuggerURL == "" {
+		return "", fmt.Errorf("no browser webSocketDebuggerUrl at %s", u)
 	}
-	return "", fmt.Errorf("no page targets at %s", u)
+	return info.WebSocketDebuggerURL, nil
 }
 
 func (c *cdpClient) readLoop() {
@@ -413,30 +473,36 @@ func (c *cdpClient) readLoop() {
 			c.log.Info("cdp connection closed", slog.Any("err", err))
 			return
 		}
-		var env cdpEnvelope
+		var env cdpIncoming
 		if err := json.Unmarshal(raw, &env); err != nil {
 			c.log.Warn("cdp non-JSON frame", slog.Any("err", err))
 			continue
 		}
-		if env.ID == 0 {
-			// Server-initiated event (Page.frameNavigated etc.) — we
-			// don't subscribe to any events in v1, so ignore.
+		if env.ID != 0 {
+			// Reply path: deliver to the waiter that issued this id.
+			c.mu.Lock()
+			ch, ok := c.pending[env.ID]
+			delete(c.pending, env.ID)
+			c.mu.Unlock()
+			if ok {
+				ch <- cdpResponse{Result: env.Result, Error: env.Error}
+				close(ch)
+			}
 			continue
 		}
-		c.mu.Lock()
-		ch, ok := c.pending[env.ID]
-		delete(c.pending, env.ID)
-		c.mu.Unlock()
-		if ok {
-			ch <- cdpResponse{Result: env.Result, Error: env.Error}
-			close(ch)
+		// Event path: server-initiated frame. We hand it to the event
+		// handler (typically pageSessionSender) so it can track
+		// Target.attachedToTarget / Target.detachedFromTarget.
+		if env.Method != "" && c.eventHandler != nil {
+			c.eventHandler(env.Method, env.SessionID, env.Params)
 		}
 	}
 }
 
-// Send issues a CDP command and waits for the matching response (or ctx).
-// `params` may be nil.
-func (c *cdpClient) Send(ctx context.Context, method string, params any) (json.RawMessage, error) {
+// Send issues a CDP command on the named session and waits for the
+// matching response (or ctx). Pass an empty `sessionID` for commands
+// targeting the browser session (Target.* setup). `params` may be nil.
+func (c *cdpClient) Send(ctx context.Context, sessionID, method string, params any) (json.RawMessage, error) {
 	id := atomic.AddInt64(&c.nextID, 1)
 	ch := make(chan cdpResponse, 1)
 
@@ -445,7 +511,7 @@ func (c *cdpClient) Send(ctx context.Context, method string, params any) (json.R
 	conn := c.conn
 	c.mu.Unlock()
 
-	frame := cdpEnvelope{ID: id, Method: method, Params: params}
+	frame := cdpRequest{ID: id, SessionID: sessionID, Method: method, Params: params}
 	raw, err := json.Marshal(frame)
 	if err != nil {
 		return nil, err
@@ -488,6 +554,158 @@ func (c *cdpClient) Close() error {
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(time.Second))
 	return conn.Close()
+}
+
+// ---------------------------------------------------------------------------
+// pageSessionSender — flat-mode dispatch routing
+//
+// Wraps cdpClient and routes every Send call to the "current" attached
+// page session. The current session is the most recent
+// Target.attachedToTarget event whose targetInfo.type == "page". When
+// a session detaches we drop it and fall back to any other still-
+// attached page (rare in our single-target scenarios; the chromeless
+// Job runs with one page at a time).
+//
+// If no page session is attached yet when Send is called (race: the
+// first input envelope can arrive before chromium has emitted
+// attachedToTarget for the boot-time about:blank), Send blocks until
+// one arrives or the caller's ctx expires. The dispatcher's per-event
+// 2s ctx gives plenty of headroom for the auto-attach handshake.
+// ---------------------------------------------------------------------------
+
+type pageSessionSender struct {
+	cdp *cdpClient
+	log *slog.Logger
+
+	mu            sync.Mutex
+	pageSessions  map[string]string // sessionID → targetID; all currently-attached pages
+	currentSID    string            // most recently attached page session
+	pendingWaiter chan string       // closed when currentSID transitions ""→non-empty
+}
+
+func newPageSessionSender(cdp *cdpClient, log *slog.Logger) *pageSessionSender {
+	return &pageSessionSender{
+		cdp:          cdp,
+		log:          log,
+		pageSessions: make(map[string]string),
+	}
+}
+
+// Close tears down the underlying CDP connection.
+func (s *pageSessionSender) Close() error { return s.cdp.Close() }
+
+// CurrentSession returns the active page session id (or empty if no
+// page is currently attached). Test-only helper.
+func (s *pageSessionSender) CurrentSession() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentSID
+}
+
+// Send routes the command at the current page session. Blocks (within
+// ctx) until at least one page session is attached.
+func (s *pageSessionSender) Send(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	sid, err := s.waitForSession(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("waiting for page session: %w", err)
+	}
+	return s.cdp.Send(ctx, sid, method, params)
+}
+
+func (s *pageSessionSender) waitForSession(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	if s.currentSID != "" {
+		sid := s.currentSID
+		s.mu.Unlock()
+		return sid, nil
+	}
+	if s.pendingWaiter == nil {
+		s.pendingWaiter = make(chan string)
+	}
+	ch := s.pendingWaiter
+	s.mu.Unlock()
+	select {
+	case <-ch:
+		s.mu.Lock()
+		sid := s.currentSID
+		s.mu.Unlock()
+		if sid == "" {
+			return "", errors.New("session attach signal but no current session")
+		}
+		return sid, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-s.cdp.disconnect:
+		return "", errors.New("cdp disconnected before session attached")
+	}
+}
+
+// handleEvent is the cdpClient eventHandler hook. We track
+// Target.attachedToTarget / detachedFromTarget for page-type targets
+// and ignore everything else (workers, service-workers, etc.).
+//
+// Frame-attached events (iframe / popup-on-same-page) are not routed
+// here because the bridge dispatches input at the page level — its
+// dispatched mouse/key events reach iframes via the renderer's normal
+// event-targeting, no per-iframe sessionId required.
+func (s *pageSessionSender) handleEvent(method, _ string, paramsRaw json.RawMessage) {
+	switch method {
+	case "Target.attachedToTarget":
+		var p struct {
+			SessionID  string `json:"sessionId"`
+			TargetInfo struct {
+				TargetID string `json:"targetId"`
+				Type     string `json:"type"`
+			} `json:"targetInfo"`
+		}
+		if err := json.Unmarshal(paramsRaw, &p); err != nil {
+			s.log.Warn("Target.attachedToTarget: bad params", slog.Any("err", err))
+			return
+		}
+		if p.TargetInfo.Type != "page" {
+			return
+		}
+		s.mu.Lock()
+		s.pageSessions[p.SessionID] = p.TargetInfo.TargetID
+		prevEmpty := s.currentSID == ""
+		s.currentSID = p.SessionID
+		var notify chan string
+		if prevEmpty && s.pendingWaiter != nil {
+			notify = s.pendingWaiter
+			s.pendingWaiter = nil
+		}
+		s.mu.Unlock()
+		if notify != nil {
+			close(notify)
+		}
+		s.log.Info("page session attached",
+			slog.String("session_id", p.SessionID),
+			slog.String("target_id", p.TargetInfo.TargetID))
+
+	case "Target.detachedFromTarget":
+		var p struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := json.Unmarshal(paramsRaw, &p); err != nil {
+			return
+		}
+		s.mu.Lock()
+		if _, ok := s.pageSessions[p.SessionID]; !ok {
+			s.mu.Unlock()
+			return
+		}
+		delete(s.pageSessions, p.SessionID)
+		if s.currentSID == p.SessionID {
+			s.currentSID = ""
+			// Fall back to any other still-attached page session.
+			for sid := range s.pageSessions {
+				s.currentSID = sid
+				break
+			}
+		}
+		s.mu.Unlock()
+		s.log.Info("page session detached", slog.String("session_id", p.SessionID))
+	}
 }
 
 // ---------------------------------------------------------------------------

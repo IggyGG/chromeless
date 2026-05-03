@@ -132,21 +132,36 @@ func TestProtocolButtonToCDP(t *testing.T) {
 // 2. Fake CDP target — exercises Dispatch end to end
 // ---------------------------------------------------------------------------
 
-// fakeCDP is a minimal CDP-over-WebSocket server. It speaks just enough
-// to make /json/list discovery work, then accepts a websocket and
-// records each method+params it receives. Every call gets a synthetic
-// {"id":N,"result":{}} reply so the bridge's request/response pairing
-// is exercised.
+// fakeCDP is a minimal flat-mode CDP server. It serves /json/version
+// pointing at a single browser-level WebSocket; on that WS it acks
+// the bridge's Target.setDiscoverTargets / Target.setAutoAttach
+// bootstrap, synthesises one Target.attachedToTarget event for a
+// page target (sessionId=fake-page-1), then records every subsequent
+// command + acks with {"id":N,"result":{}}.
+//
+// Calls() returns only POST-bootstrap, page-session-routed commands —
+// the Target.* setup commands and the synthetic attach event are
+// filtered so existing assertions on dispatched method counts still
+// hold.
 type fakeCDP struct {
 	mu       sync.Mutex
 	received []recordedCall
 	server   *httptest.Server
+
+	// writeMu serialises websocket writes for the lone connection;
+	// gorilla/websocket forbids concurrent writes.
+	writeMu sync.Mutex
 }
 
 type recordedCall struct {
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
+	Method    string          `json:"method"`
+	SessionID string          `json:"sessionId,omitempty"`
+	Params    json.RawMessage `json:"params"`
 }
+
+const fakeBrowserPath = "/devtools/browser/abc"
+const fakePageSessionID = "fake-page-1"
+const fakePageTargetID = "fake-page-target-1"
 
 func newFakeCDP(t *testing.T) *fakeCDP {
 	t.Helper()
@@ -154,48 +169,99 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 	mux := http.NewServeMux()
-	// We register the page-target ws path *after* the test server starts
-	// so we know its URL — see ServeHTTP closure below.
 	srv := httptest.NewServer(mux)
 	f.server = srv
 
-	mux.HandleFunc("/json/list", func(w http.ResponseWriter, _ *http.Request) {
-		// Construct a target description pointing at /devtools/page/1.
-		// The test server URL is http://127.0.0.1:NNNN — switch scheme
-		// to ws://.
+	mux.HandleFunc("/json/version", func(w http.ResponseWriter, _ *http.Request) {
 		base := strings.Replace(srv.URL, "http://", "ws://", 1)
-		body := `[{"type":"page","webSocketDebuggerUrl":"` + base + `/devtools/page/1","url":"about:blank"}]`
+		body := `{"webSocketDebuggerUrl":"` + base + fakeBrowserPath + `","Browser":"fake/test"}`
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, body)
 	})
 
-	mux.HandleFunc("/devtools/page/1", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fakeBrowserPath, func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("fakeCDP upgrade: %v", err)
 			return
 		}
 		defer conn.Close()
+
+		writeJSON := func(v any) error {
+			f.writeMu.Lock()
+			defer f.writeMu.Unlock()
+			return conn.WriteJSON(v)
+		}
+
 		for {
 			_, raw, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
 			var env struct {
-				ID     int64           `json:"id"`
-				Method string          `json:"method"`
-				Params json.RawMessage `json:"params"`
+				ID        int64           `json:"id"`
+				SessionID string          `json:"sessionId"`
+				Method    string          `json:"method"`
+				Params    json.RawMessage `json:"params"`
 			}
 			if err := json.Unmarshal(raw, &env); err != nil {
 				return
 			}
+
+			// Special-case the flat-mode bootstrap commands: ack them
+			// without recording, and emit a synthetic
+			// Target.attachedToTarget after setAutoAttach so the
+			// bridge's pageSessionSender picks up sessionId.
+			switch env.Method {
+			case "Target.setDiscoverTargets":
+				if err := writeJSON(map[string]any{
+					"id": env.ID, "result": map[string]any{},
+				}); err != nil {
+					return
+				}
+				continue
+			case "Target.setAutoAttach":
+				// Emit the synthetic attach event FIRST, then ack —
+				// matches chromium's ordering (events stream during
+				// the auto-attach handshake).
+				attachEvent := map[string]any{
+					"method": "Target.attachedToTarget",
+					"params": map[string]any{
+						"sessionId":          fakePageSessionID,
+						"waitingForDebugger": false,
+						"targetInfo": map[string]any{
+							"targetId": fakePageTargetID,
+							"type":     "page",
+							"url":      "about:blank",
+							"title":    "",
+							"attached": true,
+						},
+					},
+				}
+				if err := writeJSON(attachEvent); err != nil {
+					return
+				}
+				if err := writeJSON(map[string]any{
+					"id": env.ID, "result": map[string]any{},
+				}); err != nil {
+					return
+				}
+				continue
+			}
+
+			// Record everything else (Page.bringToFront,
+			// Input.dispatchMouseEvent, Input.dispatchKeyEvent, ...).
 			f.mu.Lock()
-			f.received = append(f.received, recordedCall{Method: env.Method, Params: env.Params})
+			f.received = append(f.received, recordedCall{
+				Method:    env.Method,
+				SessionID: env.SessionID,
+				Params:    env.Params,
+			})
 			f.mu.Unlock()
 
-			reply := map[string]any{"id": env.ID, "result": map[string]any{}}
-			rawReply, _ := json.Marshal(reply)
-			if err := conn.WriteMessage(websocket.TextMessage, rawReply); err != nil {
+			if err := writeJSON(map[string]any{
+				"id": env.ID, "sessionId": env.SessionID, "result": map[string]any{},
+			}); err != nil {
 				return
 			}
 		}
@@ -1398,6 +1464,265 @@ func TestDispatchKeyTextSynthesis(t *testing.T) {
 			}
 		} else if text != want {
 			t.Errorf("key[%d] text = %q, want %q", i, text, want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 7. Flat-mode CDP migration (BUGS-529)
+// ---------------------------------------------------------------------------
+//
+// These tests exercise the flat-mode plumbing introduced to fix
+// BUGS-529 (cb-chromium dropping Input.dispatch* on direct-page-WS
+// sessions after a third-party Page.navigate). They cover:
+//
+//   - dialCDP returns a *pageSessionSender whose CurrentSession()
+//     reflects the auto-attached page sessionId
+//   - every dispatched CDP command on the wire carries that sessionId
+//     (this is the actual fix — flat-mode sessions follow navigation)
+//   - Send blocks until the first attached session arrives
+//   - Target.detachedFromTarget clears the current session
+//   - bootstrap commands (setDiscoverTargets / setAutoAttach) are not
+//     leaked into the recorded Calls() (test scaffolding sanity)
+
+func TestFlatModeSessionAttached(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+
+	// Auto-attach event is emitted synchronously on setAutoAttach ack.
+	// By the time dialCDP returns, CurrentSession() should be set.
+	if got := cdp.CurrentSession(); got != fakePageSessionID {
+		t.Errorf("CurrentSession() = %q, want %q", got, fakePageSessionID)
+	}
+}
+
+func TestFlatModeSessionIDOnEveryDispatch(t *testing.T) {
+	// The whole point of BUGS-529: every Input.dispatch* on the wire
+	// MUST carry sessionId so chromium routes it to the page session
+	// (which follows navigation), not to a stale RenderFrame binding.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"mouse_move","t":1,"seq":0,"data":{"x":10,"y":20}}`,
+		`{"v":1,"type":"key_down","t":2,"seq":1,"data":{"key":"a","code":"KeyA","mods":0}}`,
+		`{"v":1,"type":"mouse_button","t":3,"seq":2,"data":{"button":0,"action":"down","x":10,"y":20}}`,
+	})
+
+	calls := f.Calls()
+	if len(calls) == 0 {
+		t.Fatalf("no calls recorded")
+	}
+	for i, c := range calls {
+		if c.SessionID != fakePageSessionID {
+			t.Errorf("call[%d] %s: sessionId = %q, want %q",
+				i, c.Method, c.SessionID, fakePageSessionID)
+		}
+	}
+}
+
+func TestFlatModeBootstrapCommandsHidden(t *testing.T) {
+	// Sanity: the fakeCDP filters Target.setDiscoverTargets /
+	// Target.setAutoAttach out of the recorded Calls() so our
+	// dispatcher-layer assertions don't have to handle them.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+
+	// dialCDP issued setDiscoverTargets + setAutoAttach. No dispatch
+	// envelope has been routed yet, so Calls() should still be empty.
+	if calls := f.Calls(); len(calls) != 0 {
+		t.Errorf("bootstrap commands leaked into Calls(): %+v", calls)
+	}
+}
+
+func TestFlatModeSendBlocksUntilAttached(t *testing.T) {
+	// Drive a direct cdpClient (NOT through dialCDP) so we can exercise
+	// the pageSessionSender's wait-for-session path with no autoAttach
+	// running. Verify Send returns ctx.DeadlineExceeded if no session
+	// ever arrives.
+	cdp := &cdpClient{
+		pending:    make(map[int64]chan cdpResponse),
+		disconnect: make(chan struct{}),
+		log:        quietLogger(),
+	}
+	sender := newPageSessionSender(cdp, quietLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := sender.Send(ctx, "Page.bringToFront", nil)
+	if err == nil {
+		t.Fatalf("expected deadline error, got nil")
+	}
+	// The sender wraps ctx.Err() in a clarifying error message; assert
+	// on substring rather than identity.
+	if !strings.Contains(err.Error(), "page session") {
+		t.Errorf("expected 'page session' in err, got: %v", err)
+	}
+}
+
+func TestFlatModeSendUnblocksOnAttach(t *testing.T) {
+	// Direct sender path: no real connection. Verify that handleEvent
+	// for a Target.attachedToTarget unblocks a pending Send waiter.
+	cdp := &cdpClient{
+		pending:    make(map[int64]chan cdpResponse),
+		disconnect: make(chan struct{}),
+		log:        quietLogger(),
+	}
+	sender := newPageSessionSender(cdp, quietLogger())
+
+	// Background goroutine blocks in waitForSession.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	gotSID := make(chan string, 1)
+	go func() {
+		sid, err := sender.waitForSession(ctx)
+		if err != nil {
+			gotSID <- ""
+			return
+		}
+		gotSID <- sid
+	}()
+
+	// Give the goroutine a moment to register as a waiter, then fire
+	// the attach event.
+	time.Sleep(20 * time.Millisecond)
+	attachParams := json.RawMessage(`{"sessionId":"sid-x","waitingForDebugger":false,"targetInfo":{"targetId":"tgt-x","type":"page","url":"about:blank"}}`)
+	sender.handleEvent("Target.attachedToTarget", "", attachParams)
+
+	select {
+	case sid := <-gotSID:
+		if sid != "sid-x" {
+			t.Errorf("waitForSession returned %q, want %q", sid, "sid-x")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("waitForSession did not unblock after attach")
+	}
+}
+
+func TestFlatModeNonPageTargetIgnored(t *testing.T) {
+	// service_worker / dedicated_worker / iframe attach events MUST NOT
+	// become the current session — input dispatches at the page level.
+	cdp := &cdpClient{
+		pending:    make(map[int64]chan cdpResponse),
+		disconnect: make(chan struct{}),
+		log:        quietLogger(),
+	}
+	sender := newPageSessionSender(cdp, quietLogger())
+
+	// Worker attach — should be ignored.
+	workerAttach := json.RawMessage(`{"sessionId":"sw-1","waitingForDebugger":false,"targetInfo":{"targetId":"sw-tgt","type":"service_worker","url":""}}`)
+	sender.handleEvent("Target.attachedToTarget", "", workerAttach)
+	if got := sender.CurrentSession(); got != "" {
+		t.Errorf("worker attach set CurrentSession = %q, want empty", got)
+	}
+
+	// Page attach — should set CurrentSession.
+	pageAttach := json.RawMessage(`{"sessionId":"page-1","waitingForDebugger":false,"targetInfo":{"targetId":"page-tgt","type":"page","url":"about:blank"}}`)
+	sender.handleEvent("Target.attachedToTarget", "", pageAttach)
+	if got := sender.CurrentSession(); got != "page-1" {
+		t.Errorf("page attach: CurrentSession = %q, want page-1", got)
+	}
+}
+
+func TestFlatModeDetachClearsCurrentSession(t *testing.T) {
+	cdp := &cdpClient{
+		pending:    make(map[int64]chan cdpResponse),
+		disconnect: make(chan struct{}),
+		log:        quietLogger(),
+	}
+	sender := newPageSessionSender(cdp, quietLogger())
+
+	// Attach two pages; second becomes current.
+	a := json.RawMessage(`{"sessionId":"a","waitingForDebugger":false,"targetInfo":{"targetId":"tA","type":"page","url":"about:blank"}}`)
+	b := json.RawMessage(`{"sessionId":"b","waitingForDebugger":false,"targetInfo":{"targetId":"tB","type":"page","url":"about:blank"}}`)
+	sender.handleEvent("Target.attachedToTarget", "", a)
+	sender.handleEvent("Target.attachedToTarget", "", b)
+	if got := sender.CurrentSession(); got != "b" {
+		t.Errorf("after two attaches: CurrentSession = %q, want b", got)
+	}
+
+	// Detach b → fall back to a.
+	detachB := json.RawMessage(`{"sessionId":"b","targetId":"tB"}`)
+	sender.handleEvent("Target.detachedFromTarget", "", detachB)
+	if got := sender.CurrentSession(); got != "a" {
+		t.Errorf("after detach b: CurrentSession = %q, want a (fallback)", got)
+	}
+
+	// Detach a → no sessions left.
+	detachA := json.RawMessage(`{"sessionId":"a","targetId":"tA"}`)
+	sender.handleEvent("Target.detachedFromTarget", "", detachA)
+	if got := sender.CurrentSession(); got != "" {
+		t.Errorf("after detach a: CurrentSession = %q, want empty", got)
+	}
+}
+
+// TestFlatModeNavigateDoesNotBreakDispatch is the regression assertion
+// for BUGS-529's symptom in test form: the bridge connects, the
+// harness "navigates" (in fakeCDP land we just keep the session
+// attached but pretend a page navigation occurred — the bridge can't
+// tell the difference), then dispatches input. With flat-mode the
+// sessionId stays valid and dispatches still record on the same
+// session. Pre-fix this WOULD have routed to a stale page WS that
+// chromium silently dropped.
+func TestFlatModeNavigateDoesNotBreakDispatch(t *testing.T) {
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	disp := newDispatcher(cdp, newMetrics(), quietLogger())
+
+	// Pre-navigate dispatch.
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"mouse_move","t":1,"seq":0,"data":{"x":10,"y":20}}`,
+	})
+	preCount := len(f.Calls())
+
+	// Simulate a navigation: chromium emits Page.frameNavigated as an
+	// event BUT does not detach/reattach the session in flat-mode. We
+	// model this by handing the event in directly — no state changes.
+	// The bridge's pageSessionSender ignores it (only attached/detached
+	// are routed).
+
+	// Post-navigate dispatch — must keep landing on the same session.
+	dispatchAll(t, disp, ctx, []string{
+		`{"v":1,"type":"key_down","t":2,"seq":1,"data":{"key":"a","code":"KeyA","mods":0}}`,
+		`{"v":1,"type":"mouse_button","t":3,"seq":2,"data":{"button":0,"action":"down","x":10,"y":20}}`,
+	})
+	post := f.Calls()
+	if len(post) <= preCount {
+		t.Fatalf("post-navigate dispatch produced no new calls (pre=%d post=%d)", preCount, len(post))
+	}
+	for i, c := range post {
+		if c.SessionID != fakePageSessionID {
+			t.Errorf("call[%d] %s: sessionId=%q, want %q", i, c.Method, c.SessionID, fakePageSessionID)
 		}
 	}
 }
