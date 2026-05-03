@@ -402,6 +402,17 @@ CbDevToolsManagerDelegate::CreateNewTarget(
   web_contents->WasShown();
   web_contents->Focus();
 
+  // BUGS-529 diagnostic — confirms the smoking-gun pattern is closed
+  // for delegate-spawned targets too. Both the boot WebContents (in
+  // main_parts) and these are children of the same Aura root window;
+  // both should report RWHV bounds=non-zero, HasFocus=true post-Focus.
+  if (auto* rwhv = web_contents->GetRenderWidgetHostView()) {
+    LOG(INFO) << "CbDevToolsManagerDelegate::CreateNewTarget: post-Focus "
+                 "RWHV bounds=" << rwhv->GetViewBounds().ToString()
+              << " hasFocus=" << rwhv->HasFocus()
+              << " isHidden=" << web_contents->IsHidden();
+  }
+
   content::NavigationController::LoadURLParams load_params(url);
   load_params.transition_type = ui::PAGE_TRANSITION_TYPED;
   web_contents->GetController().LoadURLWithParams(load_params);

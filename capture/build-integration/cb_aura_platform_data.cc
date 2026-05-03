@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "base/check.h"
+#include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "capture/build-integration/cb_focus_client.h"
 #include "capture/build-integration/cb_window_parenting_client.h"
@@ -81,6 +82,32 @@ CbAuraPlatformData::CbAuraPlatformData(const gfx::Size& initial_size) {
   host_ = aura::WindowTreeHost::Create(std::move(properties));
   host_->InitHost();
   host_->window()->Show();
+
+  // Force-propagate the bounds to the aura::Window root + the platform
+  // window. WindowTreeHost::Create stores the bounds on the host but the
+  // ozone-X11 backend dispatches the actual platform-window resize
+  // asynchronously, so host_->window()->bounds() can still be 0x0 by the
+  // time PreMainMessageLoopRun's WebContents::Create runs. With 0x0 root
+  // bounds, FillLayout::OnWindowAddedToLayout adds the WebContentsView
+  // Aura with 0x0 bounds, the renderer's viewport reports as 0x0, and
+  // CDP Input.dispatchMouseEvent coordinates fall outside every DOM
+  // element — clicks register at the document level but never fire on
+  // the buttons the test expects (the BUGS-529 wire-clicks symptom seen
+  // post-cr7727-aura: 0/3 PASS even though events DO reach window —
+  // form-element listeners never fire because hit-testing misses).
+  // SetBoundsInPixels propagates synchronously through the ozone path
+  // and updates host_->window()->bounds() before we leave this ctor.
+  // Mirrors content_shell's ShellPlatformDelegate::CreatePlatformWindow
+  // → ShellPlatformDataAura::ResizeWindow sequence (called between
+  // platform_data ctor and SetContents).
+  const gfx::Rect bounds_before = host_->window()->bounds();
+  host_->SetBoundsInPixels(gfx::Rect(initial_size));
+  const gfx::Rect bounds_after = host_->window()->bounds();
+  LOG(INFO) << "CbAuraPlatformData: host bounds before SetBoundsInPixels="
+            << bounds_before.ToString()
+            << " / after=" << bounds_after.ToString()
+            << " / requested=" << gfx::Rect(initial_size).ToString();
+
   host_->window()->SetLayoutManager(
       std::make_unique<FillLayout>(host_->window()));
 

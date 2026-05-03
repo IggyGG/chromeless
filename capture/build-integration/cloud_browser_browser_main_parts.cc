@@ -20,6 +20,8 @@
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_socket_factory.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/render_widget_host.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/result_codes.h"
@@ -254,6 +256,19 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   //     drop input on the floor.
   initial_web_contents_->WasShown();
   initial_web_contents_->Focus();
+
+  // BUGS-529 diagnostic — confirms the smoking-gun pattern is closed.
+  // Pre-fix expectation: HasFocus=false, ViewBounds=0x0.
+  // Post-fix expectation: HasFocus=true, ViewBounds=non-zero.
+  if (auto* rwhv = initial_web_contents_->GetRenderWidgetHostView()) {
+    LOG(INFO) << "CloudBrowserBrowserMainParts: boot WebContents post-Focus "
+                 "RWHV bounds=" << rwhv->GetViewBounds().ToString()
+              << " hasFocus=" << rwhv->HasFocus()
+              << " isHidden=" << initial_web_contents_->IsHidden();
+  } else {
+    LOG(WARNING) << "CloudBrowserBrowserMainParts: boot WebContents has "
+                    "no RenderWidgetHostView yet (renderer not up?)";
+  }
 
   content::NavigationController::LoadURLParams load_params{
       GURL(url::kAboutBlankURL)};
