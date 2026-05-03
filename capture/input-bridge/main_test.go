@@ -213,6 +213,18 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 			// Target.attachedToTarget after setAutoAttach so the
 			// bridge's pageSessionSender picks up sessionId.
 			switch env.Method {
+			case "Page.enable":
+				// Issued by pageSessionSender on each attach as a
+				// BUGS-529 diagnostic so the bridge sees
+				// Page.frameNavigated events. Ack but don't record;
+				// it's bootstrap-shaped from the dispatcher's
+				// perspective.
+				if err := writeJSON(map[string]any{
+					"id": env.ID, "sessionId": env.SessionID, "result": map[string]any{},
+				}); err != nil {
+					return
+				}
+				continue
 			case "Target.setDiscoverTargets":
 				if err := writeJSON(map[string]any{
 					"id": env.ID, "result": map[string]any{},
@@ -1676,6 +1688,41 @@ func TestFlatModeDetachClearsCurrentSession(t *testing.T) {
 	sender.handleEvent("Target.detachedFromTarget", "", detachA)
 	if got := sender.CurrentSession(); got != "" {
 		t.Errorf("after detach a: CurrentSession = %q, want empty", got)
+	}
+}
+
+// TestFlatModeFrameNavigatedDiagnostic verifies that the bridge
+// processes Page.frameNavigated events on its current session
+// without crashing and without confusing them with attach/detach.
+// Per BUGS-529 option C, the bridge enables Page domain on each
+// auto-attached session so cluster pod logs surface whether
+// flat-mode auto-attach is propagating navigation correctly.
+func TestFlatModeFrameNavigatedDiagnostic(t *testing.T) {
+	cdp := &cdpClient{
+		pending:    make(map[int64]chan cdpResponse),
+		disconnect: make(chan struct{}),
+		log:        quietLogger(),
+	}
+	sender := newPageSessionSender(cdp, quietLogger())
+
+	// Attach a page session so currentSID is non-empty.
+	attach := json.RawMessage(`{"sessionId":"page-1","waitingForDebugger":false,"targetInfo":{"targetId":"tgt-1","type":"page","url":"about:blank"}}`)
+	sender.handleEvent("Target.attachedToTarget", "", attach)
+
+	// Top-level navigation: should be routed through the navigation
+	// log path (not to currentSID changes).
+	beforeSID := sender.CurrentSession()
+	topLevel := json.RawMessage(`{"frame":{"id":"F1","url":"http://example.test/x.html","loaderId":"L1"}}`)
+	sender.handleEvent("Page.frameNavigated", "page-1", topLevel)
+	if got := sender.CurrentSession(); got != beforeSID {
+		t.Errorf("frameNavigated must not change currentSID; got %q after %q", got, beforeSID)
+	}
+
+	// Iframe (non-empty parentId): silently ignored.
+	iframe := json.RawMessage(`{"frame":{"id":"F2","parentId":"F1","url":"http://example.test/iframe.html","loaderId":"L2"}}`)
+	sender.handleEvent("Page.frameNavigated", "page-1", iframe)
+	if got := sender.CurrentSession(); got != beforeSID {
+		t.Errorf("iframe frameNavigated must not change currentSID; got %q after %q", got, beforeSID)
 	}
 }
 

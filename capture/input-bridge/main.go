@@ -510,6 +510,13 @@ func (c *cdpClient) Send(ctx context.Context, sessionID, method string, params a
 	c.pending[id] = ch
 	conn := c.conn
 	c.mu.Unlock()
+	if conn == nil {
+		// Test scaffolding can construct a cdpClient with no
+		// underlying connection (the pageSessionSender unit tests
+		// drive handleEvent directly without a real WS). Refuse the
+		// send rather than panic in SetWriteDeadline below.
+		return nil, errors.New("cdp not connected")
+	}
 
 	frame := cdpRequest{ID: id, SessionID: sessionID, Method: method, Params: params}
 	raw, err := json.Marshal(frame)
@@ -648,7 +655,7 @@ func (s *pageSessionSender) waitForSession(ctx context.Context) (string, error) 
 // here because the bridge dispatches input at the page level — its
 // dispatched mouse/key events reach iframes via the renderer's normal
 // event-targeting, no per-iframe sessionId required.
-func (s *pageSessionSender) handleEvent(method, _ string, paramsRaw json.RawMessage) {
+func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json.RawMessage) {
 	switch method {
 	case "Target.attachedToTarget":
 		var p struct {
@@ -681,6 +688,47 @@ func (s *pageSessionSender) handleEvent(method, _ string, paramsRaw json.RawMess
 		s.log.Info("page session attached",
 			slog.String("session_id", p.SessionID),
 			slog.String("target_id", p.TargetInfo.TargetID))
+		// Diagnostic: enable the Page domain on the freshly-attached
+		// session so we receive Page.frameNavigated events. Used to
+		// falsify the "flat-mode session doesn't follow navigation"
+		// hypothesis on cb-chromium per BUGS-529 option C: if the
+		// bridge sees frameNavigated on its session post-harness-
+		// navigate, the session IS following navigation in flat-mode
+		// and the bug is below this layer. If it doesn't, cb-chromium
+		// isn't propagating navigation events to auto-attached
+		// sessions even with flatten=true.
+		go func(sid string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := s.cdp.Send(ctx, sid, "Page.enable", nil); err != nil {
+				s.log.Warn("Page.enable on attached session failed",
+					slog.String("session_id", sid), slog.Any("err", err))
+			}
+		}(p.SessionID)
+
+	case "Page.frameNavigated":
+		// Diagnostic: log every navigation we observe on any attached
+		// session so cluster pod logs surface whether flat-mode
+		// auto-attach is propagating navigation correctly.
+		var p struct {
+			Frame struct {
+				ID       string `json:"id"`
+				ParentID string `json:"parentId"`
+				URL      string `json:"url"`
+			} `json:"frame"`
+		}
+		if err := json.Unmarshal(paramsRaw, &p); err != nil {
+			return
+		}
+		// Only top-level frames matter for navigation tracking; iframe
+		// frameNavigated events would otherwise drown the log.
+		if p.Frame.ParentID != "" {
+			return
+		}
+		s.log.Info("page navigated on bridge session",
+			slog.String("session_id", sessionID),
+			slog.String("frame_id", p.Frame.ID),
+			slog.String("url", p.Frame.URL))
 
 	case "Target.detachedFromTarget":
 		var p struct {
