@@ -115,7 +115,7 @@ spec:
       containers:
         # ─── 1/3: cb-chromium (system under test) ─────────────────────
         - name: cb-chromium
-          image: registry.triform.cloud/cloud-browser-webrtc/cb-chromium:cr7727-aura
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-chromium:cr7727-aura2
           imagePullPolicy: Always
           command:
             - /bin/bash
