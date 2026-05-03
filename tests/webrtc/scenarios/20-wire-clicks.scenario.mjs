@@ -49,6 +49,44 @@ export const scenario = {
     const wire = await s.setupWire();
     await s.runtimeEval(`window.__events.length = 0; null`);
 
+    // BUGS-529 diagnostic — figure out why mouse hit-testing misses
+    // every element on cb-chromium. Logs viewport + the element under
+    // the (62, 102) tl-click coordinates + activeElement + body bounds
+    // so we can correlate against what the renderer reports vs what
+    // the test dispatches. Stock Chrome 147 reports
+    // viewport=1280x720, elementFromPoint=BUTTON#tl, activeElement=BODY.
+    const diag = await s.runtimeEval(`JSON.stringify({
+      iw: window.innerWidth, ih: window.innerHeight,
+      ow: window.outerWidth, oh: window.outerHeight,
+      dpr: window.devicePixelRatio,
+      bodyRect: document.body.getBoundingClientRect().toJSON(),
+      activeTag: document.activeElement && document.activeElement.tagName,
+      activeId: document.activeElement && document.activeElement.id,
+      hitTl: (function(){
+        var e = document.elementFromPoint(${GRID.tl.x}, ${GRID.tl.y});
+        return e ? e.tagName + (e.id ? ('#' + e.id) : '') : null;
+      })(),
+      hitMc: (function(){
+        var e = document.elementFromPoint(${GRID.mc.x}, ${GRID.mc.y});
+        return e ? e.tagName + (e.id ? ('#' + e.id) : '') : null;
+      })(),
+      stageVis: (function(){
+        var s = document.querySelector('.stage');
+        if (!s) return 'no .stage';
+        var r = s.getBoundingClientRect();
+        return r.toJSON();
+      })(),
+      gridVis: (function(){
+        var g = document.querySelector('.click-grid');
+        if (!g) return 'no .click-grid';
+        var r = g.getBoundingClientRect();
+        var cs = getComputedStyle(g);
+        return {rect: r.toJSON(), display: cs.display, vis: cs.visibility,
+                pe: cs.pointerEvents};
+      })(),
+    })`);
+    s.log("info", "[BUGS-529 diag] renderer state at dispatch", JSON.parse(diag));
+
     s.marker("wire-single-tl");
     await wire.click(GRID.tl.x, GRID.tl.y);
     await sleep(150);
