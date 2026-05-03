@@ -152,7 +152,7 @@ fi
 # Step 1 — gclient config + sync.
 # ---------------------------------------------------------------------
 
-step "1/9 gclient sync"
+step "1/10 gclient sync"
 
 if [[ -n "${SKIP_FETCH}" && -d "${CHROMIUM_SRC}/src" ]]; then
     log "SKIP_FETCH=1 and chromium tree present; skipping fetch"
@@ -193,7 +193,7 @@ step_done
 # Step 2 — symlink this repo as //cloud-browser.
 # ---------------------------------------------------------------------
 
-step "2/9 symlink cloud-browser into chromium src/"
+step "2/10 symlink cloud-browser into chromium src/"
 
 CB_LINK="${CHROMIUM_SRC}/src/cloud-browser"
 if [[ -L "${CB_LINK}" ]]; then
@@ -214,7 +214,7 @@ step_done
 # semantics. The wrapper handles the "already applied?" detection.
 # ---------------------------------------------------------------------
 
-step "3/9 apply patches"
+step "3/10 apply patches"
 
 export CHROMIUM_SRC="${CHROMIUM_SRC}/src"
 if [[ -n "${STUB_MODE}" ]]; then
@@ -245,7 +245,7 @@ step_done
 # emit a cryptic "include not found" error 30s later.
 # ---------------------------------------------------------------------
 
-step "3.5/9 profile system-deps verify"
+step "3.5/10 profile system-deps verify"
 
 profile="${CB_BUILD_PROFILE:-sw}"
 log "build profile: ${profile}"
@@ -316,7 +316,7 @@ step_done
 # build is the one that matters for our ~4–8h target.
 # ---------------------------------------------------------------------
 
-step "4/9 sccache setup"
+step "4/10 sccache setup"
 
 mkdir -p "${SCCACHE_DIR}"
 export SCCACHE_DIR
@@ -336,7 +336,7 @@ step_done
 # Step 5 — gn gen.
 # ---------------------------------------------------------------------
 
-step "5/9 gn gen"
+step "5/10 gn gen"
 
 export OUT_DIR="out/cb-release"
 run bash "${CB_REPO}/capture/build-integration/build.sh" gen
@@ -347,7 +347,7 @@ step_done
 # Step 6 — autoninja.
 # ---------------------------------------------------------------------
 
-step "6/9 autoninja"
+step "6/10 autoninja"
 
 ninja_args=()
 if [[ -n "${NINJA_PARALLELISM:-}" ]]; then
@@ -379,7 +379,7 @@ step_done
 # Set CB_TESTS_FATAL=1 to restore strict mode once tests pass cleanly.
 # ---------------------------------------------------------------------
 
-step "7/9 unit tests"
+step "7/10 unit tests"
 
 if [[ -n "${STUB_MODE}" ]]; then
     log "[stub] would run cloud_browser_encoder_unittests + cloud_browser_framesink_capturer_unittests"
@@ -404,7 +404,7 @@ step_done
 # Step 8 — strip + package the binary.
 # ---------------------------------------------------------------------
 
-step "8/9 package binary"
+step "8/10 package binary"
 
 binary_src="${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_worker"
 artifact_name="cloud_browser_worker-cr${CHROMIUM_BRANCH_NUMBER}-${CB_GIT_SHA}.tar.zst"
@@ -452,7 +452,7 @@ step_done
 # stay in one place.
 # ---------------------------------------------------------------------
 
-step "9/9 stage runtime image build context"
+step "9/10 stage runtime image build context"
 
 cp "${CB_REPO}/build/Dockerfile.runtime" "${ARTIFACTS_DIR}/context/Dockerfile"
 cp "${CB_REPO}/infra/launch-chromium.sh" "${ARTIFACTS_DIR}/context/launch-chromium.sh" 2>/dev/null || true
@@ -467,6 +467,65 @@ EOF
 log "image build context ready at ${ARTIFACTS_DIR}/context/"
 log "  expected tag: cb-chromium:${image_tag}"
 log "  the kaniko sidecar in the T112 Job picks up from here"
+
+step_done
+
+# ---------------------------------------------------------------------
+# Step 10 — CDP validation against the just-pushed image.
+#
+# Schedules a `cb-cdp-validation` Job in the `cb-tests` namespace that
+# runs `pytest tests/cdp/` against a freshly-spun cb-browserless built
+# from this image tag. Gates promotion: if any of the four CDP ops
+# (createBrowserContext / createTarget / attachToTarget / Page.navigate)
+# fail, the build script exits non-zero and the kaniko-pushed image is
+# NOT promoted to `cb-chromium:latest`.
+#
+# Why a separate K8s Job instead of inline-docker-run: the build host
+# doesn't have egress to the chromium binary's full system-deps surface,
+# but the cluster does. Running the smoke as a Job in the same cluster
+# the image will eventually serve from also catches "the image runs
+# differently in K8s than on the build host" regressions.
+#
+# Image tag is passed via env var (CB_TEST_IMAGE_TAG), NOT sed
+# substitution into the manifest — keeps the YAML a stable artifact and
+# makes `kubectl diff` against a manifest that's been through CI useful.
+# ---------------------------------------------------------------------
+
+step "10/10 cdp validation"
+
+CDP_VALIDATION_MANIFEST="${CB_REPO}/infra/k8s/tests/cb-cdp-validation.yaml"
+CDP_VALIDATION_NS="cb-tests"
+CDP_VALIDATION_JOB="cb-cdp-validation"
+
+if [[ ! -f "${CDP_VALIDATION_MANIFEST}" ]]; then
+    die "cdp validation manifest missing: ${CDP_VALIDATION_MANIFEST} (k8s-manifest-author should have shipped it)"
+fi
+
+# Best-effort: clear any prior Job instance from the previous build so
+# we don't get a "field is immutable" rejection on re-apply.
+kubectl -n "${CDP_VALIDATION_NS}" delete job "${CDP_VALIDATION_JOB}" --ignore-not-found=true >/dev/null 2>&1 || true
+
+log "applying ${CDP_VALIDATION_MANIFEST} with CB_TEST_IMAGE_TAG=${image_tag}"
+CB_TEST_IMAGE_TAG="${image_tag}" kubectl apply -f "${CDP_VALIDATION_MANIFEST}"
+
+log "waiting up to 120s for ${CDP_VALIDATION_JOB} to complete..."
+set +e
+kubectl -n "${CDP_VALIDATION_NS}" wait --for=condition=complete \
+    --timeout=120s "job/${CDP_VALIDATION_JOB}"
+wait_rc=$?
+set -e
+
+# Always tail the Job pod logs — green or red, the per-op pass/fail
+# breakdown belongs in the build log so a failed promotion can be
+# triaged from kubectl logs of the cb-build Job alone.
+log "--- cb-cdp-validation pod logs ---"
+kubectl -n "${CDP_VALIDATION_NS}" logs --tail=200 \
+    "job/${CDP_VALIDATION_JOB}" 2>&1 | sed 's/^/  /' || true
+log "--- end cb-cdp-validation pod logs ---"
+
+if [[ ${wait_rc} -ne 0 ]]; then
+    die "cdp validation job did not complete cleanly (kubectl wait rc=${wait_rc}); image NOT promoted"
+fi
 
 step_done
 
