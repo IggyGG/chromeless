@@ -674,13 +674,32 @@ export class Scenario {
     // BUGS-529 description names #2.
     let browserContextId, targetId;
     if (this.wire) {
+      // cb-chromium's CbDevToolsManagerDelegate::CreateNewTarget bails
+      // with "no context available" when called without an explicit
+      // browserContextId AND main_parts hasn't called
+      // SetDefaultBrowserContext (which it doesn't — see
+      // capture/build-integration/cloud_browser_browser_main_parts.cc;
+      // a separate chromium-tree TODO). To unblock the test workaround
+      // we call Target.createBrowserContext first; cb-chromium's
+      // CbDevToolsManagerDelegate::CreateBrowserContext pushes onto
+      // contexts_, and CreateNewTarget then reads contexts_.back().
+      //
+      // We deliberately do NOT track the returned browserContextId for
+      // teardown disposal — cb-chromium has a known DisposeBrowserContext
+      // destruction-order bug (see cb_devtools_agent.cc TODO header), so
+      // Target.closeTarget alone is what we tear down per scenario.
+      // The browser process exits on Pod shutdown which cleans up the
+      // leaked contexts; at 3 wire scenarios per run the leak is
+      // bounded and harmless.
+      const createCtx = await this._browser.Target.createBrowserContext({});
       ({ targetId } = await this._browser.Target.createTarget({
         url: navUrl,
+        browserContextId: createCtx.browserContextId,
       }));
-      browserContextId = null;
+      browserContextId = null;  // suppress teardown disposal
       this.log("ok",
           "wire mode: created target boot-loaded to fixture (BUGS-529 workaround)",
-          { targetId, navUrl });
+          { targetId, navUrl, ctx: createCtx.browserContextId });
     } else {
       ({ browserContextId } = await this._browser.Target.createBrowserContext({}));
       ({ targetId } = await this._browser.Target.createTarget({
