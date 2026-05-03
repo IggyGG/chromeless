@@ -1,0 +1,129 @@
+<!doctype html>
+<!--
+  tests/webrtc/fixtures/demo.html — standalone preview of the canvas
+  demo content used by the WebRTC harness.
+
+  Open this file in any browser (no server required, modules are
+  loaded via relative paths) to see the same animated content that
+  drive-recorder.mjs records to out.webm. The buttons trigger the
+  same `window.__cbtest.handle()` messages the harness pushes via
+  CDP `Runtime.evaluate`, so you can iterate on the demo's response
+  to scene-change commands without spinning up cb-chromium.
+
+  This file is NOT loaded by the harness — the harness loads
+  streamer-page.html which imports demo.js directly into a hidden
+  canvas. demo.html exists purely as a developer ergonomic tool:
+  what you see here is what gets recorded.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>cb-chromium webrtc fixture — demo preview</title>
+    <style>
+      html, body {
+        margin: 0; height: 100%;
+        background: #06080d; color: #d6e3ff;
+        font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .wrap {
+        display: grid; grid-template-rows: auto 1fr auto;
+        height: 100vh; gap: 12px; padding: 12px; box-sizing: border-box;
+      }
+      header { font-size: 12px; opacity: 0.6; }
+      canvas {
+        background: #0b0e14;
+        border: 1px solid #1f2a3a;
+        border-radius: 4px;
+        max-width: 100%;
+        height: auto;
+        box-shadow: 0 2px 24px rgba(0, 0, 0, 0.4);
+      }
+      .controls {
+        display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+      }
+      button, input {
+        background: #1c2433; color: #d6e3ff;
+        border: 1px solid #2c3849; padding: 6px 10px;
+        font: inherit; border-radius: 3px; cursor: pointer;
+      }
+      button:hover { background: #2a3548; }
+      input { cursor: text; min-width: 240px; }
+      .group { display: flex; gap: 4px; padding: 0 6px;
+        border-left: 1px solid #2c3849; }
+      .group:first-child { border-left: none; padding-left: 0; }
+      .hint { opacity: 0.55; font-size: 11px; margin-left: auto; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        cb-chromium webrtc fixture — drive-recorder.mjs records exactly
+        what you see in this canvas. Buttons below send the same
+        <code>window.__cbtest.handle({...})</code> messages the harness
+        pushes via CDP.
+      </header>
+      <div style="display:grid; place-items:center;">
+        <canvas id="stage" width="960" height="540"></canvas>
+      </div>
+      <div class="controls">
+        <div class="group">
+          <button data-scene="boot">scene: boot</button>
+          <button data-scene="idle">scene: idle</button>
+          <button data-scene="streaming">scene: streaming</button>
+          <button data-scene="error">scene: error</button>
+        </div>
+        <div class="group">
+          <input id="logText" placeholder='log line text…' />
+          <button id="logSend">log-line</button>
+        </div>
+        <div class="group">
+          <button data-flash="#5fb4ff">flash blue</button>
+          <button data-flash="#ff5577">flash red</button>
+          <button data-flash="#7fffaa">flash green</button>
+        </div>
+        <span class="hint">harness uses an offscreen canvas at 1280×720 + canvas.captureStream(30)</span>
+      </div>
+    </div>
+    <script type="module">
+      import { attachDemo } from "./demo.js";
+
+      const canvas = document.getElementById("stage");
+      const demo = attachDemo(canvas, { fps: 30 });
+
+      // Same surface the harness uses, just driven from buttons.
+      window.__cbtest = {
+        handle(msg) { return demo.send(msg); },
+      };
+
+      for (const b of document.querySelectorAll("[data-scene]")) {
+        b.addEventListener("click", () => {
+          demo.send({ type: "set-scene", value: b.dataset.scene });
+        });
+      }
+      for (const b of document.querySelectorAll("[data-flash]")) {
+        b.addEventListener("click", () => {
+          demo.send({ type: "flash", color: b.dataset.flash });
+        });
+      }
+      const logText = document.getElementById("logText");
+      const logSend = document.getElementById("logSend");
+      function pushLog() {
+        const text = logText.value.trim() || "[manual] log line";
+        demo.send({ type: "log-line", text });
+        logText.value = "";
+      }
+      logSend.addEventListener("click", pushLog);
+      logText.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") pushLog();
+      });
+
+      // Auto-script for the preview so the page demos itself.
+      setTimeout(() => demo.send({ type: "set-scene", value: "idle" }), 1000);
+      setTimeout(() => demo.send({ type: "set-scene", value: "streaming" }), 2200);
+      setTimeout(() => demo.send({ type: "log-line", text: "[wire] Page.navigate https://example.com" }), 2500);
+      setTimeout(() => demo.send({ type: "log-line", text: "[wire] DOMContentLoaded" }), 3100);
+      setTimeout(() => demo.send({ type: "log-line", text: "[wire] frame[0] encoded VP9" }), 3700);
+      setTimeout(() => demo.send({ type: "flash", color: "#5fb4ff" }), 4200);
+    </script>
+  </body>
+</html>

@@ -135,6 +135,19 @@ spec:
               sleep 2
               export DISPLAY=:99
 
+              # disable-features list extended for the test Job:
+              #   * TranslateUI, MediaRouter — match cb-browserless
+              #   * Vulkan, VaapiVideoDecodeLinuxGL — no GPU in test pods
+              #   * IntensiveWakeUpThrottling — chromium 88+ throttles
+              #     background tabs aggressively after ~5s in headless
+              #     contexts. Frames stop flowing on the page-side
+              #     <canvas>, the encoder gets zero work, and
+              #     outboundRtp.encoderImplementation never populates.
+              #   * CalculateNativeWinOcclusion — prevents the
+              #     "occluded window" path from pausing rendering
+              #     when there's no visible compositor.
+              #   * BackForwardCacheMemoryControls,Translate — stragglers
+              #     observed contributing to background-tab pauses.
               /usr/local/bin/cloud_browser_worker \
                 --no-sandbox \
                 --disable-dev-shm-usage \
@@ -145,7 +158,10 @@ spec:
                 --user-data-dir=$HOME/.config/chromium \
                 --no-first-run \
                 --no-default-browser-check \
-                --disable-features=TranslateUI,MediaRouter,Vulkan,VaapiVideoDecodeLinuxGL \
+                --disable-features=TranslateUI,MediaRouter,Vulkan,VaapiVideoDecodeLinuxGL,IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,BackForwardCacheMemoryControls,Translate \
+                --disable-background-timer-throttling \
+                --disable-renderer-backgrounding \
+                --disable-backgrounding-occluded-windows \
                 --disable-gpu \
                 --ozone-platform=x11 \
                 --use-gl=angle \
@@ -217,14 +233,23 @@ spec:
               cd /workspace/tests/webrtc
               npm install --no-audit --no-fund --silent
 
-              # webrtc-harness-author owns drive-recorder.mjs; the
-              # CLI surface here matches the contract documented in
-              # plans/fizzy-beaming-shamir.md.
+              # Recording is always produced. drive-recorder.mjs emits
+              # a structured TEST_ARTIFACT line with the path + size +
+              # codec; we capture it so a follow-up step can echo it
+              # verbatim into Pod logs and a separate `kubectl cp`
+              # can pull the artifact off the Pod's emptyDir.
+              #
+              # The default steer script (fixtures/default-steer-script.json)
+              # walks the demo through boot → idle → streaming with
+              # log-line + bar-set + flash messages so the recorded
+              # webm has visibly varied content even when no
+              # per-test steering is supplied.
               mkdir -p /tmp/out
               node drive-recorder.mjs \
                 --cb-url=http://localhost:9222 \
                 --duration=5 \
-                --out=/tmp/out/out.webm
+                --out=/tmp/out/out.webm \
+                --steer-script=fixtures/default-steer-script.json
 
               # Acceptance: artifact exists and is non-trivial size.
               # The plan's threshold is 10 KiB (any value ≥ that
@@ -237,6 +262,22 @@ spec:
                 echo "ERROR: out.webm is $size bytes (< 10240 byte threshold)" >&2
                 touch /tmp/out/done
                 exit 1
+              fi
+
+              # Surface the artifact in Pod logs so an operator can
+              # base64-decode it locally without needing `kubectl cp`
+              # (handy when debugging from a phone or restricted shell).
+              # We only do this when ffprobe says the duration is sane —
+              # avoids spamming megabytes of logs on a corrupt webm.
+              ffprobe_dur=$(ffprobe -v error -show_entries format=duration \
+                            -of default=nw=1:nk=1 /tmp/out/out.webm 2>/dev/null || true)
+              echo "[validation] ffprobe duration: ${ffprobe_dur:-unknown}s"
+              if [ -n "${ffprobe_dur}" ]; then
+                echo "[validation] artifact base64 (decode + write to .webm to play):"
+                echo "===WEBM_BASE64_BEGIN==="
+                base64 -w 0 /tmp/out/out.webm
+                echo
+                echo "===WEBM_BASE64_END==="
               fi
 
               # Signal cb-chromium pod-mate to shut down so the Pod

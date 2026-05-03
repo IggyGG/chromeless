@@ -18,14 +18,26 @@
  *   --cb-url=<url>     Base URL of the cb-chromium DevTools endpoint.
  *                      Default: http://cb-browserless.triform-wtf.svc.cluster.local:9222
  *   --duration=<sec>   How long to record after first frame. Default 5.
- *   --out=<path>       Output .webm path. Default ./out.webm.
+ *   --out=<path>       Output .webm path.
+ *                      Default: ${TEST_ARTIFACTS_DIR:-./artifacts}/
+ *                               webrtc-${codec}-${YYYYMMDD-HHMMSS}.webm
  *   --codec=<name>     Codec to pin via setCodecPreferences (vp9|vp8|h264|av1).
  *                      Default: don't pin (browser default order).
  *   --listen-host=<h>  Host the harness's tiny HTTP server binds.
  *                      Default 127.0.0.1.
  *   --listen-port=<p>  Port. Default 0 (ephemeral).
+ *   --steer-script=<f> JSON file with `[{"at": ms, "send": {type, ...}}, ...]`.
+ *                      Each entry's `send` payload is pushed via
+ *                      window.__cbtest.handle(...) at +ms after first frame.
+ *                      Use this to drive the demo through scene changes
+ *                      so the recording visibly steers per-test.
  *   --keep-page-open   Don't close the chromium page on exit. Useful
  *                      when iterating manually via DevTools.
+ *
+ * Recording is ALWAYS produced — every successful run writes a .webm.
+ * The path is printed at end of run on a line of the shape
+ *   TEST_ARTIFACT path=<absolute-path> bytes=<n> frames=<n> codec=<storage>
+ * so CI runners can capture the artifact mechanically.
  *
  * Exit codes:
  *   0  success — recording written, encoder assertions (if available) passed.
@@ -51,11 +63,12 @@ function parseArgs(argv) {
   const out = {
     cbUrl: "http://cb-browserless.triform-wtf.svc.cluster.local:9222",
     duration: 5,
-    outFile: path.resolve(process.cwd(), "out.webm"),
+    outFile: null, // resolved after parsing — depends on --codec and TEST_ARTIFACTS_DIR
     codec: "",
     listenHost: "127.0.0.1",
     listenPort: 0,
     keepPageOpen: false,
+    steerScript: null,
   };
   for (const a of argv) {
     if (a.startsWith("--cb-url=")) out.cbUrl = a.slice("--cb-url=".length);
@@ -64,6 +77,7 @@ function parseArgs(argv) {
     else if (a.startsWith("--codec=")) out.codec = a.slice("--codec=".length);
     else if (a.startsWith("--listen-host=")) out.listenHost = a.slice("--listen-host=".length);
     else if (a.startsWith("--listen-port=")) out.listenPort = Number(a.slice("--listen-port=".length));
+    else if (a.startsWith("--steer-script=")) out.steerScript = path.resolve(a.slice("--steer-script=".length));
     else if (a === "--keep-page-open") out.keepPageOpen = true;
     else if (a === "-h" || a === "--help") { printHelp(); process.exit(0); }
     else { console.error(`unknown arg: ${a}`); printHelp(); process.exit(2); }
@@ -72,21 +86,46 @@ function parseArgs(argv) {
     console.error("--duration must be a positive number of seconds");
     process.exit(2);
   }
+  if (out.outFile === null) out.outFile = defaultOutPath(out.codec);
   return out;
+}
+
+// Default artifact path. Honours TEST_ARTIFACTS_DIR (set by CI runners
+// like GitHub Actions, Jenkins, GitLab) so artifacts land in a known
+// location without per-runner config. Falls back to ./artifacts/ in
+// the working directory.
+function defaultOutPath(codec) {
+  const dir = process.env.TEST_ARTIFACTS_DIR
+    ? path.resolve(process.env.TEST_ARTIFACTS_DIR)
+    : path.resolve(process.cwd(), "artifacts");
+  const stamp = new Date().toISOString()
+    .replace(/[-:T]/g, "")
+    .replace(/\..*$/, "");
+  const codecSlug = codec ? codec : "auto";
+  return path.join(dir, `webrtc-${codecSlug}-${stamp}.webm`);
 }
 
 function printHelp() {
   process.stderr.write(`Usage: node drive-recorder.mjs [options]
 
 Options:
-  --cb-url=<url>      cb-chromium /json/version base. Default cluster DNS.
-  --duration=<sec>    Recording length in seconds. Default 5.
-  --out=<path>        Output .webm path. Default ./out.webm.
-  --codec=<name>      Pin codec (vp9|vp8|h264|av1). Default: browser order.
-  --listen-host=<h>   Local HTTP server bind host. Default 127.0.0.1.
-  --listen-port=<p>   Local HTTP server bind port. Default 0 (ephemeral).
-  --keep-page-open    Leave the chromium page open on exit (debugging).
-  -h, --help          Show this help.
+  --cb-url=<url>       cb-chromium /json/version base. Default cluster DNS.
+  --duration=<sec>     Recording length in seconds. Default 5.
+  --out=<path>         Output .webm path.
+                       Default: \${TEST_ARTIFACTS_DIR:-./artifacts}/webrtc-<codec>-<ts>.webm.
+  --codec=<name>       Pin codec (vp9|vp8|h264|av1). Default: browser order.
+  --listen-host=<h>    Local HTTP server bind host. Default 127.0.0.1.
+  --listen-port=<p>    Local HTTP server bind port. Default 0 (ephemeral).
+  --steer-script=<f>   JSON file: [{"at": ms, "send": {type, ...}}, ...] —
+                       each entry's send payload is pushed to the page at
+                       +ms after first frame. Drives demo scene changes.
+  --keep-page-open     Leave the chromium page open on exit (debugging).
+  -h, --help           Show this help.
+
+Artifacts:
+  Every successful run writes a webm file at --out and prints a
+  TEST_ARTIFACT line on stderr that CI runners can grep for:
+    TEST_ARTIFACT path=<absolute> bytes=<n> frames=<n> codec=<storage>
 `);
 }
 
@@ -229,10 +268,12 @@ async function attachToFreshTarget(cbUrl, navUrl) {
   });
   log("ok", "attachToTarget", { sessionId });
 
-  // Bind a thin per-session client. With flatten:true the raw browser
-  // connection multiplexes; chrome-remote-interface gives us a child
-  // namespace via .session(sessionId) (CRI 0.33+).
-  const session = await browser.session(sessionId);
+  // Bind a thin per-session client. With flatten:true the browser
+  // websocket multiplexes per-session messages; chrome-remote-interface
+  // exposes the multiplex via the low-level browser.send(method, params,
+  // sessionId) and browser.on(event, (params, sessionId) => ...) APIs
+  // (it does NOT expose a .session() helper — that's what we wrap here).
+  const session = makeSessionClient(browser, sessionId);
   await session.Page.enable();
   await session.Runtime.enable();
 
@@ -250,6 +291,35 @@ async function attachToFreshTarget(cbUrl, navUrl) {
       try { await browser.Target.closeTarget({ targetId }); } catch { /* ignore */ }
       try { await browser.Target.disposeBrowserContext({ browserContextId }); } catch { /* ignore */ }
       try { await browser.close(); } catch { /* ignore */ }
+    },
+  };
+}
+
+// Wraps a chrome-remote-interface browser client so callers can use the
+// familiar `session.Page.enable()` / `session.Runtime.evaluate({...})` /
+// `session.Runtime.consoleAPICalled(handler)` pattern over a flat-mode
+// CDP connection. CRI 0.33's actual primitives are:
+//   - browser.send(method, params, sessionId)       — scoped send
+//   - browser.on("Domain.event", (params, sId) => …) — events with sId
+// This adapter only covers the Page + Runtime methods the harness uses;
+// extend if you start calling additional CDP methods.
+function makeSessionClient(browser, sessionId) {
+  const send = (method, params = {}) => browser.send(method, params, sessionId);
+  const subscribe = (eventName, handler) => {
+    browser.on(eventName, (params, evtSessionId) => {
+      if (evtSessionId === sessionId) handler(params);
+    });
+  };
+  return {
+    sessionId,
+    Page: {
+      enable:   () => send("Page.enable"),
+      navigate: (p) => send("Page.navigate", p),
+    },
+    Runtime: {
+      enable:   () => send("Runtime.enable"),
+      evaluate: (p) => send("Runtime.evaluate", p),
+      consoleAPICalled: (h) => subscribe("Runtime.consoleAPICalled", h),
     },
   };
 }
@@ -363,6 +433,18 @@ function spawnFfmpeg({ width, height, fps, outFile, codec }) {
 async function main() {
   log("info", "harness start", { args });
 
+  // Ensure the artifact directory exists. We do this BEFORE anything
+  // else so a missing/unwritable output path fails the test in <50ms,
+  // not 30s in after a successful CDP attach + recording window.
+  fs.mkdirSync(path.dirname(args.outFile), { recursive: true });
+
+  // Optional steer script: list of {at: ms, send: {type, ...}} that
+  // gets dispatched at first-frame + at-ms. The streamer page already
+  // runs a default scene script on its own (boot → idle → streaming
+  // with log lines) so leaving this empty still produces an
+  // interesting recording.
+  const steerScript = await loadSteerScript(args.steerScript);
+
   const encoderAssertions = await loadEncoderAssertions();
 
   // 1. Static server (page + fixture).
@@ -378,6 +460,7 @@ async function main() {
   let videoSink = null;
   let firstFrameAt = null;
   let frameCount = 0;
+  let framesDroppedSizeMismatch = 0;
   let frameWidth = 0;
   let frameHeight = 0;
   let ffmpeg = null;
@@ -394,6 +477,14 @@ async function main() {
       // node-webrtc's frame format: { width, height, data, rotation }
       // where data is a Uint8Array containing YUV planes concatenated
       // (Y, U, V, sizes per the I420 layout).
+      //
+      // Resolution-change handling: ffmpeg's rawvideo demuxer expects
+      // a fixed -s WxH; if chromium re-negotiates resolution mid-stream
+      // (e.g. simulcast layer flip, BWE-driven downscale despite our
+      // setParameters pin) we'd start emitting truncated packets and
+      // ffmpeg would corrupt the output. We DROP frames at the wrong
+      // size rather than silently producing garbage — the streamer
+      // page's pinning should keep this case rare.
       frameCount += 1;
       if (firstFrameAt === null) {
         firstFrameAt = Date.now();
@@ -407,6 +498,18 @@ async function main() {
           outFile: args.outFile,
           codec: args.codec,
         });
+      } else if (frame.width !== frameWidth || frame.height !== frameHeight) {
+        // First time we see a different size, complain loudly and
+        // count drops. We don't restart ffmpeg because re-parking a
+        // new file mid-test breaks the single-artifact contract; the
+        // pinning in streamer-page.html should keep this rare.
+        framesDroppedSizeMismatch += 1;
+        if (framesDroppedSizeMismatch === 1) {
+          log("warn", "frame size mismatch — dropping",
+              { expected: { w: frameWidth, h: frameHeight },
+                got:      { w: frame.width, h: frame.height } });
+        }
+        return;
       }
       if (ffmpeg && !ffmpeg.killed && ffmpeg.stdin && !ffmpeg.stdin.destroyed) {
         try { ffmpeg.stdin.write(Buffer.from(frame.data)); }
@@ -503,6 +606,27 @@ async function main() {
   //    encoded media, not just an SDP handshake on paper).
   await waitFor(() => firstFrameAt !== null, 20_000, "no frames received from page");
 
+  // 6.1 Dispatch the steer-script (if any). Each entry's `send`
+  //     payload is pushed to the page at first-frame + at-ms via the
+  //     same window.__cbtest.handle inbound bridge the SDP/ICE
+  //     messages use. The streamer page routes set-scene/log-line/
+  //     bar-set/flash/badge to demo.send() so the recording visibly
+  //     follows the script.
+  if (steerScript && steerScript.length > 0) {
+    log("info", "scheduling steer script", { entries: steerScript.length });
+    for (const entry of steerScript) {
+      const fireAt = firstFrameAt + Number(entry.at || 0);
+      setTimeout(async () => {
+        try {
+          const r = await pushInbound(cb.session, entry.send);
+          log("info", `steer +${entry.at}ms`, { send: entry.send, ack: r });
+        } catch (err) {
+          log("warn", `steer +${entry.at}ms failed`, String(err));
+        }
+      }, Math.max(0, fireAt - Date.now()));
+    }
+  }
+
   // 6a. If encoder-assertions exposes pollStatsUntilEncoded, defer
   //     to it for the per-codec dwell logic (it polls until
   //     outboundRtp.encoderImplementation populates — chromium omits
@@ -577,13 +701,15 @@ async function main() {
     });
   }
 
-  // 11. Confirm we wrote something useful.
+  // 11. Confirm we wrote something useful AND emit the structured
+  //     TEST_ARTIFACT line that CI runners grep for.
   let outSize = 0;
   try { outSize = fs.statSync(args.outFile).size; }
   catch { /* file missing */ }
   log("info", "recording", {
     outFile: args.outFile, bytes: outSize,
     frames: frameCount,
+    framesDroppedSizeMismatch,
     elapsedMs: firstFrameAt ? (Date.now() - firstFrameAt) : 0,
   });
   if (outSize < 1024) {
@@ -592,6 +718,13 @@ async function main() {
   if (fatalReason) {
     throw new Error(`page reported fatal: ${fatalReason}`);
   }
+  // Mechanical artifact line. Format is intentionally space-separated
+  // key=value (not JSON) so a single grep+awk in shell picks it up.
+  // CI hint: `grep -E '^TEST_ARTIFACT '` on stderr.
+  process.stderr.write(
+    `TEST_ARTIFACT path=${args.outFile} bytes=${outSize} ` +
+    `frames=${frameCount} codec=vp9-libvpx wire=${args.codec || "auto"}\n`,
+  );
 
   // 12. Cleanup chromium.
   try { peer.close(); } catch { /* ignore */ }
@@ -616,6 +749,43 @@ async function waitFor(pred, ms, reason) {
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`timeout waiting for: ${reason}`);
+}
+
+async function loadSteerScript(filePath) {
+  if (!filePath) return null;
+  let raw;
+  try { raw = fs.readFileSync(filePath, "utf8"); }
+  catch (err) {
+    log("err", "steer script unreadable", { filePath, err: String(err) });
+    process.exit(2);
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (err) {
+    log("err", "steer script not valid JSON", { filePath, err: String(err) });
+    process.exit(2);
+  }
+  if (!Array.isArray(parsed)) {
+    log("err", "steer script must be a JSON array of {at, send}", { filePath });
+    process.exit(2);
+  }
+  for (const e of parsed) {
+    if (!e || typeof e !== "object") {
+      log("err", "steer entry not an object", { entry: e }); process.exit(2);
+    }
+    if (!Number.isFinite(e.at) || e.at < 0) {
+      log("err", "steer entry missing non-negative numeric 'at'", { entry: e });
+      process.exit(2);
+    }
+    if (!e.send || typeof e.send !== "object" || !e.send.type) {
+      log("err", "steer entry needs send: {type, ...}", { entry: e });
+      process.exit(2);
+    }
+  }
+  // Stable order — earliest first. Multiple entries at the same `at`
+  // run in the order they appear in the file.
+  parsed.sort((a, b) => a.at - b.at);
+  return parsed;
 }
 
 async function readSenderStatsViaCDP(session) {

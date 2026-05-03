@@ -1,0 +1,17 @@
+[
+  {"at":     0, "send": {"type": "set-scene", "value": "boot"}},
+  {"at":   200, "send": {"type": "log-line", "text": "[harness] first frame received"}},
+  {"at":   600, "send": {"type": "set-scene", "value": "idle"}},
+  {"at":   900, "send": {"type": "log-line", "text": "[harness] negotiation complete"}},
+  {"at":  1200, "send": {"type": "set-scene", "value": "streaming"}},
+  {"at":  1300, "send": {"type": "flash", "color": "#5fb4ff"}},
+  {"at":  1500, "send": {"type": "log-line", "text": "[harness] codec preference applied"}},
+  {"at":  2000, "send": {"type": "bar-set", "index": 0, "value": 0.92}},
+  {"at":  2100, "send": {"type": "bar-set", "index": 1, "value": 0.18}},
+  {"at":  2200, "send": {"type": "bar-set", "index": 2, "value": 0.74}},
+  {"at":  2400, "send": {"type": "log-line", "text": "[harness] encoder factory check"}},
+  {"at":  3000, "send": {"type": "badge", "text": "ENCODING"}},
+  {"at":  3200, "send": {"type": "flash", "color": "#7fffaa"}},
+  {"at":  3500, "send": {"type": "log-line", "text": "[harness] outbound-rtp populated"}},
+  {"at":  4200, "send": {"type": "log-line", "text": "[harness] recording window closing"}}
+]
