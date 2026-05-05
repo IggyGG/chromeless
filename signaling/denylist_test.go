@@ -203,8 +203,8 @@ func TestNewRedisClient_NotCompiled(t *testing.T) {
 // ---------- initDenylist env handling ----------
 
 func TestInitDenylist_StaticFromEnv(t *testing.T) {
-	t.Setenv("CBWRTC_DENYLIST", "alice, bob:tok")
-	t.Setenv("CBWRTC_DENYLIST_REDIS_ADDR", "")
+	t.Setenv("CHROMELESS_DENYLIST", "alice, bob:tok")
+	t.Setenv("CHROMELESS_DENYLIST_REDIS_ADDR", "")
 	prev := globalDenylist
 	t.Cleanup(func() { globalDenylist = prev })
 
@@ -219,8 +219,8 @@ func TestInitDenylist_StaticFromEnv(t *testing.T) {
 }
 
 func TestInitDenylist_FallsBackToStaticOnRedisFailure(t *testing.T) {
-	t.Setenv("CBWRTC_DENYLIST_REDIS_ADDR", "127.0.0.1:6379") // newRedisClient is stubbed
-	t.Setenv("CBWRTC_DENYLIST", "alice")
+	t.Setenv("CHROMELESS_DENYLIST_REDIS_ADDR", "127.0.0.1:6379") // newRedisClient is stubbed
+	t.Setenv("CHROMELESS_DENYLIST", "alice")
 	prev := globalDenylist
 	t.Cleanup(func() { globalDenylist = prev })
 
@@ -228,6 +228,6 @@ func TestInitDenylist_FallsBackToStaticOnRedisFailure(t *testing.T) {
 	// Redis failed → static fallback applies the env CSV.
 	hit, _ := d.Contains(context.Background(), "alice", "")
 	if !hit {
-		t.Error("expected static fallback to honour CBWRTC_DENYLIST")
+		t.Error("expected static fallback to honour CHROMELESS_DENYLIST")
 	}
 }

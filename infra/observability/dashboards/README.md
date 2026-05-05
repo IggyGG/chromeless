@@ -1,12 +1,12 @@
-# Grafana dashboards for cloud-browser-webrtc
+# Grafana dashboards for chromeless
 
 T66 ships two Grafana 11+ dashboards that turn the metrics from T38 +
 T48 into something humans can read.
 
 | Dashboard | UID | What it's for |
 |---|---|---|
-| `cb-cluster-overview.json` | `cb-cluster-overview` | Operator's first stop. Active sessions, session lifecycle rates, signaling close codes, assignment latency (T50, empty until controller ships), aggregated outbound bitrate, auth failures. |
-| `cb-session-detail.json` | `cb-session-detail` | Drill-down for one chromium pod / sidecar instance. Pick the instance via the `$instance` template variable. Per-session bitrate / fps / dropped frames / QP / RTT / packet loss / CPU / RSS, plus a placeholder panel for `cb_webrtc_quality_limitation_fraction` (reserved). |
+| `chromeless-cluster-overview.json` | `chromeless-cluster-overview` | Operator's first stop. Active sessions, session lifecycle rates, signaling close codes, assignment latency (T50, empty until controller ships), aggregated outbound bitrate, auth failures. |
+| `chromeless-session-detail.json` | `chromeless-session-detail` | Drill-down for one chromium pod / sidecar instance. Pick the instance via the `$instance` template variable. Per-session bitrate / fps / dropped frames / QP / RTT / packet loss / CPU / RSS, plus a placeholder panel for `cb_webrtc_quality_limitation_fraction` (reserved). |
 
 ## Quickstart — run with the included observability stack
 
@@ -24,7 +24,7 @@ Then:
   prod, obviously).
 - Prometheus: <http://localhost:9090>.
 - The two cb-* dashboards land under
-  *Dashboards → cloud-browser-webrtc/*.
+  *Dashboards → chromeless/*.
 
 The default profile (no `--profile`) skips Prometheus/Grafana so day-to-day
 local dev isn't paying for them.
@@ -39,7 +39,7 @@ The dashboards are plain Grafana 11 schema-39 JSON. Either:
    ```
    curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASS" \
      -H "Content-Type: application/json" \
-     -d @infra/observability/dashboards/cb-cluster-overview.json \
+     -d @infra/observability/dashboards/chromeless-cluster-overview.json \
      "$GRAFANA_URL/api/dashboards/db"
    ```
    (Wrap each JSON file in `{"dashboard": ..., "overwrite": true}` if
@@ -54,11 +54,11 @@ If you use your own Prometheus rather than the in-profile one, the
 two scrape targets are:
 
 ```yaml
-- job_name: cb-signaling
+- job_name: chromeless-signaling
   metrics_path: /metrics
   static_configs:
     - targets: ['<signaling-host>:8080']
-- job_name: cb-chromium
+- job_name: chromeless
   metrics_path: /metrics
   static_configs:
     - targets: ['<chromium-host>:9100']

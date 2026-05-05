@@ -280,7 +280,7 @@ What we need to know before we can choose:
    (first-party, easy RuntimeClass). Self-managed K8s pulls toward
    Kata (better cross-cloud parity).
 
-The prototype task is small: build one cloud-browser-webrtc image
+The prototype task is small: build one chromeless image
 that runs under each candidate, run the latency harness against it,
 and publish the numbers next to the v1 success criteria. That's the
 ticket I'd file at the top of Phase 3.

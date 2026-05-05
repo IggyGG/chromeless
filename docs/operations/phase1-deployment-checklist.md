@@ -1,6 +1,6 @@
 # Phase 1 deployment-readiness checklist
 
-A pre-flight checklist for taking cloud-browser-webrtc from "the
+A pre-flight checklist for taking chromeless from "the
 team's dev cluster" to "a real Phase 1 deployment that real users
 hit." Everything below should be ✓ before you let traffic in.
 
@@ -50,7 +50,7 @@ relevant phase — Phase 1 won't carry you.
       `infra/security-hardening.md`. Phase 3 sandbox decision (T44)
       replaces this.
 - [ ] T68 CRIU snapshot/restore is **not** yet wired through the
-      controller (`cb.io/snapshot-id` is read-only metadata in T71).
+      controller (`chromeless.io/snapshot-id` is read-only metadata in T71).
       Phase 1 cold-starts; that's fine.
 
 ---
@@ -60,7 +60,7 @@ relevant phase — Phase 1 won't carry you.
 - [ ] **Ed25519 keypair generated** and the pubkey base64-encoded
       lives in:
   - `Secret signaling-auth` (consumed by `signaling`)
-  - `Secret turn-issuer-secrets.CBWRTC_AUTH_PUBKEY` (consumed by
+  - `Secret turn-issuer-secrets.CHROMELESS_AUTH_PUBKEY` (consumed by
     `turn-issuer`)
   Both must hold the same value or sessions can't fetch TURN creds.
 - [ ] **Auth issuer** (the upstream system that mints session tokens
@@ -72,7 +72,7 @@ relevant phase — Phase 1 won't carry you.
 - [ ] **TURN shared secret** generated with `openssl rand -hex 32`
       and synced between:
   - `Secret turn-rest-secret.static-auth-secret` (coturn)
-  - `Secret turn-issuer-secrets.CBWRTC_TURN_SHARED_SECRET`
+  - `Secret turn-issuer-secrets.CHROMELESS_TURN_SHARED_SECRET`
 - [ ] TLS certificates:
   - `signaling.<your-domain>` cert provisioned (cert-manager or
     pre-imported).
@@ -107,16 +107,16 @@ relevant phase — Phase 1 won't carry you.
 
 - [ ] **Prometheus** scraping:
   - `signaling:8080/metrics` → `cb_signaling_*`
-  - `cb-metrics-sidecar` per session → `cb_chromium_*`,
+  - `chromeless-metrics-sidecar` per session → `cb_chromium_*`,
     `cb_webrtc_*`, `cb_client_*` (T72).
   - `turn-issuer:8090/metrics` → `cb_turn_issuer_*`.
   - `browser-session-controller:8080/metrics` →
     `controller_runtime_*`, custom `cb_session_*`.
 - [ ] **Grafana** dashboards imported (T66):
-  - `cb-cluster-overview` (default home).
-  - `cb-session-detail`.
+  - `chromeless-cluster-overview` (default home).
+  - `chromeless-session-detail`.
 - [ ] **AlertManager** rules loaded from
-      `infra/observability/alerts/cb-alerts.yaml`. `promtool check
+      `infra/observability/alerts/chromeless-alerts.yaml`. `promtool check
       rules` clean.
 - [ ] **Alert routing** wired to your paging system (PagerDuty,
       Slack, whatever):

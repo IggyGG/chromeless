@@ -137,9 +137,9 @@ Sequence:
    the embedder so its `OnFrame` callback feeds a
    `webrtc::VideoTrackSource` we install on the
    PeerConnectionFactory.
-3. Update `infra/launch-chromium.sh` to invoke the new
+3. Update `infra/launch-chromeless.sh` to invoke the new
    `cloud_browser_worker` binary instead of stock `chromium`.
-4. Drop `CBWRTC_USE_FAKE_MEDIA=1` from `infra/compose.yaml`. The
+4. Drop `CHROMELESS_USE_FAKE_MEDIA=1` from `infra/compose.yaml`. The
    real capture path is now the production path.
 
 **First measurement.** Compare against T29 spike's screencast

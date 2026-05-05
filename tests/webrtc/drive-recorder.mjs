@@ -2,7 +2,7 @@
 /**
  * tests/webrtc/drive-recorder.mjs — WebRTC harness driver.
  *
- * Connects to cb-chromium via Chrome DevTools Protocol, opens a fresh
+ * Connects to chromeless via Chrome DevTools Protocol, opens a fresh
  * BrowserContext + target, navigates that target to a self-hosted
  * streamer-page.html, then plays the role of WebRTC counter-peer in
  * Node.js using @roamhq/wrtc. Records the inbound video stream to
@@ -15,8 +15,8 @@
  * fizzy-beaming-shamir.md) for the full architecture rationale.
  *
  * CLI:
- *   --cb-url=<url>     Base URL of the cb-chromium DevTools endpoint.
- *                      Default: http://cb-browserless.triform-wtf.svc.cluster.local:9222
+ *   --chromeless-url=<url>     Base URL of the chromeless DevTools endpoint.
+ *                      Default: http://chromeless-browserless.triform-wtf.svc.cluster.local:9222
  *   --duration=<sec>   How long to record after first frame. Default 5.
  *   --out=<path>       Output .webm path.
  *                      Default: ${TEST_ARTIFACTS_DIR:-./artifacts}/
@@ -61,7 +61,7 @@ const { RTCVideoSink } = nonstandard;
 
 function parseArgs(argv) {
   const out = {
-    cbUrl: "http://cb-browserless.triform-wtf.svc.cluster.local:9222",
+    cbUrl: "http://chromeless-browserless.triform-wtf.svc.cluster.local:9222",
     duration: 5,
     outFile: null, // resolved after parsing — depends on --codec and TEST_ARTIFACTS_DIR
     codec: "",
@@ -71,7 +71,7 @@ function parseArgs(argv) {
     steerScript: null,
   };
   for (const a of argv) {
-    if (a.startsWith("--cb-url=")) out.cbUrl = a.slice("--cb-url=".length);
+    if (a.startsWith("--chromeless-url=")) out.cbUrl = a.slice("--chromeless-url=".length);
     else if (a.startsWith("--duration=")) out.duration = Number(a.slice("--duration=".length));
     else if (a.startsWith("--out=")) out.outFile = path.resolve(a.slice("--out=".length));
     else if (a.startsWith("--codec=")) out.codec = a.slice("--codec=".length);
@@ -109,7 +109,7 @@ function printHelp() {
   process.stderr.write(`Usage: node drive-recorder.mjs [options]
 
 Options:
-  --cb-url=<url>       cb-chromium /json/version base. Default cluster DNS.
+  --chromeless-url=<url>       chromeless /json/version base. Default cluster DNS.
   --duration=<sec>     Recording length in seconds. Default 5.
   --out=<path>         Output .webm path.
                        Default: \${TEST_ARTIFACTS_DIR:-./artifacts}/webrtc-<codec>-<ts>.webm.
@@ -227,7 +227,7 @@ function startStaticServer(host, port) {
 // option on .send().
 
 async function attachToFreshTarget(cbUrl, navUrl) {
-  // The cb-chromium binary refuses /json/version requests whose Host
+  // The chromeless binary refuses /json/version requests whose Host
   // header isn't loopback (DNS-rebinding mitigation in DevTools). The
   // Python test forces Host: localhost; we do the same by using the
   // chrome-remote-interface low-level API (CDP.Version) which lets us
@@ -400,7 +400,7 @@ function spawnFfmpeg({ width, height, fps, outFile, codec }) {
   // codecs. We default to libvpx-vp9 because:
   //   - .webm + VP9 is a universally inspectable combination
   //     (mpv, QuickTime, ffprobe, every browser).
-  //   - The SOURCE video stream we receive from cb-chromium gets
+  //   - The SOURCE video stream we receive from chromeless gets
   //     decoded by libwebrtc and handed to us as raw I420 frames
   //     before we re-encode for storage; so the storage codec is
   //     independent of the wire codec.

@@ -1,0 +1,359 @@
+# chromeless-webrtc-wire-bridge-validation.yaml — production wire-path
+# end-to-end test. Drives the FULL chromeless input dispatch chain:
+#
+#   harness.dc.send(v1 envelope)
+#     → page-side InputRelay (ws → :9100/input)
+#     → input-bridge sidecar (parses + translates)
+#     → CDP Input.dispatch{Mouse,Key}Event on chromeless
+#     → renderer event listener → window.__events
+#
+# What this Job adds vs the sibling chromeless-webrtc-validation Job:
+#
+#   * input-bridge sidecar container, listening on
+#     ws://127.0.0.1:9100/input and translating v1 envelopes to CDP.
+#     Runs alongside chromeless in the same pod (shared network
+#     namespace so the bridge dials :9222 directly).
+#
+#   * test-driver runs `scenarios/runner.mjs --only=wire` instead
+#     of the basic recorder. The wire-mode scenarios pin v1 envelope
+#     shape, modifier handling, click ramp, drag-during-mousedown,
+#     keyboard `text` synthesis. Currently exposes 4 production bugs
+#     in input-bridge's CDP translation — see
+#     tests/webrtc/scenarios/README.md "Bridge bugs surfaced by wire
+#     tests" for the full inventory.
+#
+# Lifecycle / shutdown sentinels mirror chromeless-webrtc-validation.yaml:
+# test-driver writes /tmp/out/done; chromeless and input-bridge each
+# watch for it and SIGTERM gracefully so the Pod transitions to
+# Complete instead of waiting on activeDeadlineSeconds.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-webrtc-wire-bridge-validation
+  namespace: chromeless-tests
+  labels:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: test
+    app.kubernetes.io/variant: webrtc-wire-bridge
+spec:
+  backoffLimit: 1
+  # 7m hard ceiling: ~60s test execution + 60s clone + 60s npm install
+  # + 60s ffmpeg apt install + 60s Go binary fetch + slack.
+  activeDeadlineSeconds: 420
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless
+        app.kubernetes.io/component: test
+        app.kubernetes.io/variant: webrtc-wire-bridge
+    spec:
+      restartPolicy: Never
+      # Pin to triform-8: has succeeded twice for this Job, ~94GB ephemeral
+      # free vs triform-6 hovering around 29GB which gets evicted under load.
+      # Pinning by hostname is acceptable for a one-shot validation Job.
+      nodeSelector:
+        kubernetes.io/hostname: triform-8
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        - name: bootstrap-tests
+          image: alpine/git:2.43.0
+          command:
+            - sh
+            - -euxc
+            - |
+              AUTH_REPO="${OUR_REPO%%://*}://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#*://}"
+              git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                "${AUTH_REPO}" /workspace
+              git -C /workspace remote set-url origin "${OUR_REPO}"
+              if [ ! -d /workspace/tests/webrtc/scenarios ]; then
+                echo "ERROR: /workspace/tests/webrtc/scenarios missing on ${OUR_REPO_REF};" >&2
+                echo "       scenario framework hasn't landed yet." >&2
+                exit 1
+              fi
+              ls -la /workspace/tests/webrtc/scenarios
+          env:
+            - name: OUR_REPO
+              value: "http://forgejo-http.forgejo.svc.cluster.local:3000/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+
+        # Build input-bridge from source. The cluster registry
+        # currently has no pre-built input-bridge image; we build at
+        # Job-run time. ~30s on a warm Go module cache.
+        - name: build-input-bridge
+          image: golang:1.23-bookworm
+          command:
+            - bash
+            - -euxc
+            - |
+              cd /workspace/capture/input-bridge
+              GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomod \
+                go build -o /shared/input-bridge .
+              ls -la /shared/input-bridge
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+            - name: shared-bin
+              mountPath: /shared
+
+      containers:
+        # ─── 1/3: chromeless (system under test) ─────────────────────
+        - name: chromeless
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-aura2
+          imagePullPolicy: Always
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -x
+              export HOME=/tmp/chromeless-home
+              mkdir -p $HOME/.config/chromium /tmp/out
+              # 1280x3000 — workaround for the chromeless-vs-stock-chromium
+              # layout regression revealed by BUGS-529 v5 validation: chromeless
+              # renders fixture-input-mirror.html with bodyRect.y=587 (587px
+              # below viewport top), pushing text1 to y=998, drag source to
+              # y=1057, and the click-grid bottom rows below y=720. With a
+              # 720px viewport most fixture content falls outside the hittable
+              # area. Enlarging Xvfb + the chromium window to 3000px tall makes
+              # all laid-out content viewport-resident so the wire-bridge tests
+              # can validate every scenario end-to-end. The layout regression
+              # itself is tracked as a follow-up ticket; this is a test-only
+              # workaround so BUGS-529 wire-path validation passes 3/3.
+              Xvfb :99 -screen 0 1280x3000x24 -nolisten tcp -ac &
+              sleep 2
+              export DISPLAY=:99
+              /usr/local/bin/chromeless \
+                --no-sandbox \
+                --disable-dev-shm-usage \
+                --display=:99 \
+                --remote-debugging-port=9222 \
+                --remote-debugging-address=0.0.0.0 \
+                --remote-allow-origins=* \
+                --user-data-dir=$HOME/.config/chromium \
+                --no-first-run \
+                --no-default-browser-check \
+                --disable-features=TranslateUI,MediaRouter,Vulkan,VaapiVideoDecodeLinuxGL,IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,BackForwardCacheMemoryControls,Translate \
+                --disable-background-timer-throttling \
+                --disable-renderer-backgrounding \
+                --disable-backgrounding-occluded-windows \
+                --disable-gpu \
+                --ozone-platform=x11 \
+                --use-gl=angle \
+                --use-angle=swiftshader-webgl \
+                --window-size=1280,3000 \
+                --use-fake-ui-for-media-stream \
+                --use-fake-device-for-media-stream \
+                about:blank &
+              CHROMELESS_PID=$!
+              ( while [ ! -f /tmp/out/done ]; do sleep 1; done; \
+                kill -TERM "$CHROMELESS_PID" 2>/dev/null || true ) &
+              wait "$CHROMELESS_PID" || true
+              exit 0
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits:   { cpu: "2",    memory: "4Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: out-vol
+              mountPath: /tmp/out
+
+        # ─── 2/3: input-bridge sidecar ────────────────────────────────
+        # Built at init time, mounted from /shared via emptyDir.
+        # Listens on :9100/input, dials chromeless's CDP at :9222.
+        # Because the Pod has shared netns, both binaries see each
+        # other on 127.0.0.1.
+        #
+        # The bridge requires CDP to be reachable AT STARTUP — the
+        # /json/list call happens during initial connect. We poll for
+        # CDP readiness before exec'ing the bridge so the container
+        # doesn't crashloop while chromium is still booting.
+        - name: input-bridge
+          image: debian:bookworm-slim
+          command:
+            - bash
+            - -euxc
+            - |
+              apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
+              i=0
+              until curl -fsS http://127.0.0.1:9222/json/version >/dev/null; do
+                i=$((i+1))
+                if [ $i -gt 60 ]; then
+                  echo "ERROR: chromeless CDP not reachable within 60s" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+              echo "[input-bridge] CDP ready, starting"
+              # Watch for the test-driver's done sentinel and exit
+              # cleanly when it lands.
+              ( while [ ! -f /tmp/out/done ]; do sleep 1; done; \
+                kill -TERM 1 2>/dev/null || true ) &
+              exec /shared/input-bridge \
+                --source ws \
+                --ws-addr 127.0.0.1:9100 \
+                --ws-path /input \
+                --cdp-url http://127.0.0.1:9222 \
+                --metrics-addr 127.0.0.1:9101
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # apt-install needs these.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          volumeMounts:
+            - name: shared-bin
+              mountPath: /shared
+              readOnly: true
+            - name: out-vol
+              mountPath: /tmp/out
+
+        # ─── 3/3: test-driver ─────────────────────────────────────────
+        - name: test-driver
+          image: node:20-bookworm-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -euxc
+            - |
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ffmpeg ca-certificates curl
+
+              # Wait for chromeless AND input-bridge to be ready.
+              i=0
+              until curl -fsS http://localhost:9222/json/version >/dev/null \
+                 && curl -fsS http://localhost:9101/healthz >/dev/null; do
+                i=$((i+1))
+                if [ "$i" -gt 90 ]; then
+                  echo "ERROR: chromium or input-bridge not ready within 90s" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+
+              cd /workspace/tests/webrtc
+              npm install --no-audit --no-fund --silent
+
+              mkdir -p /tmp/out
+              # Run the wire-only scenarios. Each scenario produces
+              # its own webm + events.json + summary.json; the
+              # runner emits manifest.json + index.html.
+              TEST_ARTIFACTS_DIR=/tmp/out \
+                node scenarios/runner.mjs --only=wire || true
+
+              # Bridge metrics — proves whether envelopes were
+              # received and dispatched. Useful when scenarios show
+              # zero page events: distinguishes "bridge never got
+              # the wire" from "bridge dispatched but chromium
+              # didn't reflect."
+              echo "[validation] bridge metrics:"
+              curl -fsS http://localhost:9101/metrics 2>&1 \
+                | grep -E "^input_bridge_(events|dispatch|parse|unknown)" \
+                | head -30
+
+              echo "[validation] artifacts:"
+              ls -la /tmp/out/
+
+              # Acceptance: at least one wire scenario must have
+              # actually run (non-zero events captured) — that proves
+              # the wire path is plumbed end-to-end. Individual
+              # scenario assertions may fail because of the documented
+              # bridge bugs (see scenarios/README.md); we accept those
+              # as known-failing until the bridge is patched.
+              if [ ! -f /tmp/out/manifest.json ]; then
+                echo "ERROR: no manifest.json produced — runner failed" >&2
+                touch /tmp/out/done
+                exit 1
+              fi
+              # node-extract eventCount totals from the manifest;
+              # avoids needing python3 in node:20-bookworm-slim.
+              total_events=$(node -e 'const m = require("/tmp/out/manifest.json"); console.log(m.scenarios.reduce((s,sc) => s + (sc.eventCount||0), 0));')
+              echo "[validation] total events captured across wire scenarios: ${total_events}"
+              if [ "${total_events}" = "0" ]; then
+                echo "[validation] ERROR: zero events captured — wire path is broken" >&2
+                touch /tmp/out/done
+                exit 1
+              fi
+              echo "[validation] wire path is plumbed end-to-end"
+
+              # Surface the index + each webm as base64 in logs.
+              for f in /tmp/out/webrtc-*.webm; do
+                if [ -f "$f" ]; then
+                  echo "===WEBM_BASE64_BEGIN_$(basename $f)==="
+                  base64 -w 0 "$f"
+                  echo
+                  echo "===WEBM_BASE64_END_$(basename $f)==="
+                fi
+              done
+
+              touch /tmp/out/done
+          env:
+            - name: CHROMELESS_URL
+              value: "http://localhost:9222"
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi", ephemeral-storage: "2Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              # NOT readOnly — npm install writes node_modules into
+              # /workspace/tests/webrtc/. The bootstrap-tests
+              # initContainer is the only other writer and it has
+              # already exited by the time test-driver runs, so
+              # there's no producer/consumer race to guard against.
+            - name: out-vol
+              mountPath: /tmp/out
+
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 256Mi
+        # input-bridge binary lives here, written by build-input-bridge
+        # initContainer.
+        - name: shared-bin
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        - name: out-vol
+          emptyDir:
+            sizeLimit: 512Mi

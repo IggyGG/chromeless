@@ -6,14 +6,14 @@ image.
 
 | File                  | Purpose                                                                                |
 |-----------------------|----------------------------------------------------------------------------------------|
-| `cb-build.sh`         | Orchestrator. Runs T101's Day-1 sequence end-to-end inside the build pod.              |
+| `chromeless-build.sh`         | Orchestrator. Runs T101's Day-1 sequence end-to-end inside the build pod.              |
 | `Dockerfile.runtime`  | Final runtime image — debian-slim base + `cloud_browser_worker` + supervisord glue.    |
 | `README.md`           | This file.                                                                             |
 
 The companion file in `capture/build-integration/build.sh` (T49) is
 the **developer-host** wrapper for the same operations
 (apply-patches / gen / ninja) when working from inside an existing
-Chromium tree. `cb-build.sh` calls into it for those three steps so
+Chromium tree. `chromeless-build.sh` calls into it for those three steps so
 behaviour stays consistent across the dev-host and Job paths.
 
 ## How the K8s Job invokes this
@@ -24,32 +24,32 @@ T112's Job spec mounts:
 |----------------|----------------------------------------------------------------------------------------|
 | `/workspace`   | This repo, RW (so we can `git -C /workspace ...` for SHA, etc.).                       |
 | `/work/src/chromium` | Persistent volume holding the Chromium checkout. Reused across Job retries.    |
-| `/work/artifacts`    | Output volume. `cb-build.sh` writes the binary tarball + the kaniko build context here. |
-| `/work/logs`         | Persistent volume for run logs. `cb-build-<timestamp>.log` per invocation.       |
+| `/work/artifacts`    | Output volume. `chromeless-build.sh` writes the binary tarball + the kaniko build context here. |
+| `/work/logs`         | Persistent volume for run logs. `chromeless-build-<timestamp>.log` per invocation.       |
 | `/sccache`           | Persistent volume for the sccache cache. The single biggest determinant of build time. |
 
 Then it runs:
 
 ```
-bash /workspace/build/cb-build.sh
+bash /workspace/build/chromeless-build.sh
 ```
 
 …with optional env-var overrides:
 
 | Var                       | Default                                  | Purpose                                                  |
 |---------------------------|-------------------------------------------|----------------------------------------------------------|
-| `CB_REPO`                 | `/workspace`                              | This repo's path inside the pod.                         |
-| `CB_WORK_ROOT`            | `/work`                                   | Override for the work-dir prefix (used by STUB_MODE local runs). |
+| `CHROMELESS_REPO`                 | `/workspace`                              | This repo's path inside the pod.                         |
+| `CHROMELESS_WORK_ROOT`            | `/work`                                   | Override for the work-dir prefix (used by STUB_MODE local runs). |
 | `CHROMIUM_BRANCH_NUMBER`  | `7727`                                    | Pinned Chromium release branch (T17 §6). Update at each roll. |
 | `SCCACHE_DIR`             | `/sccache`                                | sccache cache root.                                      |
 | `NINJA_PARALLELISM`       | (unset)                                   | `-j` arg for autoninja. Default lets ninja auto-pick.    |
-| `CB_BUILD_TARGETS`        | `cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests` | The three Phase-2 targets. |
+| `CHROMELESS_BUILD_TARGETS`        | `cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests` | The three Phase-2 targets. |
 | `SKIP_FETCH`              | (unset)                                   | `1` skips Step 1 if the Chromium tree is already populated (Job retry). |
 | `STUB_MODE`               | (unset)                                   | `1` exercises the script's structure without actually building. The DoD test path. |
 
 The Job's downstream **kaniko sidecar** picks up
 `/work/artifacts/context/` and pushes
-`cb-chromium:cr${CHROMIUM_BRANCH_NUMBER}-${CB_GIT_SHA}` to the
+`chromeless:cr${CHROMIUM_BRANCH_NUMBER}-${CHROMELESS_GIT_SHA}` to the
 forgejo registry. Registry auth lives there, not here.
 
 ## What each step does + expected runtime
@@ -57,14 +57,14 @@ forgejo registry. Registry auth lives there, not here.
 | Step | What | Cold | Warm sccache |
 |------|------|------|--------------|
 | 1/9 gclient sync       | `gclient config` + `gclient sync --no-history --shallow` to the pinned branch-head. ~30 GB checkout (vs ~80 GB with full history). | 30–60 min | 0–5 min if SKIP_FETCH=1 |
-| 2/9 symlink            | `ln -s ${CB_REPO} ${CHROMIUM_SRC}/src/cloud-browser`. | <1 s | <1 s |
+| 2/9 symlink            | `ln -s ${CHROMELESS_REPO} ${CHROMIUM_SRC}/src/cloud-browser`. | <1 s | <1 s |
 | 3/9 apply patches      | Delegates to `capture/build-integration/build.sh apply-patches` (T49). | <5 s | <5 s |
 | 4/9 sccache setup      | `sccache --start-server` + env vars. | <5 s | <5 s |
 | 5/9 gn gen             | Delegates to T49's wrapper. | 1–3 min | 1–3 min |
 | 6/9 autoninja          | The big one — `cloud_browser_worker` + the two test targets. **The single biggest variable.** | **3–6 h** | **45–90 min** |
 | 7/9 unit tests         | `cloud_browser_encoder_unittests` + `cloud_browser_framesink_capturer_unittests`. ~52 tests per T97 §5. | 1–2 min | 1–2 min |
 | 8/9 package binary     | Strip + `tar --zstd -cf` into `/work/artifacts/`. | 1–2 min | 1–2 min |
-| 9/9 stage image context| Copies Dockerfile.runtime + supervisord.conf + launch-chromium.sh into the kaniko context. | <5 s | <5 s |
+| 9/9 stage image context| Copies Dockerfile.runtime + supervisord.conf + launch-chromeless.sh into the kaniko context. | <5 s | <5 s |
 | **Total**              |  | **4–8 h** | **~1 h** |
 
 T17 §4 numbers are the source of truth for the autoninja step. The
@@ -74,7 +74,7 @@ typical band for incremental Chromium patches.
 ## Triage — common failures
 
 Drawn from T101 §2 ("failure modes to expect") + T49 patches/README
-rebase-strategy notes. Look at the matching `cb-build-<timestamp>.log`
+rebase-strategy notes. Look at the matching `chromeless-build-<timestamp>.log`
 in `/work/logs/` first.
 
 ### Step 1 — gclient sync fails
@@ -135,12 +135,12 @@ Useful for verifying the script's structure without 4 hours of build
 time:
 
 ```bash
-mkdir -p /tmp/cb-build-test/work /tmp/cb-build-test/sccache
-CB_REPO=$(pwd) \
-CB_WORK_ROOT=/tmp/cb-build-test/work \
-SCCACHE_DIR=/tmp/cb-build-test/sccache \
+mkdir -p /tmp/chromeless-build-test/work /tmp/chromeless-build-test/sccache
+CHROMELESS_REPO=$(pwd) \
+CHROMELESS_WORK_ROOT=/tmp/chromeless-build-test/work \
+SCCACHE_DIR=/tmp/chromeless-build-test/sccache \
 STUB_MODE=1 \
-bash build/cb-build.sh
+bash build/chromeless-build.sh
 ```
 
 Each step prints its `=== STEP N/9 ... ===` markers and skips the

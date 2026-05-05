@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/capture/cursor-watcher
+module github.com/iggy/chromeless/capture/cursor-watcher
 
 go 1.22
 

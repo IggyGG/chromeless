@@ -1,8 +1,8 @@
 {
-  "name": "cloud-browser-webrtc-e2e",
+  "name": "chromeless-e2e",
   "version": "0.0.1",
   "private": true,
-  "description": "Playwright end-to-end tests for the v0 cloud-browser-webrtc stack",
+  "description": "Playwright end-to-end tests for the v0 chromeless stack",
   "type": "module",
   "scripts": {
     "test:e2e": "playwright test",

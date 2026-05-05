@@ -1485,7 +1485,7 @@ func TestDispatchKeyTextSynthesis(t *testing.T) {
 // ---------------------------------------------------------------------------
 //
 // These tests exercise the flat-mode plumbing introduced to fix
-// BUGS-529 (cb-chromium dropping Input.dispatch* on direct-page-WS
+// BUGS-529 (chromeless dropping Input.dispatch* on direct-page-WS
 // sessions after a third-party Page.navigate). They cover:
 //
 //   - dialCDP returns a *pageSessionSender whose CurrentSession()

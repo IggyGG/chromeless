@@ -37,7 +37,7 @@
 #
 # Knobs (env, all optional):
 #   LOOPBACK_OUT_DIR     where reconciler writes its CSV/PNG/summary
-#                        (default: /tmp/cb-harness-loopback)
+#                        (default: /tmp/chromeless-harness-loopback)
 #   LOOPBACK_PYTHON      python3 binary (default: python3)
 #
 # Prereqs:
@@ -51,7 +51,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SAMPLE_DIR="$REPO_ROOT/harness/latency/sample-input"
-OUT_DIR="${LOOPBACK_OUT_DIR:-/tmp/cb-harness-loopback}"
+OUT_DIR="${LOOPBACK_OUT_DIR:-/tmp/chromeless-harness-loopback}"
 PYTHON="${LOOPBACK_PYTHON:-python3}"
 
 step() { printf '\n\033[1m== %s ==\033[0m\n' "$*" >&2; }

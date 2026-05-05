@@ -4,7 +4,7 @@
 // upgrading the websocket. Tokens are JWT-shaped (header.payload.sig)
 // using `alg=EdDSA`, signed with an Ed25519 keypair.
 //
-// Verifier key is loaded once from `CBWRTC_AUTH_PUBKEY` (base64-encoded
+// Verifier key is loaded once from `CHROMELESS_AUTH_PUBKEY` (base64-encoded
 // raw 32-byte Ed25519 public key). If the env var is unset or empty,
 // auth is **disabled** with a single startup warning — this is the
 // current Phase-0/1 behaviour and must remain a deliberate, observable
@@ -77,7 +77,7 @@ var globalAuth authConfig
 var timeNow = time.Now
 
 // authPubkeyEnv is the environment variable consulted to enable auth.
-const authPubkeyEnv = "CBWRTC_AUTH_PUBKEY"
+const authPubkeyEnv = "CHROMELESS_AUTH_PUBKEY"
 
 // mAuthFailures is exported via /metrics. Each rejection records one
 // increment with a low-cardinality `reason` label.

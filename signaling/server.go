@@ -1,4 +1,4 @@
-// Package main implements the v0 cloud-browser-webrtc signaling server.
+// Package main implements the v0 chromeless signaling server.
 //
 // It is intentionally minimal:
 //   - one process, one in-memory map of sessions
@@ -668,7 +668,7 @@ func main() {
 	}
 	addr := ":" + port
 
-	// T93: read CBWRTC_REGION first so every metric Set/Inc on the
+	// T93: read CHROMELESS_REGION first so every metric Set/Inc on the
 	// startup path picks up the correct label.
 	initRegion(logger)
 	// T48: dev issuer must run before initAuth so the env var it
@@ -686,7 +686,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/turn-credentials", turnHandler)
-	mux.HandleFunc("/issue-token", devIssuerHandler) // T48 dev only; 404 unless CBWRTC_DEV_ISSUER=1
+	mux.HandleFunc("/issue-token", devIssuerHandler) // T48 dev only; 404 unless CHROMELESS_DEV_ISSUER=1
 	if adminEnabled() {
 		// T89: only register the route when the admin pubkey is set.
 		// "Forgot to configure auth" should be 404, not anonymous.

@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/capture/input-bridge
+module github.com/iggy/chromeless/capture/input-bridge
 
 go 1.22
 

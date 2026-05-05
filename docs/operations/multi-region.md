@@ -46,7 +46,7 @@ first:
 
 ### Approach A — GeoDNS (recommended default)
 
-`browser.cloud-browser-webrtc.io` resolves via GeoDNS / Anycast to
+`browser.chromeless.io` resolves via GeoDNS / Anycast to
 the nearest regional ingress. The signaling Ingress in each
 region's [`infra/k8s/signaling-deployment.yaml`](../../infra/k8s/signaling-deployment.yaml)
 takes the same hostname, terminated regionally.
@@ -71,7 +71,7 @@ existing `client/dist/config.js` template can carry a `region:` field).
 
 ### Approach C — probe-based selection
 
-Client fires HEAD requests to `<region>.cloud-browser-webrtc.io`
+Client fires HEAD requests to `<region>.chromeless.io`
 endpoints, measures round-trip times, picks the fastest. T82's
 client-side stats sampling is adjacent infrastructure.
 
@@ -86,7 +86,7 @@ client-side stats sampling is adjacent infrastructure.
 Phase 4+ wishlist when we have telemetry showing GeoDNS is mis-routing
 > 5% of users.
 
-The same DNS records double as `signaling.<region>.cloud-browser-webrtc.io`
+The same DNS records double as `signaling.<region>.chromeless.io`
 for diagnostic per-region URLs and for B's UI dropdown.
 
 ## 3. Signaling federation
@@ -185,9 +185,9 @@ Phase 3 multi-tenancy (T67 namespacing + T48 auth) extends with a
 Implementation hook:
 - Extend [`signaling/auth.go`](../../signaling/auth.go)'s `Claims`
   struct with `Aud []string` and `DefaultRegion string` fields.
-- Add `CBWRTC_REGION` env to signaling + turn-issuer; signaling's
+- Add `CHROMELESS_REGION` env to signaling + turn-issuer; signaling's
   verifier rejects when `claims.Aud` doesn't include
-  `os.Getenv("CBWRTC_REGION")`.
+  `os.Getenv("CHROMELESS_REGION")`.
 - Surface `region` as a label on `cb_signaling_*` metrics.
 
 These are two-line changes per service; the design is intended to
@@ -217,25 +217,25 @@ to context-switch every time they investigate.** The T94 shape:
   endpoint; preserves the `region` label (`honor_labels: true`).
 - One global Grafana hosting
   [`infra/observability/dashboards/`](../../infra/observability/dashboards/).
-  Both `cb-cluster-overview.json` and `cb-session-detail.json`
+  Both `chromeless-cluster-overview.json` and `chromeless-session-detail.json`
   carry a `$region` template variable (multi-select, default
   "All"); every panel query is `{region=~"$region"}` filtered.
 - Per-region Grafana *also* deployed for the in-region on-call.
   Same dashboards; the `$region` selector limits to the local
   region by default.
 
-The metrics side: cb-signaling carries `region` per T93 in
-`signaling/metrics.go`; cb-metrics-sidecar carries it per T94 via
-`ConstLabels: regionLabels()` reading `CBWRTC_REGION` at start.
+The metrics side: chromeless-signaling carries `region` per T93 in
+`signaling/metrics.go`; chromeless-metrics-sidecar carries it per T94 via
+`ConstLabels: regionLabels()` reading `CHROMELESS_REGION` at start.
 The Helm chart's top-level `region:` value (T94) propagates the
 env to every Pod (signaling, controller, turn-issuer, session
-pool's cb-chromium + cb-metrics-sidecar). When the value is empty
+pool's chromeless + chromeless-metrics-sidecar). When the value is empty
 (single-region deploy), no `region` label is emitted at all —
 existing single-region dashboards keep working unchanged.
 
 ### Alerting — regional routing
 
-[`infra/observability/alerts/cb-alerts.yaml`](../../infra/observability/alerts/cb-alerts.yaml)
+[`infra/observability/alerts/chromeless-alerts.yaml`](../../infra/observability/alerts/chromeless-alerts.yaml)
 already labels alerts with `severity`. Add `region` from the
 external label so AlertManager's routing tree can route per-region:
 
@@ -306,35 +306,35 @@ points:
 
 | Existing artifact | Multi-region change |
 |---|---|
-| [T48 auth (`signaling/auth.go`)](../../signaling/auth.go) | add `Aud []string` + `DefaultRegion string` to `Claims`; reject when `os.Getenv("CBWRTC_REGION")` not in `Aud`. |
+| [T48 auth (`signaling/auth.go`)](../../signaling/auth.go) | add `Aud []string` + `DefaultRegion string` to `Claims`; reject when `os.Getenv("CHROMELESS_REGION")` not in `Aud`. |
 | [T67 tenant labels (`signaling/metrics.go`)](../../signaling/metrics.go) | add `region` label to all metrics; emit via `external_labels` in Prometheus config. |
-| [T76 TURN issuer (`infra/turn-issuer`)](../../infra/turn-issuer/) | per-region deploy; per-region HMAC secret; the issuer's existing `CBWRTC_TURN_SHARED_SECRET` becomes a per-region value. |
-| [T50 Helm chart (`infra/helm/`)](../../infra/helm/cloud-browser-webrtc/) | per-region overlay/values file (`values-<region>.yaml`); CI installs each region with that file. |
+| [T76 TURN issuer (`infra/turn-issuer`)](../../infra/turn-issuer/) | per-region deploy; per-region HMAC secret; the issuer's existing `CHROMELESS_TURN_SHARED_SECRET` becomes a per-region value. |
+| [T50 Helm chart (`infra/helm/`)](../../infra/helm/chromeless/) | per-region overlay/values file (`values-<region>.yaml`); CI installs each region with that file. |
 | [T80 runbook](./runbook.md) | per-region drill-down sections; "rotating secrets" gains a per-region step. |
 | [T84 release pipeline](../../.github/workflows/release.yml) | push to a multi-region registry mirror; canary rollout via Argo CD per region. |
 | [T66 Grafana dashboards](../../infra/observability/dashboards/) | **DONE in T94** — both dashboards carry `$region` template variable; every panel query is `{region=~"$region"}` filtered. |
-| AlertManager rules | **DONE in T94** — region-local rules group by `region` label; global rules carry `scope: global` for cross-region rotations. See [`cb-alerts.yaml`](../../infra/observability/alerts/cb-alerts.yaml). |
-| Helm chart `region:` value | **DONE in T94** — top-level `region:` value propagates `CBWRTC_REGION` to every Pod. |
+| AlertManager rules | **DONE in T94** — region-local rules group by `region` label; global rules carry `scope: global` for cross-region rotations. See [`chromeless-alerts.yaml`](../../infra/observability/alerts/chromeless-alerts.yaml). |
+| Helm chart `region:` value | **DONE in T94** — top-level `region:` value propagates `CHROMELESS_REGION` to every Pod. |
 
 Phase 3 implementation tasks:
 
 1. **T-MR1 (T93 — implemented)**: `Claims.Aud` is honoured by the
    signaling verifier; rejection emits
    `cb_signaling_auth_failures_total{reason="region_not_allowed"}`.
-   `CBWRTC_REGION` env var (Helm: `signaling.region`) tags every
+   `CHROMELESS_REGION` env var (Helm: `signaling.region`) tags every
    metric with a constant `region` label. Dev issuer accepts
    `?aud=…` to mint scoped tokens. Source files:
    - `signaling/auth.go` (`Claims.Aud`, `processRegion`, `initRegion`,
      audience check inside `verifyToken`).
    - `signaling/dev-issuer.go` (`?aud=` query param).
    - `signaling/metrics.go` (`region` label on every metric).
-   - `infra/helm/cloud-browser-webrtc/values.yaml` +
+   - `infra/helm/chromeless/values.yaml` +
      `templates/signaling.yaml` (the Helm wiring).
    `DefaultRegion`-style claim is deferred to T-MR4 (it only matters
    once GeoDNS lands; in v1 the issuer can pick a region for the
    client without the claim).
 2. **T-MR2 (T94 — implemented)**: per-region Helm values + federated
-   Prometheus topology. `cb-metrics-sidecar` also carries the
+   Prometheus topology. `chromeless-metrics-sidecar` also carries the
    `region` ConstLabel.
 3. **T-MR3**: `$region` template variable across the T66 dashboards
    (depends on T-MR2 metrics).

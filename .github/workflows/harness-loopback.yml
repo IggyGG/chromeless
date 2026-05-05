@@ -56,7 +56,7 @@ jobs:
                    sink-lag-baseline.sh input-latency-loopback.sh; do
             if [ -x "tests/harness/$s" ]; then
               echo "::group::$s"
-              CB_BASELINE_OUT=".baselines-out/${s%.sh}.json" \
+              CHROMELESS_BASELINE_OUT=".baselines-out/${s%.sh}.json" \
                   bash "tests/harness/$s" || echo "$s exited non-zero"
               echo "::endgroup::"
             else

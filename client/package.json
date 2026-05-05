@@ -1,5 +1,5 @@
 {
-  "name": "cloud-browser-webrtc-client",
+  "name": "chromeless-client",
   "version": "0.0.1",
   "private": true,
   "description": "v0 browser client — signaling round-trip + stub RTCPeerConnection",

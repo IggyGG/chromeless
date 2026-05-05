@@ -1,4 +1,4 @@
-# infra/k8s/namespace.yaml — cloud-browser-webrtc namespace
+# infra/k8s/namespace.yaml — chromeless namespace
 #
 # Everything Phase-3 lives in this namespace so it's easy to teardown
 # and easy to reason about per-tenant network policies. The namespace
@@ -7,9 +7,9 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: cloud-browser-webrtc
+  name: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     # Pod Security Standards (replace PSP). Restricted is what we want
     # eventually; baseline gets us through the v1 deploy where we still
     # need shareProcessNamespace + the chromium suid sandbox helper.

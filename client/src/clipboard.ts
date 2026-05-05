@@ -1,4 +1,4 @@
-// Bidirectional clipboard sync for the cloud-browser-webrtc client.
+// Bidirectional clipboard sync for the chromeless client.
 //
 // Wraps the "clipboard" RTCDataChannel (separate from "input"). Wire
 // format: docs/protocols/clipboard-channel.md (v1).

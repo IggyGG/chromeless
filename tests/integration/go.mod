@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/tests/integration
+module github.com/iggy/chromeless/tests/integration
 
 go 1.22
 

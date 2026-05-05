@@ -50,7 +50,7 @@ times to launch N restored copies of the same starting state.
    │   docker rm $cid                                                ▼
    └─────────┬──────────┘                                  ┌────────────────────┐
              │ snapshot dir at                             │ DevTools: Page.    │
-             │ /var/lib/cb-snapshots/<sha>/                │   navigate(streamerURL)
+             │ /var/lib/chromeless-snapshots/<sha>/                │   navigate(streamerURL)
              ▼                                             │   with session_id  │
    ┌────────────────────┐                                  │ ready_at - now < 1s
    │ uploaded to a      │                                  └────────────────────┘
@@ -110,7 +110,7 @@ The snapshot directory is the *memory* state. The *filesystem* state
 is separate. We use an overlayfs layout:
 
 ```
-/var/lib/cb-snapshots/<sha>/
+/var/lib/chromeless-snapshots/<sha>/
 ├── images/                ← criu's memory-pages dump
 └── rootfs.tar.zst         ← the container's rootfs at snapshot time
 ```
@@ -145,7 +145,7 @@ snapshot becomes *tenant-namespaced* and must never be served to a
 different tenant. The directory layout already supports this:
 
 ```
-/var/lib/cb-snapshots/
+/var/lib/chromeless-snapshots/
 ├── shared/<sha>/          ← about:blank snapshots, any-tenant
 └── tenant/<tenant_id>/<sha>/   ← post-page snapshots, single-tenant
 ```
@@ -175,7 +175,7 @@ N times. A tampered snapshot is a privilege-escalation primitive
    private key in the build pipeline). Verify before restore.
 2. **Store on read-only object storage** with bucket-level immutable
    policies.
-3. **Restore over a content-addressed path** (`/var/lib/cb-snapshots/<sha>`):
+3. **Restore over a content-addressed path** (`/var/lib/chromeless-snapshots/<sha>`):
    the sha matches a manifest signed at build time, the restore
    helper refuses to restore from a sha not on the allow-list.
 
@@ -197,14 +197,14 @@ host with CRIU installed. Procedure:
    `CAP_CHECKPOINT_RESTORE` + `CAP_SYS_PTRACE`.
 2. **Build the image** (build context = repo root):
    ```
-   docker build -t cloud-browser-webrtc:dev -f infra/Dockerfile .
+   docker build -t chromeless:dev -f infra/Dockerfile .
    ```
 3. **Take a snapshot:**
    ```
-   sudo ./infra/snapshots/snapshot.sh cb-snapshot-blank
+   sudo ./infra/snapshots/snapshot.sh chromeless-snapshot-blank
    ```
    The script prints the snapshot's content sha and writes to
-   `/var/lib/cb-snapshots/<sha>/`.
+   `/var/lib/chromeless-snapshots/<sha>/`.
 4. **Restore:**
    ```
    sudo ./infra/snapshots/restore.sh <sha>
@@ -228,7 +228,7 @@ options. T68 snapshots interact with each subtly:
 
 | Policy | What happens at session end | Compatible with snapshots? |
 |---|---|---|
-| `RecreatePod` (default) | Pod is deleted; the pool reconciler creates a fresh one. New pod restores from `cb.io/snapshot-id` if set, else cold-starts. | Yes. Each session gets a fresh process-tree-from-snapshot. Highest isolation. |
+| `RecreatePod` (default) | Pod is deleted; the pool reconciler creates a fresh one. New pod restores from `chromeless.io/snapshot-id` if set, else cold-starts. | Yes. Each session gets a fresh process-tree-from-snapshot. Highest isolation. |
 | `ScrubAndReturn` | `scrub-pod.sh` wipes user-data-dir + tmp inside the live pod; pod stays alive and goes back to warm. | Yes — but the snapshot only matters at the *original* container boot. Once a pod is in the warm pool, subsequent reuses don't re-restore the snapshot; they just scrub-in-place. |
 
 ### Acceptable when
@@ -306,7 +306,7 @@ Pick per pool, not per session — the pool is the unit of trust.
   task gets re-evaluated.
 - **T50 (controller):** the controller chooses
   `runc + restore-from-snapshot` vs `cold-start fresh pod` based on
-  the pod's `cb.io/snapshot-id` annotation. Empty annotation =
+  the pod's `chromeless.io/snapshot-id` annotation. Empty annotation =
   cold-start path. See `infra/k8s/cloud-browser-session.yaml`.
 
 ## Files in this directory

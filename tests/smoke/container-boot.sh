@@ -2,7 +2,7 @@
 #
 # tests/smoke/container-boot.sh — T9.
 #
-# Boot the cloud-browser-webrtc container, drive Chromium via DevTools
+# Boot the chromeless container, drive Chromium via DevTools
 # Protocol to navigate a real URL, capture a screenshot, and assert it's
 # a valid PNG. Designed to catch real regressions: a launcher that
 # crashes, a Dockerfile that builds but doesn't actually start Chromium,
@@ -16,7 +16,7 @@
 #      9222:9222` on docker run therefore can't reach DevTools. Running
 #      from inside the container's net namespace bypasses this entirely
 #      and isolates the smoke from "is host networking right" concerns.
-#      (Filed as a follow-up; once launch-chromium.sh is fixed, this
+#      (Filed as a follow-up; once launch-chromeless.sh is fixed, this
 #      smoke continues to pass unchanged.)
 #   2. Avoiding host pip installs keeps the smoke self-contained and
 #      compatible with any host that has Docker + curl + python3, which
@@ -37,7 +37,7 @@
 #
 # Knobs (env):
 #   SMOKE_IMAGE_TAG        Docker image tag to test. Default: auto-detect
-#                          (prefers cloud-browser-webrtc:ci, then :dev,
+#                          (prefers chromeless:ci, then :dev,
 #                          then builds :dev from infra/Dockerfile).
 #   SMOKE_FORCE_REBUILD    If "1", always docker build even if a tag exists.
 #   SMOKE_NAVIGATE_URL     URL Chromium navigates to. Default:
@@ -45,7 +45,7 @@
 #                          target if the runner has no public outbound
 #                          (e.g. data:text/html;base64,...).
 #   SMOKE_SCREENSHOT_PATH  Where to write the screenshot. Default:
-#                          /tmp/cb-smoke.png.
+#                          /tmp/chromeless-smoke.png.
 #   SMOKE_READY_TIMEOUT_S  How long to wait for DevTools. Default: 60.
 #   SMOKE_LOAD_TIMEOUT_S   How long to wait for navigation to complete.
 #                          Default: 30.
@@ -65,14 +65,14 @@ set -euo pipefail
 SMOKE_IMAGE_TAG="${SMOKE_IMAGE_TAG:-}"
 SMOKE_FORCE_REBUILD="${SMOKE_FORCE_REBUILD:-0}"
 SMOKE_NAVIGATE_URL="${SMOKE_NAVIGATE_URL:-https://example.com}"
-SMOKE_SCREENSHOT_PATH="${SMOKE_SCREENSHOT_PATH:-/tmp/cb-smoke.png}"
+SMOKE_SCREENSHOT_PATH="${SMOKE_SCREENSHOT_PATH:-/tmp/chromeless-smoke.png}"
 SMOKE_READY_TIMEOUT_S="${SMOKE_READY_TIMEOUT_S:-60}"
 SMOKE_LOAD_TIMEOUT_S="${SMOKE_LOAD_TIMEOUT_S:-30}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CONTAINER_NAME="cb-smoke-$$"
+CONTAINER_NAME="chromeless-smoke-$$"
 CONTAINER_ID=""
-SCREENSHOT_IN_CONTAINER="/tmp/cb-smoke.png"
+SCREENSHOT_IN_CONTAINER="/tmp/chromeless-smoke.png"
 
 step()  { printf '\n\033[1m== %s ==\033[0m\n' "$*" >&2; }
 log()   { printf '[smoke] %s\n' "$*" >&2; }
@@ -108,7 +108,7 @@ require python3
 resolve_or_build_image() {
     if [ "$SMOKE_FORCE_REBUILD" = "1" ]; then
         log "SMOKE_FORCE_REBUILD=1 — rebuilding image"
-        SMOKE_IMAGE_TAG="${SMOKE_IMAGE_TAG:-cloud-browser-webrtc:dev}"
+        SMOKE_IMAGE_TAG="${SMOKE_IMAGE_TAG:-chromeless:dev}"
         ( cd "$REPO_ROOT" && docker build -t "$SMOKE_IMAGE_TAG" -f infra/Dockerfile . ) \
             || fail "docker build failed"
         return
@@ -126,15 +126,15 @@ resolve_or_build_image() {
     fi
 
     # Auto-detect order: :ci (CI fast path) -> :dev (local convention).
-    if docker image inspect "cloud-browser-webrtc:ci" >/dev/null 2>&1; then
-        SMOKE_IMAGE_TAG="cloud-browser-webrtc:ci"
+    if docker image inspect "chromeless:ci" >/dev/null 2>&1; then
+        SMOKE_IMAGE_TAG="chromeless:ci"
         log "auto-detected image: $SMOKE_IMAGE_TAG"
-    elif docker image inspect "cloud-browser-webrtc:dev" >/dev/null 2>&1; then
-        SMOKE_IMAGE_TAG="cloud-browser-webrtc:dev"
+    elif docker image inspect "chromeless:dev" >/dev/null 2>&1; then
+        SMOKE_IMAGE_TAG="chromeless:dev"
         log "auto-detected image: $SMOKE_IMAGE_TAG"
     else
-        SMOKE_IMAGE_TAG="cloud-browser-webrtc:dev"
-        log "no cloud-browser-webrtc image present; building $SMOKE_IMAGE_TAG"
+        SMOKE_IMAGE_TAG="chromeless:dev"
+        log "no chromeless image present; building $SMOKE_IMAGE_TAG"
         ( cd "$REPO_ROOT" && docker build -t "$SMOKE_IMAGE_TAG" -f infra/Dockerfile . ) \
             || fail "docker build failed"
     fi

@@ -405,7 +405,7 @@ class PortalScenario {
 // ---------------------------------------------------------------------------
 
 export async function runPortalScenario(scenario, opts = {}) {
-  const cbUrl = opts.cbUrl ?? process.env.CB_URL ?? "http://127.0.0.1:9222";
+  const cbUrl = opts.cbUrl ?? process.env.CHROMELESS_URL ?? "http://127.0.0.1:9222";
   const artifactsDir =
     opts.artifactsDir
     ?? process.env.TEST_ARTIFACTS_DIR

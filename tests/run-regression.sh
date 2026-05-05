@@ -178,7 +178,7 @@ run_e2e() {
 # ---- driver ------------------------------------------------------------
 
 START=$(date +%s)
-printf "${BOLD}cloud-browser-webrtc regression suite${RESET}\n"
+printf "${BOLD}chromeless regression suite${RESET}\n"
 printf "${DIM}mode=%s repo=%s${RESET}\n" "$MODE" "$REPO_ROOT"
 
 case "$MODE" in

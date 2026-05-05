@@ -1,0 +1,41 @@
+# netpol-forgejo-allow-chromeless-tests.yaml
+#
+# Allows the chromeless-tests namespace to dial forgejo's HTTP API on port 3000.
+# Required so the bootstrap-tests / build-input-bridge initContainers
+# in chromeless-cdp-validation, chromeless-webrtc-validation, and
+# chromeless-webrtc-wire-bridge-validation can `git clone` the chromeless
+# repo at runtime.
+#
+# Lives in the FORGEJO namespace (where the receiver pods are), not
+# chromeless-tests — namespaceSelector matches the source-namespace label.
+# Mirrors the existing allow-runner-ingress and allow-ingress-controller
+# rules in forgejo's NetworkPolicy set.
+#
+# When forgejo's default-deny-ingress is in effect (which is the
+# steady-state config), every consumer namespace needs an explicit
+# allow rule. The same pattern landed for forgejo-runner during
+# Cohort-2 setup; this is the chromeless-tests sibling.
+#
+# Kept separate from kustomization.yaml because this resource lives
+# in a different namespace from the others. Apply explicitly:
+#   kubectl apply -f infra/k8s/tests/netpol-forgejo-allow-chromeless-tests.yaml
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-chromeless-tests-ingress
+  namespace: forgejo
+  annotations:
+    chromeless.triform/applied-by: "infra/k8s/tests/netpol-forgejo-allow-chromeless-tests.yaml"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: chromeless-tests
+      ports:
+        - port: 3000
+          protocol: TCP

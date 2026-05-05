@@ -1,6 +1,6 @@
 # Container security hardening
 
-T57: Phase 1+ minimum-viable hardening of the cloud-browser-webrtc
+T57: Phase 1+ minimum-viable hardening of the chromeless
 container. This is what we ship today; T44's Phase 3 sandbox decision
 (gVisor / Kata + Cloud Hypervisor / runc + AppArmor) builds *on top*
 of this rather than replacing it.
@@ -20,7 +20,7 @@ maximally contained without yet relying on a microVM.
 | Root filesystem | writeable | read-only in K8s (`readOnlyRootFilesystem: true`); writeable paths are explicit emptyDir volumes |
 | Capabilities | Docker default set | `drop: ["ALL"]`, no `add` |
 | Privilege escalation | implicit-allowed | `allowPrivilegeEscalation: false` |
-| Seccomp | Docker's default profile (only) | `Localhost: cb-chromium.json` — DENY-list of dangerous syscalls beyond Docker's default |
+| Seccomp | Docker's default profile (only) | `Localhost: chromeless.json` — DENY-list of dangerous syscalls beyond Docker's default |
 | Pod-level | (none) | `runAsNonRoot: true`, `runAsUser/Group: 1000`, `fsGroup: 1000` |
 | supervisord | ran as root, dropped privs per program | runs as cbuser; programs inherit |
 
@@ -28,16 +28,16 @@ maximally contained without yet relying on a microVM.
 
 ### `infra/Dockerfile`
 
-- **`USER cbuser` at the end.** With this, `docker run cloud-browser-webrtc:dev`
+- **`USER cbuser` at the end.** With this, `docker run chromeless:dev`
   starts a container whose PID 1 is cbuser. Combined with K8s's
   `runAsNonRoot: true`, this is the difference between "we attempt to
   drop to a user" and "we cannot become root, ever, in this image."
-- **`mkdir -p /run/supervisor /run/cb-session /var/log/supervisor`
+- **`mkdir -p /run/supervisor /run/chromeless-session /var/log/supervisor`
   + `chown -R cbuser:cbuser ...`** at build time. cbuser owns its
   state dirs in the image fs. In K8s the emptyDir overlays wipe these
   paths, so `cold-start.sh` re-creates them at startup.
-- **`COPY infra/seccomp/cb-chromium.json /etc/cb-seccomp.json`.** The
-  baked-in copy lets `docker run --security-opt seccomp=/etc/cb-seccomp.json`
+- **`COPY infra/seccomp/chromeless.json /etc/chromeless-seccomp.json`.** The
+  baked-in copy lets `docker run --security-opt seccomp=/etc/chromeless-seccomp.json`
   work without an external file.
 
 ### `infra/supervisord.conf`
@@ -67,20 +67,20 @@ maximally contained without yet relying on a microVM.
   seccomp localhost profile, fsGroupChangePolicy=OnRootMismatch
   (cheaper recursive chown than `Always` for emptyDir).
 - **Per-container `securityContext`**: `readOnlyRootFilesystem: true`
-  on every container including cb-chromium, `drop: ALL` capabilities,
+  on every container including chromeless, `drop: ALL` capabilities,
   `allowPrivilegeEscalation: false`. Defense in depth — even if pod
   defaults regress, individual containers stay locked.
 - **Volumes**:
   - `dshm` (medium=Memory, 1Gi): Chromium's /dev/shm.
   - `run` (medium=Memory, 64Mi): tmpfs for /run; supervisord +
-    pulse + cb-session live here.
+    pulse + chromeless-session live here.
   - `supervisor-log` (64Mi): /var/log/supervisor.
   - `home` (512Mi): /home/cbuser; chromium profile + caches.
   - `tmp` (64Mi): /tmp.
   - `x11-socket`: /tmp/.X11-unix shared with the cursor-watcher and
     clipboard-bridge sidecars.
 
-### `infra/seccomp/cb-chromium.json`
+### `infra/seccomp/chromeless.json`
 
 - **`defaultAction: SCMP_ACT_ALLOW`.** Chromium has a wide and
   evolving syscall surface. ALLOW-listing is brittle; the renderer
@@ -120,8 +120,8 @@ maximally contained without yet relying on a microVM.
   ALL caps. Until T44's Phase 3 sandbox decision is made, the
   OS-level seccomp profile here is the only seccomp layer between
   the renderer and the host. Document on the `--no-sandbox` line in
-  `infra/launch-chromium.sh` notes this.
-- **`shareProcessNamespace: true`.** Required so cb-metrics-sidecar
+  `infra/launch-chromeless.sh` notes this.
+- **`shareProcessNamespace: true`.** Required so chromeless-metrics-sidecar
   (T38) can read /proc to aggregate Chromium CPU/RSS. Mitigated by
   the seccomp profile blocking ptrace + process_vm_*. Phase 3
   alternatives: (1) move metrics scraping to a host-side
@@ -131,15 +131,15 @@ maximally contained without yet relying on a microVM.
 
 ## K8s seccomp install
 
-The seccomp profile lives at `infra/seccomp/cb-chromium.json` in this
+The seccomp profile lives at `infra/seccomp/chromeless.json` in this
 repo. K8s does NOT read it from the container image. Each kubelet
 node must have the profile on disk at:
 
 ```
-/var/lib/kubelet/seccomp/cb-chromium.json
+/var/lib/kubelet/seccomp/chromeless.json
 ```
 
-before a pod with `seccompProfile.localhostProfile: cb-chromium.json`
+before a pod with `seccompProfile.localhostProfile: chromeless.json`
 can start. The recommended pattern:
 
 1. Bake the profile into your node image (Packer / Image Builder /

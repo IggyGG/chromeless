@@ -1,7 +1,7 @@
 # Testing strategy
 
 This document is the entry point for everything we test in
-`cloud-browser-webrtc`. It is the contract between the dev teammates
+`chromeless`. It is the contract between the dev teammates
 (`chromium-dev`, `webrtc-dev`, `infra-dev`, `platform-dev`) and the
 `qa-tester` role, and the playbook for anyone landing a PR.
 

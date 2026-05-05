@@ -1,8 +1,8 @@
 {
-  "name": "cb-chromium-webrtc-tests",
+  "name": "chromeless-webrtc-tests",
   "version": "0.0.1",
   "private": true,
-  "description": "Standalone WebRTC harness that drives cb-chromium via CDP, acts as the Node.js peer, records the stream, and asserts encoder identity. See drive-recorder.mjs for the entry point and ../../docs/capture/path-of-least-resistance.md (T15) for upstream context.",
+  "description": "Standalone WebRTC harness that drives chromeless via CDP, acts as the Node.js peer, records the stream, and asserts encoder identity. See drive-recorder.mjs for the entry point and ../../docs/capture/path-of-least-resistance.md (T15) for upstream context.",
   "type": "module",
   "scripts": {
     "test": "node drive-recorder.mjs",

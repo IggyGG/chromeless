@@ -226,7 +226,7 @@ exist:
 
 Phase 2 unlocks the moment a Linux build host is provisioned per
 T17. The first Phase 2 deliverable is replacing T78's
-`CBWRTC_USE_FAKE_MEDIA` workaround with real
+`CHROMELESS_USE_FAKE_MEDIA` workaround with real
 FrameSinkVideoCapturer-driven capture — and that's the day the v1
 latency budget can be tightened toward Phase 4's < 60 ms LAN aim.
 

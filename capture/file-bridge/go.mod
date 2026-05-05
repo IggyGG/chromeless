@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/capture/file-bridge
+module github.com/iggy/chromeless/capture/file-bridge
 
 go 1.22
 

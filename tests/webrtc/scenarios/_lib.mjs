@@ -30,7 +30,7 @@
 //     covered by capture/input-bridge/main_test.go (27 unit tests on
 //     the Go side) and tests/integration/input_loop_test.go.
 //
-//   * The cluster Job (cb-webrtc-input-validation.yaml) runs the
+//   * The cluster Job (chromeless-webrtc-input-validation.yaml) runs the
 //     input-bridge sidecar and a separate set of e2e scenarios that
 //     drive the DataChannel path. That covers the wire layer; this
 //     module covers behaviour.
@@ -637,21 +637,21 @@ export class Scenario {
 
     // local:true uses chrome-remote-interface's bundled protocol
     // descriptor instead of fetching /json/protocol from the target
-    // at connect time. The cb-chromium build at cr7727-sw FATALs in
+    // at connect time. The chromeless build at cr7727-sw FATALs in
     // devtools_http_handler.cc:724 ("Could not load protocol") when
     // /json/protocol is requested — the embedder's resource pak is
     // missing the bundled descriptor file. Stock chromium has it
-    // baked in; cb-chromium will need a separate fix to package it.
+    // baked in; chromeless will need a separate fix to package it.
     // For now the harness sidesteps the path entirely.
     this._browser = await CDP({ target: wsUrl, local: true });
     this.log("ok", "browser CDP attached");
 
-    // BUGS-529 workaround (test-only): cb-chromium's flat-mode CDP
+    // BUGS-529 workaround (test-only): chromeless's flat-mode CDP
     // session DOES follow Page.frameNavigated correctly (verified by
     // input-bridge's diagnostic Page.frameNavigated logging — sessionId
     // stays stable across navigation), but Input.dispatch* on a session
     // bound through a navigation never reaches the renderer. This
-    // appears to be a chromium-tree bug in cb-chromium's InputRouter
+    // appears to be a chromium-tree bug in chromeless's InputRouter
     // binding-update path.
     //
     // Sidestep by creating a NEW page target boot-loaded directly to
@@ -668,24 +668,24 @@ export class Scenario {
     //   * non-wire: unchanged — non-wire scenarios already createTarget
     //     against a fresh BrowserContext.
     //
-    // This keeps the production cb-browserless deployment path
+    // This keeps the production chromeless-browserless deployment path
     // unchanged (production never navigates; the streamer page IS
     // the boot URL), and is exactly the test-only workaround the
     // BUGS-529 description names #2.
     let browserContextId, targetId;
     if (this.wire) {
-      // cb-chromium's CbDevToolsManagerDelegate::CreateNewTarget bails
+      // chromeless's CbDevToolsManagerDelegate::CreateNewTarget bails
       // with "no context available" when called without an explicit
       // browserContextId AND main_parts hasn't called
       // SetDefaultBrowserContext (which it doesn't — see
       // capture/build-integration/cloud_browser_browser_main_parts.cc;
       // a separate chromium-tree TODO). To unblock the test workaround
-      // we call Target.createBrowserContext first; cb-chromium's
+      // we call Target.createBrowserContext first; chromeless's
       // CbDevToolsManagerDelegate::CreateBrowserContext pushes onto
       // contexts_, and CreateNewTarget then reads contexts_.back().
       //
       // We deliberately do NOT track the returned browserContextId for
-      // teardown disposal — cb-chromium has a known DisposeBrowserContext
+      // teardown disposal — chromeless has a known DisposeBrowserContext
       // destruction-order bug (see cb_devtools_agent.cc TODO header), so
       // Target.closeTarget alone is what we tear down per scenario.
       // The browser process exits on Pod shutdown which cleans up the
@@ -747,7 +747,7 @@ export class Scenario {
       // Target was boot-loaded to navUrl via Target.createTarget above
       // (BUGS-529 workaround). Skip the explicit navigate so the
       // input-bridge's session stays bound to the RFH that loaded the
-      // fixture from boot — never navigated, so cb-chromium's broken
+      // fixture from boot — never navigated, so chromeless's broken
       // InputRouter binding-update path doesn't engage. We still need
       // to wait for the page to finish loading before continuing,
       // since createTarget returns synchronously after the URL is
@@ -1195,7 +1195,7 @@ export class Scenario {
  */
 export async function runScenario(scenario, opts = {}) {
   const cbUrl = opts.cbUrl
-    ?? process.env.CB_URL
+    ?? process.env.CHROMELESS_URL
     ?? "http://127.0.0.1:9222";
   const artifactsDir = opts.artifactsDir
     ?? process.env.TEST_ARTIFACTS_DIR

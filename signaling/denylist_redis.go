@@ -6,9 +6,9 @@
 //
 // Connection:
 //
-//	CBWRTC_DENYLIST_REDIS_ADDR   host:port (or unix:/path)
-//	CBWRTC_DENYLIST_REDIS_DB     optional db number, defaults to 0
-//	CBWRTC_DENYLIST_REDIS_PASS   optional password
+//	CHROMELESS_DENYLIST_REDIS_ADDR   host:port (or unix:/path)
+//	CHROMELESS_DENYLIST_REDIS_DB     optional db number, defaults to 0
+//	CHROMELESS_DENYLIST_REDIS_PASS   optional password
 //
 // We deliberately do not pull go-redis as a hard dependency just to
 // land the interface — the interface ships independently in
@@ -52,10 +52,10 @@ var errRedisNotCompiled = errors.New(
 //
 //     func newRedisClient(addr string) (RedisClient, error) {
 //       opts := &redis.Options{Addr: addr}
-//       if db := os.Getenv("CBWRTC_DENYLIST_REDIS_DB"); db != "" {
+//       if db := os.Getenv("CHROMELESS_DENYLIST_REDIS_DB"); db != "" {
 //         n, _ := strconv.Atoi(db); opts.DB = n
 //       }
-//       if pw := os.Getenv("CBWRTC_DENYLIST_REDIS_PASS"); pw != "" {
+//       if pw := os.Getenv("CHROMELESS_DENYLIST_REDIS_PASS"); pw != "" {
 //         opts.Password = pw
 //       }
 //       rdb := redis.NewClient(opts)

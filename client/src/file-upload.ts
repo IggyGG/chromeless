@@ -1,4 +1,4 @@
-// File-upload encoder for the cloud-browser-webrtc client.
+// File-upload encoder for the chromeless client.
 //
 // Wraps the "files" RTCDataChannel and chunks a File / Blob into
 // envelope-delimited messages per docs/protocols/file-upload.md (v1).

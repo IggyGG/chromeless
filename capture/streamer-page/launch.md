@@ -163,7 +163,7 @@ in the launch flag set alone.
 
 ### Phase 1 decision: route around with `--use-fake-device-for-media-stream`
 
-`infra/compose.yaml` defaults `CBWRTC_USE_FAKE_MEDIA=1` for the
+`infra/compose.yaml` defaults `CHROMELESS_USE_FAKE_MEDIA=1` for the
 dev compose stack. The launch script appends
 `--use-fake-device-for-media-stream` when set, which routes
 `getDisplayMedia` to Chromium's synthetic test pattern + tone
@@ -197,7 +197,7 @@ What this is not:
 To flip back for diagnostic runs:
 
 ```bash
-CBWRTC_USE_FAKE_MEDIA= docker compose -f infra/compose.yaml up --build
+CHROMELESS_USE_FAKE_MEDIA= docker compose -f infra/compose.yaml up --build
 ```
 
 (empty string ≠ unset for the `[ "${VAR}" = "1" ]` shell test;
@@ -287,7 +287,7 @@ redirect_stderr=true
 ```
 
 If this conflicts with an existing port assignment (the current
-`infra/compose.yaml` has the comment "9100: cb-metrics-sidecar (T38)"
+`infra/compose.yaml` has the comment "9100: chromeless-metrics-sidecar (T38)"
 on the chromium container's published ports — the host-side
 publication is for a different sidecar; input-bridge stays on
 loopback inside the container), reconcile during the supervisord

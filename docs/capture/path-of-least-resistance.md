@@ -211,7 +211,7 @@ is a Chromium-147-side regression in the X11 desktop capturer that
 we are not in a position to fix from launch-flag space alone.
 
 **The dev compose stack therefore defaults
-`CBWRTC_USE_FAKE_MEDIA=1`**, which routes `getDisplayMedia`
+`CHROMELESS_USE_FAKE_MEDIA=1`**, which routes `getDisplayMedia`
 through `--use-fake-device-for-media-stream` to Chromium's
 synthetic test pattern + tone. The streamer page sees a normal
 `MediaStream`; the rest of the WebRTC pipeline (encoder, signaling,

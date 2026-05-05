@@ -1,4 +1,4 @@
-// Input channel encoder for the cloud-browser-webrtc client.
+// Input channel encoder for the chromeless client.
 //
 // Wraps the RTCDataChannel named "input" (created in main.ts) and turns
 // DOM events into the v1 wire envelope documented in

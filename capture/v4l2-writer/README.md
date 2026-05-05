@@ -26,7 +26,7 @@ length-prefixed I420 / S16LE frames with magic-tagged init headers.
    streamer.js (capture/streamer-page) installs
    pc.ontrack handlers and pushes:
                          ┌──────────────────────────────┐
-   inbound video track ─►│  /run/cb-passthrough/        │
+   inbound video track ─►│  /run/chromeless-passthrough/        │
                          │      video.sock              │
                          └──────────┬───────────────────┘
                                     ▼
@@ -54,12 +54,12 @@ go build -o v4l2-writer ./cmd/v4l2-writer
 
 # Video sidecar (compose-dev)
 ./v4l2-writer --mode=video \
-              --socket=/run/cb-passthrough/video.sock \
+              --socket=/run/chromeless-passthrough/video.sock \
               --device=/dev/video10
 
 # Audio sidecar (compose-dev)
 ./v4l2-writer --mode=audio \
-              --socket=/run/cb-passthrough/audio.sock \
+              --socket=/run/chromeless-passthrough/audio.sock \
               --pulse-sink=cb_passthrough
 ```
 
@@ -145,7 +145,7 @@ the unprivileged session pod can write to it.
 - **Compose dev (privileged):** `infra/init-passthrough.sh`
   modprobes v4l2loopback inside the chromium container and the
   v4l2-writer sidecars run alongside, sharing the
-  `cb-passthrough-sockets` emptyDir.
+  `chromeless-passthrough-sockets` emptyDir.
 - **K8s production (host DaemonSet):** `infra/host-daemonset.yaml`
   loads v4l2loopback once per node with N pre-allocated devices.
   Session pods bind one device via a hostPath mount; the session

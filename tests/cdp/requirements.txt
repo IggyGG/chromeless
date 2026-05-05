@@ -1,4 +1,4 @@
-# Pinned for reproducibility — Step 10 of cb-build.sh launches a
+# Pinned for reproducibility — Step 10 of chromeless-build.sh launches a
 # python:3.11-slim Job that pip-installs from this file. Bumps go
 # through a normal review cycle so a transient PyPI yank can't
 # silently break promotion.

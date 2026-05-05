@@ -1,7 +1,7 @@
-# Cloud-browser-webrtc SLOs and alert thresholds
+# Chromeless SLOs and alert thresholds
 
 This is what we promise. Each SLO is paired with an alert in
-[`infra/observability/alerts/cb-alerts.yaml`](../../infra/observability/alerts/cb-alerts.yaml);
+[`infra/observability/alerts/chromeless-alerts.yaml`](../../infra/observability/alerts/chromeless-alerts.yaml);
 breaching the alert threshold means the SLO is at risk and a human
 should look. Breaching the SLO itself in steady state is a postmortem
 ([template](./postmortem-template.md)).
@@ -24,7 +24,7 @@ should look. Breaching the SLO itself in steady state is a postmortem
 ## How "p95 RTT" is measured
 
 The metric is `cb_webrtc_round_trip_time_ms` — a per-session gauge
-sampled by the cb-metrics-sidecar (T38) every 10 s. We don't have a
+sampled by the chromeless-metrics-sidecar (T38) every 10 s. We don't have a
 true histogram on this yet; the alert uses `quantile(0.5,
 cb_webrtc_round_trip_time_ms)` across all live sessions as a
 defensible approximation.
@@ -60,7 +60,7 @@ We split alerts into `severity: warning` and `severity: critical`.
 - **warning** → channel notification (Slack #alerts), no page.
 - **critical** → page (PagerDuty / OpsGenie equivalent).
 
-Mapping in `cb-alerts.yaml` is encoded in the `labels.severity`
+Mapping in `chromeless-alerts.yaml` is encoded in the `labels.severity`
 field; AlertManager routes from there.
 
 ## Postmortem-triggering SLO breaches

@@ -35,7 +35,7 @@ fail() { log "FATAL: $*"; exit "${2:-1}"; }
 [ -x "$RESTORE_SH" ]  || fail "missing $RESTORE_SH" 2
 
 log "1. snapshot a fresh container"
-SHA=$("$SNAPSHOT_SH" cb-snapshot-smoke)
+SHA=$("$SNAPSHOT_SH" chromeless-snapshot-smoke)
 log "   sha = $SHA"
 
 log "2. restore from sha"

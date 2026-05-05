@@ -1,4 +1,4 @@
-// encoder-assertions.mjs — sender-side encoder-identity verification for cb-chromium.
+// encoder-assertions.mjs — sender-side encoder-identity verification for chromeless.
 //
 // outboundRtp.encoderImplementation in getStats() is set verbatim from
 // EncoderInfo::implementation_name in our embedded encoders. If the

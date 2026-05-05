@@ -7,7 +7,7 @@
 // Today this is a *scaffold*. A real deployment needs:
 //   - TLS cert (cert-manager.io / kube's CertController).
 //   - ValidatingWebhookConfiguration pointing at the controller
-//     Service:443/validate-cb-browsersession.
+//     Service:443/validate-chromeless-browsersession.
 //   - The signaling-server's auth (T48) extended to issue per-tenant
 //     ServiceAccount tokens that the K8s API server can verify and
 //     present to this webhook in admission.Request.UserInfo.
@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 )
 
 // TenantClaimHeader is the request header the API server forwards

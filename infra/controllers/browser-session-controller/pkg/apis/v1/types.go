@@ -166,7 +166,7 @@ const (
 // BrowserSessionPoolSpec configures the pool.
 type BrowserSessionPoolSpec struct {
 	// WarmReplicas is the number of pre-created Pods we try to keep
-	// in cb.session/state=warm.
+	// in chromeless.session/state=warm.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10000
 	WarmReplicas int32 `json:"warmReplicas"`
@@ -196,13 +196,13 @@ type BrowserSessionPoolSpec struct {
 
 // BrowserSessionPoolStatus reports the pool's current capacity.
 type BrowserSessionPoolStatus struct {
-	// Warm is the count of Pods labelled cb.session/state=warm.
+	// Warm is the count of Pods labelled chromeless.session/state=warm.
 	Warm int32 `json:"warm"`
 
-	// Active is the count labelled cb.session/state=assigned.
+	// Active is the count labelled chromeless.session/state=assigned.
 	Active int32 `json:"active"`
 
-	// Draining is the count labelled cb.session/state=draining.
+	// Draining is the count labelled chromeless.session/state=draining.
 	Draining int32 `json:"draining"`
 
 	// TotalEverProvisioned is a monotonic counter; useful for
@@ -246,21 +246,21 @@ type BrowserSessionPoolList struct {
 // =========================================================================
 
 // Label keys and well-known values used by the controller. The
-// `cb.session/` namespace is reserved for controller-managed labels;
-// `cb.io/` for annotations the wider ecosystem (snapshot helper, API
+// `chromeless.session/` namespace is reserved for controller-managed labels;
+// `chromeless.io/` for annotations the wider ecosystem (snapshot helper, API
 // gateway, etc.) reads or writes.
 const (
-	LabelSessionState       = "cb.session/state"
+	LabelSessionState       = "chromeless.session/state"
 	LabelSessionStateWarm   = "warm"
 	LabelSessionStateAssign = "assigned"
 	LabelSessionStateDrain  = "draining"
 
-	LabelSessionOwner = "cb.session/owner"      // session CR name when assigned
-	LabelSessionPool  = "cb.session/pool"       // pool CR name
-	LabelSessionTenant = "cb.session/tenant"    // tenant id, "_anonymous" if none
+	LabelSessionOwner = "chromeless.session/owner"      // session CR name when assigned
+	LabelSessionPool  = "chromeless.session/pool"       // pool CR name
+	LabelSessionTenant = "chromeless.session/tenant"    // tenant id, "_anonymous" if none
 
-	AnnotationSnapshotID = "cb.io/snapshot-id"  // T68
-	AnnotationSessionID  = "cb.io/session-id"   // session CR uid mirror
+	AnnotationSnapshotID = "chromeless.io/snapshot-id"  // T68
+	AnnotationSessionID  = "chromeless.io/session-id"   // session CR uid mirror
 
 	// AnonymousTenant matches signaling/auth.go's anonymousTenant
 	// constant. Two systems, same string — keep in sync if either

@@ -1,4 +1,4 @@
-# infra/pulse-default.pa — PulseAudio runtime config for cloud-browser-webrtc
+# infra/pulse-default.pa — PulseAudio runtime config for chromeless
 #
 # This file is COPYed in the Dockerfile to /etc/pulse/default.pa, replacing
 # the Debian default. PulseAudio executes default.pa automatically on
@@ -44,12 +44,12 @@ load-module module-native-protocol-unix auth-anonymous=1 socket=/run/user/1000/p
 
 ### Playback sink Chromium writes into. Named cb_audio per the T24 contract;
 ### everything downstream of audio capture refers to this name.
-load-module module-null-sink sink_name=cb_audio sink_properties=device.description="cb-audio-playback"
+load-module module-null-sink sink_name=cb_audio sink_properties=device.description="chromeless-audio-playback"
 
 ### Capture sink — receives a loopback of cb_audio.monitor. Its own monitor
 ### is what we expose as the default source so getUserMedia/getDisplayMedia
 ### audio captures everything Chromium plays.
-load-module module-null-sink sink_name=cb_capture sink_properties=device.description="cb-audio-capture"
+load-module module-null-sink sink_name=cb_capture sink_properties=device.description="chromeless-audio-capture"
 
 ### Loopback: cb_audio.monitor -> cb_capture. latency_msec=20 keeps the
 ### relay tight without spending CPU on tiny chunks. *_dont_move=true

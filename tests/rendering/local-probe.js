@@ -6,7 +6,7 @@
  *      Establishes a baseline that the fixtures themselves are
  *      working — distinguishes fixture bugs from SwiftShader bugs.
  *   2. **swiftshader-v1**: a flag set as close to v1's
- *      `infra/launch-chromium.sh` as Playwright will accept on a
+ *      `infra/launch-chromeless.sh` as Playwright will accept on a
  *      developer host (we cannot make Playwright launch under
  *      Xvfb, but we *can* match the GPU/Vulkan disable + ANGLE +
  *      SwiftShader bits).
@@ -28,7 +28,7 @@
 const path  = require("node:path");
 const fs    = require("node:fs/promises");
 
-const { chromium } = require("/Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/e2e/node_modules/playwright/index.js");
+const { chromium } = require("/Users/iggy/Documents/GitHub/scrapebrowse/chromeless/tests/e2e/node_modules/playwright/index.js");
 
 const HERE = path.resolve(__dirname);
 const FIXTURES = {
@@ -36,7 +36,7 @@ const FIXTURES = {
   webgpu: "file://" + path.join(HERE, "webgpu-fixture.html"),
 };
 
-// Closest match to v1's launch-chromium.sh that Playwright will
+// Closest match to v1's launch-chromeless.sh that Playwright will
 // honour on a developer host. We can't pass --display=:99 (no
 // Xvfb on a dev laptop) but the GPU/ozone bits transfer.
 const SWIFTSHADER_V1_FLAGS = [

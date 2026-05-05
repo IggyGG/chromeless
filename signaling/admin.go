@@ -8,11 +8,11 @@
 //
 // The admin token is signed by a SEPARATE Ed25519 keypair from the
 // session-token keypair (T48). Public verification key in
-// `CBWRTC_ADMIN_PUBKEY` (base64-encoded raw 32 bytes). Tokens carry
+// `CHROMELESS_ADMIN_PUBKEY` (base64-encoded raw 32 bytes). Tokens carry
 // the same JWT-shape as session tokens but with an explicit
 // `role: "admin"` claim that is not accepted by /ws/.
 //
-// When `CBWRTC_ADMIN_PUBKEY` is unset, the admin endpoint refuses to
+// When `CHROMELESS_ADMIN_PUBKEY` is unset, the admin endpoint refuses to
 // register the route at all — the failure mode for "I forgot to
 // configure auth" should be 404, not "anonymous revoke." Likewise
 // when no denylist is configured (initDenylist returned a static
@@ -33,7 +33,7 @@ import (
 	"strings"
 )
 
-const adminPubkeyEnv = "CBWRTC_ADMIN_PUBKEY"
+const adminPubkeyEnv = "CHROMELESS_ADMIN_PUBKEY"
 
 type adminConfig struct {
 	enabled bool

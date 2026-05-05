@@ -122,7 +122,7 @@ Two-paragraph reflection:
 ## Cross-references
 
 - Alert rules that fired:
-  [`infra/observability/alerts/cb-alerts.yaml`](../../infra/observability/alerts/cb-alerts.yaml)
+  [`infra/observability/alerts/chromeless-alerts.yaml`](../../infra/observability/alerts/chromeless-alerts.yaml)
   → `<rule name>`.
 - SLO breached:
   [`sla.md`](./sla.md) → `<SLO row>`.

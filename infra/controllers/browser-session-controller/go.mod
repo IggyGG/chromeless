@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller
+module github.com/iggy/chromeless/infra/controllers/browser-session-controller
 
 go 1.23.0
 

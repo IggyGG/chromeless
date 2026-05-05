@@ -12,19 +12,19 @@
 #   2. (T31) Clear stale Chromium user-data-dir so each container
 #      session starts from a fresh profile.
 #   3. (T31) Generate a SESSION_ID if the env didn't supply one. The id
-#      is written to /run/cb-session/id (and, with other resolved env
-#      values, to /run/cb-session/env) so the watchdog and supervisord
+#      is written to /run/chromeless-session/id (and, with other resolved env
+#      values, to /run/chromeless-session/env) so the watchdog and supervisord
 #      programs can see the same value.
 #   4. Echo resolved values so `docker logs <container>` is greppable.
 
 set -eu
 
 USER_DATA_DIR="/home/cbuser/.config/chromium"
-SESSION_DIR="/run/cb-session"
+SESSION_DIR="/run/chromeless-session"
 SESSION_ID_FILE="$SESSION_DIR/id"
 SESSION_ENV_FILE="$SESSION_DIR/env"
 
-echo "[cold-start] booting cloud-browser-webrtc container" >&2
+echo "[cold-start] booting chromeless container" >&2
 
 # --- 0. K8s emptyDir overlay safety net (T57) -----------------------------
 # These dirs are pre-created in the image fs (see Dockerfile), but a K8s
@@ -34,7 +34,7 @@ echo "[cold-start] booting cloud-browser-webrtc container" >&2
 # pulse can't open its runtime dir. Re-create here, idempotently.
 mkdir -p /run/supervisor \
          /run/user/1000/pulse \
-         /run/cb-session \
+         /run/chromeless-session \
          /var/log/supervisor \
          /home/cbuser/.config/chromium
 chmod 0700 /run/user/1000
@@ -64,12 +64,12 @@ SIGNALING_URL="${SIGNALING_URL:-ws://signaling:8080/ws}"
 STREAMER_FPS="${STREAMER_FPS:-30}"
 STREAMER_PORT="${STREAMER_PORT:-9000}"
 
-# /run/cb-session/id: just the id, plain text. Easy to read from
+# /run/chromeless-session/id: just the id, plain text. Easy to read from
 # scripts that don't want to source a full env file.
 printf '%s\n' "$SESSION_ID" > "$SESSION_ID_FILE"
 chmod 0644 "$SESSION_ID_FILE"
 
-# /run/cb-session/env: KEY=VALUE per line, sourceable by entrypoint.sh.
+# /run/chromeless-session/env: KEY=VALUE per line, sourceable by entrypoint.sh.
 {
     printf 'SESSION_ID=%s\n'    "$SESSION_ID"
     printf 'SIGNALING_URL=%s\n' "$SIGNALING_URL"

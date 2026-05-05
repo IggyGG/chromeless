@@ -267,7 +267,7 @@ follow-up to T54 once we ship this):
   We need the renegotiation flow (T37 reconnect path is a partial
   fit) before this pays off.
 - **Telemetry-first.** Wire the per-class negotiation-outcome
-  metric (already a stub in T42 stats sampler) into the cb-metrics
+  metric (already a stub in T42 stats sampler) into the chromeless-metrics
   sidecar; let real data tell us which UA classes are negotiating
   poorly, then ship probing for *those* classes specifically.
 

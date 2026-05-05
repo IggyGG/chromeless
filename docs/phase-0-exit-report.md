@@ -22,7 +22,7 @@ own.
 
 ### 1.1 Container boot smoke (T9) — PASS
 
-Re-run from clean against `cloud-browser-webrtc:dev` immediately
+Re-run from clean against `chromeless:dev` immediately
 before this report:
 
 ```
@@ -34,7 +34,7 @@ End-to-end ~12 s on Apple Silicon. Layered checks all green:
 
 | Step | Result |
 |------|--------|
-| 1. Image resolved (`cloud-browser-webrtc:dev` auto-detected) | OK |
+| 1. Image resolved (`chromeless:dev` auto-detected) | OK |
 | 2. Container started; DevTools up after 3 s | OK |
 | 3. `/json/version` reports `Browser: Chrome/147.0.7727.116` | OK |
 | 4. Page target discovered | OK |

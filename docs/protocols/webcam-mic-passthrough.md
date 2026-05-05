@@ -30,7 +30,7 @@ browser sees a real `getUserMedia()` device.
    │ pc.addTrack(t, stream) │                      │   InsertableStreams        │
    │   ↓                    │                      │   per-frame transform      │
    │ negotiationneeded      │ ── SDP renegotiate ──▶│   ↓ Y'CbCr 4:2:0 frames    │
-   │   ↓                    │ ──── ICE / SRTP  ────▶│ unix:/run/cb-passthrough/  │
+   │   ↓                    │ ──── ICE / SRTP  ────▶│ unix:/run/chromeless-passthrough/  │
    │ track is now a sender  │                      │   video.sock + audio.sock  │
    └────────────────────────┘                      │   ↓                        │
                                                    │ v4l2-writer helper (Go)    │
@@ -75,7 +75,7 @@ The worker:
 1. Decodes the incoming `EncodedVideoFrame` / `EncodedAudioFrame`
    stream into raw frames via a transform.
 2. Writes each frame to a Unix domain socket
-   (`/run/cb-passthrough/video.sock` and `…/audio.sock`).
+   (`/run/chromeless-passthrough/video.sock` and `…/audio.sock`).
 
 A native helper ([`capture/v4l2-writer/`](../../capture/v4l2-writer/),
 T92) listens on those sockets and writes:
@@ -120,10 +120,10 @@ Both magic constants are also documented in
 ```yaml
 # infra/compose.yaml — chromium service
 chromium:
-  image: cloud-browser-webrtc:dev
+  image: chromeless:dev
   privileged: true              # required for `modprobe v4l2loopback`
   volumes:
-    - cb-passthrough:/run/cb-passthrough
+    - chromeless-passthrough:/run/chromeless-passthrough
 ```
 
 The container's entrypoint runs:
@@ -149,13 +149,13 @@ video_nr=10,11,12,...`). Sessions then bind one device per Pod via
 a device plugin or a host-path volume:
 
 ```yaml
-# infra/k8s/cb-passthrough-loader.yaml — DaemonSet (TODO follow-up)
+# infra/k8s/chromeless-passthrough-loader.yaml — DaemonSet (TODO follow-up)
 # loads v4l2loopback once per node; exposes /dev/videoN devices as
 # part of a kubelet device-plugin claim:
 spec:
   containers:
-    - name: cb-passthrough-loader
-      image: ghcr.io/.../cb-passthrough-loader:dev
+    - name: chromeless-passthrough-loader
+      image: ghcr.io/.../chromeless-passthrough-loader:dev
       securityContext:
         privileged: true   # only the DaemonSet is privileged
 ```
@@ -164,7 +164,7 @@ Individual session Pods then claim a device via a hostPath mount or
 a device plugin allocation — the **session Pod itself remains
 non-privileged**. This is the path that scales.
 
-The session manifest (T50/T71) gets a `cb.passthrough/device-claim`
+The session manifest (T50/T71) gets a `chromeless.passthrough/device-claim`
 annotation that the controller fills in at scheduling time.
 
 ---
@@ -234,7 +234,7 @@ when:
 3. The streamer page was launched with `?passthrough=true` (config
    from the orchestrator, not user-controllable).
 4. The session pod was scheduled with the
-   `cb.passthrough/device-claim` annotation (or, in compose dev,
+   `chromeless.passthrough/device-claim` annotation (or, in compose dev,
    `passthrough: true` in the env).
 
 All four gates must be true for any media to leave the client.

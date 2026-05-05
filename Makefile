@@ -1,4 +1,4 @@
-# cloud-browser-webrtc — top-level Makefile
+# chromeless — top-level Makefile
 #
 # Canonical entry points for tests. See tests/README.md for the full
 # strategy. Targets that aren't yet wired print a "not implemented" notice
@@ -39,7 +39,7 @@ test-all-ci: test-unit test-integration test-smoke
 # - harness-all:  hermetic baselines (loopback / aliased-warning / sink-lag /
 #                 input-latency)
 # - e2e:          Playwright against full compose stack
-# Note: nightly does NOT include opt-in CBWRTC_INTEGRATION_LIVE Go tests
+# Note: nightly does NOT include opt-in CHROMELESS_INTEGRATION_LIVE Go tests
 # (audio_loopback) — those run inside e2e via Playwright spec 05 anyway.
 test-all-nightly: test-all-ci test-harness-all test-e2e
 

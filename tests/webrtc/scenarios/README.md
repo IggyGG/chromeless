@@ -23,7 +23,7 @@ scenarios/
 
 ```bash
 # Local: against a chromium with --remote-debugging-port=9222.
-TEST_ARTIFACTS_DIR=/tmp/cb-input-test \
+TEST_ARTIFACTS_DIR=/tmp/chromeless-input-test \
   node scenarios/runner.mjs
 
 # Single scenario (each file is independently runnable):
@@ -34,7 +34,7 @@ node scenarios/runner.mjs --only=concurrent
 node scenarios/runner.mjs --skip=keyboard --fail-fast
 
 # Override target:
-node scenarios/runner.mjs --cb-url=http://chromium.cluster.local:9222
+node scenarios/runner.mjs --chromeless-url=http://chromium.cluster.local:9222
 ```
 
 After a run, open `${TEST_ARTIFACTS_DIR}/index.html` to scrub through
@@ -172,7 +172,7 @@ chromium --headless=new --remote-debugging-port=9222 \
 /tmp/input-bridge --source ws --cdp-url http://127.0.0.1:9222 &
 
 # Run wire-only scenarios:
-TEST_ARTIFACTS_DIR=/tmp/cb-wire-test \
+TEST_ARTIFACTS_DIR=/tmp/chromeless-wire-test \
   node scenarios/runner.mjs --only=wire
 ```
 
@@ -198,8 +198,8 @@ straight at the right code path.
 ## Cluster integration
 
 The CDP-direct scenarios (01–12) run via the existing
-`cb-webrtc-validation.yaml` Job — no input-bridge needed.
+`chromeless-webrtc-validation.yaml` Job — no input-bridge needed.
 
-The wire scenarios (20+) run via `cb-webrtc-wire-bridge-validation.yaml`
+The wire scenarios (20+) run via `chromeless-webrtc-wire-bridge-validation.yaml`
 — same shape but with an additional `input-bridge` sidecar
-container alongside cb-chromium and the test-driver.
+container alongside chromeless and the test-driver.

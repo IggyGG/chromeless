@@ -27,7 +27,7 @@ allowlist, 100 MiB cap, mandatory SHA-256 verification).
                               │  - verify SHA-256                       │
                               │  - re-sniff MIME (http.DetectContentType)│
                               │  - virus-scan stub (Phase 4 ClamAV)     │
-                              │  - write to /var/lib/cb-uploads/<sess>/ │
+                              │  - write to /var/lib/chromeless-uploads/<sess>/ │
                               │  - DOM.setFileInputFiles via CDP        │
                               └────────────────┬────────────────────────┘
                                                │
@@ -49,7 +49,7 @@ go build -o file-bridge .
 # Production-ish: sidecar mode against a real Chromium.
 ./file-bridge --ws-addr 127.0.0.1:9400 --ws-path /files \
               --cdp-url http://127.0.0.1:9222 \
-              --upload-dir /var/lib/cb-uploads \
+              --upload-dir /var/lib/chromeless-uploads \
               --session-id <sess>
 ```
 
@@ -60,7 +60,7 @@ go build -o file-bridge .
 | `--ws-addr`         | `127.0.0.1:9400`               | WS source listen address                                 |
 | `--ws-path`         | `/files`                       | WS source URL path                                       |
 | `--cdp-url`         | `http://127.0.0.1:9222`        | Chromium DevTools base URL                               |
-| `--upload-dir`      | `/var/lib/cb-uploads`          | Per-session upload root (subdir per session)             |
+| `--upload-dir`      | `/var/lib/chromeless-uploads`          | Per-session upload root (subdir per session)             |
 | `--session-id`      | `default`                      | Subdir under `--upload-dir`; should match the cb session |
 | `--max-total-size`  | `104857600` (100 MiB)          | Hard upload size cap                                     |
 | `--max-chunk-size`  | `1048576` (1 MiB raw)          | Max bytes per chunk (after base64-decode)                |
@@ -116,7 +116,7 @@ The full WebSocket → bridge → fake CDP integration lives in
 ```bash
 docker build -t file-bridge .
 docker run --rm --network=host \
-           -v /var/lib/cb-uploads:/var/lib/cb-uploads \
+           -v /var/lib/chromeless-uploads:/var/lib/chromeless-uploads \
            file-bridge
 ```
 
@@ -133,7 +133,7 @@ and writes server replies back into the data channel.
 
 The K8s manifest at `infra/k8s/cloud-browser-session.yaml` adds the
 bridge as a container in the same pod with a shared `emptyDir`
-mount at `/var/lib/cb-uploads`.
+mount at `/var/lib/chromeless-uploads`.
 
 ## Known v1 gaps
 

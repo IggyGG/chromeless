@@ -1,0 +1,301 @@
+# infra/helm/chromeless/values.yaml — chart defaults.
+#
+# Override per environment via `-f my-values.yaml` or `--set`.
+# Anything marked REQUIRED here MUST be replaced; the templates fail
+# the install with a fail() if the placeholder leaks through.
+
+namespace:
+  # Created by templates/_namespace.yaml unless create=false.
+  create: true
+  name: chromeless
+  podSecurityStandards:
+    enforce: baseline
+    audit: restricted
+    warn: restricted
+
+# T94: region this deployment serves. When set, propagated as
+# CHROMELESS_REGION to every Pod (signaling, controller, turn-issuer,
+# session-pool template's chromeless + chromeless-metrics-sidecar). The
+# value lands as:
+#   - signaling: token aud-claim verification + Prometheus label.
+#   - sidecar/controller/turn-issuer: Prometheus label only.
+# Per-component overrides under `<component>.region:` are still
+# honoured (T93 left signaling.region in place); set per-component
+# only when one component must report a different region from the
+# rest of the deployment, which is unusual.
+region: ""
+
+images:
+  # Override these per-environment with --set images.<component>.tag=...
+  # to point at the version you actually want to ship.
+  registry: ghcr.io/iggy/chromeless
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+  chromium:
+    repository: chromeless
+    tag: ""           # falls back to .Chart.AppVersion when empty
+  signaling:
+    repository: chromeless-signaling
+    tag: ""
+  controller:
+    repository: chromeless-controller
+    tag: ""
+  turnIssuer:
+    repository: chromeless-turn-issuer
+    tag: ""
+  metricsSidecar:
+    repository: chromeless-metrics-sidecar
+    tag: ""
+  inputBridge:
+    repository: chromeless-input-bridge
+    tag: ""
+  cursorWatcher:
+    repository: chromeless-cursor-watcher
+    tag: ""
+  clipboardBridge:
+    repository: chromeless-clipboard-bridge
+    tag: ""
+
+signaling:
+  enabled: true
+  replicas: 3
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    cpuTargetUtilization: 60
+  ingress:
+    enabled: true
+    className: nginx
+    host: signaling.example.com
+    tlsSecretName: signaling-tls
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # base64-encoded raw 32-byte Ed25519 public key. REQUIRED if auth
+  # is enabled. See docs/security/auth.md.
+  authPubkey: ""
+  # T93: identifier for the AWS / GCP / on-prem region this signaling
+  # deployment serves. When set, propagated as CHROMELESS_REGION; the
+  # signaling server uses it to verify token `aud` claims (data
+  # residency) and tags every emitted Prometheus metric with
+  # `region="<value>"` so federated dashboards group cleanly.
+  # Leave empty for single-region deploys; the signaling code stays
+  # backwards-compatible (empty → "_unspecified" label).
+  region: ""
+  # T115: scheduling controls. Empty = scheduler decides. Set in the
+  # per-cluster overlay (e.g. infra/k8s/chromeless/values-triform.yaml)
+  # to pin signaling to a specific node pool.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+controller:
+  enabled: true
+  replicas: 2
+  defaultPool: default-pool
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # T115: scheduling controls. Controller is namespaced cluster-state
+  # and watches Pods, so it should NOT land on the GPU node (which is
+  # tainted) — pick a stable infra/control-plane-adjacent worker.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+turnIssuer:
+  enabled: true
+  replicas: 2
+  # See docs/security/auth.md and infra/turn-issuer/secret-rotation.md.
+  # All four are REQUIRED when turnIssuer.enabled=true.
+  secrets:
+    authPubkey: ""           # CHROMELESS_AUTH_PUBKEY (same as signaling.authPubkey)
+    sharedSecret: ""         # CHROMELESS_TURN_SHARED_SECRET — openssl rand -hex 32
+    sharedSecretPrev: ""     # optional rotation overlap
+    turnURLs: ""             # CHROMELESS_TURN_URLS — comma-separated TURN URIs
+    stunURLs: "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# coturn — disabled by default. Production deployments should
+# strongly prefer a managed TURN service (Cloudflare TURN,
+# metered.ca, Twilio). Set `coturn.enabled: true` only if
+# self-hosted is the right answer for your environment; see
+# infra/k8s/turn-deployment.yaml comments for why TURN-on-K8s is
+# operationally painful.
+coturn:
+  enabled: false
+  replicas: 2
+  realm: turn.example.com
+  staticAuthSecret: ""        # must equal turnIssuer.secrets.sharedSecret
+  staticAuthSecretPrev: ""    # for rotation overlap
+  # hostNetwork=true is the only way to expose coturn's wide UDP
+  # range without the K8s NodePort 30000-32767 limit. Pin to a
+  # dedicated node pool with the right firewall.
+  hostNetwork: true
+  nodeSelector: {}
+  tolerations: []
+
+# Default BrowserSessionPool — controller materialises Pods from
+# this template. Disable + supply your own if you want region-
+# scoped pools or per-tenant pools.
+defaultPool:
+  enabled: true
+  warmReplicas: 2
+  maxSessions: 100
+  maxAgeSeconds: 3600
+  recyclePolicy: RecreatePod    # RecreatePod | ScrubAndReturn
+  # Resource shape per session pod (sum across containers). Note:
+  # to claim a GPU per session, add `nvidia.com/gpu: "1"` under both
+  # requests and limits; K8s requires the value in BOTH places for
+  # extended resources.
+  resources:
+    requests:
+      cpu: "1500m"
+      memory: 3Gi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "3000m"
+      memory: 6Gi
+      ephemeral-storage: 2Gi
+  # T115: scheduling controls for the SESSION pod template. The pool
+  # is the unit of trust + GPU shape per T87/T95, so per-pool node
+  # pinning lives here. For triform's GPU node:
+  #   nodeSelector: { nvidia.com/gpu.present: "true" }
+  #   tolerations:
+  #     - { key: nvidia.com/gpu, operator: Equal, value: present, effect: NoSchedule }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # T115: optional pod-level topology spread; the chart applies these
+  # verbatim under the pool template's pod spec when set. Use this to
+  # spread session pods across hostnames / zones without baking the
+  # constraint into every overlay. Empty list = scheduler decides.
+  topologySpreadConstraints: []
+  # T95: opt-in runtimeClass. When set (e.g. "nvidia"), the chart
+  # writes runtimeClassName on the session Pod. Cluster admin must
+  # ensure the RuntimeClass exists. Empty = falls back to
+  # gvisor.enabled below.
+  runtimeClassName: ""
+  # T119: idle-timeout in seconds. NOT rendered into the pool spec
+  # today (BrowserSessionPool CRD doesn't carry it; see
+  # crds/browsersessionpools.yaml) — kept here so the overlay can
+  # document intent. The value belongs on individual BrowserSession
+  # specs (CRD allows .spec.idleTimeoutSeconds, default 600). When
+  # the controller learns to default per-session timeouts from the
+  # owning pool, wire this through then.
+  idleTimeoutSeconds: 600
+
+# T119: software-encoder pool (no GPU pin). Enable in the cluster
+# overlay to add a second BrowserSessionPool for sessions that don't
+# need NVENC — lets the cluster scale beyond the GPU node's slot
+# count by spreading sessions across non-GPU workers using libvpx /
+# libx264 zero-latency encoding.
+#
+# Identical shape to defaultPool. Disabled by default so naive
+# `helm install` doesn't materialise a second pool.
+swPool:
+  enabled: false
+  warmReplicas: 0
+  maxSessions: 100
+  maxAgeSeconds: 1800
+  idleTimeoutSeconds: 300
+  recyclePolicy: RecreatePod
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 3Gi
+      ephemeral-storage: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  runtimeClassName: ""
+
+# Optional gVisor isolation per T44 sandbox primer. When enabled,
+# the chart sets runtimeClassName=gvisor on the session pod
+# template. The runtimeClass itself must be installed
+# cluster-wide separately.
+gvisor:
+  enabled: false
+
+# Optional Prometheus scrape annotations on signaling + controller
+# pods. Set to false if you use ServiceMonitor / PodMonitor instead.
+prometheusAnnotations:
+  enabled: true
+
+# T119: PodDisruptionBudgets. Disabled by default in the chart
+# because PDBs interact with cluster-autoscaler / drains in ways an
+# operator should opt into deliberately. The chromeless overlay flips
+# this on. Per-component knobs below tune the budgets the templates
+# render.
+podDisruptionBudgets:
+  enabled: false
+  signaling:
+    minAvailable: 1
+  controller:
+    # Single-replica controller deployments cannot tolerate
+    # disruption; maxUnavailable=0 blocks PDB-aware evictions.
+    # Operators draining a node with maxUnavailable=0 PDBs will
+    # have to scale the controller out (replicas: 2) first or
+    # bypass the PDB explicitly.
+    maxUnavailable: 0
+  pool:
+    # Applies to both defaultPool + swPool session pods.
+    minAvailable: "50%"
+
+# T119: PriorityClasses. Disabled by default because PriorityClass
+# is a cluster-scoped resource and a chart shouldn't create
+# cluster-scoped objects without operator consent. Flip on in the
+# overlay; the templates render two cluster-scoped PriorityClasses
+# (signaling-priority, controller-priority) and the deployment
+# templates pick them up via priorityClassName when enabled.
+priorityClasses:
+  enabled: false
+  signaling:
+    name: chromeless-signaling-priority
+    value: 1000
+  controller:
+    name: chromeless-controller-priority
+    value: 1000
+  # Pool session pods deliberately have NO PriorityClass — they're
+  # interchangeable, preempt-eligible workloads. Default priority 0.
+
+# T119: NetworkPolicies. Disabled by default. When enabled, the
+# chart writes a default-deny + per-component allow set scoped to
+# the chart's namespace. Calico GlobalNetworkPolicies are NOT
+# generated here; if your cluster needs cluster-scoped enforcement
+# on top of these, author the GNPs separately.
+networkPolicies:
+  enabled: false
+  # CIDR for kube-apiserver egress from the controller. Most
+  # clusters route apiserver via the kubernetes.default service IP
+  # (10.96.0.1 / 10.43.0.1) but for hardened clusters the operator
+  # may need to point at the actual control-plane node CIDR.
+  apiServerCIDR: "0.0.0.0/0"
+  # DNS namespace + selector for the kube-dns / coredns pods.
+  dnsNamespace: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns

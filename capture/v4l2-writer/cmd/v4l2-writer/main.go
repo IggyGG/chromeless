@@ -37,9 +37,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/iggy/cloud-browser-webrtc/capture/v4l2-writer/internal/pulse"
-	"github.com/iggy/cloud-browser-webrtc/capture/v4l2-writer/internal/v4l2"
-	"github.com/iggy/cloud-browser-webrtc/capture/v4l2-writer/internal/wire"
+	"github.com/iggy/chromeless/capture/v4l2-writer/internal/pulse"
+	"github.com/iggy/chromeless/capture/v4l2-writer/internal/v4l2"
+	"github.com/iggy/chromeless/capture/v4l2-writer/internal/wire"
 )
 
 type config struct {
@@ -56,7 +56,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.mode, "mode", "", "Operating mode: video | audio")
 	fs.StringVar(&cfg.socketPath, "socket", "",
 		"Unix socket path the streamer connects to "+
-			"(e.g. /run/cb-passthrough/video.sock)")
+			"(e.g. /run/chromeless-passthrough/video.sock)")
 	fs.StringVar(&cfg.device, "device", "/dev/video10",
 		"v4l2loopback device path (--mode=video only)")
 	fs.StringVar(&cfg.pulseSink, "pulse-sink", "cb_passthrough",

@@ -1,7 +1,7 @@
 # Simulcast: when (not) to enable
 
 A short, opinionated guide to whether to flip `?simulcast=true` on a
-given deployment of `cloud-browser-webrtc`. Companion to the protocol
+given deployment of `chromeless`. Companion to the protocol
 doc at [`docs/protocols/simulcast.md`](../protocols/simulcast.md).
 
 ## Default: off

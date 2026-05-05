@@ -30,7 +30,7 @@ vendor/
 *.dylib
 build/
 !docs/build/
-# T113: top-level build/ holds source files (cb-build.sh,
+# T113: top-level build/ holds source files (chromeless-build.sh,
 # Dockerfile.runtime, README.md), not C++ build artifacts.
 !/build/
 out/

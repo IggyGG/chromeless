@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/infra/turn-issuer
+module github.com/iggy/chromeless/infra/turn-issuer
 
 go 1.22
 

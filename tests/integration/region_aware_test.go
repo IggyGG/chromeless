@@ -22,7 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// startRegionalServer is startServerWithDevIssuer + CBWRTC_REGION.
+// startRegionalServer is startServerWithDevIssuer + CHROMELESS_REGION.
 // Kept separate so the existing T67/T89 tests don't have to absorb
 // the region label.
 func startRegionalServer(t *testing.T, region string) int {
@@ -38,16 +38,16 @@ func startRegionalServer(t *testing.T, region string) int {
 	cmd := exec.Command(binaryPath)
 	env := []string{}
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "CBWRTC_AUTH_PUBKEY=") ||
-			strings.HasPrefix(kv, "CBWRTC_REGION=") {
+		if strings.HasPrefix(kv, "CHROMELESS_AUTH_PUBKEY=") ||
+			strings.HasPrefix(kv, "CHROMELESS_REGION=") {
 			continue
 		}
 		env = append(env, kv)
 	}
 	env = append(env,
 		fmt.Sprintf("SIGNALING_PORT=%d", port),
-		"CBWRTC_DEV_ISSUER=1",
-		"CBWRTC_REGION="+region,
+		"CHROMELESS_DEV_ISSUER=1",
+		"CHROMELESS_REGION="+region,
 	)
 	cmd.Env = env
 	cmd.Stdout = &stdout

@@ -1,0 +1,20 @@
+# infra/observability/grafana-provisioning/dashboards/chromeless-dashboards.yaml
+#
+# Tells Grafana to pick up dashboards from the bind-mounted
+# /var/lib/grafana/dashboards directory at startup. The
+# infra/observability/dashboards/*.json files mount there in compose.
+
+apiVersion: 1
+
+providers:
+  - name: chromeless
+    orgId: 1
+    folder: chromeless
+    folderUid: chromeless-folder
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

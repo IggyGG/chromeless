@@ -770,7 +770,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.wsAddr, "ws-addr", "127.0.0.1:9400", "WS source listen addr")
 	fs.StringVar(&cfg.wsPath, "ws-path", "/files", "WS source path")
 	fs.StringVar(&cfg.cdpURL, "cdp-url", "http://127.0.0.1:9222", "Chromium DevTools base URL")
-	fs.StringVar(&cfg.uploadDir, "upload-dir", "/var/lib/cb-uploads", "Per-session upload root")
+	fs.StringVar(&cfg.uploadDir, "upload-dir", "/var/lib/chromeless-uploads", "Per-session upload root")
 	fs.StringVar(&cfg.sessionID, "session-id", "default", "Per-session subdirectory under upload-dir")
 	fs.Int64Var(&cfg.maxTotalSize, "max-total-size", defaultMaxTotalSize, "Total per-upload size cap (bytes)")
 	fs.Int64Var(&cfg.maxChunkSize, "max-chunk-size", defaultMaxChunkSize, "Max raw chunk size (bytes)")

@@ -1,0 +1,153 @@
+{{- if .Values.defaultPool.enabled -}}
+{{- $ns := include "chromeless.namespace" . -}}
+apiVersion: cloud-browser-webrtc.example.com/v1alpha1
+kind: BrowserSessionPool
+metadata:
+  name: {{ .Values.controller.defaultPool }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pool
+spec:
+  warmReplicas: {{ .Values.defaultPool.warmReplicas }}
+  maxSessions: {{ .Values.defaultPool.maxSessions }}
+  maxAgeSeconds: {{ .Values.defaultPool.maxAgeSeconds }}
+  recyclePolicy: {{ .Values.defaultPool.recyclePolicy }}
+  template:
+    metadata:
+      labels:
+        {{- include "chromeless.labels" . | nindent 8 }}
+        app.kubernetes.io/component: session
+        chromeless.session/state: warm
+        chromeless.session/pool: {{ .Values.controller.defaultPool | quote }}
+      annotations:
+        chromeless.io/snapshot-id: ""
+    spec:
+      {{- if .Values.defaultPool.runtimeClassName }}
+      runtimeClassName: {{ .Values.defaultPool.runtimeClassName | quote }}
+      {{- else if .Values.gvisor.enabled }}
+      runtimeClassName: gvisor
+      {{- end }}
+      {{- with .Values.defaultPool.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.defaultPool.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.defaultPool.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.defaultPool.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      shareProcessNamespace: true
+      restartPolicy: Always
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: chromeless.json
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: supervisor-log
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: x11-socket
+          emptyDir: {}
+      containers:
+        - name: chromeless
+          image: {{ include "chromeless.image" (dict "component" "chromium" "values" .Values "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - name: SESSION_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SIGNALING_URL
+              value: "ws://signaling.{{ $ns }}.svc.cluster.local:8080/ws"
+            - name: STREAMER_FPS
+              value: "30"
+            - name: IDLE_TIMEOUT_S
+              value: "999999"
+            {{- $region := include "chromeless.region" (dict "context" . "component" "") }}
+            {{- if $region }}
+            - name: CHROMELESS_REGION
+              value: {{ $region | quote }}
+            {{- end }}
+          ports:
+            - name: devtools
+              containerPort: 9222
+            - name: streamer
+              containerPort: 9000
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+            - { name: run, mountPath: /run }
+            - { name: supervisor-log, mountPath: /var/log/supervisor }
+            - { name: home, mountPath: /home/cbuser }
+            - { name: tmp, mountPath: /tmp }
+            - { name: x11-socket, mountPath: /tmp/.X11-unix }
+          resources:
+            {{- toYaml .Values.defaultPool.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /json/version, port: devtools }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /json/version, port: devtools }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+        - name: chromeless-metrics-sidecar
+          image: {{ include "chromeless.image" (dict "component" "metricsSidecar" "values" .Values "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - { name: DEVTOOLS_URL, value: "http://127.0.0.1:9222" }
+            - { name: METRICS_LISTEN, value: ":9100" }
+            - { name: POLL_INTERVAL_S, value: "10" }
+            {{- $region := include "chromeless.region" (dict "context" . "component" "") }}
+            {{- if $region }}
+            - { name: CHROMELESS_REGION, value: {{ $region | quote }} }
+            {{- end }}
+          ports:
+            - { name: metrics, containerPort: 9100 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+{{- end }}

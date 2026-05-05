@@ -178,7 +178,7 @@ runtime surfaces:
 
 1. **GPU node pool labels** — `nvidia.com/gpu.product` (e.g.
    `NVIDIA-L4`), `nvidia.com/gpu.memory`, and our own
-   `cb.cloud-browser/gpu-isolation` (values: `none` / `mig` / `vfio`).
+   `chromeless.cloud-browser/gpu-isolation` (values: `none` / `mig` / `vfio`).
    Pod templates set NodeAffinity against the right node pool.
 2. **NVIDIA k8s-device-plugin** — single DaemonSet per node pool,
    different `--mig-strategy` flags per cell:

@@ -1,0 +1,146 @@
+# chromeless-cdp-validation.yaml — pytest CDP smoke against deployed
+# chromeless-browserless service. Exercises the four-op handshake
+# (createBrowserContext → createTarget → attachToTarget →
+# Page.navigate) that fcbeb16 made pass against chromeless:cr7727-sw.
+# Every chromium build promotion gates on this Job exiting 0.
+#
+# Why a Job and not an in-Pod sidecar of chromeless-browserless: this test
+# connects TO the live chromeless-browserless service via cluster DNS, the
+# same path physics uses, so the validation covers Service routing,
+# imagePullPolicy:Always tag-floating, and every Deployment-level
+# concern that an in-pod test would skip.
+#
+# Test code source: chromeless:tests/cdp/. Loaded via git-clone
+# initContainer (mirrors chromeless-build's `bootstrap-our-repo` pattern in
+# infra/k8s/chromeless-build/build-job.yaml). Reasons for git-clone over an
+# inline ConfigMap:
+#
+#   - Tests live in-repo and evolve with main; the Job picks up the
+#     latest pytest suite at apply-time without operators editing
+#     this YAML.
+#   - chromeless-build already uses the git-clone bootstrap pattern; one
+#     consistent "where does the Job's code come from" idiom across
+#     chromeless-build + chromeless-tests means one operator playbook.
+#   - ConfigMap's 1 MiB ceiling forecloses on tests/cdp/ growing
+#     past the toy-suite stage (the WebRTC Job's vendor tree alone
+#     is well over 1 MiB once @roamhq/wrtc lands in package-lock).
+#   - Zero coordination cost with cdp-test-author: their pytest
+#     files land in tests/cdp/, this Job auto-picks them up on the
+#     next apply.
+#
+# Wired into chromeless-build.sh Step 10 (cdp-test-author owns that line);
+# this YAML stands alone for manual `kubectl apply -f` invocation.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-cdp-validation
+  namespace: chromeless-tests
+  labels:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: test
+    app.kubernetes.io/variant: cdp-smoke
+spec:
+  # backoffLimit:1 — fail-fast. The CDP smoke is deterministic against
+  # the deployed binary; a transient-network excuse is rare and a
+  # second attempt rarely tells us more than the first failure.
+  backoffLimit: 1
+  # 30s test + 60s slack for clone + pip install on a cold node.
+  activeDeadlineSeconds: 180
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless
+        app.kubernetes.io/component: test
+        app.kubernetes.io/variant: cdp-smoke
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        # python:3.11-slim and alpine/git pull anonymously from Docker
+        # Hub today; the secret is here for forward-compat if/when we
+        # repoint these tags through the registry mirror.
+        - name: registry-pull
+      initContainers:
+        - name: bootstrap-tests
+          image: alpine/git:2.43.0
+          command:
+            - sh
+            - -euxc
+            - |
+              # Forgejo REQUIRE_SIGNIN_VIEW=true → anon clones return 401
+              # even on flagged-public repos. Same auth dance as
+              # chromeless-build/build-job.yaml: inline creds at clone, scrub
+              # them from the stored remote post-clone.
+              AUTH_REPO="${OUR_REPO%%://*}://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#*://}"
+              git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                "${AUTH_REPO}" /workspace
+              git -C /workspace remote set-url origin "${OUR_REPO}"
+              if [ ! -d /workspace/tests/cdp ]; then
+                echo "ERROR: /workspace/tests/cdp missing on ${OUR_REPO_REF};" >&2
+                echo "       cdp-test-author scaffolding (tests/cdp/{conftest.py,test_create_browser_context.py,requirements.txt}) hasn't landed yet." >&2
+                exit 1
+              fi
+              ls -la /workspace/tests/cdp
+          env:
+            - name: OUR_REPO
+              value: "http://forgejo-http.forgejo.svc.cluster.local:3000/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: pytest
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -euxc
+            - |
+              cd /workspace/tests/cdp
+              pip install --quiet --no-cache-dir -r requirements.txt
+              # CHROMELESS_URL drives conftest.py's ws-url discovery (mirror
+              # of tests/smoke/container-boot.sh's /json/version
+              # convention). The pytest exit code is the Job's
+              # success signal — Step 10 of chromeless-build.sh waits on it.
+              exec python -m pytest -v --color=yes
+          env:
+            - name: CHROMELESS_URL
+              value: "http://chromeless-browserless.triform-wtf.svc.cluster.local:9222"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+              ephemeral-storage: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 256Mi

@@ -29,14 +29,14 @@ Before clicking Connect:
 
 | Check                                      | How                                                                                                                  | Pass criterion                                                                  |
 |--------------------------------------------|----------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| Pod image matches T112's build             | `kubectl get pod -l app=cb-chromium -o jsonpath='{.items[0].spec.containers[0].image}'`                              | Tag = `cb-chromium:cr7727-<sha>` from the T113 build's `IMAGE_TAG` file.         |
-| Pod Ready + healthy                        | `kubectl get pod -l app=cb-chromium`                                                                                  | `STATUS=Running`, `READY=N/N`, no recent restarts.                                |
-| Image is the Phase 2 binary, not Phase 1   | `kubectl exec <pod> -- /usr/local/bin/cloud_browser_worker --version`                                                 | Prints version + `CB_IMAGE_TAG` = current tag. (If `chromium --version` is what runs, the deploy is still on the v1 image — abort.) |
+| Pod image matches T112's build             | `kubectl get pod -l app=chromeless -o jsonpath='{.items[0].spec.containers[0].image}'`                              | Tag = `chromeless:cr7727-<sha>` from the T113 build's `IMAGE_TAG` file.         |
+| Pod Ready + healthy                        | `kubectl get pod -l app=chromeless`                                                                                  | `STATUS=Running`, `READY=N/N`, no recent restarts.                                |
+| Image is the Phase 2 binary, not Phase 1   | `kubectl exec <pod> -- /usr/local/bin/chromeless --version`                                                 | Prints version + `CHROMELESS_IMAGE_TAG` = current tag. (If `chromium --version` is what runs, the deploy is still on the v1 image — abort.) |
 | GPU visible to the Pod                     | `kubectl exec <pod> -- nvidia-smi --query-gpu=name,driver_version --format=csv`                                      | Returns "NVIDIA RTX PRO 6000 Blackwell, 590.48.01" (per the team-lead's cluster note).   |
 | NVENC probe passes for H.264 + AV1         | CDP probe (§5.A) running `NvencEncoder::ProbeAvailable("H264")` + `("AV1")` via the worker's `--probe-encoders` flag, OR check the chromium.log for the factory's startup probe-cache populate line. | Both return `true`. (Blackwell supports both per T43.)            |
 | Xvfb screen is renderable                  | `kubectl exec <pod> -- env DISPLAY=:99 xrandr 2>&1`                                                                  | Reports `Screen 0: ... 1920 x 1080`. (Regression guard — T78-followup ruled this out as the original NotReadableError cause.) |
 | `window.pc` exposed by streamer            | CDP `Runtime.evaluate` (§5.B): `typeof window.pc`                                                                     | `"object"`. (T69 regression guard.)                                              |
-| Streamer joined signaling                  | `kubectl logs -l app=cb-signaling --tail=50 \| grep "peer joined role=browser"`                                       | At least one match, dated post-Pod-start.                                        |
+| Streamer joined signaling                  | `kubectl logs -l app=chromeless-signaling --tail=50 \| grep "peer joined role=browser"`                                       | At least one match, dated post-Pod-start.                                        |
 
 If any pre-flight check fails, **abort the demo**, file the
 specific gap as a follow-up, and reset. Don't paper over a
@@ -68,7 +68,7 @@ later.
 | QP p95                                  | `cb_webrtc_outbound_qp{quantile="0.95"}`        | **< 38** (any sustained ≥ 38 means encoder saturation; check bitrate ceiling). Per T106 §3 Stage-C signal. |
 | BWE target tracking                     | `(cb_webrtc_outbound_bytes_per_second * 8) / cb_bwe_target_bitrate_bps` | **0.9 ≤ ratio ≤ 1.1** sustained over 30 s. Per T58 contract.                            |
 | VP9 SW fallback path works              | If AV1 **not** negotiated (e.g., Safari client), confirm VP9 SW (T35) lit up via `cb_webrtc_outbound_implementation == "cloud-browser-vp9-libvpx-lowlatency"` | Implementation string from T35's `GetEncoderInfo`. SW fallback is the unconditional Phase 1 floor. |
-| No mid-session encoder crashes          | `kubectl logs -l app=cb-chromium --since=10m \| grep -E "encoder.+(crash|FATAL|ASAN|signal 11)"` | Empty.                                                                                  |
+| No mid-session encoder crashes          | `kubectl logs -l app=chromeless --since=10m \| grep -E "encoder.+(crash|FATAL|ASAN|signal 11)"` | Empty.                                                                                  |
 
 The 8 ms p95 NVENC AV1 number is the load-bearing first-Phase-2
 result. Blackwell is the most-capable cell of T43's matrix; if
@@ -94,7 +94,7 @@ the cluster networking is set up.
 ### A. NVENC probe results
 
 ```bash
-POD=$(kubectl get pod -l app=cb-chromium -o name | head -1)
+POD=$(kubectl get pod -l app=chromeless -o name | head -1)
 WS=$(kubectl exec "$POD" -- curl -s http://127.0.0.1:9222/json/list \
      | jq -r '.[] | select(.type=="page") | .webSocketDebuggerUrl' | head -1)
 # Then in any Runtime.evaluate-capable client (websocat, the same
@@ -187,7 +187,7 @@ If any §1–4 gate fails, before re-running:
 | QP p95 ≥ 38 sustained                                 | `cb_bwe_target_bitrate_bps` vs `cb_webrtc_outbound_bytes_per_second`     | Bitrate ceiling too low for the content. Confirm Config target_bitrate_bps; if BWE is saturated, real bandwidth is the constraint. |
 | `iceConnectionState` stuck at `checking`              | Signaling logs: was a `peer joined role=client` line emitted?            | T96/T104's late-client-join path — check that #104 ICE-buffer fix landed in the deployed signaling image. Otherwise the streamer's candidates were dropped. |
 | Encoder crashes mid-session (signal 11 / FATAL)       | `kubectl logs --previous`                                                 | Driver / encoder bug. Capture the full backtrace, encoder-config rollback the affected codec, file a follow-up against T63 / T70 / T75 as appropriate. |
-| Streamer page shows `NotReadableError`                | `chromium.err.log` for `vkCreateInstance` lines                           | T78-followup regression — Vulkan re-enabled. Confirm launch-chromium.sh's `--disable-features=Vulkan` flag is in the production launch command (T78). |
+| Streamer page shows `NotReadableError`                | `chromium.err.log` for `vkCreateInstance` lines                           | T78-followup regression — Vulkan re-enabled. Confirm launch-chromeless.sh's `--disable-features=Vulkan` flag is in the production launch command (T78). |
 
 T101 §3 has the deeper triage tree for build-time failures
 (unit-test fail, link OOM, patch context drift); this table
@@ -225,7 +225,7 @@ Once §1–4 gates all pass:
   table the demo's negotiation honors.
 - **T78** + **T86** — the synthetic-media stop-gap this demo
   retires. Once T116 + T117 produce real numbers, the README
-  "Known limitations" entry about CBWRTC_USE_FAKE_MEDIA flips.
+  "Known limitations" entry about CHROMELESS_USE_FAKE_MEDIA flips.
 - **T96** + **T104** — signaling buffer + ICE replay; without
   #104 deployed, the late-client-join path fails connection
   before any encoder gate is exercised.

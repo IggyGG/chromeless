@@ -29,11 +29,11 @@ apiVersion: cloud-browser-webrtc.example.com/v1alpha1
 kind: BrowserSessionPool
 metadata:
   name: warm-pool-shared
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: pool
-    cb.io/recycle-policy: scrub-and-return
+    chromeless.io/recycle-policy: scrub-and-return
 spec:
   warmReplicas: 5
   maxSessions: 100
@@ -43,7 +43,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: session
-        cb.session/state: warm
+        chromeless.session/state: warm
     spec:
       shareProcessNamespace: true
       restartPolicy: Always
@@ -56,10 +56,10 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: Localhost
-          localhostProfile: cb-chromium.json
+          localhostProfile: chromeless.json
       containers:
-        - name: cb-chromium
-          image: ghcr.io/iggy/cloud-browser-webrtc/cb-chromium:dev
+        - name: chromeless
+          image: ghcr.io/iggy/chromeless/chromeless:dev
           imagePullPolicy: IfNotPresent
           ports:
             - { name: devtools, containerPort: 9222 }
@@ -96,11 +96,11 @@ apiVersion: cloud-browser-webrtc.example.com/v1alpha1
 kind: BrowserSessionPool
 metadata:
   name: warm-pool-strict
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: pool
-    cb.io/recycle-policy: recreate-pod
+    chromeless.io/recycle-policy: recreate-pod
 spec:
   warmReplicas: 10
   maxSessions: 200
@@ -110,7 +110,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: session
-        cb.session/state: warm
+        chromeless.session/state: warm
     spec:
       shareProcessNamespace: true
       restartPolicy: Always
@@ -123,10 +123,10 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: Localhost
-          localhostProfile: cb-chromium.json
+          localhostProfile: chromeless.json
       containers:
-        - name: cb-chromium
-          image: ghcr.io/iggy/cloud-browser-webrtc/cb-chromium:dev
+        - name: chromeless
+          image: ghcr.io/iggy/chromeless/chromeless:dev
           imagePullPolicy: IfNotPresent
           ports:
             - { name: devtools, containerPort: 9222 }

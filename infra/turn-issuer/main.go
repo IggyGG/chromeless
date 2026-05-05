@@ -1,4 +1,4 @@
-// Package main is the cloud-browser-webrtc TURN-credentials issuer
+// Package main is the chromeless TURN-credentials issuer
 // (T76). It implements RFC 7635 / TURN-REST credential issuance for
 // self-hosted coturn deployments — and for managed-TURN deployments
 // that use the same shared-secret HMAC convention (Cloudflare TURN
@@ -20,9 +20,9 @@
 //	         "ttl": 3600,
 //	         "urls": ["turn:turn.example.com:3478?transport=udp", ...]}
 //
-// Secret rotation: the issuer accepts CBWRTC_TURN_SHARED_SECRET (the
+// Secret rotation: the issuer accepts CHROMELESS_TURN_SHARED_SECRET (the
 // current secret used to mint credentials) and optionally
-// CBWRTC_TURN_SHARED_SECRET_PREV (the previous secret kept active for
+// CHROMELESS_TURN_SHARED_SECRET_PREV (the previous secret kept active for
 // validation overlap). During rotation, coturn must trust both for
 // the duration of the overlap; see secret-rotation.md.
 //
@@ -61,11 +61,11 @@ import (
 // ----- config / startup ----------------------------------------------------
 
 const (
-	envAuthPubkey       = "CBWRTC_AUTH_PUBKEY"
-	envSharedSecret     = "CBWRTC_TURN_SHARED_SECRET"
-	envSharedSecretPrev = "CBWRTC_TURN_SHARED_SECRET_PREV"
-	envTurnURLs         = "CBWRTC_TURN_URLS" // comma-separated
-	envSTUNURLs         = "CBWRTC_STUN_URLS" // comma-separated; appended verbatim to iceServers
+	envAuthPubkey       = "CHROMELESS_AUTH_PUBKEY"
+	envSharedSecret     = "CHROMELESS_TURN_SHARED_SECRET"
+	envSharedSecretPrev = "CHROMELESS_TURN_SHARED_SECRET_PREV"
+	envTurnURLs         = "CHROMELESS_TURN_URLS" // comma-separated
+	envSTUNURLs         = "CHROMELESS_STUN_URLS" // comma-separated; appended verbatim to iceServers
 
 	defaultTTL = 3600  // 1 hour
 	minTTL     = 300   // 5 minutes

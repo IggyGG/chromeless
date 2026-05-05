@@ -1,5 +1,5 @@
-# cb-tests namespace — runs validation Jobs against the deployed
-# cb-chromium binary. Parallel to cb-build (image-build env) and
+# chromeless-tests namespace — runs validation Jobs against the deployed
+# chromeless binary. Parallel to chromeless-build (image-build env) and
 # triform-wtf (production runtime).
 #
 # Why a dedicated ns:
@@ -9,15 +9,15 @@
 # - Failed test pods + their logs accumulate here without polluting
 #   the production ns. ttlSecondsAfterFinished:86400 on the Jobs
 #   bounds the clutter.
-# - cb-build's per-purpose-ns model carries over: build → cb-build,
-#   test → cb-tests, prod → cb-prod / triform-wtf.
+# - chromeless-build's per-purpose-ns model carries over: build → chromeless-build,
+#   test → chromeless-tests, prod → chromeless / triform-wtf.
 #
 # Operator prerequisites before `kubectl apply -k infra/k8s/tests/`:
 #   1. registry-pull Secret (kubernetes.io/dockerconfigjson) — mirror
-#      from cb-build into cb-tests so the WebRTC Job can pull
-#      registry.triform.cloud/cloud-browser-webrtc/cb-chromium.
+#      from chromeless-build into chromeless-tests so the WebRTC Job can pull
+#      registry.triform.cloud/chromeless/chromeless.
 #   2. forgejo-credentials Secret (Opaque, username + password) —
-#      mirror from cb-build for the git-clone initContainers that
+#      mirror from chromeless-build for the git-clone initContainers that
 #      pull the in-repo test code at apply-time.
 #
 # Both Secrets are pre-applied by the operator. See README.md for
@@ -26,9 +26,9 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: cb-tests
+  name: chromeless-tests
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: test
-    app.kubernetes.io/part-of: cloud-browser-webrtc
+    app.kubernetes.io/part-of: chromeless
     triform.ai/purpose: test

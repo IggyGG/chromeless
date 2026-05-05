@@ -129,7 +129,7 @@ counters).
 ```jsonc
 { "v": 1, "type": "file_upload_complete",
   "upload_id": "01958a01-...",
-  "server_path": "/var/lib/cb-uploads/<sess>/<upload_id>__report.pdf",
+  "server_path": "/var/lib/chromeless-uploads/<sess>/<upload_id>__report.pdf",
   "attached_via": "domSetFileInputFiles" }
 ```
 
@@ -214,7 +214,7 @@ single most dangerous surface in the cloud-browser product.
    client-side name don't collide and a maliciously crafted name
    cannot escape the per-session directory.
 6. **Per-session directory isolation.** Files land in
-   `/var/lib/cb-uploads/<session_id>/`; the session pod has no
+   `/var/lib/chromeless-uploads/<session_id>/`; the session pod has no
    write access outside its mount. Phase 3 sandboxing (T44)
    applies on top.
 7. **Virus scan stub.** v1 logs a stub line per upload; Phase 4
@@ -258,7 +258,7 @@ relay's localhost WebSocket inside the container.
 // Server reply (happy path):
 { "v":1, "type":"file_upload_complete",
   "upload_id":"abc123",
-  "server_path":"/var/lib/cb-uploads/sess1/abc123__hello.pdf",
+  "server_path":"/var/lib/chromeless-uploads/sess1/abc123__hello.pdf",
   "attached_via":"domSetFileInputFiles" }
 
 // Or rejection:

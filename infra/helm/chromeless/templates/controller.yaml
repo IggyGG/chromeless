@@ -1,0 +1,164 @@
+{{- if .Values.controller.enabled -}}
+{{- $ns := include "chromeless.namespace" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: browser-session-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-browser-session-controller
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: ["cloud-browser-webrtc.example.com"]
+    resources: ["browsersessions", "browsersessionpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["cloud-browser-webrtc.example.com"]
+    resources: ["browsersessions/status", "browsersessionpools/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["cloud-browser-webrtc.example.com"]
+    resources: ["browsersessions/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-browser-session-controller
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+subjects:
+  - kind: ServiceAccount
+    name: browser-session-controller
+    namespace: {{ $ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-browser-session-controller
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser-session-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chromeless.selectorLabels" (merge (dict "component" "controller") .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "chromeless.selectorLabels" (merge (dict "component" "controller") .) | nindent 8 }}
+      {{- if .Values.prometheusAnnotations.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+      {{- end }}
+    spec:
+      serviceAccountName: browser-session-controller
+      automountServiceAccountToken: true
+      {{- if .Values.priorityClasses.enabled }}
+      priorityClassName: {{ .Values.priorityClasses.controller.name }}
+      {{- end }}
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ include "chromeless.image" (dict "component" "controller" "values" .Values "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - "--leader-elect=true"
+            - "--metrics-bind=:8080"
+            - "--health-bind=:8081"
+            - "--default-pool={{ .Values.controller.defaultPool }}"
+          {{- $region := include "chromeless.region" (dict "context" . "component" "controller") }}
+          {{- if $region }}
+          env:
+            - name: CHROMELESS_REGION
+              value: {{ $region | quote }}
+          {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: browser-session-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "chromeless.selectorLabels" (merge (dict "component" "controller") .) | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+{{- end }}

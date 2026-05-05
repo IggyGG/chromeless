@@ -1,38 +1,38 @@
 # kustomization.yaml — `kubectl apply -k infra/k8s/tests/` entrypoint.
 #
 # Operator workflow:
-#   # one-time prereq (mirror Secrets from cb-build into cb-tests):
-#   kubectl get secret registry-pull -n cb-build -o yaml \
-#     | sed 's/namespace: cb-build/namespace: cb-tests/' \
+#   # one-time prereq (mirror Secrets from chromeless-build into chromeless-tests):
+#   kubectl get secret registry-pull -n chromeless-build -o yaml \
+#     | sed 's/namespace: chromeless-build/namespace: chromeless-tests/' \
 #     | kubectl apply -f -
-#   kubectl get secret forgejo-credentials -n cb-build -o yaml \
-#     | sed 's/namespace: cb-build/namespace: cb-tests/' \
+#   kubectl get secret forgejo-credentials -n chromeless-build -o yaml \
+#     | sed 's/namespace: chromeless-build/namespace: chromeless-tests/' \
 #     | kubectl apply -f -
 #
 #   # apply manifests:
 #   kubectl apply -k infra/k8s/tests/
 #
 #   # re-run a Job (Jobs are immutable; delete + apply):
-#   kubectl -n cb-tests delete job cb-cdp-validation
-#   kubectl apply -f infra/k8s/tests/cb-cdp-validation.yaml
+#   kubectl -n chromeless-tests delete job chromeless-cdp-validation
+#   kubectl apply -f infra/k8s/tests/chromeless-cdp-validation.yaml
 #
-# Wired downstream by cb-build.sh Step 10 — see README.md and
-# build/cb-build.sh.
+# Wired downstream by chromeless-build.sh Step 10 — see README.md and
+# build/chromeless-build.sh.
 
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: cb-tests
+namespace: chromeless-tests
 
 resources:
   - namespace.yaml
-  - cb-cdp-validation.yaml
-  - cb-webrtc-validation.yaml
-  - cb-webrtc-wire-bridge-validation.yaml
+  - chromeless-cdp-validation.yaml
+  - chromeless-webrtc-validation.yaml
+  - chromeless-webrtc-wire-bridge-validation.yaml
 
 labels:
   - includeSelectors: false
     pairs:
-      app.kubernetes.io/name: cloud-browser-webrtc
-      app.kubernetes.io/part-of: cloud-browser-webrtc
+      app.kubernetes.io/name: chromeless
+      app.kubernetes.io/part-of: chromeless
       app.kubernetes.io/component: test

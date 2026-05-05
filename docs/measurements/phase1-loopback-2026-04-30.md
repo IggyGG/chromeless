@@ -6,7 +6,7 @@ end-to-end gated on spec-05 fix)
 > compose stack; `harness/latency/record-y4m.sh` produces the y4m
 > fixture. Generated `harness/latency/fixtures/harness-loop-720p30.y4m`
 > (1.2 GiB raw, 900 frames @ 30 fps × 30 s) inside an ephemeral
-> container based on `cloud-browser-webrtc:dev` (Chromium 147 + Xvfb
+> container based on `chromeless:dev` (Chromium 147 + Xvfb
 > + ffmpeg x11grab). Transcoded to mp4 (391 KiB) for compactness.
 > Direct reconciliation against the mp4 (no WebRTC pipeline; just
 > reconcile.py decoding the y4m's own QRs):
@@ -58,7 +58,7 @@ end-to-end gated on spec-05 fix)
 >
 > **However**, the *real glass-to-glass number* the harness was
 > designed to produce is **still gated** — not on T96 anymore, but on
-> the still-active `CBWRTC_USE_FAKE_MEDIA=1` workaround for the
+> the still-active `CHROMELESS_USE_FAKE_MEDIA=1` workaround for the
 > Chromium-147 + Xvfb getDisplayMedia issue (T78 / #86). With
 > fake-media, the streamer captures Chromium's synthetic test pattern,
 > NOT whatever harness page is actually rendered. So the harness's
@@ -119,12 +119,12 @@ _(operator — `tests/harness/validation.md` §1.4 + §4 step 4.)_
 
 | | |
 |-|-|
-| Image tag             | `cloud-browser-webrtc:dev` (current dev build) |
-| `CBWRTC_USE_FAKE_MEDIA` | **1** if the run is on the current HEAD (T86 fake-media unblock per commit 411d06a). **0** required for a numbers-against-the-real-screen-capture run, which depends on T86's real fix landing. |
-| Encoder               | _whichever is wired in launch-chromium.sh + the SDP munger (T30) at run time. T35 (VP9), T36 (x264), T75 (SVT-AV1) all completed. Default appears to be x264 with zero-latency tuning._ |
+| Image tag             | `chromeless:dev` (current dev build) |
+| `CHROMELESS_USE_FAKE_MEDIA` | **1** if the run is on the current HEAD (T86 fake-media unblock per commit 411d06a). **0** required for a numbers-against-the-real-screen-capture run, which depends on T86's real fix landing. |
+| Encoder               | _whichever is wired in launch-chromeless.sh + the SDP munger (T30) at run time. T35 (VP9), T36 (x264), T75 (SVT-AV1) all completed. Default appears to be x264 with zero-latency tuning._ |
 | Audio                 | enabled (T24 wires PulseAudio null-sink → getDisplayMedia capture; spec 05 verifies audio reaches the client) |
 | Cursor metadata (T26) | enabled |
-| Auth (T48)            | disabled in dev (no `CBWRTC_AUTH_PUBKEY`); signaling logs `auth disabled` warning |
+| Auth (T48)            | disabled in dev (no `CHROMELESS_AUTH_PUBKEY`); signaling logs `auth disabled` warning |
 | TURN (T76 issuer)     | available; not required for loopback or LAN runs |
 
 ### 2.5 Harness page parameters
@@ -244,7 +244,7 @@ during T16:
   offset; the LAN delta from loopback should be the encoder + transport
   + decode time alone.
 - T86 fake-media path produces synthetic green frames + 440 Hz tone —
-  if the run uses `CBWRTC_USE_FAKE_MEDIA=1`, the encoder gets nearly
+  if the run uses `CHROMELESS_USE_FAKE_MEDIA=1`, the encoder gets nearly
   no entropy and the encoded bitrate is unrealistically low. **The
   numbers from a fake-media run are NOT comparable to a real-screen
   run**; document the configuration explicitly above and call this
@@ -262,7 +262,7 @@ blocked:**
    session. Confirmed live:
    - `tests/integration/audio_loopback_test.go`
      `TestStreamerOffersAudio`: **PASS in 21.84 s** with
-     `CBWRTC_INTEGRATION_LIVE=1`. SDP advertises `m=audio` + opus
+     `CHROMELESS_INTEGRATION_LIVE=1`. SDP advertises `m=audio` + opus
      rtpmap. (No real-pipeline numbers from this — it asserts on the
      contract layer.)
    - Signaling logs show `peer joined (replayed buffered envelopes)
@@ -276,7 +276,7 @@ blocked:**
 2. **T86 / #86 — STILL ACTIVE for real numbers.** The X11+SwiftShader
    pin (`5d69ac4`), the broader ozone/angle/swiftshader-webgl flag
    suite (T80–T84 area), and finally the
-   `CBWRTC_USE_FAKE_MEDIA=1` env switch (`411d06a`, T86 commit)
+   `CHROMELESS_USE_FAKE_MEDIA=1` env switch (`411d06a`, T86 commit)
    together let the streamer dial signaling and complete WebRTC
    negotiation. **They do NOT make real screen capture work.** The
    captured stream is Chromium's synthetic test pattern, not whatever
@@ -329,7 +329,7 @@ A condensed version, valid post-T86 fix:
 
 ```bash
 # 0. Resolve blockers.
-#    - T86: real getDisplayMedia path works; CBWRTC_USE_FAKE_MEDIA=0
+#    - T86: real getDisplayMedia path works; CHROMELESS_USE_FAKE_MEDIA=0
 #    - #96: streamer re-offers on client join
 
 git checkout <stack revision>

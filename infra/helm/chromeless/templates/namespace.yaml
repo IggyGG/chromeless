@@ -1,0 +1,11 @@
+{{- if .Values.namespace.create -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "chromeless.namespace" . }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: {{ .Values.namespace.podSecurityStandards.enforce | quote }}
+    pod-security.kubernetes.io/audit: {{ .Values.namespace.podSecurityStandards.audit | quote }}
+    pod-security.kubernetes.io/warn: {{ .Values.namespace.podSecurityStandards.warn | quote }}
+{{- end -}}

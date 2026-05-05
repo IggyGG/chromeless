@@ -1,8 +1,8 @@
-"""CDP smoke against the deployed cb-chromium binary.
+"""CDP smoke against the deployed chromeless binary.
 
 Exercises the four CDP operations that physics actually issues against the
 embedder. Each operation is its own pytest function so failures localize
-cleanly: when Step 10 of cb-build.sh prints which test failed, we know
+cleanly: when Step 10 of chromeless-build.sh prints which test failed, we know
 which embedder override regressed without re-reading the log.
 
 The four ops, in dependency order:
@@ -88,7 +88,7 @@ async def test_target_create_browser_context(ws_url: str) -> None:
         )
         # NOTE: we intentionally do NOT call Target.disposeBrowserContext
         # here. The plan flags it as a known-broken path: it crashes the
-        # cb-chromium binary, which then returns ConnectionRefused for the
+        # chromeless binary, which then returns ConnectionRefused for the
         # remaining tests in this module. Leaking contexts across tests is
         # cheap — the validation Job pod runs once per build and is GC'd
         # immediately. When the dispose crash is fixed in a follow-up, the

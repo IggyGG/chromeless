@@ -1,13 +1,13 @@
 # Triform K8s deploy runbook (Phase 2)
 
-Concrete operator runbook for the cloud-browser-webrtc Helm release on
+Concrete operator runbook for the chromeless Helm release on
 the Triform K8s cluster. Pairs with `docs/operations/runbook.md`
 (general / cluster-agnostic) and `docs/operations/phase1-deployment-checklist.md`
 (pre-Phase-2). T115 owns this document.
 
-The chart itself lives at `infra/helm/cloud-browser-webrtc/`. The
-Triform values overlay lives at `infra/k8s/cb-prod/values-triform.yaml`.
-The install wrapper is `infra/k8s/cb-prod/install.sh`.
+The chart itself lives at `infra/helm/chromeless/`. The
+Triform values overlay lives at `infra/k8s/chromeless/values-triform.yaml`.
+The install wrapper is `infra/k8s/chromeless/install.sh`.
 
 ## Cluster facts (verified live, pin to chart-installation date)
 
@@ -38,9 +38,9 @@ The install wrapper is `infra/k8s/cb-prod/install.sh`.
 
 1. **Build artifacts present.** T112's K8s Job has produced
    `cloud_browser_worker` + companion service images, kaniko-pushed
-   to `registry.triform.cloud/cloud-browser-webrtc/cb-*:<tag>`. Note
-   the tag — you'll pass it as `CB_IMAGE_TAG`.
-2. **DNS record exists.** `cb-signaling.triform.dev` → cluster
+   to `registry.triform.cloud/chromeless/cb-*:<tag>`. Note
+   the tag — you'll pass it as `CHROMELESS_IMAGE_TAG`.
+2. **DNS record exists.** `chromeless-signaling.triform.dev` → cluster
    ingress IP. Add to Cloudflare (the registrar for `triform.dev`) as
    an A record pointing at the ingress-nginx LoadBalancer IP. Same
    pattern as existing apps (forgejo.triform.dev, coder.triform.dev,
@@ -55,11 +55,11 @@ The install wrapper is `infra/k8s/cb-prod/install.sh`.
    (below); the privkey goes to whoever issues session tokens (the
    dev-issuer in Phase 1; in Phase 2 a real auth service).
 5. **Secrets overlay file authored**, ungitted, at
-   `~/.cb-secrets-triform.yaml`:
+   `~/.chromeless-secrets-triform.yaml`:
 
 ```yaml
-# ~/.cb-secrets-triform.yaml — DO NOT commit. Provided to install.sh
-# via CB_SECRETS_FILE.
+# ~/.chromeless-secrets-triform.yaml — DO NOT commit. Provided to install.sh
+# via CHROMELESS_SECRETS_FILE.
 signaling:
   authPubkey: "<base64 32-byte raw Ed25519 public key>"
 turnIssuer:
@@ -74,23 +74,23 @@ turnIssuer:
 ## Install
 
 ```bash
-export CB_IMAGE_TAG="m147-roll1-abc1234"   # tag from T113's build
-export CB_SECRETS_FILE="$HOME/.cb-secrets-triform.yaml"
+export CHROMELESS_IMAGE_TAG="m147-roll1-abc1234"   # tag from T113's build
+export CHROMELESS_SECRETS_FILE="$HOME/.chromeless-secrets-triform.yaml"
 
 # Dry-run first to see what's about to land.
-DRY_RUN=1 ./infra/k8s/cb-prod/install.sh
+DRY_RUN=1 ./infra/k8s/chromeless/install.sh
 
 # If the dry-run looks right, apply for real.
-./infra/k8s/cb-prod/install.sh
+./infra/k8s/chromeless/install.sh
 ```
 
 `install.sh`:
 
 1. Validates the kubectl context is the Triform cluster (checks for
    triform-5 + triform-6 nodes).
-2. Creates the `cb-prod` namespace if absent.
+2. Creates the `chromeless` namespace if absent.
 3. Copies the `registry-pull` secret from the `default` ns into
-   `cb-prod` if absent.
+   `chromeless` if absent.
 4. Renders the chart with values + secrets overlay + per-image tag
    `--set` for every cb-* image.
 5. Runs `helm upgrade --install --wait --atomic --timeout 10m`.
@@ -101,13 +101,13 @@ DRY_RUN=1 ./infra/k8s/cb-prod/install.sh
 
 ```bash
 # Pods, services, ingress.
-kubectl -n cb-prod get all
+kubectl -n chromeless get all
 
 # Warm pool reached its target?
-kubectl -n cb-prod get browsersessionpool default-pool -o jsonpath='{.status}' | jq
+kubectl -n chromeless get browsersessionpool default-pool -o jsonpath='{.status}' | jq
 
 # Signaling reachable from outside?
-curl -fsS https://cb-signaling.triform.dev/healthz
+curl -fsS https://chromeless-signaling.triform.dev/healthz
 
 # Metrics scraped by kube-prometheus-stack?
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
@@ -135,12 +135,12 @@ but correct.
 To temporarily allow more (e.g. for a load test):
 
 ```bash
-helm upgrade cb infra/helm/cloud-browser-webrtc/ \
-  -f infra/k8s/cb-prod/values-triform.yaml \
-  -f ~/.cb-secrets-triform.yaml \
+helm upgrade cb infra/helm/chromeless/ \
+  -f infra/k8s/chromeless/values-triform.yaml \
+  -f ~/.chromeless-secrets-triform.yaml \
   --set defaultPool.maxSessions=8 \
   --set defaultPool.warmReplicas=0 \
-  -n cb-prod
+  -n chromeless
 ```
 
 ## Rollback
@@ -150,8 +150,8 @@ back automatically. For an explicit roll-back to a previous good
 revision:
 
 ```bash
-helm history cb -n cb-prod
-helm rollback cb <revision> -n cb-prod --wait --timeout 5m
+helm history cb -n chromeless
+helm rollback cb <revision> -n chromeless --wait --timeout 5m
 ```
 
 Image-only roll-back (without changing values) is a single
@@ -167,17 +167,17 @@ whatever image they started with.
 
 Print and tick:
 
-- [ ] Build artifact tag captured (`CB_IMAGE_TAG`)
-- [ ] DNS record `cb-signaling.triform.dev` resolves (`dig +short`)
+- [ ] Build artifact tag captured (`CHROMELESS_IMAGE_TAG`)
+- [ ] DNS record `chromeless-signaling.triform.dev` resolves (`dig +short`)
 - [ ] Ingress IP reachable on TCP 443 from outside the cluster
 - [ ] Auth keypair generated; pubkey in secrets overlay; privkey safe
 - [ ] TURN shared secret generated; in secrets overlay
 - [ ] TURN URLs set in secrets overlay
 - [ ] DRY_RUN=1 install.sh output reviewed
 - [ ] install.sh exit 0
-- [ ] `kubectl -n cb-prod get all` shows expected pods Ready
-- [ ] `curl https://cb-signaling.triform.dev/healthz` returns 200
-- [ ] Grafana dashboard `cb-cluster-overview` shows the new region
+- [ ] `kubectl -n chromeless get all` shows expected pods Ready
+- [ ] `curl https://chromeless-signaling.triform.dev/healthz` returns 200
+- [ ] Grafana dashboard `chromeless-cluster-overview` shows the new region
       (cb_signaling_active_sessions, cb_chromium_cpu_pct...)
 - [ ] At least one BrowserSession can be created via the controller
       (manual `kubectl apply -f` of a sample CR or via a real
@@ -187,24 +187,24 @@ Print and tick:
 
 | Symptom | Diagnosis | Fix |
 |---------|-----------|-----|
-| `helm install` exits with `values.signaling.authPubkey is required` | Secrets overlay missing or wrong path | `ls -la ${CB_SECRETS_FILE}`; reset CB_SECRETS_FILE to the right path; re-run |
-| Signaling Pod stuck `ContainerCreating` | registry-pull secret missing in cb-prod | `kubectl -n cb-prod get secret registry-pull` — if absent, install.sh's auto-copy didn't run; manually `kubectl get secret -n default registry-pull -o yaml \| sed 's/namespace: default/namespace: cb-prod/' \| kubectl apply -f -` |
-| Signaling Pod CrashLoopBackOff | Bad authPubkey (not 32-byte raw key, base64 mis-padded) | `kubectl -n cb-prod logs deploy/signaling`; regenerate keypair, update secrets overlay, re-install |
-| Session Pod `Pending` with "Insufficient nvidia.com/gpu" | More sessions requested than GPUs free | `kubectl -n cb-prod describe pod` confirms; either wait, or `kubectl delete browsersession <stale>` |
-| Session Pod `Pending` with "didn't tolerate the taint" | tolerations / nodeSelector mismatch in the pool template | check `kubectl -n cb-prod get browsersessionpool default-pool -o yaml` matches the values overlay; the controller may need a restart if a pool template update didn't propagate |
-| Ingress 404 / cert-manager not issuing | DNS not resolving yet, or wrong ClusterIssuer | `kubectl describe ingress -n cb-prod signaling`; check Events; verify `cert-manager.io/cluster-issuer: letsencrypt-production` annotation matches a ready ClusterIssuer |
+| `helm install` exits with `values.signaling.authPubkey is required` | Secrets overlay missing or wrong path | `ls -la ${CHROMELESS_SECRETS_FILE}`; reset CHROMELESS_SECRETS_FILE to the right path; re-run |
+| Signaling Pod stuck `ContainerCreating` | registry-pull secret missing in chromeless | `kubectl -n chromeless get secret registry-pull` — if absent, install.sh's auto-copy didn't run; manually `kubectl get secret -n default registry-pull -o yaml \| sed 's/namespace: default/namespace: chromeless/' \| kubectl apply -f -` |
+| Signaling Pod CrashLoopBackOff | Bad authPubkey (not 32-byte raw key, base64 mis-padded) | `kubectl -n chromeless logs deploy/signaling`; regenerate keypair, update secrets overlay, re-install |
+| Session Pod `Pending` with "Insufficient nvidia.com/gpu" | More sessions requested than GPUs free | `kubectl -n chromeless describe pod` confirms; either wait, or `kubectl delete browsersession <stale>` |
+| Session Pod `Pending` with "didn't tolerate the taint" | tolerations / nodeSelector mismatch in the pool template | check `kubectl -n chromeless get browsersessionpool default-pool -o yaml` matches the values overlay; the controller may need a restart if a pool template update didn't propagate |
+| Ingress 404 / cert-manager not issuing | DNS not resolving yet, or wrong ClusterIssuer | `kubectl describe ingress -n chromeless signaling`; check Events; verify `cert-manager.io/cluster-issuer: letsencrypt-production` annotation matches a ready ClusterIssuer |
 | WebSocket connects then disconnects after seconds | nginx ingress proxy timeouts | confirm `proxy-read-timeout` and `proxy-send-timeout` annotations are in the rendered Ingress; bump if user sessions exceed 1h |
 | Per-session GPU contention symptoms (encoder underrun, FPS collapse) | maxSessions too high for the node | drop `defaultPool.maxSessions`; correlate with `nvidia-smi` on triform-5 |
 
 ## Cross-references
 
-- `infra/helm/cloud-browser-webrtc/` — the chart
-- `infra/k8s/cb-prod/values-triform.yaml` — Triform overlay
-- `infra/k8s/cb-prod/install.sh` — install wrapper
+- `infra/helm/chromeless/` — the chart
+- `infra/k8s/chromeless/values-triform.yaml` — Triform overlay
+- `infra/k8s/chromeless/install.sh` — install wrapper
 - `docs/security/auth.md` — auth keypair + TURN credentials lifecycle
 - `docs/operations/runbook.md` — general operator runbook
 - `docs/operations/multi-region.md` — when to add a second region
 - `docs/operations/tracing.md` — Jaeger setup (T99); applies same shape
-- `infra/k8s/cb-build/` — T112 build environment
+- `infra/k8s/chromeless-build/` — T112 build environment
 - `docs/operations/encoder-factory-deploy.md` — T106; encoder-side
   deploy concerns once the real factory is shipping

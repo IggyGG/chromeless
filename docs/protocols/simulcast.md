@@ -1,6 +1,6 @@
 # Simulcast (T77)
 
-How `cloud-browser-webrtc` lets the cloud-side encoder send multiple
+How `chromeless` lets the cloud-side encoder send multiple
 resolution layers in parallel so the receiving end can pick whichever
 fits its bandwidth.
 

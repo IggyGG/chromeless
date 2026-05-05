@@ -1,6 +1,6 @@
 # End-to-end tests (Playwright)
 
-Functional E2E for the v0 cloud-browser-webrtc stack. Drives a real
+Functional E2E for the v0 chromeless stack. Drives a real
 Chromium against the served client, exercising signaling, ICE, and
 (once T34 lands) the full SDP round-trip + media reception. Latency is
 **not** measured here — that lives in `harness/` and `tests/harness/`.
@@ -53,11 +53,11 @@ example, when you've already brought the stack up by hand or are
 running on a CI host that pre-provisions the stack — set:
 
 ```sh
-CBWRTC_E2E_USE_RUNNING_STACK=1 npm run test:e2e
+CHROMELESS_E2E_USE_RUNNING_STACK=1 npm run test:e2e
 
 # or against a different URL entirely:
-CBWRTC_E2E_BASE_URL=http://my-host:3000 \
-CBWRTC_E2E_USE_RUNNING_STACK=1 \
+CHROMELESS_E2E_BASE_URL=http://my-host:3000 \
+CHROMELESS_E2E_USE_RUNNING_STACK=1 \
   npm run test:e2e
 ```
 
@@ -68,8 +68,8 @@ You can also point the suite at a hand-rolled local stack
 ( cd signaling && go run . ) &
 ( cd client && npm install && npm run build && python3 -m http.server -d dist 5173 ) &
 
-CBWRTC_E2E_USE_RUNNING_STACK=1 \
-CBWRTC_E2E_BASE_URL=http://localhost:5173 \
+CHROMELESS_E2E_USE_RUNNING_STACK=1 \
+CHROMELESS_E2E_BASE_URL=http://localhost:5173 \
   npm run test:e2e
 ```
 
@@ -131,7 +131,7 @@ end-to-end. Two related artifacts:
 - **`../integration/audio_loopback_test.go`** — Go integration
   partner (also T64). Asserts the streamer's SDP **offer** advertises
   audio (m=audio + opus rtpmap) at the contract layer, without
-  needing a browser. Opt-in via `CBWRTC_INTEGRATION_LIVE=1` because
+  needing a browser. Opt-in via `CHROMELESS_INTEGRATION_LIVE=1` because
   it stands up `docker compose`. Together with spec 05 they cover
   the full vertical: *audio is offered* (Go test) → *audio is
   received* (Playwright spec).

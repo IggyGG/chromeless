@@ -7,15 +7,15 @@
 //
 // Activation:
 //
-//	CBWRTC_DEV_ISSUER=1   enables /issue-token + publishes the
-//	                      generated public key in CBWRTC_AUTH_PUBKEY.
+//	CHROMELESS_DEV_ISSUER=1   enables /issue-token + publishes the
+//	                      generated public key in CHROMELESS_AUTH_PUBKEY.
 //
-// When `CBWRTC_DEV_ISSUER=1` and `CBWRTC_AUTH_PUBKEY` is unset, this
+// When `CHROMELESS_DEV_ISSUER=1` and `CHROMELESS_AUTH_PUBKEY` is unset, this
 // file generates a fresh keypair on startup, hands the public half to
 // initAuth() through the env, and serves /issue-token using the
 // private half. This is the path the integration test uses.
 //
-// If `CBWRTC_AUTH_PUBKEY` is already set, the dev issuer refuses to
+// If `CHROMELESS_AUTH_PUBKEY` is already set, the dev issuer refuses to
 // start — that combination only happens by accident in production
 // configs and we want it to fail loudly.
 
@@ -47,7 +47,7 @@ func newJTI() (string, error) {
 }
 
 const (
-	devIssuerEnv = "CBWRTC_DEV_ISSUER"
+	devIssuerEnv = "CHROMELESS_DEV_ISSUER"
 	devTokenTTL  = 1 * time.Hour
 )
 
@@ -60,7 +60,7 @@ type devIssuer struct {
 
 var globalDevIssuer *devIssuer
 
-// initDevIssuer wires up the dev-only issuer if `CBWRTC_DEV_ISSUER=1`.
+// initDevIssuer wires up the dev-only issuer if `CHROMELESS_DEV_ISSUER=1`.
 // Must be called BEFORE initAuth so the env var it sets is visible.
 func initDevIssuer(logger *slog.Logger) {
 	if os.Getenv(devIssuerEnv) != "1" {

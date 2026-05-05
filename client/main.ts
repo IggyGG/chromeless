@@ -1,4 +1,4 @@
-// v0 browser client for cloud-browser-webrtc.
+// v0 browser client for chromeless.
 //
 // Per docs/capture/path-of-least-resistance.md (T15) and T23, the
 // streamer (capture/streamer-page) holds the media and is therefore
@@ -460,7 +460,7 @@ async function connect(sessionId: string): Promise<void> {
   // T48: try to fetch a signed session token. If the issuer endpoint
   // returns null (not deployed, or 404 in production until you wire
   // your own issuer), we connect without a token — the signaling
-  // server will reject if `CBWRTC_AUTH_PUBKEY` is set, accept
+  // server will reject if `CHROMELESS_AUTH_PUBKEY` is set, accept
   // otherwise.
   const issued = await fetchSessionToken(sessionId, "client", { signalingBase: DEFAULT_SIGNALING });
   if (issued) {

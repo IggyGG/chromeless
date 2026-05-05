@@ -70,7 +70,7 @@ Limits:
 - `size` clamped to `[1, 1048576]` (1 byte to 1 MiB) per request.
   Without the cap, a single client could exhaust the host's egress.
 - POST body limit: 1 MiB. Larger requests get 413.
-- Auth: required when `CBWRTC_AUTH_PUBKEY` is set (T48). Token in
+- Auth: required when `CHROMELESS_AUTH_PUBKEY` is set (T48). Token in
   `?token=…` query string, same as `/ws/`. Consistent with
   `/turn-credentials` and `/admin/revoke`. The probe's lack of auth
   in dev mode is fine — auth-disabled deploys are local/CI only.

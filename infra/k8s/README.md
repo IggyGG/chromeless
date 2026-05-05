@@ -1,4 +1,4 @@
-# `infra/k8s/` — Kubernetes manifests for cloud-browser-webrtc
+# `infra/k8s/` — Kubernetes manifests for chromeless
 
 > **Status:** Phase 3 prep (T50). The manifests apply cleanly with
 > `kubectl --dry-run=client` against any K8s 1.27+ API. A real cluster
@@ -9,10 +9,10 @@
 
 | File | Purpose |
 |---|---|
-| `namespace.yaml` | The `cloud-browser-webrtc` namespace with Pod Security Standards labels. |
+| `namespace.yaml` | The `chromeless` namespace with Pod Security Standards labels. |
 | `signaling-deployment.yaml` | Stateless signaling tier: Deployment + Service + Ingress + HPA + ServiceAccount. |
 | `turn-deployment.yaml` | coturn StatefulSet with TURN-REST credentials Secret + ConfigMap + headless Service. **Production should prefer a managed TURN service** (Cloudflare TURN, metered.ca, Twilio) — see comments in that file. |
-| `cloud-browser-session.yaml` | Pod template for one session — five containers (cb-chromium, cb-metrics-sidecar, input-bridge, cursor-watcher, clipboard-bridge) sharing a network and PID namespace. The session controller (designed in `session-controller-design.md`, not yet built) materialises these. |
+| `cloud-browser-session.yaml` | Pod template for one session — five containers (chromeless, chromeless-metrics-sidecar, input-bridge, cursor-watcher, clipboard-bridge) sharing a network and PID namespace. The session controller (designed in `session-controller-design.md`, not yet built) materialises these. |
 | `session-controller-design.md` | Design doc for the warm-pool / assignment / eviction operator. **Read this** before touching the manifests in anger. |
 | `kustomization.yaml` | `kubectl apply -k .` entry point. |
 
@@ -69,7 +69,7 @@ kustomize overlay under `infra/k8s/overlays/<env>/`):
   may prefer that over `hostNetwork=true`.
 - `pod-security.kubernetes.io/enforce: baseline` is OK on GKE; bump
   to `restricted` once `runAsNonRoot: true` is honoured by every
-  container (cb-chromium needs it).
+  container (chromeless needs it).
 
 ### EKS
 

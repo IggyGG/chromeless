@@ -7,7 +7,7 @@
 > **Owners:** `platform-dev` (author), `qa-tester` (validation methodology).
 
 This document defines the measurable, testable acceptance criteria for v1 of
-`cloud-browser-webrtc`. v1 is reached when **every** Pass criterion below is
+`chromeless`. v1 is reached when **every** Pass criterion below is
 satisfied on a reference deployment using the methodology in the
 [latency harness](../harness/) and the [container smoke + E2E tests](../tests/).
 

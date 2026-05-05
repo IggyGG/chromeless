@@ -1,5 +1,5 @@
 #!/bin/sh
-# infra/lifecycle/scrub-pod.sh — scrub the cb-chromium container's
+# infra/lifecycle/scrub-pod.sh — scrub the chromeless container's
 # tenant-touched state in-place so the pod can return to the warm
 # pool. Called by the BrowserSession controller via Pod-exec when
 # the pool's `spec.recyclePolicy: ScrubAndReturn` (T90).
@@ -23,7 +23,7 @@
 #     .pki/, .config/dconf/).
 #   - /tmp scratch (excluding the X11 socket dir which other
 #     sidecars depend on).
-#   - /run/cb-session/{id,env} so the next chromium restart picks up
+#   - /run/chromeless-session/{id,env} so the next chromium restart picks up
 #     fresh per-session env (set by the controller via supervisord
 #     environment= update OR by the next pod-level cold-start.sh).
 #
@@ -37,7 +37,7 @@ set -eu
 
 USER_DATA_DIR="/home/cbuser/.config/chromium"
 HOME_DIR="/home/cbuser"
-CB_SESSION_DIR="/run/cb-session"
+CHROMELESS_SESSION_DIR="/run/chromeless-session"
 SUPERVISORCTL="/usr/bin/supervisorctl"
 SUPERVISORD_CONF="/etc/supervisor/supervisord.conf"
 
@@ -73,7 +73,7 @@ done
 # --- 4. wipe per-session env so a fresh value lands on next start ------
 # We delete; the next entrypoint chain (after a pod-level cold-start) or
 # the controller's environment= update will write the new SESSION_ID.
-rm -f "$CB_SESSION_DIR/id" "$CB_SESSION_DIR/env"
+rm -f "$CHROMELESS_SESSION_DIR/id" "$CHROMELESS_SESSION_DIR/env"
 
 # --- 5. clear /tmp (preserve the X11 socket dir; chromium needs it) ---
 find /tmp -mindepth 1 -maxdepth 1 ! -name ".X11-unix" -exec rm -rf {} + 2>/dev/null || true

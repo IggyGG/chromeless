@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
   tests/webrtc/streamer-page.html — self-contained WebRTC streamer page
-  loaded INTO cb-chromium by drive-recorder.mjs.
+  loaded INTO chromeless by drive-recorder.mjs.
 
   Capture path (CHANGED 2026-05-03):
     Capture is now a CANVAS captureStream, not getDisplayMedia /
@@ -9,7 +9,7 @@
 
       1. canvas.captureStream(fps) works in headless chromium with no
          display server, no window-picker, and no fake-device flag.
-         The cb-tests/cb-webrtc-validation Job runs cb-chromium under
+         The chromeless-tests/chromeless-webrtc-validation Job runs chromeless under
          Xvfb so getDisplayMedia *would* work, but the canvas path is
          strictly more deterministic: no compositor in the loop, no
          dependency on `--auto-select-desktop-capture-source`, and the
@@ -50,7 +50,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>cb-chromium webrtc test streamer</title>
+    <title>chromeless webrtc test streamer</title>
     <style>
       html, body {
         margin: 0; height: 100%; background: #06080d;
@@ -214,7 +214,7 @@
         // No iceServers: the harness peer is in the same network
         // namespace via host loopback (drive-recorder.mjs's Node.js
         // peer listens on 127.0.0.1, and either we're on the same
-        // host in local dev or sharing pod netns in the cb-tests Job).
+        // host in local dev or sharing pod netns in the chromeless-tests Job).
         // Host candidates are sufficient — STUN would just slow
         // first-frame.
         const pc = new RTCPeerConnection({});

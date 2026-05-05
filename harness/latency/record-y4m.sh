@@ -3,7 +3,7 @@
 # y4m fixture for T109's --use-file-for-fake-video-capture-loop path.
 #
 # The stack today (Phase 1, Chromium 147 + Xvfb under the
-# CBWRTC_USE_FAKE_MEDIA path) can't do real getDisplayMedia, so the
+# CHROMELESS_USE_FAKE_MEDIA path) can't do real getDisplayMedia, so the
 # cloud Chromium's synthetic camera is the only signal we have.
 # The synthetic camera is a moving green square though — it doesn't
 # carry the harness page's QR codes — so reconcile.py sees zero
@@ -189,8 +189,8 @@ echo
 echo "OK: wrote $(du -h "$OUT" | cut -f1) to $OUT"
 echo
 echo "Next:"
-echo "  1. Bind-mount harness/latency/fixtures/ at /opt/cb-fixtures/ in the"
+echo "  1. Bind-mount harness/latency/fixtures/ at /opt/chromeless-fixtures/ in the"
 echo "     compose / k8s pod (compose.yaml T109 entry already does this)."
-echo "  2. Set CBWRTC_USE_FAKE_MEDIA=1 +"
-echo "         CBWRTC_USE_FAKE_MEDIA_FILE=/opt/cb-fixtures/$(basename "$OUT")"
+echo "  2. Set CHROMELESS_USE_FAKE_MEDIA=1 +"
+echo "         CHROMELESS_USE_FAKE_MEDIA_FILE=/opt/chromeless-fixtures/$(basename "$OUT")"
 echo "  3. Run the T65 latency-measurement workflow against the running stack."

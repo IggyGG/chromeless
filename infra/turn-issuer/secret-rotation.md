@@ -14,8 +14,8 @@ SIGHUP, and how to tell the rotation worked.
 
 | Component | Variable | Role |
 |---|---|---|
-| Issuer | `CBWRTC_TURN_SHARED_SECRET` | the secret the issuer uses to *mint* credentials |
-| Issuer | `CBWRTC_TURN_SHARED_SECRET_PREV` | optional; only set during a rotation overlap. The issuer doesn't *use* this to mint, but its presence is the signal "we are rolling, expect existing credentials minted with the previous secret to still be in flight." |
+| Issuer | `CHROMELESS_TURN_SHARED_SECRET` | the secret the issuer uses to *mint* credentials |
+| Issuer | `CHROMELESS_TURN_SHARED_SECRET_PREV` | optional; only set during a rotation overlap. The issuer doesn't *use* this to mint, but its presence is the signal "we are rolling, expect existing credentials minted with the previous secret to still be in flight." |
 | coturn | `static-auth-secret` (in `turnserver.conf`) | the secret coturn uses to *validate* credentials presented by clients |
 | coturn | `static-auth-secret-fallback` (compile-time option in some forks; otherwise we run two `turnserver.conf` blocks during overlap) | optional secondary secret coturn will accept while the primary rolls forward |
 
@@ -52,8 +52,8 @@ StatefulSet (the manifest in `infra/k8s/turn-deployment.yaml`):
    # Easier: just watch coturn's stderr for "rejected" auth events;
    # there should be none.
    ```
-4. **Update issuer.** Set `CBWRTC_TURN_SHARED_SECRET=S_new` and
-   `CBWRTC_TURN_SHARED_SECRET_PREV=S_old`. Roll the issuer Deployment.
+4. **Update issuer.** Set `CHROMELESS_TURN_SHARED_SECRET=S_new` and
+   `CHROMELESS_TURN_SHARED_SECRET_PREV=S_old`. Roll the issuer Deployment.
    New issuances now use `S_new`. Existing in-flight credentials minted
    with `S_old` keep validating against coturn's fallback.
 5. **Wait the grace period.** At minimum, the longest `ttlSeconds`
@@ -61,7 +61,7 @@ StatefulSet (the manifest in `infra/k8s/turn-deployment.yaml`):
    24 hours.
 6. **Drop the fallback.** Update `turnserver.conf` to remove the
    `S_old` fallback. Roll coturn again. Update the issuer to drop
-   `CBWRTC_TURN_SHARED_SECRET_PREV` (set to empty).
+   `CHROMELESS_TURN_SHARED_SECRET_PREV` (set to empty).
 7. **Verify** by checking
    `cb_turn_issuer_credentials_issued_total` is climbing on the
    /metrics endpoint and coturn's auth-failure counter is flat.

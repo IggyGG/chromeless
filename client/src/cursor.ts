@@ -1,4 +1,4 @@
-// Cursor renderer for the cloud-browser-webrtc client.
+// Cursor renderer for the chromeless client.
 //
 // Subscribes to the "cursor" RTCDataChannel (created in main.ts) and
 // renders an HTML/CSS cursor at the reported coordinates as an

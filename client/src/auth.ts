@@ -6,7 +6,7 @@
 // signaling). This module just pulls a token from a known endpoint and
 // hands it back as a string.
 //
-// In dev, the signaling container runs with `CBWRTC_DEV_ISSUER=1`,
+// In dev, the signaling container runs with `CHROMELESS_DEV_ISSUER=1`,
 // which exposes `/issue-token` on the same origin. Defaults here
 // match that.
 //

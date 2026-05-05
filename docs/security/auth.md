@@ -1,6 +1,6 @@
 # Signaling auth (T48 / Phase-3 prep)
 
-How the cloud-browser-webrtc signaling server authenticates websocket
+How the chromeless signaling server authenticates websocket
 connections. Lands in T48 as a Phase-3 enabler — Phase 0/1 deployments
 typically run with auth disabled.
 
@@ -9,7 +9,7 @@ typically run with auth disabled.
 - Tokens are **JWT-shaped** (`header.payload.signature`) using
   **`alg=EdDSA`**. The header is fixed: `{"alg":"EdDSA","typ":"JWT"}`.
 - The server reads its **Ed25519 public key** from
-  `CBWRTC_AUTH_PUBKEY` (base64-encoded raw 32-byte key). If the env
+  `CHROMELESS_AUTH_PUBKEY` (base64-encoded raw 32-byte key). If the env
   var is unset, **auth is disabled** and the server logs a clear
   warning at startup.
 - The browser sends the token as `?token=...` on the websocket URL.
@@ -37,7 +37,7 @@ typically run with auth disabled.
 |-----------------|-----------------------------------------------------|
 | `missing`       | `?token=` empty                                     |
 | `malformed`     | wrong number of dots, bad base64, bad JSON, wrong sig length |
-| `bad_signature` | signature does not verify against `CBWRTC_AUTH_PUBKEY` |
+| `bad_signature` | signature does not verify against `CHROMELESS_AUTH_PUBKEY` |
 | `expired`       | `exp` is in the past                                |
 | `not_yet_valid` | `nbf` is in the future                              |
 | `sid_mismatch`  | `sid` claim does not match the path segment         |
@@ -69,11 +69,11 @@ What it doesn't give us:
 
 ### Anonymous fallback
 
-When auth is disabled (`CBWRTC_AUTH_PUBKEY` unset), every connection
+When auth is disabled (`CHROMELESS_AUTH_PUBKEY` unset), every connection
 is bucketed into `tenant_id = "_anonymous"`. This preserves the
 pre-T67 single-namespace behaviour for dev / CI runs that don't run
 the issuer. The startup warning log
-(`auth disabled: CBWRTC_AUTH_PUBKEY is unset; any caller can connect`)
+(`auth disabled: CHROMELESS_AUTH_PUBKEY is unset; any caller can connect`)
 already telegraphs the implication; T67 doesn't add a second log,
 just a metric label.
 
@@ -126,7 +126,7 @@ TTL," signaling consults a denylist on every authenticated connect.
 Two backends:
 
 - **`StaticDenylist`** — in-memory set, seeded from
-  `CBWRTC_DENYLIST` (CSV of `tenant` or `tenant:jti` entries).
+  `CHROMELESS_DENYLIST` (CSV of `tenant` or `tenant:jti` entries).
   Single-process, lost on restart. Fine for dev, CI, and small
   deployments where the admin endpoint is the only writer and the
   fleet is one signaling pod.
@@ -134,7 +134,7 @@ Two backends:
   `cb:auth:denylist:tenants` for tenant-wide bans;
   `cb:auth:denylist:jtis` for per-token bans, value `tenant:jti`).
   Multiple signaling replicas converge on the same revocation
-  state. Configured via `CBWRTC_DENYLIST_REDIS_ADDR`.
+  state. Configured via `CHROMELESS_DENYLIST_REDIS_ADDR`.
 
 Lookup semantics:
 
@@ -165,13 +165,13 @@ Content-Type: application/json
 ```
 
 The admin token is signed by a **separate Ed25519 keypair**
-(`CBWRTC_ADMIN_PUBKEY`, distinct from `CBWRTC_AUTH_PUBKEY`) and
+(`CHROMELESS_ADMIN_PUBKEY`, distinct from `CHROMELESS_AUTH_PUBKEY`) and
 must carry `role: "admin"`. The endpoint is registered only when
 that pubkey env is set; in its absence the path returns 404.
 Operationally:
 
 1. Generate a fresh admin keypair (separate from session keypair).
-2. `CBWRTC_ADMIN_PUBKEY=<base64-pub>` on the signaling deployment.
+2. `CHROMELESS_ADMIN_PUBKEY=<base64-pub>` on the signaling deployment.
 3. Run an issuer for admin tokens behind whatever gate your ops
    team uses (kubectl SSO, sudo workflow, etc.). The dev issuer
    does NOT mint admin tokens; that is deliberate.
@@ -223,15 +223,15 @@ What this does NOT protect against (yet):
 
 `signaling/dev-issuer.go` provides an in-process token issuer for
 local development and integration tests. It activates when
-`CBWRTC_DEV_ISSUER=1`:
+`CHROMELESS_DEV_ISSUER=1`:
 
 1. Generates a fresh Ed25519 keypair on startup.
-2. Sets `CBWRTC_AUTH_PUBKEY` from the public key (so `initAuth`
+2. Sets `CHROMELESS_AUTH_PUBKEY` from the public key (so `initAuth`
    verifies tokens this issuer signs).
 3. Serves `/issue-token?role=...&session_id=...&tenant=...`,
    responding with `{token, exp, role, sid, sub}`.
 
-The dev issuer **refuses to start** if `CBWRTC_AUTH_PUBKEY` is also
+The dev issuer **refuses to start** if `CHROMELESS_AUTH_PUBKEY` is also
 set explicitly — that combination is almost always a misconfigured
 production deployment, and we want it to fail loudly.
 
@@ -239,16 +239,16 @@ A non-dev deployment must:
 
 1. Generate the Ed25519 keypair off-cluster (e.g.,
    `openssl genpkey -algorithm ed25519`).
-2. Inject the **public** half via `CBWRTC_AUTH_PUBKEY` into the
+2. Inject the **public** half via `CHROMELESS_AUTH_PUBKEY` into the
    signaling deployment.
 3. Run a real issuer service (gated by app-level auth) signing
    short-lived tokens with the **private** half.
-4. Never deploy `CBWRTC_DEV_ISSUER=1` to anything user-facing.
+4. Never deploy `CHROMELESS_DEV_ISSUER=1` to anything user-facing.
 
 ## Key rotation
 
 Rotating the verifier key means signing a fleet of tokens with a new
-private key and updating the `CBWRTC_AUTH_PUBKEY` env on the
+private key and updating the `CHROMELESS_AUTH_PUBKEY` env on the
 signaling deployment. The naïve approach (single key in env)
 forces a brief gap where the old key is invalid before the new one
 rolls out — acceptable for short-`exp` tokens (clients re-auth and
@@ -301,7 +301,7 @@ A second component verifies the same Ed25519 token: the
 calls `POST /issue-turn-cred` with the same `Authorization: Bearer
 <token>` it would attach to the signaling WS upgrade. The issuer:
 
-1. Verifies the JWT against `CBWRTC_AUTH_PUBKEY` (same env, same
+1. Verifies the JWT against `CHROMELESS_AUTH_PUBKEY` (same env, same
    contract — the verifier is a copy of `signaling/auth.go`'s
    `verifyToken`; tests `TestIssue_*` mirror the rejection cases).
 2. Reads `sub` (tenant) and `sid` (session) from the token.
@@ -311,7 +311,7 @@ calls `POST /issue-turn-cred` with the same `Authorization: Bearer
 4. Returns `{username, credential, ttl, urls, iceServers}` so the
    client can drop the response shape into `RTCPeerConnection`.
 
-The shared secret (`CBWRTC_TURN_SHARED_SECRET`) is **separate** from
+The shared secret (`CHROMELESS_TURN_SHARED_SECRET`) is **separate** from
 the auth pubkey — the issuer holds both:
 - the **pubkey** (for verifying the caller's identity)
 - the **shared secret** (for minting credentials coturn will accept)

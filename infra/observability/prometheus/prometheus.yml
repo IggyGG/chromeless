@@ -4,26 +4,26 @@
 # (prometheus-federate.yml) can aggregate without losing provenance.
 #
 # Scrape jobs:
-#   cb-signaling   — local cluster's signaling :8080 (cb_signaling_*).
-#   cb-chromium    — local cluster's metrics sidecar :9100
+#   chromeless-signaling   — local cluster's signaling :8080 (cb_signaling_*).
+#   chromeless    — local cluster's metrics sidecar :9100
 #                    (cb_chromium_*, cb_webrtc_*, cb_client_*).
-#   cb-controller  — the BrowserSession controller's :8080 (T71).
-#   cb-turn-issuer — the TURN issuer's :8090 (T76).
+#   chromeless-controller  — the BrowserSession controller's :8080 (T71).
+#   chromeless-turn-issuer — the TURN issuer's :8090 (T76).
 #
 # Substitute REGION at deploy time. The dev compose stack passes
-# REGION via env (defaults to `dev` when CBWRTC_REGION is unset).
+# REGION via env (defaults to `dev` when CHROMELESS_REGION is unset).
 # K8s deploys template this value via the Helm chart.
 
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
-    deploy: cloud-browser-webrtc-dev
+    deploy: chromeless-dev
     # T94: region label every metric the federate aggregates.
-    region: "${CBWRTC_REGION:-dev}"
+    region: "${CHROMELESS_REGION:-dev}"
 
 scrape_configs:
-  - job_name: cb-signaling
+  - job_name: chromeless-signaling
     metrics_path: /metrics
     static_configs:
       - targets:
@@ -31,7 +31,7 @@ scrape_configs:
         labels:
           service: signaling
 
-  - job_name: cb-chromium
+  - job_name: chromeless
     metrics_path: /metrics
     static_configs:
       - targets:
@@ -41,7 +41,7 @@ scrape_configs:
 
   # Phase-3 controller + issuer scrapes. Targets resolve only when
   # those services are deployed (Helm chart per region).
-  - job_name: cb-controller
+  - job_name: chromeless-controller
     metrics_path: /metrics
     static_configs:
       - targets:
@@ -52,7 +52,7 @@ scrape_configs:
     # dev compose doesn't ship it).
     honor_labels: false
 
-  - job_name: cb-turn-issuer
+  - job_name: chromeless-turn-issuer
     metrics_path: /metrics
     static_configs:
       - targets:

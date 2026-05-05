@@ -19,7 +19,7 @@ encoders end-to-end without our help. So why a new layer?
   wrapper (`Vp9Encoder::SetRates`, `H264Encoder::SetRates`, etc.).
   That is a duplicate-knowledge problem. The adapter is the one
   place to log, tag, and emit the bitrate decisions to the
-  cb-metrics-sidecar (T38).
+  chromeless-metrics-sidecar (T38).
 - **Coordination.** ABR (per `PROJECT_BRIEF.md` Phase 2) is
   cross-encoder: a target-bitrate drop sometimes argues for cutting
   resolution or framerate rather than just lowering the encoder
@@ -66,7 +66,7 @@ SetRates calls:
                  |
                  +----> cloud_browser::BweAdapter::OnBitrateUpdated
                                   |
-                                  +-- MetricsSink (-> cb-metrics-sidecar)
+                                  +-- MetricsSink (-> chromeless-metrics-sidecar)
                                   |
                                   v
                            builds RateControlParameters,

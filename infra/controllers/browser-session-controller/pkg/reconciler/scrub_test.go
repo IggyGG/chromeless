@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 )
 
 // fakeScrubExecutor records the call and returns scripted output.

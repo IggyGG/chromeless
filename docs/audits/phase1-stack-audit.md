@@ -39,12 +39,12 @@ contingent on the §4 must-pass list.**
 authored: full signaling protocol, `getDisplayMedia` (with the T86
 fake-media gate), RTCPeerConnection with answerer-role flow per T34,
 heartbeat, and the input-bridge relay (T41). Launched via
-`infra/launch-chromium.sh` with the X11 + ANGLE/SwiftShader pin. The
+`infra/launch-chromeless.sh` with the X11 + ANGLE/SwiftShader pin. The
 T29 HeadlessExperimental spike concluded such a sidecar is not viable
 in stock Chromium — Phase 2 must use the in-process FrameSink path.
 **Risk:** real `getDisplayMedia` under Chromium 147 + Xvfb returns
 `NotReadableError` (T86). Production today ships with the
-`CBWRTC_USE_FAKE_MEDIA=1` env flag (synthetic green frames + 440 Hz
+`CHROMELESS_USE_FAKE_MEDIA=1` env flag (synthetic green frames + 440 Hz
 tone). Acceptable for a contract-layer demo; not acceptable for the
 v1 latency number (which would measure synthetic-encoder time, not
 real screen capture).
@@ -78,7 +78,7 @@ impact.
 `capture/build-integration/` (736aab6) ships `args.gn` + a single
 patch (`0001-expose-encoder-factory-injection.patch`). T17 research
 landed; the actual build host hasn't been provisioned. Launch script
-(`infra/launch-chromium.sh`) is production: ozone-x11, use-gl=angle,
+(`infra/launch-chromeless.sh`) is production: ozone-x11, use-gl=angle,
 use-angle=swiftshader-webgl, disable-gpu-vsync, with the optional
 `--use-fake-device-for-media-stream` gate (T86). Plus the T9-followup
 socat sidecar (a3cd5ad) bridging eth0:9222 → loopback to work around
@@ -110,14 +110,14 @@ explicitly Phase 3.
 ### 1.7 Auth (T48, T89)
 
 Ed25519 JWTs, single-key verifier in signaling, dev issuer for local
-flow. **Disabled by default** when `CBWRTC_AUTH_PUBKEY` is unset —
+flow. **Disabled by default** when `CHROMELESS_AUTH_PUBKEY` is unset —
 signaling logs a clear warning at boot, all sessions collapse to the
 `_anonymous` tenant. T89 layers short-TTL refresh + Redis denylist.
 Key rotation is single-key-only for v1; Phase 3 adds JWKS for rolling.
 
 ### 1.8 Multi-region (T87 design, T93 region claim, T94 federated obs)
 
-T93 enforces `aud` against `CBWRTC_REGION`, rejects `region_not_allowed`,
+T93 enforces `aud` against `CHROMELESS_REGION`, rejects `region_not_allowed`,
 tags every metric with `region`. T94 federates Prometheus per-region
 into a global view; Helm `region:` propagates everywhere. **T87's
 GeoDNS / cross-region session pools / TURN topology are design-only**
@@ -187,10 +187,10 @@ T81 follow-up.
 ### 1.16 Container + lifecycle (T7, T28, T31, T57, T68, T90)
 
 Debian bookworm-slim base; supervisord with xvfb / pulseaudio /
-streamer-static / chromium / devtools-proxy / cb-metrics-sidecar /
+streamer-static / chromium / devtools-proxy / chromeless-metrics-sidecar /
 idle-watchdog. T57 hardening: non-root, read-only fs, dropped caps,
 seccomp profile. T31 cold-start wipes user-data-dir, resolves
-SESSION_ID, persists `/run/cb-session/env`. T9 smoke green
+SESSION_ID, persists `/run/chromeless-session/env`. T9 smoke green
 (commit `2907370` — verified end-to-end with a real PNG of
 example.com). T90 ScrubAndReturn for warm-pool recycling. T68 CRIU
 scaffold only. **Risk:** `--no-sandbox` ships as the v1 expedient and
@@ -210,7 +210,7 @@ webhook scaffold + RBAC complete.
 
 ### 1.18 Observability (T38, T66, T82, T94)
 
-cb-metrics-sidecar polls Chromium DevTools every 10 s + `/proc`,
+chromeless-metrics-sidecar polls Chromium DevTools every 10 s + `/proc`,
 exposes Prometheus on `:9100`. Two Grafana dashboards: cluster-overview
 + session-detail. T82 caps metric cardinality at 100 tenants × 100
 sessions before falling to `_other`. Signaling exposes its own
@@ -310,7 +310,7 @@ No other TODO/FIXME/XXX markers in the v1 ship path.
 
 ### 4.1 Must-pass (gates v1 ship)
 
-1. **T86 real-fix lands** OR `CBWRTC_USE_FAKE_MEDIA=1` is documented
+1. **T86 real-fix lands** OR `CHROMELESS_USE_FAKE_MEDIA=1` is documented
    as the production v1 default with explicit trade-off (no real screen
    capture; synthetic media). Today's compose.yaml already takes the
    second path.
@@ -338,7 +338,7 @@ No other TODO/FIXME/XXX markers in the v1 ship path.
 - TURN: STUN-only. Document that users behind symmetric NAT will
   fail; T76 issuer is built but TURN endpoints aren't deployed.
 - Auth disabled by default: ship with a clear "set
-  `CBWRTC_AUTH_PUBKEY` for any internet-exposed deployment" warning.
+  `CHROMELESS_AUTH_PUBKEY` for any internet-exposed deployment" warning.
 - Idle-eviction measures "time since assignment" not "time since
   activity" — Phase 3 follow-up.
 
@@ -360,7 +360,7 @@ T68, T87) — that's bonus scope, not creep.
   the watchdog silently reports null → premature container shutdown.
   Worth a regression assertion (Playwright spec 04 already covers
   the hook existence). No follow-up filed.
-- **cb-metrics-sidecar same-contract dependency.** Sidecar polls
+- **chromeless-metrics-sidecar same-contract dependency.** Sidecar polls
   `window.pc` via DevTools; same single-name fragility as the
   watchdog. No follow-up filed.
 - **Cursor-watcher reconnect baseline.** On data-channel reconnect

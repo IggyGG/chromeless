@@ -321,11 +321,11 @@ func protocolButtonToCDP(b int) string {
 // to a specific session by setting it.
 //
 // Why not the legacy `/devtools/page/<id>` direct-page-WS we used pre-
-// BUGS-529? On cb-chromium, that style of session silently stops
+// BUGS-529? On chromeless, that style of session silently stops
 // reaching the renderer when a separate CDP client navigates the
 // target — `Input.dispatch*` continues to ack at the protocol layer
 // but produces no page-level events. Flat-mode sessions follow
-// navigation correctly on stock chromium and on cb-chromium, so the
+// navigation correctly on stock chromium and on chromeless, so the
 // bridge migrates to flat-mode as the BUGS-529 long-term fix.
 //
 // The browser↔bridge wire shape (per chromedevtools.github.io/devtools-
@@ -691,10 +691,10 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 		// Diagnostic: enable the Page domain on the freshly-attached
 		// session so we receive Page.frameNavigated events. Used to
 		// falsify the "flat-mode session doesn't follow navigation"
-		// hypothesis on cb-chromium per BUGS-529 option C: if the
+		// hypothesis on chromeless per BUGS-529 option C: if the
 		// bridge sees frameNavigated on its session post-harness-
 		// navigate, the session IS following navigation in flat-mode
-		// and the bug is below this layer. If it doesn't, cb-chromium
+		// and the bug is below this layer. If it doesn't, chromeless
 		// isn't propagating navigation events to auto-attached
 		// sessions even with flatten=true.
 		go func(sid string) {

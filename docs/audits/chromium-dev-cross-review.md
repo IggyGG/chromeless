@@ -47,7 +47,7 @@ T92 lands. Pre-flagged concerns above for the implementor.
 ## T93 — webrtc-dev region-aware signaling auth (NOT YET LANDED)
 
 **Status:** task in_progress; the T94 commit shows region-label
-plumbing in the signaling main.go (`CBWRTC_REGION` env), so some
+plumbing in the signaling main.go (`CHROMELESS_REGION` env), so some
 foundational work is already in. The auth + per-region routing
 piece itself isn't yet committed.
 
@@ -103,7 +103,7 @@ above; webrtc-dev free to take or leave.
 relevant metric (`cb_webrtc_outbound_qp`, `cb_webrtc_outbound_fps`,
 `cb_webrtc_outbound_dropped_frames_total`,
 `cb_webrtc_outbound_bytes_per_second`) is created with
-`ConstLabels: regionLabels()` in `capture/cb-metrics-sidecar/main.go:67-73`.
+`ConstLabels: regionLabels()` in `capture/chromeless-metrics-sidecar/main.go:67-73`.
 The dashboards under
 `infra/observability/dashboards/cb-{cluster-overview,session-detail}.json`
 filter by `region=~"$region"` in their PromQL. Federated

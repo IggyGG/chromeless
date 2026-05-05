@@ -9,11 +9,11 @@
 # A session Pod runs five cooperating containers in a shared network
 # and PID namespace:
 #
-#   cb-chromium         the T7 + T28 + T31 image without the metrics
+#   chromeless         the T7 + T28 + T31 image without the metrics
 #                       sidecar binary; runs Xvfb + PulseAudio +
 #                       streamer-static + Chromium under supervisord.
 #                       DevTools on :9222, streamer-static on :9000.
-#   cb-metrics-sidecar  T38 sidecar exposing /metrics on :9100. Uses
+#   chromeless-metrics-sidecar  T38 sidecar exposing /metrics on :9100. Uses
 #                       /proc to aggregate Chromium CPU/RSS, hence the
 #                       Pod-wide shareProcessNamespace below.
 #   input-bridge        T22 server-side input dispatch; relays the
@@ -26,7 +26,7 @@
 #                       client via a data channel.
 #
 # Security knobs:
-#   shareProcessNamespace=true        cb-metrics-sidecar needs /proc
+#   shareProcessNamespace=true        chromeless-metrics-sidecar needs /proc
 #                                     visibility into chromium PIDs;
 #                                     this widens trust inside the
 #                                     pod but the pod is a single
@@ -35,31 +35,31 @@
 #   runtimeClassName: gvisor          (commented; decision deferred to
 #                                     Phase 3 per T44's matrix)
 #   readOnlyRootFilesystem            on every sidecar where possible.
-#                                     cb-chromium needs writable root
+#                                     chromeless needs writable root
 #                                     because chromium spawns helpers
 #                                     and writes a profile dir.
 #
-# Image registry placeholder: we use ghcr.io/iggy/cloud-browser-webrtc
+# Image registry placeholder: we use ghcr.io/iggy/chromeless
 # throughout. The actual registry path will land when we publish.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: cb-session-template
-  namespace: cloud-browser-webrtc
+  name: chromeless-session-template
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: session
-    cb.session/state: warm
+    chromeless.session/state: warm
   annotations:
     # T68: optional CRIU snapshot to restore from at startup. Empty (or
     # unset) means "cold-start the pod normally". The session
     # controller (T50) reads this annotation to decide between
     # cold-start and the snapshot fast path; the value is a
     # content-sha matching a directory under
-    # /var/lib/cb-snapshots/shared/<sha>/ on the node. See
+    # /var/lib/chromeless-snapshots/shared/<sha>/ on the node. See
     # infra/snapshots/README.md for the full design and threat model
     # (especially the "must be tenant-clean" contract).
-    cb.io/snapshot-id: ""
+    chromeless.io/snapshot-id: ""
 spec:
   # Phase 3 isolation lever. Uncomment after the runtimeClass is
   # installed cluster-wide. See docs/research/sandbox-isolation.md.
@@ -80,11 +80,11 @@ spec:
     fsGroupChangePolicy: OnRootMismatch
     seccompProfile:
       # Localhost = the kubelet's seccomp dir
-      # (/var/lib/kubelet/seccomp/cb-chromium.json). Deploys must
+      # (/var/lib/kubelet/seccomp/chromeless.json). Deploys must
       # install the JSON on every node before this pod will start.
       # See infra/security-hardening.md "K8s seccomp install".
       type: Localhost
-      localhostProfile: cb-chromium.json
+      localhostProfile: chromeless.json
 
   # Cluster-internal DNS for signaling. Keep clusterFirst so the pod
   # uses the cluster's DNS resolver; Phase-3 prod can layer per-tenant
@@ -98,7 +98,7 @@ spec:
 
   # T57: every writable path under / needs a volume since
   # readOnlyRootFilesystem: true on every container. /run is one
-  # emptyDir for everything supervisord/pulse/cb-session need;
+  # emptyDir for everything supervisord/pulse/chromeless-session need;
   # cold-start.sh re-creates the subdirs at startup.
   volumes:
     # /dev/shm: Chromium needs more than the default 64M. emptyDir with
@@ -108,7 +108,7 @@ spec:
       emptyDir:
         medium: Memory
         sizeLimit: 1Gi
-    # /run: supervisord socket + pid, pulse runtime, cb-session env.
+    # /run: supervisord socket + pid, pulse runtime, chromeless-session env.
     # tmpfs-backed so it doesn't burn ephemeral storage budget.
     - name: run
       emptyDir:
@@ -138,12 +138,12 @@ spec:
     # storage is reclaimed when the pod terminates; sized to 2 × the
     # 100 MiB upload cap to allow at least one concurrent upload plus
     # whatever the user has attached via past uploads.
-    - name: cb-uploads
+    - name: chromeless-uploads
       emptyDir:
         sizeLimit: 256Mi
     # T81 — webcam/mic passthrough sockets. The streamer page writes
     # raw I420 / S16LE frames to these Unix domain sockets (paths
-    # /run/cb-passthrough/{video,audio}.sock); the v4l2-writer
+    # /run/chromeless-passthrough/{video,audio}.sock); the v4l2-writer
     # follow-up reads from them and pushes into /dev/video10 +
     # PulseAudio. emptyDir is fine because the sockets are
     # re-created each session and never need to outlive the pod.
@@ -154,7 +154,7 @@ spec:
     # via a separate device-claim volume — NOT via emptyDir or
     # privileged: true. The compose-dev shape is documented in
     # infra/compose.yaml and is NOT intended for production.
-    - name: cb-passthrough-sockets
+    - name: chromeless-passthrough-sockets
       emptyDir:
         sizeLimit: 8Mi
 
@@ -164,11 +164,11 @@ spec:
   containers:
 
     # -------------------------------------------------------------------
-    # cb-chromium — main browser process tree (Xvfb + PulseAudio +
+    # chromeless — main browser process tree (Xvfb + PulseAudio +
     # streamer-static + Chromium under supervisord).
     # -------------------------------------------------------------------
-    - name: cb-chromium
-      image: ghcr.io/iggy/cloud-browser-webrtc/chromium:dev
+    - name: chromeless
+      image: ghcr.io/iggy/chromeless/chromium:dev
       imagePullPolicy: IfNotPresent
       env:
         - name: SESSION_ID
@@ -177,7 +177,7 @@ spec:
               fieldPath: metadata.name
         - name: SIGNALING_URL
           # cluster-internal Service; see signaling-deployment.yaml
-          value: "ws://signaling.cloud-browser-webrtc.svc.cluster.local:8080/ws"
+          value: "ws://signaling.chromeless.svc.cluster.local:8080/ws"
         - name: STREAMER_FPS
           value: "30"
         # Disable the watchdog when running under the cluster
@@ -204,8 +204,8 @@ spec:
           mountPath: /tmp
         # Read-only access to files uploaded by file-bridge (T74).
         # Chromium reads the on-disk path via DOM.setFileInputFiles.
-        - name: cb-uploads
-          mountPath: /var/lib/cb-uploads
+        - name: chromeless-uploads
+          mountPath: /var/lib/chromeless-uploads
           readOnly: true
         - name: x11-socket
           mountPath: /tmp/.X11-unix
@@ -213,8 +213,8 @@ spec:
         # (which writes from inside Chromium) and the v4l2-writer
         # follow-up sidecar (which reads). Production deployments
         # bind /dev/video10 here through a device plugin.
-        - name: cb-passthrough-sockets
-          mountPath: /run/cb-passthrough
+        - name: chromeless-passthrough-sockets
+          mountPath: /run/chromeless-passthrough
       resources:
         requests:
           cpu: "1500m"
@@ -238,7 +238,7 @@ spec:
         initialDelaySeconds: 60
         periodSeconds: 30
         failureThreshold: 3
-      # T57: cb-chromium is now read-only-root just like every other
+      # T57: chromeless is now read-only-root just like every other
       # container in the pod. Chromium writes to /home/cbuser, /run,
       # /tmp — all volume mounts above. The whole rootfs is RO.
       securityContext:
@@ -251,10 +251,10 @@ spec:
         runAsGroup: 1000
 
     # -------------------------------------------------------------------
-    # cb-metrics-sidecar — Prometheus /metrics on :9100 (T38).
+    # chromeless-metrics-sidecar — Prometheus /metrics on :9100 (T38).
     # -------------------------------------------------------------------
-    - name: cb-metrics-sidecar
-      image: ghcr.io/iggy/cloud-browser-webrtc/metrics-sidecar:dev
+    - name: chromeless-metrics-sidecar
+      image: ghcr.io/iggy/chromeless/metrics-sidecar:dev
       imagePullPolicy: IfNotPresent
       env:
         - name: DEVTOOLS_URL
@@ -291,13 +291,13 @@ spec:
     # input-bridge (T22) — relays input events from the streamer page's
     # data channel into Chromium DevTools.
     #
-    # Default ws-addr is 9100, which collides with cb-metrics-sidecar
+    # Default ws-addr is 9100, which collides with chromeless-metrics-sidecar
     # in the shared pod network namespace. We override to :9200 here.
     # Follow-up: bake the override into the input-bridge default once
     # T38 + T22 ship together in the same image.
     # -------------------------------------------------------------------
     - name: input-bridge
-      image: ghcr.io/iggy/cloud-browser-webrtc/input-bridge:dev
+      image: ghcr.io/iggy/chromeless/input-bridge:dev
       imagePullPolicy: IfNotPresent
       args:
         - "--ws-addr=:9200"
@@ -329,7 +329,7 @@ spec:
     # pushes events to the input-bridge ws sink.
     # -------------------------------------------------------------------
     - name: cursor-watcher
-      image: ghcr.io/iggy/cloud-browser-webrtc/cursor-watcher:dev
+      image: ghcr.io/iggy/chromeless/cursor-watcher:dev
       imagePullPolicy: IfNotPresent
       args:
         - "--cdp-url=http://127.0.0.1:9222"
@@ -355,7 +355,7 @@ spec:
     # through a data channel.
     # -------------------------------------------------------------------
     - name: clipboard-bridge
-      image: ghcr.io/iggy/cloud-browser-webrtc/clipboard-bridge:dev
+      image: ghcr.io/iggy/chromeless/clipboard-bridge:dev
       imagePullPolicy: IfNotPresent
       args:
         - "--ws-addr=:9300"
@@ -390,23 +390,23 @@ spec:
     # -------------------------------------------------------------------
     # file-bridge (T74) — chunk + sha256 + MIME-allowlist file upload
     # over a "files" data channel. Writes to the per-session
-    # cb-uploads emptyDir, then attaches via DOM.setFileInputFiles.
+    # chromeless-uploads emptyDir, then attaches via DOM.setFileInputFiles.
     # -------------------------------------------------------------------
     - name: file-bridge
-      image: ghcr.io/iggy/cloud-browser-webrtc/file-bridge:dev
+      image: ghcr.io/iggy/chromeless/file-bridge:dev
       imagePullPolicy: IfNotPresent
       args:
         - "--ws-addr=:9400"
         - "--ws-path=/files"
         - "--cdp-url=http://127.0.0.1:9222"
-        - "--upload-dir=/var/lib/cb-uploads"
+        - "--upload-dir=/var/lib/chromeless-uploads"
         # session-id is patched per-session by the controller (T71).
       ports:
         - name: files-ws
           containerPort: 9400
       volumeMounts:
-        - name: cb-uploads
-          mountPath: /var/lib/cb-uploads
+        - name: chromeless-uploads
+          mountPath: /var/lib/chromeless-uploads
       resources:
         requests:
           cpu: "50m"
@@ -427,25 +427,25 @@ spec:
 
     # -------------------------------------------------------------------
     # T92 — v4l2-writer (video) — consumes the streamer-page →
-    # /run/cb-passthrough/video.sock frame stream and writes I420
+    # /run/chromeless-passthrough/video.sock frame stream and writes I420
     # frames into the host-DaemonSet-loaded /dev/video10 (T81 + T92).
     # The session pod is NOT privileged; the v4l2loopback module
     # was loaded once per node by infra/host-daemonset.yaml
-    # (cb-passthrough-loader). gid 44 = "video" group; combined with
+    # (chromeless-passthrough-loader). gid 44 = "video" group; combined with
     # the device's mode 0666 set by the loader, this lets the
     # unprivileged sidecar write to /dev/video10 without
     # CAP_SYS_ADMIN or device-cgroup tweaks.
     # -------------------------------------------------------------------
     - name: v4l2-writer-video
-      image: ghcr.io/iggy/cloud-browser-webrtc/v4l2-writer:dev
+      image: ghcr.io/iggy/chromeless/v4l2-writer:dev
       imagePullPolicy: IfNotPresent
       args:
         - "--mode=video"
-        - "--socket=/run/cb-passthrough/video.sock"
+        - "--socket=/run/chromeless-passthrough/video.sock"
         - "--device=/dev/video10"
       volumeMounts:
-        - name: cb-passthrough-sockets
-          mountPath: /run/cb-passthrough
+        - name: chromeless-passthrough-sockets
+          mountPath: /run/chromeless-passthrough
         - name: video10
           mountPath: /dev/video10
       resources:
@@ -466,16 +466,16 @@ spec:
 
     # -------------------------------------------------------------------
     # T92 — v4l2-writer (audio) — consumes the streamer-page →
-    # /run/cb-passthrough/audio.sock frame stream and writes S16LE
+    # /run/chromeless-passthrough/audio.sock frame stream and writes S16LE
     # samples to the cb_passthrough PulseAudio sink (loaded by
     # infra/pulse-default.pa, T24). Uses pacat under the hood.
     # -------------------------------------------------------------------
     - name: v4l2-writer-audio
-      image: ghcr.io/iggy/cloud-browser-webrtc/v4l2-writer:dev
+      image: ghcr.io/iggy/chromeless/v4l2-writer:dev
       imagePullPolicy: IfNotPresent
       args:
         - "--mode=audio"
-        - "--socket=/run/cb-passthrough/audio.sock"
+        - "--socket=/run/chromeless-passthrough/audio.sock"
         - "--pulse-sink=cb_passthrough"
       env:
         # Point pacat at the PulseAudio daemon running in the
@@ -485,8 +485,8 @@ spec:
         - name: PULSE_SERVER
           value: "unix:/run/pulse/native"
       volumeMounts:
-        - name: cb-passthrough-sockets
-          mountPath: /run/cb-passthrough
+        - name: chromeless-passthrough-sockets
+          mountPath: /run/chromeless-passthrough
         - name: run
           mountPath: /run/pulse
           subPath: pulse

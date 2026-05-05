@@ -3,13 +3,13 @@
 Mirrors the entry-point convention from `tests/smoke/container-boot.sh`:
 discover the WebSocket debugger URL via `GET /json/version`, then rewrite
 the `ws://localhost:9222` host portion to whatever cluster-reachable address
-the caller passed in via `CB_URL`.
+the caller passed in via `CHROMELESS_URL`.
 
 Usage outside pytest:
-    CB_URL=http://localhost:9222 pytest tests/cdp/
+    CHROMELESS_URL=http://localhost:9222 pytest tests/cdp/
 
 Inside the cluster Job:
-    CB_URL=http://cb-browserless.triform-wtf.svc.cluster.local:9222
+    CHROMELESS_URL=http://chromeless-browserless.triform-wtf.svc.cluster.local:9222
 
 The `Host: localhost` header on the discovery request avoids chromium's
 DNS-rebinding rejection: the embedder pins remote-debugging to listen with
@@ -71,10 +71,10 @@ def discover_ws_url(cb_url: str, timeout: float = 5.0) -> str:
 
 @pytest.fixture(scope="session")
 def cb_url() -> str:
-    """Base HTTP URL of the cb-browserless DevTools endpoint."""
+    """Base HTTP URL of the chromeless-browserless DevTools endpoint."""
     return os.environ.get(
-        "CB_URL",
-        "http://cb-browserless.triform-wtf.svc.cluster.local:9222",
+        "CHROMELESS_URL",
+        "http://chromeless-browserless.triform-wtf.svc.cluster.local:9222",
     )
 
 

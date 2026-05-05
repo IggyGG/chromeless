@@ -1,12 +1,12 @@
-// Playwright configuration for the v0 cloud-browser-webrtc E2E suite.
+// Playwright configuration for the v0 chromeless E2E suite.
 //
 // The default flow brings up the full stack via docker compose
 // (infra/compose.yaml) and waits for the client to be reachable at
-// CBWRTC_E2E_BASE_URL (default http://localhost:3000). For local iteration
+// CHROMELESS_E2E_BASE_URL (default http://localhost:3000). For local iteration
 // or CI environments where the stack is already running (e.g. a
 // self-hosted runner with a long-lived dev stack, or a manual
 // `docker compose up` in another terminal), set
-// CBWRTC_E2E_USE_RUNNING_STACK=1 and Playwright will skip the webServer
+// CHROMELESS_E2E_USE_RUNNING_STACK=1 and Playwright will skip the webServer
 // management entirely.
 //
 // Run from this directory:
@@ -19,11 +19,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const baseURL =
-  process.env["CBWRTC_E2E_BASE_URL"] ?? "http://localhost:3000";
+  process.env["CHROMELESS_E2E_BASE_URL"] ?? "http://localhost:3000";
 
 const useRunningStack =
-  process.env["CBWRTC_E2E_USE_RUNNING_STACK"] === "1" ||
-  process.env["CBWRTC_E2E_USE_RUNNING_STACK"] === "true";
+  process.env["CHROMELESS_E2E_USE_RUNNING_STACK"] === "1" ||
+  process.env["CHROMELESS_E2E_USE_RUNNING_STACK"] === "true";
 
 export default defineConfig({
   testDir: ".",

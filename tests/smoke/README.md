@@ -65,16 +65,16 @@ All optional; sensible defaults baked in:
 | `SMOKE_IMAGE_TAG`         | auto-detect (`:ci` → `:dev` → build) | Override to test a specific tag. |
 | `SMOKE_FORCE_REBUILD`     | `0`                           | `1` forces `docker build` even if a tag exists. |
 | `SMOKE_NAVIGATE_URL`      | `https://example.com`         | Override to an offline target if the runner has no public outbound. |
-| `SMOKE_SCREENSHOT_PATH`   | `/tmp/cb-smoke.png`           | Where the captured screenshot lands. |
+| `SMOKE_SCREENSHOT_PATH`   | `/tmp/chromeless-smoke.png`           | Where the captured screenshot lands. |
 | `SMOKE_READY_TIMEOUT_S`   | `60`                          | Max time to wait for DevTools to come up. |
 | `SMOKE_LOAD_TIMEOUT_S`    | `30`                          | Max time to wait for navigation to complete. |
 
 ### Auto-detected image tag
 
-In CI, `build-image` produces `cloud-browser-webrtc:ci`; the smoke
+In CI, `build-image` produces `chromeless:ci`; the smoke
 auto-detects this so `./tests/smoke/container-boot.sh` Just Works
 without env tweaks. Locally, dev convention is
-`cloud-browser-webrtc:dev`, which the smoke also picks up. If neither
+`chromeless:dev`, which the smoke also picks up. If neither
 tag exists, the smoke builds `:dev` from `infra/Dockerfile` with the
 repo root as the build context (matching the Dockerfile's `COPY` lines
 and CI's build-image job).
@@ -87,7 +87,7 @@ captured via DevTools, ~12 s end-to-end on Apple Silicon):
 
 ```
 == 1. resolve image ==
-[smoke] auto-detected image: cloud-browser-webrtc:dev
+[smoke] auto-detected image: chromeless:dev
 == 2. start container ==
 [smoke] container started: <id>
 [smoke] polling DevTools (inside container) for up to 60s...
@@ -102,9 +102,9 @@ captured via DevTools, ~12 s end-to-end on Apple Silicon):
 [cdp] Page.navigate https://example.com
 [cdp] readyState=complete
 [cdp] Page.captureScreenshot
-[cdp] wrote /tmp/cb-smoke.png (20060 bytes inside container)
+[cdp] wrote /tmp/chromeless-smoke.png (20060 bytes inside container)
 == 7. validate screenshot ==
-[smoke] screenshot OK: /tmp/cb-smoke.png (20060 bytes, valid PNG magic)
+[smoke] screenshot OK: /tmp/chromeless-smoke.png (20060 bytes, valid PNG magic)
 == smoke passed ==
 [smoke] container-boot: PASS
 ```
@@ -143,7 +143,7 @@ It does NOT exercise:
 `tests/smoke/container-boot.sh` is wired into the `smoke` job in
 `.github/workflows/ci.yml`. The job runs on `ubuntu-latest`, restores
 the image cache produced by `build-image`, and runs the script
-directly. Auto-detect picks up `cloud-browser-webrtc:ci`, so no env
+directly. Auto-detect picks up `chromeless:ci`, so no env
 tweak is needed in the workflow YAML.
 
 ## See also

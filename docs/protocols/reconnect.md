@@ -1,6 +1,6 @@
 # Reconnect protocol (v1)
 
-How `cloud-browser-webrtc` recovers from signaling websocket drops and
+How `chromeless` recovers from signaling websocket drops and
 ICE failures without making the user reload the page.
 
 > **Status:** v1, lands with T37. The signaling-server protocol gains

@@ -15,7 +15,7 @@ import (
 	runtimes "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/types"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 )
 
 func encode(t *testing.T, obj *cbv1.BrowserSession) []byte {

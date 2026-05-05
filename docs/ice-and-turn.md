@@ -1,6 +1,6 @@
 # ICE / STUN / TURN
 
-How `cloud-browser-webrtc` handles NAT traversal — what we ship today,
+How `chromeless` handles NAT traversal — what we ship today,
 what we deploy when we go off-LAN, and where the wiring will plug in.
 
 ## Background, briefly

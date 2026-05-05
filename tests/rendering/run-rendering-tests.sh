@@ -2,7 +2,7 @@
 #
 # T91: rendering-fixture orchestrator (canonical CI path).
 #
-# Boots the cloud-browser-webrtc:dev container, navigates the
+# Boots the chromeless:dev container, navigates the
 # already-running Chromium (the streamer Chromium serves DevTools
 # on :9222 — same instance that the streamer page is loaded into,
 # so the rendering tests run under the production launch flag set:
@@ -14,7 +14,7 @@
 #
 # Pair this with `local-probe.js` (Playwright on the dev host)
 # for fixture-validation iteration without docker. This script is
-# the canonical "what does the cloud-browser-webrtc:dev image
+# the canonical "what does the chromeless:dev image
 # actually do" gate.
 #
 # Usage:
@@ -32,8 +32,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RESULTS_DIR="${SCRIPT_DIR}/results"
 COMPOSE_FILE="${REPO_ROOT}/infra/compose.yaml"
 
-DEVTOOLS_HOST="${CBWRTC_RENDERING_DEVTOOLS:-http://127.0.0.1:9222}"
-PROFILE="${CBWRTC_RENDERING_PROFILE:-swiftshader-v1}"
+DEVTOOLS_HOST="${CHROMELESS_RENDERING_DEVTOOLS:-http://127.0.0.1:9222}"
+PROFILE="${CHROMELESS_RENDERING_PROFILE:-swiftshader-v1}"
 BOOT_STACK=0
 SAVE_BASELINES=0
 
@@ -176,8 +176,8 @@ PY
     return $?
 }
 
-WEBGL_URL="${CBWRTC_RENDERING_WEBGL_URL:-http://localhost:9000/streamer-tests/rendering/webgl-fixture.html}"
-WEBGPU_URL="${CBWRTC_RENDERING_WEBGPU_URL:-http://localhost:9000/streamer-tests/rendering/webgpu-fixture.html}"
+WEBGL_URL="${CHROMELESS_RENDERING_WEBGL_URL:-http://localhost:9000/streamer-tests/rendering/webgl-fixture.html}"
+WEBGPU_URL="${CHROMELESS_RENDERING_WEBGPU_URL:-http://localhost:9000/streamer-tests/rendering/webgpu-fixture.html}"
 
 run_fixture webgl  "${WEBGL_URL}"
 run_fixture webgpu "${WEBGPU_URL}"

@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/signaling
+module github.com/iggy/chromeless/signaling
 
 go 1.22
 

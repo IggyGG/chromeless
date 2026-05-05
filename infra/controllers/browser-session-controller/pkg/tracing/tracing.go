@@ -9,7 +9,7 @@
 // endpoint in production).
 //
 // Sample rate: default 10% per the T99 brief. Override globally via
-// `CBWRTC_TRACE_SAMPLE_RATIO` (0.0–1.0). Per-tenant overrides happen
+// `CHROMELESS_TRACE_SAMPLE_RATIO` (0.0–1.0). Per-tenant overrides happen
 // at the request level by setting a baggage value before the root
 // span is created — the helper `WithTenantSampling` in this package
 // handles the lookup.
@@ -17,7 +17,7 @@
 // The shape mirrors the metrics.go ConstLabels pattern from T94: a
 // single env var flips the feature on, missing env means "off, no
 // emission, no broken pipe to Jaeger." Three Go services (signaling,
-// controller, cb-metrics-sidecar) each have a copy of this file —
+// controller, chromeless-metrics-sidecar) each have a copy of this file —
 // modules are independent and this is small enough that duplication
 // costs less than a shared internal-modules dance.
 
@@ -43,8 +43,8 @@ import (
 
 const (
 	envOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	envSampleRatio  = "CBWRTC_TRACE_SAMPLE_RATIO"
-	envRegion       = "CBWRTC_REGION"
+	envSampleRatio  = "CHROMELESS_TRACE_SAMPLE_RATIO"
+	envRegion       = "CHROMELESS_REGION"
 	defaultSampleR  = 0.1
 )
 

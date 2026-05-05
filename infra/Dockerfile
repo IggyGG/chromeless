@@ -1,4 +1,4 @@
-# infra/Dockerfile — cloud-browser-webrtc base container
+# infra/Dockerfile — chromeless base container
 #
 # Boots Chromium inside a virtual X server with a null-sink PulseAudio
 # instance, supervised by supervisord. DevTools is exposed on :9222 so the
@@ -19,31 +19,31 @@
 # multi-tenant infra as-is.
 #
 # Build (build context = repo root so we can COPY capture/streamer-page/
-# and capture/cb-metrics-sidecar/):
-#   docker build -t cloud-browser-webrtc:dev -f infra/Dockerfile .
+# and capture/chromeless-metrics-sidecar/):
+#   docker build -t chromeless:dev -f infra/Dockerfile .
 #
 # Run (interactive smoke test):
 #   docker run --rm -p 9222:9222 -p 9100:9100 \
 #       --shm-size=1g \
-#       cloud-browser-webrtc:dev
+#       chromeless:dev
 #
 # Inspect from the host while it's running:
 #   curl http://localhost:9222/json/version
 #   curl http://localhost:9100/metrics
 
 # ---------------------------------------------------------------------------
-# Build stage: cb-metrics-sidecar (T38). A small Go service that polls
+# Build stage: chromeless-metrics-sidecar (T38). A small Go service that polls
 # Chromium DevTools + /proc and exposes Prometheus metrics on :9100.
 # Built from source here so the runtime image is the only artifact
 # anyone deploys.
 # ---------------------------------------------------------------------------
 FROM golang:1.22-alpine AS metrics-build
 WORKDIR /src
-COPY capture/cb-metrics-sidecar/go.mod  capture/cb-metrics-sidecar/go.sum ./
+COPY capture/chromeless-metrics-sidecar/go.mod  capture/chromeless-metrics-sidecar/go.sum ./
 RUN go mod download
-COPY capture/cb-metrics-sidecar/*.go ./
+COPY capture/chromeless-metrics-sidecar/*.go ./
 ENV CGO_ENABLED=0 GOOS=linux
-RUN go build -trimpath -ldflags="-s -w" -o /out/cb-metrics-sidecar .
+RUN go build -trimpath -ldflags="-s -w" -o /out/chromeless-metrics-sidecar .
 
 # ---------------------------------------------------------------------------
 # Runtime image
@@ -112,17 +112,17 @@ RUN apt-get update \
 #   /home/cbuser/.config/chromium     chromium user-data-dir
 #   /run/user/1000/pulse              PulseAudio native socket
 #   /run/supervisor                   supervisord socket + pid file
-#   /run/cb-session                   cold-start.sh writes id + env
+#   /run/chromeless-session                   cold-start.sh writes id + env
 #   /var/log/supervisor               program logs
 # Everything else under / is read-only — see infra/security-hardening.md.
 RUN groupadd --gid 1000 cbuser \
  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash cbuser \
  && mkdir -p /run/user/1000/pulse \
              /run/supervisor \
-             /run/cb-session \
+             /run/chromeless-session \
              /home/cbuser/.config/chromium \
              /var/log/supervisor \
- && chown -R cbuser:cbuser /run/user/1000 /run/supervisor /run/cb-session /home/cbuser /var/log/supervisor \
+ && chown -R cbuser:cbuser /run/user/1000 /run/supervisor /run/chromeless-session /home/cbuser /var/log/supervisor \
  && chmod 0700 /run/user/1000
 
 # PulseAudio script: null sink only, no host audio. We *replace* the
@@ -137,7 +137,7 @@ COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
 # server in supervisord serves /opt/cloud-browser, so the URL path
 # /streamer/index.html resolves to the page chromium-dev shipped.
 COPY capture/streamer-page/ /opt/cloud-browser/streamer/
-COPY infra/launch-chromium.sh /usr/local/bin/launch-chromium.sh
+COPY infra/launch-chromeless.sh /usr/local/bin/launch-chromeless.sh
 
 # T52: small socat sidecar that bridges container_eth0:9222 ->
 # 127.0.0.1:9222 because Chromium 147 binds DevTools to loopback
@@ -153,7 +153,7 @@ COPY infra/devtools-proxy.sh /usr/local/bin/devtools-proxy.sh
 COPY infra/init-passthrough.sh /usr/local/bin/init-passthrough.sh
 
 # Metrics sidecar binary (T38), built in the metrics-build stage above.
-COPY --from=metrics-build /out/cb-metrics-sidecar /usr/local/bin/cb-metrics-sidecar
+COPY --from=metrics-build /out/chromeless-metrics-sidecar /usr/local/bin/chromeless-metrics-sidecar
 
 # Lifecycle scripts (T31): entrypoint chain, per-boot setup, idle
 # watchdog, manual restart. See infra/lifecycle/README.md.
@@ -163,17 +163,17 @@ RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bi
  && ln -sf /usr/local/lib/cloud-browser/lifecycle/idle-watchdog.sh /usr/local/bin/idle-watchdog.sh \
  && ln -sf /usr/local/lib/cloud-browser/lifecycle/restart.sh       /usr/local/bin/restart.sh \
  && chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh \
- && chmod +x /usr/local/bin/launch-chromium.sh \
+ && chmod +x /usr/local/bin/launch-chromeless.sh \
  && chmod +x /usr/local/bin/devtools-proxy.sh \
  && chown -R cbuser:cbuser /opt/cloud-browser
 
 # T57: seccomp profile. COPYing into the image lets `docker run
-# --security-opt seccomp=/etc/cb-seccomp.json` work without an external
+# --security-opt seccomp=/etc/chromeless-seccomp.json` work without an external
 # file. K8s reads seccomp from the kubelet's seccomp dir
 # (/var/lib/kubelet/seccomp/) so this image-baked file is informational
 # for K8s; the deploy step has to install it on each node. See
 # infra/security-hardening.md.
-COPY infra/seccomp/cb-chromium.json /etc/cb-seccomp.json
+COPY infra/seccomp/chromeless.json /etc/chromeless-seccomp.json
 
 EXPOSE 9222 8080 9100
 

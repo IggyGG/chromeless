@@ -1,4 +1,4 @@
-# Audio routing inside the cloud-browser-webrtc container
+# Audio routing inside the chromeless container
 
 This document describes how audio flows from a tab playing inside our
 headless Chromium to a `RTCPeerConnection` outbound-rtp track on the
@@ -67,9 +67,9 @@ not a runaway echo.
 
 | Flag                                          | Where set                | Why                                           |
 | --------------------------------------------- | ------------------------ | --------------------------------------------- |
-| `--autoplay-policy=no-user-gesture-required`  | `infra/launch-chromium.sh` | Allows the streamer page to start audio playback without a synthetic click. |
-| `--use-fake-ui-for-media-stream` (set in T28) | `infra/launch-chromium.sh` | Auto-grants the getUserMedia/getDisplayMedia permission picker. **Does NOT synthesize media** — that's `--use-fake-device-for-media-stream`, which we deliberately omit so real PulseAudio routes through `cb_audio.monitor` end up in the captured track. |
-| `--use-fake-device-for-media-stream` (NOT set)| `infra/launch-chromium.sh` | Deliberately absent — would feed Chromium's synthetic media (sine-wave audio, green-circle video) into capture, bypassing our PulseAudio routing. |
+| `--autoplay-policy=no-user-gesture-required`  | `infra/launch-chromeless.sh` | Allows the streamer page to start audio playback without a synthetic click. |
+| `--use-fake-ui-for-media-stream` (set in T28) | `infra/launch-chromeless.sh` | Auto-grants the getUserMedia/getDisplayMedia permission picker. **Does NOT synthesize media** — that's `--use-fake-device-for-media-stream`, which we deliberately omit so real PulseAudio routes through `cb_audio.monitor` end up in the captured track. |
+| `--use-fake-device-for-media-stream` (NOT set)| `infra/launch-chromeless.sh` | Deliberately absent — would feed Chromium's synthetic media (sine-wave audio, green-circle video) into capture, bypassing our PulseAudio routing. |
 | `PULSE_SERVER=unix:/run/user/1000/pulse/native` | `infra/Dockerfile` ENV  | Pins Chromium to the in-container PulseAudio socket so it cannot fall through to host audio if the env is inherited. |
 
 ## Manual smoke test
@@ -79,7 +79,7 @@ this manual procedure verifies the audio path:
 
 1. Start the container:
    ```
-   docker run --rm -p 9222:9222 cloud-browser-webrtc:dev
+   docker run --rm -p 9222:9222 chromeless:dev
    ```
 2. Exec into it as `cbuser` and confirm the sinks are loaded:
    ```

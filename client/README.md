@@ -90,7 +90,7 @@ through `?token=`. Two tenants both running session `dev` won't
 cross-talk; see `docs/security/auth.md#tenant-namespacing-t67` for
 the namespacing policy.
 
-When auth is disabled (`CBWRTC_AUTH_PUBKEY` unset on the server),
+When auth is disabled (`CHROMELESS_AUTH_PUBKEY` unset on the server),
 all connections share the synthetic `_anonymous` tenant. That
 matches the pre-T67 single-namespace behaviour, which is what
 `go run ./signaling` gives you out of the box.

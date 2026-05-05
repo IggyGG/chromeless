@@ -33,7 +33,7 @@ apiVersion: cloud-browser-webrtc.example.com/v1alpha1
 kind: BrowserSession
 metadata:
   name: session-2026-04-30-abc123
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
 spec:
   tenantId: "user-42"
   region: "eu-west-1"
@@ -43,7 +43,7 @@ spec:
     memRequest: "4Gi"
 status:
   phase: "Assigned"   # Pending | Warming | Assigned | Draining | Ended
-  podName: "cb-session-pool-7"
+  podName: "chromeless-session-pool-7"
   signalingURL: "wss://signaling.example.com/ws/session-2026-04-30-abc123"
   startedAt: "2026-04-30T09:30:00Z"
   lastActivityAt: "2026-04-30T09:42:18Z"
@@ -62,7 +62,7 @@ apiVersion: cloud-browser-webrtc.example.com/v1alpha1
 kind: BrowserSessionPool
 metadata:
   name: default-pool
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
 spec:
   warmReplicas: 5
   maxSessions: 100
@@ -70,7 +70,7 @@ spec:
   template:
     # Inline reference to a Pod template — same shape as
     # cloud-browser-session.yaml. The controller materialises Pods
-    # from this template, labelled cb.session/state=warm.
+    # from this template, labelled chromeless.session/state=warm.
     spec: { ... }
 status:
   warm: 5
@@ -98,7 +98,7 @@ GPU-enabled tenants).
 │  - watches BrowserSession + BrowserSessionPool                 │
 │  - assignment loop:                                            │
 │      pick a warm Pod -> bind to BrowserSession ->              │
-│      label it cb.session/state=assigned ->                     │
+│      label it chromeless.session/state=assigned ->                     │
 │      patch status with podName + signalingURL                  │
 │  - replenishment loop:                                         │
 │      keep len(warm) >= spec.warmReplicas                       │
@@ -112,7 +112,7 @@ GPU-enabled tenants).
                            │
                            ▼
 ┌────────────────────────────────────────────────────────────────┐
-│  Pods labeled cb.session/state ∈ {warm, assigned, draining}    │
+│  Pods labeled chromeless.session/state ∈ {warm, assigned, draining}    │
 │  Each pod is the cloud-browser-session.yaml shape (T50).       │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -124,13 +124,13 @@ GPU-enabled tenants).
 2. Gateway creates a `BrowserSession` CR with `spec.tenantId` and
    defaults; the CR's `status.phase` starts as `Pending`.
 3. **Controller assignment loop**:
-   - List Pods in the target pool with `cb.session/state=warm`,
+   - List Pods in the target pool with `chromeless.session/state=warm`,
      filtered by node region/zone matching the session's region
      spec.
    - Pick one (round-robin within the candidate set; in v1 we don't
      need anything cleverer).
-   - Atomically: label the pod `cb.session/state=assigned`, set
-     `cb.session/owner=<session-name>`; patch the CR's
+   - Atomically: label the pod `chromeless.session/state=assigned`, set
+     `chromeless.session/owner=<session-name>`; patch the CR's
      `status.podName` and `status.signalingURL`.
    - On failure (no warm pod available), fall through to a cold
      start: create a fresh Pod from the pool template, wait for it
@@ -150,7 +150,7 @@ warm-vs-cold path.
 After every assignment, the controller checks the warm pool size
 against `spec.warmReplicas`. If short, it creates new Pods from the
 template up to the target. New Pods come up labeled
-`cb.session/state=warm` and are visible to the next assignment loop
+`chromeless.session/state=warm` and are visible to the next assignment loop
 once they pass readiness.
 
 Replenishment runs in an independent goroutine on a 5 s tick so
@@ -165,10 +165,10 @@ Two policies, picked per pool:
 - Session ends → controller calls Pod's `restart.sh`
   (`supervisorctl restart chromium`), which kills Chromium with
   group/process cleanup and supervisord restarts it under
-  `launch-chromium.sh` with a fresh user-data-dir (cold-start.sh
+  `launch-chromeless.sh` with a fresh user-data-dir (cold-start.sh
   also runs again at the next pod boot if the whole supervisord
   comes down, though restart of just chromium is faster).
-- Label flips back to `cb.session/state=warm`.
+- Label flips back to `chromeless.session/state=warm`.
 - Pros: ~5-15 s back to ready vs 30-45 s for full pod recreation.
   Massive cost saving at scale.
 - **Cons (security):** Chromium and the kernel both leak state.
@@ -258,7 +258,7 @@ The controller exposes its own `/metrics`:
   pod-failure vs explicit).
 
 These compose with the per-session metrics from T38 (`cb_chromium_*`
-and `cb_webrtc_*` from `cb-metrics-sidecar`) and the signaling
+and `cb_webrtc_*` from `chromeless-metrics-sidecar`) and the signaling
 metrics (`cb_signaling_*`) for a full pipeline view.
 
 ## Cluster-level network isolation
@@ -266,8 +266,8 @@ metrics (`cb_signaling_*`) for a full pipeline view.
 Independent of the controller, every session pod gets a
 `NetworkPolicy` that:
 
-- Allows egress to `signaling.cloud-browser-webrtc.svc` on 8080.
-- Allows egress to `coturn.cloud-browser-webrtc.svc` on 3478/5349
+- Allows egress to `signaling.chromeless.svc` on 8080.
+- Allows egress to `coturn.chromeless.svc` on 3478/5349
   and to the public TURN range.
 - Allows egress to the public internet *except* RFC1918 ranges and
   cloud metadata IPs (`169.254.169.254`, `fd00:ec2::254`).

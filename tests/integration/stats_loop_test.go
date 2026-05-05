@@ -1,5 +1,5 @@
 // T72 stats forwarding loop: simulate the streamer page POSTing a
-// StatsSample envelope to the cb-metrics-sidecar and assert that the
+// StatsSample envelope to the chromeless-metrics-sidecar and assert that the
 // `cb_client_*` gauges + counter on /metrics reflect the values.
 //
 // We build the sidecar binary on demand (its module is separate from
@@ -38,24 +38,24 @@ var (
 func buildSidecarOnce(t *testing.T) string {
 	t.Helper()
 	sidecarBinaryOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "cb-metrics-sidecar-")
+		dir, err := os.MkdirTemp("", "chromeless-metrics-sidecar-")
 		if err != nil {
 			sidecarBinaryErr = err
 			return
 		}
-		out := filepath.Join(dir, "cb-metrics-sidecar")
+		out := filepath.Join(dir, "chromeless-metrics-sidecar")
 		build := exec.Command("go", "build", "-o", out, ".")
-		build.Dir = filepath.FromSlash("../../capture/cb-metrics-sidecar")
+		build.Dir = filepath.FromSlash("../../capture/chromeless-metrics-sidecar")
 		build.Stdout = os.Stderr
 		build.Stderr = os.Stderr
 		if err := build.Run(); err != nil {
-			sidecarBinaryErr = fmt.Errorf("go build cb-metrics-sidecar: %w", err)
+			sidecarBinaryErr = fmt.Errorf("go build chromeless-metrics-sidecar: %w", err)
 			return
 		}
 		sidecarBinaryPath = out
 	})
 	if sidecarBinaryErr != nil {
-		t.Skipf("cb-metrics-sidecar build failed: %v", sidecarBinaryErr)
+		t.Skipf("chromeless-metrics-sidecar build failed: %v", sidecarBinaryErr)
 	}
 	return sidecarBinaryPath
 }

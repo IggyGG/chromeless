@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# infra/snapshots/snapshot.sh — boot a fresh cloud-browser-webrtc
+# infra/snapshots/snapshot.sh — boot a fresh chromeless
 # container, wait for Chromium ready, CRIU-dump the supervisord process
-# tree to /var/lib/cb-snapshots/<sha>/, tear down the source container.
+# tree to /var/lib/chromeless-snapshots/<sha>/, tear down the source container.
 #
 # T68 Phase 3 stretch.
 #
@@ -11,7 +11,7 @@
 # Usage:
 #   sudo ./snapshot.sh [LABEL]
 #
-# Default LABEL is "cb-snapshot-blank". The snapshot dir is named by a
+# Default LABEL is "chromeless-snapshot-blank". The snapshot dir is named by a
 # content sha derived from the criu image set; the LABEL is used only
 # for the source container's name to make `docker ps` greppable
 # during the dump.
@@ -27,9 +27,9 @@
 
 set -euo pipefail
 
-LABEL="${1:-cb-snapshot-blank}"
-IMAGE="${CB_IMAGE:-cloud-browser-webrtc:dev}"
-SNAPSHOT_ROOT="${CB_SNAPSHOT_ROOT:-/var/lib/cb-snapshots}"
+LABEL="${1:-chromeless-snapshot-blank}"
+IMAGE="${CHROMELESS_IMAGE:-chromeless:dev}"
+SNAPSHOT_ROOT="${CHROMELESS_SNAPSHOT_ROOT:-/var/lib/chromeless-snapshots}"
 READY_TIMEOUT_S="${READY_TIMEOUT_S:-90}"
 
 log()  { printf '[snapshot] %s\n' "$*" >&2; }
@@ -48,7 +48,7 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "must run as root (criu dump needs CAP_CHECKPOINT_RESTORE)" 2
 fi
 
-WORK_DIR=$(mktemp -d -t cb-snapshot.XXXXXX)
+WORK_DIR=$(mktemp -d -t chromeless-snapshot.XXXXXX)
 cleanup() {
     if [ -n "${SOURCE_CID:-}" ]; then
         docker rm -f "$SOURCE_CID" >/dev/null 2>&1 || true

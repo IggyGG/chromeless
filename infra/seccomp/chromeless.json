@@ -1,0 +1,176 @@
+{
+  "_comment": "infra/seccomp/chromeless.json — seccomp profile for the chromeless container (T57). DENY-list profile: defaults to ALLOW (Chromium has a wide syscall surface and ALLOW-listing it is brittle), then explicitly blocks the syscalls Chromium has no business calling. Lifted from Docker's default deny set; pruned to syscalls that are NEVER needed by chromium-as-renderer + supervisord + python http.server + gorilla websocket Go services. When tightening further, do it incrementally and watch the audit log on /proc/<pid>/seccomp_filter for SCMP_ACT_LOG hits.",
+  "_chromium_note": "Chromium has its own seccomp-bpf inside each renderer when --no-sandbox is NOT set. We pass --no-sandbox today (v1 expedient — see Dockerfile), so this OS-level seccomp is the only seccomp layer between the renderer and the host kernel. Until T44's gVisor/Kata decision lands, this is the line of defense.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_X32",
+    "SCMP_ARCH_AARCH64"
+  ],
+  "syscalls": [
+    {
+      "_rationale": "Module load/unload — kernel-rooting paths. No userland use case.",
+      "names": [
+        "create_module",
+        "delete_module",
+        "finit_module",
+        "init_module",
+        "query_module",
+        "get_kernel_syms"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Direct hardware / firmware access. Container should never touch this.",
+      "names": [
+        "iopl",
+        "ioperm",
+        "kexec_file_load",
+        "kexec_load",
+        "vm86",
+        "vm86old",
+        "uselib",
+        "ustat",
+        "sysfs",
+        "_sysctl"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Mount / namespace manipulation. Container is already namespaced; renegotiating namespaces is a sandbox-escape primitive.",
+      "names": [
+        "mount",
+        "umount",
+        "umount2",
+        "pivot_root",
+        "chroot",
+        "fanotify_init",
+        "name_to_handle_at",
+        "open_by_handle_at",
+        "unshare",
+        "setns"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Time / domain-name modification. Affects the whole container.",
+      "names": [
+        "clock_settime",
+        "clock_settime64",
+        "settimeofday",
+        "stime",
+        "adjtimex",
+        "clock_adjtime",
+        "clock_adjtime64",
+        "setdomainname",
+        "sethostname"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Reboot / power management. Pod lifecycle is K8s's job, not the container's.",
+      "names": [
+        "reboot"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Kernel keyring. Has been CVE-prone (CVE-2016-0728, CVE-2017-2671). Chromium does not use it.",
+      "names": [
+        "add_key",
+        "request_key",
+        "keyctl",
+        "lookup_dcookie"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "BPF program load. Powerful kernel-side execution; Chromium does not use it. eBPF is also a CVE class.",
+      "names": [
+        "bpf"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "userfaultfd has been a kernel-exploit primitive (CVE-2021-22555 etc.). Chromium has no use for it.",
+      "names": [
+        "userfaultfd"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Swap. Container should never manage swap.",
+      "names": [
+        "swapon",
+        "swapoff"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Quotas, accounting. Not a userland concern.",
+      "names": [
+        "quotactl",
+        "acct",
+        "nfsservctl"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Memory-policy manipulation across NUMA. Powerful, container-scoped abuse vector.",
+      "names": [
+        "mbind",
+        "set_mempolicy",
+        "get_mempolicy",
+        "migrate_pages",
+        "move_pages"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "Personality, perf_event_open: have been used in chains against the kernel; renderer doesn't need them with --no-sandbox.",
+      "names": [
+        "personality",
+        "perf_event_open"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "ptrace lets one process inspect/modify another. Chromium-with-sandbox uses it; --no-sandbox doesn't. shareProcessNamespace makes ptrace particularly dangerous (one container could ptrace another). Block.",
+      "names": [
+        "ptrace"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "process_vm_readv/writev let one process read/write another's memory directly. Same threat model as ptrace.",
+      "names": [
+        "process_vm_readv",
+        "process_vm_writev"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_rationale": "kcmp leaks pid-and-resource information across processes — useful for kernel-info-leak chains.",
+      "names": [
+        "kcmp"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}

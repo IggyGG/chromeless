@@ -1,6 +1,6 @@
 # infra/
 
-Container image and (Phase 3) orchestration for the cloud-browser-webrtc
+Container image and (Phase 3) orchestration for the chromeless
 runtime.
 
 ## Files
@@ -10,7 +10,7 @@ runtime.
 | `Dockerfile` | Base image: Debian bookworm-slim + Chromium + Xvfb + PulseAudio (null sink) + python3 + supervisord. |
 | `supervisord.conf` | Process supervisor; starts Xvfb → PulseAudio → streamer-static → Chromium → idle-watchdog. |
 | `pulse-default.pa` | PulseAudio bootstrap script, copied to `/etc/pulse/default.pa`. Two null sinks (cb_audio playback + cb_capture intermediary) plus a loopback — see `audio-routing.md`. |
-| `launch-chromium.sh` | Wrapper invoked by supervisord; expands `SESSION_ID` / `SIGNALING_URL` / `STREAMER_FPS` into the streamer URL then execs Chromium with the full T28 flag list. |
+| `launch-chromeless.sh` | Wrapper invoked by supervisord; expands `SESSION_ID` / `SIGNALING_URL` / `STREAMER_FPS` into the streamer URL then execs Chromium with the full T28 flag list. |
 | `audio-routing.md` | Topology + manual smoke procedure for the in-container audio path. |
 | `lifecycle/` | Container session lifecycle (T31): `entrypoint.sh`, `cold-start.sh`, `idle-watchdog.sh`, `restart.sh`, `README.md`. |
 | `compose.yaml` | Local dev stack: real signaling (T13) + chromium with lifecycle wiring + nginx-served client. |
@@ -21,7 +21,7 @@ The build context is the **repo root** (not `infra/`), because the
 Dockerfile COPYs `capture/streamer-page/` alongside `infra/*`:
 
 ```
-docker build -t cloud-browser-webrtc:dev -f infra/Dockerfile .
+docker build -t chromeless:dev -f infra/Dockerfile .
 ```
 
 ## Run
@@ -31,7 +31,7 @@ docker run --rm \
     -p 9222:9222 \
     -p 8080:8080 \
     --shm-size=1g \
-    cloud-browser-webrtc:dev
+    chromeless:dev
 ```
 
 Confirm Chromium is alive from the host:

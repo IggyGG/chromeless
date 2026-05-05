@@ -11,8 +11,8 @@ custom resources and reconciles them onto Pods built from
   pool's `spec.warmReplicas` is N and the live count is less, the
   controller materialises new Pods from `pool.spec.template`.
 - **Assigns a Pod to a session** on `BrowserSession` create. Picks
-  a `cb.session/state=warm` Pod that's region-compatible and Ready,
-  relabels it `assigned`, sets `cb.session/owner` to the session
+  a `chromeless.session/state=warm` Pod that's region-compatible and Ready,
+  relabels it `assigned`, sets `chromeless.session/owner` to the session
   name, and surfaces connection info on
   `BrowserSession.status.connection` (signaling URL + Pod name +
   Pod IP).
@@ -61,7 +61,7 @@ go test ./...
 Container image:
 
 ```
-docker build -t ghcr.io/iggy/cloud-browser-webrtc/browser-session-controller:dev \
+docker build -t ghcr.io/iggy/chromeless/browser-session-controller:dev \
     -f infra/controllers/browser-session-controller/Dockerfile \
     infra/controllers/browser-session-controller
 ```
@@ -94,23 +94,23 @@ kind create cluster --name cb
 kubectl apply -f infra/controllers/browser-session-controller/config/crd/
 
 # 3. Build + load the controller image into kind
-docker build -t cb-controller:dev \
+docker build -t chromeless-controller:dev \
     -f infra/controllers/browser-session-controller/Dockerfile \
     infra/controllers/browser-session-controller
-kind load docker-image cb-controller:dev --name cb
+kind load docker-image chromeless-controller:dev --name cb
 
 # 4. Deploy controller (override image to the locally-loaded tag)
-kubectl create namespace cloud-browser-webrtc
+kubectl create namespace chromeless
 kubectl apply -f infra/k8s/controller-deployment.yaml
-kubectl -n cloud-browser-webrtc set image deployment/browser-session-controller \
-    controller=cb-controller:dev
+kubectl -n chromeless set image deployment/browser-session-controller \
+    controller=chromeless-controller:dev
 
 # 5. Apply a sample pool + session
 kubectl apply -f docs/k8s/sample-pool.yaml      # see below
 kubectl apply -f docs/k8s/sample-session.yaml
 
 # 6. Watch
-kubectl -n cloud-browser-webrtc get browsersession -w
+kubectl -n chromeless get browsersession -w
 ```
 
 `sample-pool.yaml` and `sample-session.yaml` are not in this repo;
@@ -164,7 +164,7 @@ status.
 | Pool aging / drain | ✓ | Tested; `TestPool_DrainsOverAged`. |
 | ScrubAndReturn recycle | – | Wire next; today every recycle goes through `RecreatePod`. Documented as the secure-default in T50. |
 | Admission webhook | scaffold | Logic + tests landed; TLS + ValidatingWebhookConfiguration are deploy-side. |
-| Snapshot-aware fast path (T68) | – | The pod's `cb.io/snapshot-id` annotation is recognised; the controller does not yet route to a snapshot-restore helper. Phase 3 follow-up. |
+| Snapshot-aware fast path (T68) | – | The pod's `chromeless.io/snapshot-id` annotation is recognised; the controller does not yet route to a snapshot-restore helper. Phase 3 follow-up. |
 
 ## Limitations
 
@@ -188,7 +188,7 @@ status.
 
 - T50 — design doc this implementation tracks.
 - T68 — CRIU snapshot/restore; the controller will eventually drive
-  the fast-path on `cb.io/snapshot-id`.
+  the fast-path on `chromeless.io/snapshot-id`.
 - T48 — signaling auth; admission webhook reads tenant claims that
   T48's tokens carry.
 - T57 — security hardening; the controller pod itself runs under

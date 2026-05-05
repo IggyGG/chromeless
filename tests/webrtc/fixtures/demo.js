@@ -53,7 +53,7 @@ export function attachDemo(canvas, opts = {}) {
     bars: [0.20, 0.55, 0.40, 0.70, 0.30, 0.85],
     barTargets: [0.20, 0.55, 0.40, 0.70, 0.30, 0.85],
     log: [
-      { ts: 0, text: "[init] cb-chromium attached" },
+      { ts: 0, text: "[init] chromeless attached" },
       { ts: 0, text: "[cdp] Target.attachToTarget OK" },
     ],
     flashColor: null,
@@ -168,7 +168,7 @@ function drawHeader(ctx, W, H, state, t) {
   ctx.fillStyle = "#7a8da6";
   ctx.font = "13px ui-monospace, Menlo, Consolas, monospace";
   ctx.textBaseline = "middle";
-  ctx.fillText("cb-chromium webrtc test fixture", 16, 22);
+  ctx.fillText("chromeless webrtc test fixture", 16, 22);
 
   // Right-aligned: scene badge.
   const badgeColor = badgeColorFor(state.scene);

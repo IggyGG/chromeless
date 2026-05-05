@@ -1,6 +1,6 @@
 # Observability
 
-Per-container metrics for cloud-browser-webrtc. The shape of the
+Per-container metrics for chromeless. The shape of the
 observability story is fixed in Phase 0 so latency tuning (Phase 2) and
 capacity planning (Phase 3) have signal from day one rather than being
 retrofitted onto a system that's already in production.
@@ -12,7 +12,7 @@ Two Prometheus endpoints, both on plain HTTP:
 | Endpoint | Service | Port | What |
 |---|---|---|---|
 | `/metrics` | signaling (`signaling/`) | `8080` | Session counts, message types, websocket close codes, active connections by role. |
-| `/metrics` | cb-metrics-sidecar (`capture/cb-metrics-sidecar/`) | `9100` | Aggregate Chromium CPU/RSS, per-track WebRTC bitrate / fps / qp / dropped frames / RTT / remote-side packet loss. |
+| `/metrics` | chromeless-metrics-sidecar (`capture/chromeless-metrics-sidecar/`) | `9100` | Aggregate Chromium CPU/RSS, per-track WebRTC bitrate / fps / qp / dropped frames / RTT / remote-side packet loss. |
 
 ### Signaling metrics
 
@@ -191,6 +191,6 @@ ceiling. `cb_chromium_cpu_pct / cb_signaling_active_sessions` is the
   RTCPeerConnection at a time, so labelling everything with a session
   id would be redundant. When Phase 3 introduces multi-tenancy,
   metrics gain a `session_id` label, sourced from
-  `/run/cb-session/id` (T31 cold-start).
+  `/run/chromeless-session/id` (T31 cold-start).
 - **No alerts here.** Alerts and recording rules belong in the deploy
   repo, not in this image. Phase 3 task.

@@ -1,4 +1,4 @@
-module github.com/iggy/cloud-browser-webrtc/capture/clipboard-bridge
+module github.com/iggy/chromeless/capture/clipboard-bridge
 
 go 1.22
 

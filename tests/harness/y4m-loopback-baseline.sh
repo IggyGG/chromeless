@@ -7,7 +7,7 @@
 #   1. Ensure the harness y4m fixture exists; if not, generate it
 #      via record-y4m.sh (one-time per dev box).
 #   2. `docker compose -f infra/compose.yaml up -d` with
-#      CBWRTC_USE_FAKE_MEDIA=1 + CBWRTC_USE_FAKE_MEDIA_FILE wired
+#      CHROMELESS_USE_FAKE_MEDIA=1 + CHROMELESS_USE_FAKE_MEDIA_FILE wired
 #      to the fixture (compose.yaml does this by default).
 #   3. Wait for the chromium container to be healthy.
 #   4. Open the client at http://localhost:3000 (Playwright or
@@ -35,7 +35,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 FIXTURES_DIR="$REPO_ROOT/harness/latency/fixtures"
 DEFAULT_FIXTURE="$FIXTURES_DIR/harness-loop-720p30.y4m"
-FIXTURE="${CB_Y4M_FIXTURE:-$DEFAULT_FIXTURE}"
+FIXTURE="${CHROMELESS_Y4M_FIXTURE:-$DEFAULT_FIXTURE}"
 
 # pyzbar needs libzbar; on macOS the homebrew install lives in
 # /opt/homebrew/lib. Set DYLD_FALLBACK_LIBRARY_PATH unconditionally —

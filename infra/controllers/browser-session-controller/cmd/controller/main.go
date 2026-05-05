@@ -20,9 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
-	"github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/reconciler"
-	"github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/tracing"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
+	"github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/reconciler"
+	"github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/tracing"
 )
 
 // version is overridden at build time via -ldflags="-X main.version=$TAG".

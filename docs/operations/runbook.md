@@ -1,4 +1,4 @@
-# Cloud-browser-webrtc operational runbook
+# Chromeless operational runbook
 
 Step-by-step recipes for the operational scenarios you'll hit in
 production. Pairs with [`sla.md`](./sla.md) (which alert means what)
@@ -21,13 +21,13 @@ and [`phase1-deployment-checklist.md`](./phase1-deployment-checklist.md)
 ## Deploying
 
 From a fresh K8s cluster (kind, k3d, GKE, EKS, AKS — whatever) to a
-running cloud-browser-webrtc.
+running chromeless.
 
 ### 0. Prerequisites
 
 - A cluster ≥ K8s 1.27.
 - Container registry credentials (push images you build locally
-  to `ghcr.io/<org>/cloud-browser-webrtc/*` and pull from there).
+  to `ghcr.io/<org>/chromeless/*` and pull from there).
 - `kubectl`, `kustomize`, `docker buildx`.
 - DNS records for `signaling.<your-domain>`, `turn.<your-domain>`.
 - TLS issuer (cert-manager + Let's Encrypt is the default the
@@ -39,31 +39,31 @@ running cloud-browser-webrtc.
 
 ```
 docker buildx build --platform linux/amd64 \
-    -t ghcr.io/<org>/cloud-browser-webrtc/chromium:<tag> \
+    -t ghcr.io/<org>/chromeless/chromium:<tag> \
     -f infra/Dockerfile . --push
 
 docker buildx build --platform linux/amd64 \
-    -t ghcr.io/<org>/cloud-browser-webrtc/signaling:<tag> \
+    -t ghcr.io/<org>/chromeless/signaling:<tag> \
     -f signaling/Dockerfile signaling/ --push
 
 docker buildx build --platform linux/amd64 \
-    -t ghcr.io/<org>/cloud-browser-webrtc/browser-session-controller:<tag> \
+    -t ghcr.io/<org>/chromeless/browser-session-controller:<tag> \
     -f infra/controllers/browser-session-controller/Dockerfile \
     infra/controllers/browser-session-controller --push
 
 docker buildx build --platform linux/amd64 \
-    -t ghcr.io/<org>/cloud-browser-webrtc/turn-issuer:<tag> \
+    -t ghcr.io/<org>/chromeless/turn-issuer:<tag> \
     -f infra/turn-issuer/Dockerfile infra/turn-issuer --push
 ```
 
-(Plus `cb-metrics-sidecar`, `input-bridge`, `cursor-watcher`,
+(Plus `chromeless-metrics-sidecar`, `input-bridge`, `cursor-watcher`,
 `clipboard-bridge`, `file-bridge` images per `infra/k8s/cloud-browser-session.yaml`.)
 
 ### 2. Install seccomp profile on every node
 
-The `cb-chromium` Pod references a Localhost seccomp profile
-(`infra/seccomp/cb-chromium.json`, T57). The kubelet only finds it
-if it's at `/var/lib/kubelet/seccomp/cb-chromium.json` on each
+The `chromeless` Pod references a Localhost seccomp profile
+(`infra/seccomp/chromeless.json`, T57). The kubelet only finds it
+if it's at `/var/lib/kubelet/seccomp/chromeless.json` on each
 node. Use the [security-profiles-operator](https://github.com/kubernetes-sigs/security-profiles-operator)
 or a privileged DaemonSet that drops the file in place.
 
@@ -73,10 +73,10 @@ Create an overlay under `infra/k8s/overlays/<env>/`:
 - replace image tags in `kustomization.yaml`.
 - patch `signaling-deployment.yaml` Ingress hostname.
 - patch `turn-deployment.yaml` realm + external-ip.
-- supply `turn-issuer-secrets` Secret values: `CBWRTC_AUTH_PUBKEY`,
-  `CBWRTC_TURN_SHARED_SECRET`, TURN URLs.
+- supply `turn-issuer-secrets` Secret values: `CHROMELESS_AUTH_PUBKEY`,
+  `CHROMELESS_TURN_SHARED_SECRET`, TURN URLs.
 - supply `turn-rest-secret` Secret value: `static-auth-secret`
-  (must match `CBWRTC_TURN_SHARED_SECRET` above).
+  (must match `CHROMELESS_TURN_SHARED_SECRET` above).
 
 ### 4. Apply
 
@@ -103,14 +103,14 @@ shouldn't cycle them all at once.
 
 ```
 # 1. Find the bad image tag.
-kubectl -n cloud-browser-webrtc get pods -o jsonpath='{.items[*].spec.containers[*].image}' | tr ' ' '\n' | sort -u
+kubectl -n chromeless get pods -o jsonpath='{.items[*].spec.containers[*].image}' | tr ' ' '\n' | sort -u
 
 # 2. Patch the previous tag back into the Deployments / pool.
-kubectl -n cloud-browser-webrtc set image deployment/signaling signaling=<good-tag>
-kubectl -n cloud-browser-webrtc set image deployment/browser-session-controller controller=<good-tag>
+kubectl -n chromeless set image deployment/signaling signaling=<good-tag>
+kubectl -n chromeless set image deployment/browser-session-controller controller=<good-tag>
 
 # 3. For session pods, patch the pool template.
-kubectl -n cloud-browser-webrtc patch browsersessionpool default-pool \
+kubectl -n chromeless patch browsersessionpool default-pool \
     --type=json \
     -p='[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"<good-tag>"}]'
 
@@ -121,14 +121,14 @@ kubectl -n cloud-browser-webrtc patch browsersessionpool default-pool \
 
 If rollback urgency demands cycling active sessions:
 ```
-kubectl -n cloud-browser-webrtc delete browsersession --all
+kubectl -n chromeless delete browsersession --all
 ```
 This evicts every user. Use sparingly.
 
 ### Controller rollback
 
 ```
-kubectl -n cloud-browser-webrtc rollout undo deployment/browser-session-controller
+kubectl -n chromeless rollout undo deployment/browser-session-controller
 ```
 
 The controller is stateless (CRDs hold the world); rolling back
@@ -143,7 +143,7 @@ is safe.
 The signaling tier is stateless behind a ClientIP-affinity Service:
 
 ```
-kubectl -n cloud-browser-webrtc scale deployment/signaling --replicas=10
+kubectl -n chromeless scale deployment/signaling --replicas=10
 ```
 
 HPA from `infra/k8s/signaling-deployment.yaml` will also auto-scale
@@ -155,7 +155,7 @@ Edit the BrowserSessionPool's `spec.warmReplicas` upward. The pool
 reconciler (T71) materialises new Pods to the new target.
 
 ```
-kubectl -n cloud-browser-webrtc patch browsersessionpool default-pool \
+kubectl -n chromeless patch browsersessionpool default-pool \
     --type=merge -p '{"spec":{"warmReplicas":50}}'
 ```
 
@@ -192,15 +192,15 @@ dashboard.
 ```
 # From the alert, the `instance` label points at the metrics sidecar
 # inside the slow Pod. The Pod name maps 1:1.
-kubectl -n cloud-browser-webrtc get pod -o wide | grep <instance-shortprefix>
+kubectl -n chromeless get pod -o wide | grep <instance-shortprefix>
 ```
 
-Or open Grafana `cb-cluster-overview` → click the slow session →
-deep-link to `cb-session-detail` filtered by `$instance`.
+Or open Grafana `chromeless-cluster-overview` → click the slow session →
+deep-link to `chromeless-session-detail` filtered by `$instance`.
 
 ### Step 2: classify the slowdown
 
-On `cb-session-detail`, look at the panels in this order:
+On `chromeless-session-detail`, look at the panels in this order:
 
 1. **ICE RTT** (`cb_webrtc_round_trip_time_ms`). If high, problem is
    network or candidate-pair pathological (TURN relay falling over,
@@ -218,9 +218,9 @@ On `cb-session-detail`, look at the panels in this order:
 ### Step 3: per-session container logs
 
 ```
-kubectl -n cloud-browser-webrtc logs <pod> -c cb-chromium --tail=200
-kubectl -n cloud-browser-webrtc logs <pod> -c cb-metrics-sidecar --tail=100
-kubectl -n cloud-browser-webrtc logs <pod> -c input-bridge --tail=100
+kubectl -n chromeless logs <pod> -c chromeless --tail=200
+kubectl -n chromeless logs <pod> -c chromeless-metrics-sidecar --tail=100
+kubectl -n chromeless logs <pod> -c input-bridge --tail=100
 ```
 
 Common signals:
@@ -260,10 +260,10 @@ Triggered by: `CBEncoderSaturated` (QP > 38 sustained),
 ### Step 2: cross-check the BWE adapter (T58)
 
 The bandwidth-estimator → encoder adapter logs in
-`cb-chromium/chromium.log`:
+`chromeless/chromium.log`:
 
 ```
-kubectl -n cloud-browser-webrtc logs <pod> -c cb-chromium | grep "BWE"
+kubectl -n chromeless logs <pod> -c chromeless | grep "BWE"
 ```
 
 A healthy session shows BWE estimates climbing on connection then
@@ -276,7 +276,7 @@ Was the negotiated codec what you expected? T54 implements VP9 → H.264
 fallback. Check the SDP:
 
 ```
-kubectl -n cloud-browser-webrtc exec <pod> -c cb-chromium -- \
+kubectl -n chromeless exec <pod> -c chromeless -- \
   curl -s http://127.0.0.1:9222/json/version
 # Then via DevTools, getStats() → look at the codec field on
 # outbound-rtp{kind=video}.
@@ -306,13 +306,13 @@ upstream and the new pubkey rolls in:
 # 2. Run the issuer to mint *both old and new* tokens for a brief
 #    window. (How depends on your issuer.)
 # 3. Roll the signaling pubkey:
-kubectl -n cloud-browser-webrtc patch secret signaling-auth \
-    --type=merge -p '{"stringData":{"CBWRTC_AUTH_PUBKEY":"<new-base64>"}}'
-kubectl -n cloud-browser-webrtc rollout restart deployment/signaling
+kubectl -n chromeless patch secret signaling-auth \
+    --type=merge -p '{"stringData":{"CHROMELESS_AUTH_PUBKEY":"<new-base64>"}}'
+kubectl -n chromeless rollout restart deployment/signaling
 # 4. Same for the turn-issuer:
-kubectl -n cloud-browser-webrtc patch secret turn-issuer-secrets \
-    --type=merge -p '{"stringData":{"CBWRTC_AUTH_PUBKEY":"<new-base64>"}}'
-kubectl -n cloud-browser-webrtc rollout restart deployment/turn-issuer
+kubectl -n chromeless patch secret turn-issuer-secrets \
+    --type=merge -p '{"stringData":{"CHROMELESS_AUTH_PUBKEY":"<new-base64>"}}'
+kubectl -n chromeless rollout restart deployment/turn-issuer
 ```
 
 Active sessions on the old pubkey continue working until their token
@@ -324,7 +324,7 @@ cert-manager auto-renews via the Ingress's `cert-manager.io/cluster-issuer`
 annotation. Manual force-renewal:
 
 ```
-kubectl -n cloud-browser-webrtc delete certificate signaling-tls
+kubectl -n chromeless delete certificate signaling-tls
 # cert-manager re-creates it within 30 s.
 ```
 
@@ -341,14 +341,14 @@ kubectl cordon <node>
 # 2. Mark the warm pods on this node as draining via the
 #    BrowserSessionPool reconciler. They'll be deleted; replenishment
 #    creates new ones on healthy nodes.
-kubectl -n cloud-browser-webrtc label pod \
-    -l cb.session/state=warm \
+kubectl -n chromeless label pod \
+    -l chromeless.session/state=warm \
     --field-selector spec.nodeName=<node> \
-    cb.session/state=draining --overwrite
+    chromeless.session/state=draining --overwrite
 
 # 3. Wait for active sessions on this node to end naturally.
 #    Check:
-kubectl -n cloud-browser-webrtc get pod -o wide \
+kubectl -n chromeless get pod -o wide \
     --field-selector spec.nodeName=<node>
 
 # 4. Force-evict if needed (this terminates active user sessions —
@@ -370,7 +370,7 @@ Post-T68; assumes the snapshot helper is deployed on each node.
 
 ```
 ssh <node>
-sudo /opt/cb-snapshots/snapshot.sh cb-blank-$(date +%Y%m%d)
+sudo /opt/chromeless-snapshots/snapshot.sh chromeless-blank-$(date +%Y%m%d)
 # Prints a sha. Note it.
 ```
 
@@ -380,7 +380,7 @@ DaemonSet pulling at boot).
 ### Validating a snapshot
 
 ```
-sudo /opt/cb-snapshots/restore.sh <sha>
+sudo /opt/chromeless-snapshots/restore.sh <sha>
 # Prints time_to_ready_ms. Should be < 2000.
 ```
 
@@ -390,8 +390,8 @@ from this snapshot to verify functional health.
 ### Switching the pool to a new snapshot
 
 ```
-kubectl -n cloud-browser-webrtc patch browsersessionpool default-pool \
-    --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"cb.io/snapshot-id":"<new-sha>"}}}}}'
+kubectl -n chromeless patch browsersessionpool default-pool \
+    --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"chromeless.io/snapshot-id":"<new-sha>"}}}}}'
 ```
 
 Existing warm Pods stay on the old snapshot; new ones use the new.
@@ -403,12 +403,12 @@ that setting (default 1 hour).
 Snapshots that no Pod references can be deleted. List currently-in-use:
 
 ```
-kubectl -n cloud-browser-webrtc get pods \
+kubectl -n chromeless get pods \
     -o jsonpath='{.items[*].metadata.annotations.cb\.io/snapshot-id}' \
     | tr ' ' '\n' | sort -u
 ```
 
-Compare against `/var/lib/cb-snapshots/shared/*` on each node;
+Compare against `/var/lib/chromeless-snapshots/shared/*` on each node;
 delete the ones not in the live set after ≥ 24 h grace (longest
 session lifetime).
 

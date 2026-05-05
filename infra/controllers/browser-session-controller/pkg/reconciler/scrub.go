@@ -15,7 +15,7 @@
 // **tenant-clean pools** (single-tenant deployments, OR pools where
 // every reuse is preceded by a fresh snapshot restore).
 //
-// Wire shape: scrub-pod.sh runs inside the cb-chromium container
+// Wire shape: scrub-pod.sh runs inside the chromeless container
 // (called by the controller via Pod-exec). Its stdout contains the
 // literal marker "[scrub] OK" on success. Anything else — non-zero
 // exit, missing marker, exec error — is treated as failure and the
@@ -43,7 +43,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 )
 
 // scrubScriptPath is the in-pod path scrub-pod.sh is COPYed to via
@@ -56,7 +56,7 @@ const scrubMarker = "[scrub] OK"
 // chromiumContainerName is the container we exec into. Must match
 // the pod template in infra/k8s/cloud-browser-session.yaml + the
 // helm chart.
-const chromiumContainerName = "cb-chromium"
+const chromiumContainerName = "chromeless"
 
 // ScrubExecutor abstracts Pod-exec so the reconciler doesn't carry
 // a hard dependency on the kubernetes client-go path. Tests inject

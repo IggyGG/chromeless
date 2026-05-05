@@ -7,7 +7,7 @@
 //	                        {"received": <bytes>}.
 //
 // Both bandwidth-cap their respective directions to 1 MiB per
-// request. Auth (T48 ?token=) is required when CBWRTC_AUTH_PUBKEY is
+// request. Auth (T48 ?token=) is required when CHROMELESS_AUTH_PUBKEY is
 // set. Tokens are NOT region-checked here — probes are always
 // allowed to flow against any signaling deployment so the client
 // can pick a region from the dropdown if GeoDNS misroutes (see

@@ -1,6 +1,6 @@
-# tests/webrtc — WebRTC harness for cb-chromium
+# tests/webrtc — WebRTC harness for chromeless
 
-Standalone Node.js harness that drives the cb-chromium binary directly
+Standalone Node.js harness that drives the chromeless binary directly
 via Chrome DevTools Protocol, plays the role of WebRTC counter-peer in
 Node.js (using `@roamhq/wrtc`), records the inbound video stream to a
 `.webm`, and (via the parallel-authored `encoder-assertions.mjs` module)
@@ -73,9 +73,9 @@ npm install
 #    ./artifacts/ unless TEST_ARTIFACTS_DIR is set.
 npm test
 
-# 3. Override the target (e.g. local cb-chromium on your laptop).
+# 3. Override the target (e.g. local chromeless on your laptop).
 node drive-recorder.mjs \
-  --cb-url=http://127.0.0.1:9222 \
+  --chromeless-url=http://127.0.0.1:9222 \
   --duration=10
 
 # 4. Pin the wire codec under test.
@@ -91,7 +91,7 @@ node drive-recorder.mjs --steer-script=fixtures/default-steer-script.json
 node drive-recorder.mjs --out=/tmp/my-recording.webm
 ```
 
-The cluster Job (`infra/k8s/tests/cb-webrtc-validation.yaml`) passes
+The cluster Job (`infra/k8s/tests/chromeless-webrtc-validation.yaml`) passes
 `--steer-script=fixtures/default-steer-script.json` so the artifact
 walks through `boot → idle → streaming` with log lines, bar updates,
 and a couple of flashes — the recording is visibly interesting even
@@ -115,7 +115,7 @@ without per-test customization.
 ## Verification checklist
 
 - `npm test` exits 0 (or `node drive-recorder.mjs` against a chosen
-  `--cb-url`).
+  `--chromeless-url`).
 - The `TEST_ARTIFACT` line points at an existing `.webm` ≥ 10 KB.
 - `ffprobe <path>` reports duration ≥ 4s, codec=vp9 (storage codec).
 - Open `<path>` in mpv / QuickTime → demo panels are visible and
@@ -135,7 +135,7 @@ without per-test customization.
 |---|---|
 | `package.json` | Node deps. `@roamhq/wrtc` (native libwebrtc bindings + `RTCVideoSink`), `chrome-remote-interface`, `ws`. |
 | `drive-recorder.mjs` | The harness. CDP attach → page navigate → console-bridge ↔ Runtime.evaluate signaling → `@roamhq/wrtc` peer → ffmpeg → structured `TEST_ARTIFACT` line. |
-| `streamer-page.html` | The page loaded into cb-chromium. Attaches `fixtures/demo.js` to a visible canvas, captures the canvas via `canvas.captureStream(30)`, sends it through an `RTCPeerConnection`. Falls back to `getDisplayMedia` then `getUserMedia` if canvas capture isn't supported. |
+| `streamer-page.html` | The page loaded into chromeless. Attaches `fixtures/demo.js` to a visible canvas, captures the canvas via `canvas.captureStream(30)`, sends it through an `RTCPeerConnection`. Falls back to `getDisplayMedia` then `getUserMedia` if canvas capture isn't supported. |
 | `fixtures/demo.js` | ES module exporting `attachDemo(canvas, opts)` — renders the multi-panel demo content (spinner, chart, particles, log, footer). The harness imports it; the standalone preview also imports it. |
 | `fixtures/demo.html` | Standalone preview of the canvas demo. Open in any browser to see what the recording will look like; buttons drive the same `window.__cbtest.handle()` messages the harness uses. |
 | `fixtures/default-steer-script.json` | Default scene script the cluster Job uses. Walks the demo through scene transitions + log lines + bar updates + flashes during the recording window. |
@@ -149,13 +149,13 @@ without per-test customization.
   ffmpeg via Homebrew (`brew install ffmpeg`).
 - **Cluster Job (k8s):** runs on `node:20-bookworm-slim` with
   ffmpeg installed via apt. Manifests live in
-  `infra/k8s/tests/cb-webrtc-validation.yaml`. The Job emits the
+  `infra/k8s/tests/chromeless-webrtc-validation.yaml`. The Job emits the
   artifact as base64 in Pod logs (between `===WEBM_BASE64_BEGIN===`
   and `===WEBM_BASE64_END===`) so an operator can decode and play
   it locally:
 
   ```bash
-  kubectl logs -n cb-tests job/cb-webrtc-validation -c test-driver \
+  kubectl logs -n chromeless-tests job/chromeless-webrtc-validation -c test-driver \
     | awk '/===WEBM_BASE64_BEGIN===/{f=1; next} /===WEBM_BASE64_END===/{f=0} f' \
     | base64 -d > out.webm
   ```
@@ -186,7 +186,7 @@ demo's `send()`.
 
 ```
 ┌─────────────────────────┐                    ┌─────────────────────┐
-│  drive-recorder.mjs     │  CDP (websocket)   │   cb-chromium       │
+│  drive-recorder.mjs     │  CDP (websocket)   │   chromeless       │
 │  (Node.js)              │ <──────────────────│   /json/version     │
 │                         │                    │   browser-level ws  │
 │   ┌─────────────────┐   │                    │                     │

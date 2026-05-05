@@ -8,7 +8,7 @@
   drive-recorder.mjs records to out.webm. The buttons trigger the
   same `window.__cbtest.handle()` messages the harness pushes via
   CDP `Runtime.evaluate`, so you can iterate on the demo's response
-  to scene-change commands without spinning up cb-chromium.
+  to scene-change commands without spinning up chromeless.
 
   This file is NOT loaded by the harness — the harness loads
   streamer-page.html which imports demo.js directly into a hidden
@@ -18,7 +18,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>cb-chromium webrtc fixture — demo preview</title>
+    <title>chromeless webrtc fixture — demo preview</title>
     <style>
       html, body {
         margin: 0; height: 100%;
@@ -57,7 +57,7 @@
   <body>
     <div class="wrap">
       <header>
-        cb-chromium webrtc fixture — drive-recorder.mjs records exactly
+        chromeless webrtc fixture — drive-recorder.mjs records exactly
         what you see in this canvas. Buttons below send the same
         <code>window.__cbtest.handle({...})</code> messages the harness
         pushes via CDP.

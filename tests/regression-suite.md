@@ -38,7 +38,7 @@ network. Fail fast.
 | `signaling/` | `admin_test.go`, `auth_test.go`, `denylist_test.go`, `metrics_test.go`, `probe_test.go`, `replay_test.go`, `turn_test.go` | T48 token verify (Ed25519, exp/nbf/aud), T67 tenant routing, T89 denylist precedence + admin endpoint, T96 offer/answer replay buffer, T93 region-claim enforcement, T25 `/turn-credentials` shape, T38 metrics labels | Real WS round-trip (covered by `tests/integration/signaling_roundtrip_test.go`); cross-tenant collisions (covered by `tests/integration/cross_tenant_test.go`) | ~3 s |
 | `infra/turn-issuer/` | `main_test.go` | T76 RFC 7635 HMAC-SHA1 credential format; secret rotation (`_PREV` overlap window); admin token gating | live coturn handshake | ~1 s |
 | `infra/controllers/browser-session-controller/` | `pkg/reconciler/{pool,scrub,session}_test.go`, `pkg/server/admission_test.go` | T71 BrowserSession CRD reconcile; T90 scrub-and-return; admission webhook validation | live K8s API (envtest only); CRIU restore (T68 deferred) | ~5 s |
-| `capture/cb-metrics-sidecar/` | `stats_handler_test.go` | T82 stats label cardinality cap; T72 stats forwarding payload shape | live Chromium DevTools poll | ~1 s |
+| `capture/chromeless-metrics-sidecar/` | `stats_handler_test.go` | T82 stats label cardinality cap; T72 stats forwarding payload shape | live Chromium DevTools poll | ~1 s |
 | `capture/clipboard-bridge/` | `main_test.go` | T32 echo suppression, MIME guard, 1 MiB cap | live Chromium clipboard permissions | ~1 s |
 | `capture/cursor-watcher/` | `main_test.go` | T26 envelope diff/dedupe; CSS-keyword vs custom shape parse | live cursor poll loop | ~1 s |
 | `capture/file-bridge/` | `main_test.go` | T74 chunk reassembly + SHA-256 verify + MIME re-sniff; allowlist gate | live CDP `DOM.setFileInputFiles` | ~2 s |
@@ -83,7 +83,7 @@ contract end-to-end.
 |------|-----------------|-----------------|---------|
 | `signaling_roundtrip_test.go` | T13/T27/T51 — full SDP/ICE round-trip, duplicate-role rejection, bye propagation, two-session isolation | streamer/client real implementations | ~2 s (incl. Go build) |
 | `offer_replay_test.go` | T96 — replay buffer keeps only most-recent offer per session; ICE explicitly NOT replayed (covered by [#104](#) followup); survives peer reconnect | T94 cross-region replay (Phase 3) | ~1 s |
-| `audio_loopback_test.go::TestStreamerOffersAudio` | T64 — streamer's SDP offer carries `m=audio` + opus rtpmap | client-side audio decode (T64 spec 05) | ~22 s (live compose; opt-in via `CBWRTC_INTEGRATION_LIVE=1`) |
+| `audio_loopback_test.go::TestStreamerOffersAudio` | T64 — streamer's SDP offer carries `m=audio` + opus rtpmap | client-side audio decode (T64 spec 05) | ~22 s (live compose; opt-in via `CHROMELESS_INTEGRATION_LIVE=1`) |
 | `clipboard_test.go` | T32 — clipboard envelope round-trip through signaling, no echo | actual Chromium copy/paste (T64 e2e) | ~2 s |
 | `cross_tenant_test.go` | T67 — `(tenant_id, session_id)` pairs route independently; collisions impossible across tenants | per-region cross-tenant (T93) | ~2 s |
 | `file_upload_test.go` | T74 — file chunks reassemble across signaling under simulated re-order | actual CDP file attach | ~3 s |
@@ -98,7 +98,7 @@ nightly via `e2e.yml` indirectly through Playwright spec 05.
 
 **Run via:** `make test-integration` (cd into `tests/integration/`
 because it's its own Go module); set
-`CBWRTC_INTEGRATION_LIVE=1` to also run audio_loopback.
+`CHROMELESS_INTEGRATION_LIVE=1` to also run audio_loopback.
 
 ---
 

@@ -1,6 +1,6 @@
 # SDP munging
 
-Why and how `cloud-browser-webrtc` rewrites SDP between
+Why and how `chromeless` rewrites SDP between
 `createOffer` and `setLocalDescription`. Owner: webrtc-dev.
 
 ## TL;DR

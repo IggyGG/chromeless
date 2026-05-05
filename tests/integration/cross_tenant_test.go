@@ -25,7 +25,7 @@ import (
 )
 
 // startServerWithDevIssuer launches the signaling binary with
-// CBWRTC_DEV_ISSUER=1, which activates the in-process /issue-token
+// CHROMELESS_DEV_ISSUER=1, which activates the in-process /issue-token
 // endpoint and enables auth verification using a freshly-generated
 // Ed25519 keypair.
 func startServerWithDevIssuer(t *testing.T) int {
@@ -39,16 +39,16 @@ func startServerWithDevIssuer(t *testing.T) int {
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(binaryPath)
-	// Strip any inherited CBWRTC_AUTH_PUBKEY so the dev issuer doesn't
+	// Strip any inherited CHROMELESS_AUTH_PUBKEY so the dev issuer doesn't
 	// refuse to start.
 	env := []string{}
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "CBWRTC_AUTH_PUBKEY=") {
+		if strings.HasPrefix(kv, "CHROMELESS_AUTH_PUBKEY=") {
 			continue
 		}
 		env = append(env, kv)
 	}
-	env = append(env, fmt.Sprintf("SIGNALING_PORT=%d", port), "CBWRTC_DEV_ISSUER=1")
+	env = append(env, fmt.Sprintf("SIGNALING_PORT=%d", port), "CHROMELESS_DEV_ISSUER=1")
 	cmd.Env = env
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -252,7 +252,7 @@ func TestSameTenantSameSessionStillWorks(t *testing.T) {
 // the same session_id behave like the pre-T67 single-namespace world
 // (a third caller of the same role gets ClosePolicyViolation).
 func TestAuthDisabledFallbackUsesAnonymousTenant(t *testing.T) {
-	port := startServer(t) // no dev issuer → CBWRTC_AUTH_PUBKEY unset → auth disabled
+	port := startServer(t) // no dev issuer → CHROMELESS_AUTH_PUBKEY unset → auth disabled
 	const sessID = "fallback"
 
 	cli := dialPeer(t, port, sessID, envelope{

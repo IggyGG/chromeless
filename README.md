@@ -1,10 +1,10 @@
-# cloud-browser-webrtc
+# chromeless
 
-[![CI](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/ci.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/ci.yml)
-[![E2E](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/e2e.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/e2e.yml)
-[![Harness](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/harness-loopback.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/harness-loopback.yml)
-[![CodeQL](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/codeql.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/codeql.yml)
-[![Release](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/release.yml/badge.svg)](https://github.com/iggy/cloud-browser-webrtc/actions/workflows/release.yml)
+[![CI](https://github.com/iggy/chromeless/actions/workflows/ci.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/ci.yml)
+[![E2E](https://github.com/iggy/chromeless/actions/workflows/e2e.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/e2e.yml)
+[![Harness](https://github.com/iggy/chromeless/actions/workflows/harness-loopback.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/harness-loopback.yml)
+[![CodeQL](https://github.com/iggy/chromeless/actions/workflows/codeql.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/codeql.yml)
+[![Release](https://github.com/iggy/chromeless/actions/workflows/release.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/release.yml)
 
 **Open-source cloud browser with low-latency WebRTC streaming.**
 
@@ -16,7 +16,7 @@
 
 ## What is this?
 
-`cloud-browser-webrtc` is a remote-browser platform: a real Chromium runs on a
+`chromeless` is a remote-browser platform: a real Chromium runs on a
 Linux server, its tab is streamed to your local browser over WebRTC, and your
 mouse / keyboard / clipboard / audio round-trip back through the same peer
 connection. The user-facing experience is "I open a webpage and use a browser
@@ -143,8 +143,8 @@ for the methodology.
 ### Local dev (docker compose)
 
 ```bash
-git clone https://github.com/<org>/cloud-browser-webrtc.git
-cd cloud-browser-webrtc
+git clone https://github.com/<org>/chromeless.git
+cd chromeless
 docker compose -f infra/compose.yaml up
 
 # Then open http://localhost:3000
@@ -157,19 +157,19 @@ with the cb dashboards (T66) auto-loaded; see
 ### Kubernetes (Helm)
 
 The supported install path for clusters is the chart at
-[`infra/helm/cloud-browser-webrtc/`](./infra/helm/cloud-browser-webrtc):
+[`infra/helm/chromeless/`](./infra/helm/chromeless):
 
 ```bash
-helm install cloud-browser-webrtc \
-    oci://ghcr.io/<org>/cloud-browser-webrtc/helm/cloud-browser-webrtc \
+helm install chromeless \
+    oci://ghcr.io/<org>/chromeless/helm/chromeless \
     --version 0.1.0 \
-    --namespace cloud-browser-webrtc \
+    --namespace chromeless \
     --create-namespace \
     -f my-values.yaml
 ```
 
 Required `my-values.yaml` knobs are documented inline in
-[`values.yaml`](./infra/helm/cloud-browser-webrtc/values.yaml); the
+[`values.yaml`](./infra/helm/chromeless/values.yaml); the
 short list is the Ed25519 auth pubkey, the TURN shared secret, and
 the TURN URLs. See
 [`docs/operations/phase1-deployment-checklist.md`](./docs/operations/phase1-deployment-checklist.md)
@@ -197,7 +197,7 @@ so users hit them with eyes open. Each has a planned-fix milestone.
   disables Vulkan. `navigator.gpu` is present, but `requestAdapter()`
   returns null. Same Phase 4 GPU-passthrough fix unblocks it.
 - **Dev compose ships synthetic media.** `infra/compose.yaml`
-  defaults `CBWRTC_USE_FAKE_MEDIA=1`, which routes `getDisplayMedia`
+  defaults `CHROMELESS_USE_FAKE_MEDIA=1`, which routes `getDisplayMedia`
   through Chromium 147's synthetic test pattern + tone instead of
   real screen capture. Real `getDisplayMedia` fails on Chromium 147
   + Xvfb regardless of launch-flag tuning (see

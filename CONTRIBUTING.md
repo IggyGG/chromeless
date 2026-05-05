@@ -1,4 +1,4 @@
-# Contributing to cloud-browser-webrtc
+# Contributing to chromeless
 
 Short guide for the team working in a shared worktree across many
 parallel tasks. Lives next to [`PROJECT_BRIEF.md`](./PROJECT_BRIEF.md).
@@ -26,12 +26,12 @@ The right pattern:
 ```sh
 # good — every file is named explicitly
 git add capture/streamer-page/streamer.js \
-        capture/cb-metrics-sidecar/stats_handler.go \
+        capture/chromeless-metrics-sidecar/stats_handler.go \
         docs/protocols/stats-channel.md
 
 # also good — pathspec-magic when a directory is genuinely all-yours
-git add 'capture/cb-metrics-sidecar/*.go' \
-        'capture/cb-metrics-sidecar/*.md'
+git add 'capture/chromeless-metrics-sidecar/*.go' \
+        'capture/chromeless-metrics-sidecar/*.md'
 ```
 
 Things to avoid:
@@ -81,7 +81,7 @@ Built artifacts (Go binaries, dist/ output, *.pid, etc.) belong in
   module's compile health is your problem to keep green even on a
   drive-by edit.
 - Don't commit binaries (`signaling/signaling`,
-  `capture/cb-metrics-sidecar/cb-metrics-sidecar`,
+  `capture/chromeless-metrics-sidecar/chromeless-metrics-sidecar`,
   `signaling/turn-issuer/turn-issuer`, etc.). Each module's
   `.gitignore` excludes them; if you see one in `git status`, it
   means an old binary leaked through — delete and re-run

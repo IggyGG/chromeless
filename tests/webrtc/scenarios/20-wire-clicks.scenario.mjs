@@ -51,12 +51,12 @@ export const scenario = {
 
     // Resolve actual button center coordinates dynamically.
     // The hardcoded GRID constants assume a specific stock-Chrome
-    // layout, but cb-chromium renders the fixture with a slightly
+    // layout, but chromeless renders the fixture with a slightly
     // different box-flow (separate layout-bug investigation, not
     // BUGS-529). Using getBoundingClientRect() makes the test
     // layout-independent — clicks land on the actual button regardless
     // of where the renderer placed it. On stock Chrome the dynamic
-    // coordinates resolve to ~(GRID.zone.x, GRID.zone.y); on cb-chromium
+    // coordinates resolve to ~(GRID.zone.x, GRID.zone.y); on chromeless
     // they resolve to whatever the rendered layout dictates.
     const dynRaw = await s.runtimeEval(`JSON.stringify(
       Object.fromEntries(

@@ -1,7 +1,7 @@
 # Container session lifecycle
 
 Scripts and supervisord configuration that govern what happens when a
-cloud-browser-webrtc container boots, runs, idles, and dies.
+chromeless container boots, runs, idles, and dies.
 
 ## Files
 
@@ -20,13 +20,13 @@ docker run
        └─ /usr/local/bin/entrypoint.sh
             ├─ cold-start.sh                   (clears user-data-dir,
             │                                   resolves SESSION_ID,
-            │                                   writes /run/cb-session/env)
-            ├─ source /run/cb-session/env      (env into entrypoint shell)
+            │                                   writes /run/chromeless-session/env)
+            ├─ source /run/chromeless-session/env      (env into entrypoint shell)
             └─ exec /usr/bin/supervisord       (becomes PID 2; inherits env)
                  ├─ xvfb           priority 10
                  ├─ pulseaudio     priority 20
                  ├─ streamer-static priority 25
-                 ├─ chromium       priority 30  (runs launch-chromium.sh)
+                 ├─ chromium       priority 30  (runs launch-chromeless.sh)
                  └─ idle-watchdog  priority 40
 ```
 
@@ -39,8 +39,8 @@ docker run
 - **Resolves session env**: SESSION_ID falls back to `auto-<6 random
   hex bytes>` if not provided. SIGNALING_URL, STREAMER_FPS,
   STREAMER_PORT take their compose-side defaults.
-- **Persists** the resolved values to `/run/cb-session/env` and the id
-  alone to `/run/cb-session/id`. Other lifecycle scripts read these
+- **Persists** the resolved values to `/run/chromeless-session/env` and the id
+  alone to `/run/chromeless-session/id`. Other lifecycle scripts read these
   rather than re-implementing the resolution logic.
 
 ## Idle watchdog (`idle-watchdog.sh`)
@@ -100,9 +100,9 @@ starts.
 
 ## Coordination with the rest of the stack
 
-- **T28**: `launch-chromium.sh` reads `SESSION_ID` / `SIGNALING_URL` /
+- **T28**: `launch-chromeless.sh` reads `SESSION_ID` / `SIGNALING_URL` /
   `STREAMER_FPS` / `STREAMER_PORT`. Cold-start sets these via
-  `/run/cb-session/env`, sourced by `entrypoint.sh` before
+  `/run/chromeless-session/env`, sourced by `entrypoint.sh` before
   supervisord starts.
 - **T13/T31 sub-A**: the watchdog assumes a healthy signaling server
   is reachable so the streamer page can ever transition into

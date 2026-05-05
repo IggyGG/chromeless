@@ -30,6 +30,6 @@ ENTRYPOINT ["/file-bridge", \
             "--ws-addr",      "0.0.0.0:9400", \
             "--ws-path",      "/files", \
             "--cdp-url",      "http://127.0.0.1:9222", \
-            "--upload-dir",   "/var/lib/cb-uploads"]
+            "--upload-dir",   "/var/lib/chromeless-uploads"]
 
 USER nonroot:nonroot

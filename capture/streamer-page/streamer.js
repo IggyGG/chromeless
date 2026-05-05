@@ -41,14 +41,14 @@
   // (video) or pacat-piped S16LE to the cb_passthrough sink
   // (audio). Wire format spec: docs/protocols/webcam-mic-passthrough.md.
   const PASSTHROUGH_ENABLED   = (params.get("passthrough") || "").toLowerCase() === "true";
-  const PASSTHROUGH_VIDEO_SOCK = params.get("passthrough_video_sock") || "/run/cb-passthrough/video.sock";
-  const PASSTHROUGH_AUDIO_SOCK = params.get("passthrough_audio_sock") || "/run/cb-passthrough/audio.sock";
+  const PASSTHROUGH_VIDEO_SOCK = params.get("passthrough_video_sock") || "/run/chromeless-passthrough/video.sock";
+  const PASSTHROUGH_AUDIO_SOCK = params.get("passthrough_audio_sock") || "/run/chromeless-passthrough/audio.sock";
   const SIMULCAST_LAYERS = parseSimulcastLayersParam(params.get("simulcast_layers"));
   // Input-bridge endpoint (T22 / T41). Same container as the streamer
   // (supervisord-managed), bound to loopback. Override via ?input=...
   // for tests that run the bridge elsewhere.
   const INPUT_BRIDGE_URL = params.get("input") || "ws://localhost:9100/input";
-  // cb-metrics-sidecar /stats-update endpoint (T38 sidecar, T72 wiring).
+  // chromeless-metrics-sidecar /stats-update endpoint (T38 sidecar, T72 wiring).
   // Also loopback within the supervisord-managed container. Override
   // via ?metrics=... for integration tests that run the sidecar on a
   // different port. Set to "off" to disable the relay entirely (used
@@ -241,7 +241,7 @@
   //
   // The user's client (T42) opens RTCDataChannel("stats") and emits
   // {v, t, sample} envelopes once per second. We forward them to the
-  // cb-metrics-sidecar's /stats-update endpoint on loopback, which
+  // chromeless-metrics-sidecar's /stats-update endpoint on loopback, which
   // updates the cb_client_* gauges (T38). HTTP POST is the right shape
   // here because:
   //   - Each sample is independent; no need for a long-lived ws.

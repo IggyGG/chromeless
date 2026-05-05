@@ -4,8 +4,8 @@
 # Order:
 #   1. dumb-init (Dockerfile ENTRYPOINT) -> this script
 #   2. cold-start.sh: per-session bootstrap; writes resolved env to
-#      /run/cb-session/env
-#   3. source /run/cb-session/env so SESSION_ID and friends propagate
+#      /run/chromeless-session/env
+#   3. source /run/chromeless-session/env so SESSION_ID and friends propagate
 #      through supervisord and into the chromium / idle-watchdog
 #      programs (supervisord's environment= directive is additive on top
 #      of the inherited env).
@@ -15,10 +15,10 @@ set -eu
 
 /usr/local/bin/cold-start.sh
 
-if [ -f /run/cb-session/env ]; then
+if [ -f /run/chromeless-session/env ]; then
     set -a
     # shellcheck disable=SC1091
-    . /run/cb-session/env
+    . /run/chromeless-session/env
     set +a
 fi
 

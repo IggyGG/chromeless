@@ -21,10 +21,10 @@ global:
   evaluation_interval: 30s
   external_labels:
     role: federate
-    deploy: cloud-browser-webrtc-global
+    deploy: chromeless-global
 
 scrape_configs:
-  - job_name: cb-region-federate
+  - job_name: chromeless-region-federate
     honor_labels: true         # preserve `region` label from the source
     metrics_path: /federate
     params:

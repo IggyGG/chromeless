@@ -1,6 +1,6 @@
 # Codec fallback negotiation
 
-How the cloud-browser-webrtc client decides what video codec is in
+How the chromeless client decides what video codec is in
 play after the offer/answer exchange, surfaces fallbacks to the user
 and to telemetry, and converts a "no codec at all" outcome into a
 hard error rather than a stuck-but-silent peer connection.

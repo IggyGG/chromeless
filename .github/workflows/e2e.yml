@@ -49,7 +49,7 @@ jobs:
         with:
           context: .
           file: infra/Dockerfile
-          tags: cloud-browser-webrtc:dev
+          tags: chromeless:dev
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -77,9 +77,9 @@ jobs:
           # The compose stack publishes ports as documented in
           # infra/compose.yaml. Specs read SIGNALING_URL etc. from
           # tests/e2e/playwright.config.ts.
-          CB_SIGNALING_URL: ws://localhost:8080
-          CB_CLIENT_URL: http://localhost:3000
-          CB_DEVTOOLS_URL: http://localhost:9222
+          CHROMELESS_SIGNALING_URL: ws://localhost:8080
+          CHROMELESS_CLIENT_URL: http://localhost:3000
+          CHROMELESS_DEVTOOLS_URL: http://localhost:9222
         run: |
           # `*.live.spec.ts` is the convention for specs that depend on
           # T78's getDisplayMedia fix. Run them but keep the workflow

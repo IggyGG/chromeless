@@ -1,0 +1,107 @@
+# netpol-chromeless-tests-egress.yaml
+#
+# Allows the chromeless-tests namespace's pods to egress to the things our
+# Jobs need at runtime:
+#
+#   * DNS (kube-system + node-local-dns)
+#   * forgejo:3000  — runtime `git clone` of chromeless from
+#                     forgejo-http.forgejo.svc.cluster.local
+#   * registry:5000 — image-pull (registry.triform.cloud) for
+#                     chromeless etc.
+#   * internal 6443/443 — kube-apiserver (Pods reading their own
+#                         secret mounts via TokenRequest)
+#   * external 80/443 — debian apt repos, npm registry, etc.
+#                       (test-driver does `apt-get install ffmpeg`,
+#                       `npm install` for the wire scenarios; the
+#                       build-input-bridge initContainer fetches Go
+#                       modules)
+#
+# Without this, Calico's default-deny-egress (enforced via
+# GlobalNetworkPolicy + the per-namespace baseline) blocks every
+# egress flow except node-local-dns + kube-apiserver — which is
+# exactly the failure mode the bootstrap-tests initContainer hit
+# (134s timeout dialing forgejo-http:3000).
+#
+# Mirrors chromeless-build-egress in shape; sibling test namespaces should
+# use this same template.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chromeless-tests-egress
+  namespace: chromeless-tests
+  annotations:
+    chromeless.triform/applied-by: "infra/k8s/tests/netpol-chromeless-tests-egress.yaml"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS — kube-system kube-dns + the node-local-dns shim at
+    # 169.254.20.10. The cluster's DNS service IP is also allowed
+    # (10.96.0.10/32) for the rare case node-local-dns isn't on a
+    # particular node.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - ipBlock:
+            cidr: 169.254.20.10/32
+        - ipBlock:
+            cidr: 10.96.0.10/32
+
+    # Cluster-internal forgejo HTTP — runtime git clone of the
+    # chromeless repo for bootstrap-tests + build-input-bridge
+    # initContainers. Companion ingress rule in
+    # netpol-forgejo-allow-chromeless-tests.yaml allows the receiving
+    # forgejo pod to accept this.
+    - ports:
+        - port: 3000
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: forgejo
+
+    # Cluster-internal registry — image pulls for chromeless etc.
+    - ports:
+        - port: 5000
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: registry
+
+    # kube-apiserver on the host network. Same shape as chromeless-build.
+    - ports:
+        - port: 6443
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+
+    # External HTTP/HTTPS — debian apt repos (ffmpeg + ca-certificates
+    # in the test-driver), npm registry (npm install for the wire
+    # scenarios), Go module proxy (build-input-bridge). Excludes
+    # RFC1918 + link-local because intra-cluster + intra-VPC traffic
+    # should match the more specific rules above.
+    - ports:
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16

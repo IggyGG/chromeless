@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 )
 
 // SessionFinalizer keeps the BrowserSession around until our drain
@@ -154,11 +154,11 @@ func (r *SessionReconciler) transitionToPending(ctx context.Context, sess *cbv1.
 // from the pool template and stay in Warming until it passes
 // readiness.
 //
-// T99: emits `cb.controller.session.assign` span for the assignment
+// T99: emits `chromeless.controller.session.assign` span for the assignment
 // attempt. The span attributes record which path (warm/cold) we
 // took and the bound pod name; failures are recorded as span events.
 func (r *SessionReconciler) tryAssign(ctx context.Context, sess *cbv1.BrowserSession) (reconcile.Result, error) {
-	ctx, span := tracingTracer("reconciler.session").Start(ctx, "cb.controller.session.assign",
+	ctx, span := tracingTracer("reconciler.session").Start(ctx, "chromeless.controller.session.assign",
 		traceWithAttrs(
 			tracingAttrString("session.name", sess.Name),
 			tracingAttrString("tenant.id", sess.Spec.TenantID),
@@ -178,7 +178,7 @@ func (r *SessionReconciler) tryAssign(ctx context.Context, sess *cbv1.BrowserSes
 		return reconcile.Result{}, fmt.Errorf("get pool %q: %w", poolName, err)
 	}
 
-	// 1. Already-bound? Pod label cb.session/owner = sess.Name.
+	// 1. Already-bound? Pod label chromeless.session/owner = sess.Name.
 	bound, err := r.findBoundPod(ctx, sess)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -222,7 +222,7 @@ func (r *SessionReconciler) findBoundPod(ctx context.Context, sess *cbv1.Browser
 	return nil, nil
 }
 
-// pickWarmPod returns the first cb.session/state=warm Pod in the pool
+// pickWarmPod returns the first chromeless.session/state=warm Pod in the pool
 // matching the session's region (if specified). Round-robin within
 // the candidate set is not strictly necessary — the controller's
 // assignment loop is single-threaded per pool by leader election so

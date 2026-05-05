@@ -11,7 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/tracing"
+	"github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/tracing"
 )
 
 func tracingTracer(subsystem string) trace.Tracer {

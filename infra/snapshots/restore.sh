@@ -13,7 +13,7 @@
 #   SIGNALING_URL    ws://signaling:8080/ws
 #   STREAMER_FPS     30
 #   STREAMER_PORT    9000
-#   CB_SNAPSHOT_ROOT /var/lib/cb-snapshots
+#   CHROMELESS_SNAPSHOT_ROOT /var/lib/chromeless-snapshots
 #
 # Output:
 #   prints the restored container ID to stdout
@@ -29,7 +29,7 @@ set -euo pipefail
 SHA="${1:-}"
 [ -n "$SHA" ] || { echo "usage: $0 <SHA>" >&2; exit 2; }
 
-SNAPSHOT_ROOT="${CB_SNAPSHOT_ROOT:-/var/lib/cb-snapshots}"
+SNAPSHOT_ROOT="${CHROMELESS_SNAPSHOT_ROOT:-/var/lib/chromeless-snapshots}"
 SOURCE="$SNAPSHOT_ROOT/shared/$SHA"
 SESSION_ID="${SESSION_ID:-$(head -c 6 /dev/urandom | od -A n -v -t x1 | tr -d ' \n')}"
 SIGNALING_URL="${SIGNALING_URL:-ws://signaling:8080/ws}"
@@ -52,9 +52,9 @@ require tar
 [ -f "$SOURCE/rootfs.tar.zst" ] || fail "snapshot missing rootfs.tar.zst" 2
 [ -d "$SOURCE/images" ]         || fail "snapshot missing images/" 2
 
-WORK_DIR=$(mktemp -d -t cb-restore.XXXXXX)
-LOWER_DIR=$(mktemp -d -t cb-restore-lower.XXXXXX)
-UPPER_DIR=$(mktemp -d -t cb-restore-upper.XXXXXX)
+WORK_DIR=$(mktemp -d -t chromeless-restore.XXXXXX)
+LOWER_DIR=$(mktemp -d -t chromeless-restore-lower.XXXXXX)
+UPPER_DIR=$(mktemp -d -t chromeless-restore-upper.XXXXXX)
 cleanup() {
     if [ -n "${RESTORED_CID:-}" ]; then
         docker rm -f "$RESTORED_CID" >/dev/null 2>&1 || true

@@ -3,7 +3,7 @@
 // PoolReconciler maintains the warm Pod count for each
 // BrowserSessionPool. The two responsibilities are:
 //
-//   1. Replenishment — keep len(cb.session/state=warm) >=
+//   1. Replenishment — keep len(chromeless.session/state=warm) >=
 //      spec.warmReplicas. Materialises Pods from the pool template
 //      via CreateWarmPod.
 //   2. Aging — Pods older than spec.maxAgeSeconds get drained so
@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 )
 
 // PoolReconciler reconciles BrowserSessionPool objects.
@@ -58,11 +58,11 @@ func (r *PoolReconciler) SetupWithManager(mgr manager.Manager) error {
 
 // Reconcile is straightforward: count, replenish if short, drain if
 // over-aged. T99 wraps each reconcile pass in a
-// `cb.controller.pool.replenish` span so the operator can drill into
+// `chromeless.controller.pool.replenish` span so the operator can drill into
 // "why did this pool's warm count drop?" by looking at the span
 // timeline rather than correlating across log lines.
 func (r *PoolReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
-	ctx, span := tracingTracer("reconciler.pool").Start(ctx, "cb.controller.pool.replenish",
+	ctx, span := tracingTracer("reconciler.pool").Start(ctx, "chromeless.controller.pool.replenish",
 		traceWithAttrs(
 			tracingAttrString("pool.namespace", req.Namespace),
 			tracingAttrString("pool.name", req.Name),

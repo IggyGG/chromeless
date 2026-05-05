@@ -1,5 +1,5 @@
 # infra/k8s/observability-jaeger.yaml — Jaeger all-in-one for the
-# cloud-browser-webrtc namespace (T99).
+# chromeless namespace (T99).
 #
 # Scope: dev / single-cluster Phase-1 deployments. Production runs
 # Tempo or Grafana Cloud Traces with a real backend; see
@@ -14,7 +14,7 @@
 # with multi-tenant ingest.
 #
 # Why a manifest in addition to the Helm chart's templates: the chart
-# (infra/helm/cloud-browser-webrtc) keeps observability strictly opt-
+# (infra/helm/chromeless) keeps observability strictly opt-
 # in via a Values toggle. This standalone YAML is the
 # `kubectl apply -f` equivalent for clusters that don't run our chart
 # (Phase 1 dev k3d / kind clusters, or a quick-and-dirty staging).
@@ -23,14 +23,14 @@ apiVersion: v1
 kind: Service
 metadata:
   name: jaeger
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: tracing
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: tracing
   ports:
     - name: otlp-grpc
@@ -50,9 +50,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: jaeger
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: tracing
 spec:
   replicas: 1
@@ -63,12 +63,12 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: cloud-browser-webrtc
+      app.kubernetes.io/name: chromeless
       app.kubernetes.io/component: tracing
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: cloud-browser-webrtc
+        app.kubernetes.io/name: chromeless
         app.kubernetes.io/component: tracing
     spec:
       containers:

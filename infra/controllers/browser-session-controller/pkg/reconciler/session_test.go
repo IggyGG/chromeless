@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	cbv1 "github.com/iggy/cloud-browser-webrtc/infra/controllers/browser-session-controller/pkg/apis/v1"
+	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 )
 
 func mustScheme(t *testing.T) *runtime.Scheme {
@@ -52,12 +52,12 @@ func samplePool(name, ns string, warm int32) *cbv1.BrowserSessionPool {
 			RecyclePolicy: cbv1.PoolRecreatePod,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"app.kubernetes.io/name": "cloud-browser-webrtc"},
+					Labels: map[string]string{"app.kubernetes.io/name": "chromeless"},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name:  "cb-chromium",
-						Image: "ghcr.io/iggy/cloud-browser-webrtc/chromium:test",
+						Name:  "chromeless",
+						Image: "ghcr.io/iggy/chromeless/chromium:test",
 					}},
 				},
 			},
@@ -87,7 +87,7 @@ func warmReadyPod(name, ns, pool string) *corev1.Pod {
 			},
 		},
 		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{Name: "cb-chromium", Image: "x"}},
+			Containers: []corev1.Container{{Name: "chromeless", Image: "x"}},
 		},
 		Status: corev1.PodStatus{
 			PodIP: "10.0.0.42",

@@ -1,0 +1,323 @@
+# build-job.yaml — Chromium build Job for triform-6 (T112 + T119).
+#
+# Drives T113's `build/chromeless-build.sh` end-to-end on a single Pod
+# scheduled to triform-6. The script handles gclient sync, symlink,
+# patch apply, sccache, gn gen, autoninja, unit tests, and binary
+# packaging.
+#
+# T119 hostPath workaround
+# ------------------------
+# This Job originally used PVCs (chromium-src 500 GiB,
+# sccache 100 GiB on openebs-hostpath). When the team-lead tried to
+# bring it up live on the Triform cluster, openebs-localpv-provisioner
+# was silent on every new claim — across openebs-hostpath,
+# triform-data, AND ceph-rbd. Existing 8-day-old PVCs on the cluster
+# remained healthy, so the regression is provisioner-side for new
+# claims, not disk-space (triform-6 has 5.4T free on /data) and not
+# RBAC.
+#
+# To unblock T112 → T113 → T114, this version of the Job uses
+# hostPath volumes pinned to triform-6's /data filesystem. Trade-offs:
+#   - PRO: works today; no provisioner involvement.
+#   - PRO: 5.4T free on /dev/md5 mounted at /data on triform-6 — well
+#          beyond what the build needs.
+#   - CON: hostPath is operator-pattern, not portable. The dir is
+#          tied to a specific node; if triform-6 dies, so does this
+#          build state.
+#   - CON: requires runAsUser:0 in an init container to chown the dir
+#          for cbuser (uid 1000). The chart-wide PSP / pod-security
+#          baseline allows it; the chromeless-build ns is labelled
+#          triform.ai/purpose=build precisely to scope this kind of
+#          thing.
+#
+# When the openebs provisioner regression is fixed, revert to the
+# pre-T119 PVC version (git history will show the diff).
+#
+# Contract with T113 (see ../../../build/chromeless-build.sh header):
+#   /workspace            — our repo, read-only mount.
+#   /work                 — work-tree root: src/, artifacts/, logs/.
+#   /sccache              — sccache cache.
+#   CHROMELESS_REPO=/workspace
+#   CHROMELESS_WORK_ROOT=/work
+#   CHROMIUM_BRANCH_NUMBER=7727 (M147 stable; verify on chromiumdash)
+#   SCCACHE_DIR=/sccache
+#   CHROMELESS_BUILD_TARGETS=cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests
+#
+# Resources: 30 CPU / 120 GiB on a 32/128 box (per the brief).
+# Headroom for kubelet, sshd, the sccache server, and the linker's
+# RSS spike during the chrome-target link.
+#
+# restartPolicy + backoffLimit: OnFailure + 2 = 3 attempts max.
+# Each retry's bootstrap initContainers are idempotent; the hostPath
+# dirs survive across retries (and across Job deletions), so a re-run
+# picks up incrementally. T113's SKIP_FETCH=1 toggle is set on
+# retries so the gclient sync step (which dominates first-run
+# wall-clock) doesn't re-do a populated tree.
+#
+# activeDeadlineSeconds: 8h. T17 §4 cold-build worst case.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-build
+  namespace: chromeless-build
+  labels:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: build
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 28800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless
+        app.kubernetes.io/component: build
+    spec:
+      restartPolicy: OnFailure
+      # Pin to triform-6: 32 CPU / 128 GiB. hostPath volumes below
+      # require this — the directories live on triform-6's /data
+      # filesystem and follow the node, not the Pod.
+      nodeName: triform-2
+      # If a future cluster admin taints triform-6 (maintenance), the
+      # scheduler fails this Pod cleanly rather than picking another
+      # node. Repeating the hostname here makes that a NotReady error
+      # rather than a silent cross-node migration that would lose
+      # access to the hostPath dirs.
+      nodeSelector:
+        kubernetes.io/hostname: triform-2
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        # 1/2: host-permissions — run as root, chown the hostPath dirs
+        # to uid 1000 so the unprivileged builder user in the runner
+        # image can write. Idempotent: re-running on a Pod retry
+        # finds 1000:1000-owned dirs and the chown is a no-op.
+        #
+        # The `type: DirectoryOrCreate` on the volumes ensures kubelet
+        # creates the dir if absent; the chown happens inside that
+        # newly-created dir. We mount the parent /data/chromeless-build for
+        # this container so a single chown -R covers both subdirs in
+        # one shot.
+        - name: bootstrap-our-repo
+          image: registry.triform.cloud/chromeless/chromeless-build-runner:0.1.4
+          command:
+            - sh
+            - -euxc
+            - |
+              # Clone or refresh our repo at OUR_REPO_REF.
+              # Forgejo instance has REQUIRE_SIGNIN_VIEW=true so anon
+              # clones return HTTP 401 even for repos flagged public. Inject
+              # creds into the URL at clone time, then scrub them from the
+              # stored remote so post-clone git ops don't carry tokens in
+              # args/logs. FORGEJO_USERNAME + FORGEJO_PASSWORD come from
+              # the forgejo-credentials Secret (mirrored from flux-system).
+              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              if [ ! -d /workspace/.git ]; then
+                git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                  "${AUTH_REPO}" /workspace
+                git -C /workspace remote set-url origin "${OUR_REPO}"
+              else
+                cd /workspace \
+                  && git fetch --depth 1 origin "${OUR_REPO_REF}" \
+                  && git reset --hard FETCH_HEAD
+              fi
+
+              # Sanity: T113's script must be present.
+              if [ ! -x /workspace/build/chromeless-build.sh ]; then
+                echo "ERROR: /workspace/build/chromeless-build.sh missing or not executable" >&2
+                echo "       Check that ${OUR_REPO_REF} contains T113's deliverable." >&2
+                exit 1
+              fi
+
+              # Pre-create T113's expected subdirs under /work. The
+              # host-permissions initContainer has already chown'd
+              # /work + /sccache, but the subdirs inside them haven't
+              # been created yet on a fresh hostPath.
+              # Chown only the top-level dirs we create. Do NOT chown -R
+              # the chromium checkout: a recursive chown updates ctime on
+              # every file (incl .git/index), which breaks subsequent
+              # uid-1000 git apply --3way --check (rejects with 'does
+              # not match index' even though blob hashes are identical).
+              mkdir -p /work/src/chromium /work/artifacts /work/logs
+              chown 1000:1000 /work/src /work/artifacts /work/logs
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            # Track main by default; set to a tag/SHA for reproducible
+            # builds (`kubectl set env job/chromeless-build OUR_REPO_REF=v0.2.0`).
+            - name: OUR_REPO_REF
+              value: "main"
+            # Creds for cloning private/internal Forgejo repos. The
+            # forgejo-credentials Secret holds username + password
+            # (Forgejo PAT). Same Secret pattern used by flux-system
+            # for tf-multiverse / tf-alchemy / tf-isolator pulls;
+            # mirrored into chromeless-build ns. When the PAT rotates, all
+            # consuming namespaces need updating.
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
+          # Bootstrap also needs root briefly to write under /work
+          # (which we just chown'd — but the workspace emptyDir is
+          # root-owned at first, and the post-chown of /work/src etc.
+          # needs root again). The chained ALL-drop + minimal adds
+          # keeps the privilege boundary tight.
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: build
+          image: registry.triform.cloud/chromeless/chromeless-build-runner:0.1.4
+          imagePullPolicy: IfNotPresent
+          # Invoke T113's script directly from the cloned repo. The
+          # earlier brief proposed /work/src/build/chromeless-build.sh as the
+          # handoff path; T113 placed it at build/chromeless-build.sh in our
+          # repo and CHROMELESS_REPO=/workspace, so the actual path is
+          # /workspace/build/chromeless-build.sh. README.md documents this.
+          command:
+            - bash
+            - -c
+            - |
+              # The chromeless-build-runner image ships /opt/depot_tools without
+              # python3_bin_reldir.txt — gn fails with "need to initialize
+              # depot_tools" until bootstrap_python3 is run. The bootstrap
+              # is idempotent, so doing it on every pod start is cheap.
+              (cd /opt/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3
+              exec bash /workspace/build/chromeless-build.sh
+          env:
+            # Diagnostic only — chromeless-build.sh derives CHROMELESS_GIT_SHA from
+            # CHROMELESS_REPO/.git when this is unset, so we provide it for
+            # `kubectl describe` legibility.
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            # T113 expects branch number, NOT a full ref. M147 stable
+            # tracks 147.0.7727.x — branch 7727. Verify on
+            # chromiumdash.appspot.com/branches before each roll.
+            - name: CHROMIUM_BRANCH_NUMBER
+              value: "7727"
+            # Mount roots — match T113's chromeless-build.sh defaults so an
+            # operator running the script locally on a dev box doesn't
+            # need to set anything different.
+            - name: CHROMELESS_REPO
+              value: "/workspace"
+            - name: CHROMELESS_WORK_ROOT
+              value: "/work"
+            - name: SCCACHE_DIR
+              value: "/sccache"
+            # Build targets. chromeless-build.sh ships with the same default,
+            # but pinning explicit values here is what `kubectl set env`
+            # operators reach for first when iterating. Override path:
+            #   kubectl -n chromeless-build set env job/chromeless-build CHROMELESS_BUILD_TARGETS="cloud_browser_worker"
+            - name: CHROMELESS_BUILD_TARGETS
+              # Fully-qualified gn paths so autoninja addresses the
+              # targets directly. Bare names fail with "unknown target"
+              # because //cloud-browser/... isn't in chromium's root
+              # build graph (a separate fix may also be needed to make
+              # gn parse the BUILD.gn at all).
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+            # Ninja parallelism. autoninja's auto-detect picks
+            # nproc=32 on triform-6, which over-subscribes the
+            # 30-CPU container cap; gives lto + sccache server headroom.
+            - name: NINJA_PARALLELISM
+              value: "14"
+            # T113 reads SKIP_FETCH=1 to skip the gclient sync on
+            # retries. The hostPath dirs survive across Job deletions,
+            # so a manual `kubectl set env job/chromeless-build SKIP_FETCH=1`
+            # before re-applying skips the multi-hour fetch.
+            - name: SKIP_FETCH
+              # Sidesteps gclient sync — the existing 34 GB checkout at
+              # /mnt/data/chromeless-build-t2/chromium-src is already at
+              # branch-heads/7727 (HEAD 2731573cc6) from the earlier
+              # successful 411-sec sync. Tonight's gclient run wedged
+              # mid-fetch (TCP connection died, git stuck in read()),
+              # so skip the validation and run STEP 2-9 against
+              # the on-disk tree. Flip back to "" once the network-
+              # reliability issue with chromium.googlesource.com
+              # is investigated.
+              value: "1"
+            # STUB_MODE=1 short-circuits the heavy steps — useful
+            # for validating Job plumbing without a 4–8h wait.
+            # Default off; flip to "1" for the DoD smoke run.
+            - name: STUB_MODE
+              value: ""
+            # sccache server lifecycle. Idle-timeout 0 keeps the
+            # server alive for the full build (it forks one server
+            # per shell otherwise).
+            - name: SCCACHE_IDLE_TIMEOUT
+              value: "0"
+            - name: SCCACHE_CACHE_SIZE
+              value: "80G"
+          resources:
+            requests:
+              cpu: "16"
+              memory: "96Gi"
+            limits:
+              cpu: "16"
+              memory: "96Gi"
+              ephemeral-storage: "8Gi"
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+              # Read-only: chromeless-build.sh only reads from CHROMELESS_REPO. If the
+              # script grows a need to write (e.g., generated headers
+              # cached in-tree), flip to RW + accept that the cloned
+              # tree drifts across runs.
+              readOnly: true
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        # T119: hostPath workaround for the openebs-localpv-provisioner
+        # regression. /data on the pinned build node holds chromium-
+        # src + sccache. T119-followup repointed from triform-6
+        # (eviction-loop on root-fs DiskPressure under shared tenancy)
+        # to triform-2 (1.4T /mnt/data on /dev/mapper/vg0-data — note that
+        # /data on triform-2 is the small ROOT fs, NOT the big LVM;
+        # the hostPath therefore mounts /mnt/data/chromeless-build-t2/...).
+        # DirectoryOrCreate ensures kubelet creates the subdir if
+        # absent. The host-permissions initContainer chowns to 1000.
+        - name: workdir
+          hostPath:
+            path: /mnt/data/chromeless-build-t2/chromium-src
+            type: DirectoryOrCreate
+        - name: sccache
+          hostPath:
+            path: /mnt/data/chromeless-build-t2/sccache
+            type: DirectoryOrCreate
+        # Our repo lives in an emptyDir — bootstrap initContainer
+        # populates it once, main container reads-only. Survival
+        # across Pod restarts isn't needed; bootstrap is cheap and
+        # idempotent.
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi

@@ -2,7 +2,7 @@
 //
 // T89: token revocation via a pluggable denylist. Two implementations:
 //
-//   - StaticDenylist: in-memory set populated from `CBWRTC_DENYLIST`
+//   - StaticDenylist: in-memory set populated from `CHROMELESS_DENYLIST`
 //     (CSV of `tenant` or `tenant:jti` entries). Suitable for dev,
 //     CI, and small single-node deploys.
 //   - RedisDenylist: reads from a Redis SET so multiple signaling
@@ -60,9 +60,9 @@ type adminDenylist interface {
 // StaticDenylist — env-var-driven, no external state.
 // ---------------------------------------------------------------------------
 
-const denylistEnv = "CBWRTC_DENYLIST"
+const denylistEnv = "CHROMELESS_DENYLIST"
 
-// StaticDenylist is the default. It is seeded once from `CBWRTC_DENYLIST`
+// StaticDenylist is the default. It is seeded once from `CHROMELESS_DENYLIST`
 // (CSV of `tenant` or `tenant:jti` entries). Mutations made via
 // AddTenant / AddJTI are in-memory only — they survive within the
 // process but are lost on restart.
@@ -81,7 +81,7 @@ func NewStaticDenylist() *StaticDenylist {
 	}
 }
 
-// loadStaticFromEnv parses CBWRTC_DENYLIST. Each comma-separated entry
+// loadStaticFromEnv parses CHROMELESS_DENYLIST. Each comma-separated entry
 // is either `tenant` (whole-tenant ban) or `tenant:jti` (single-token
 // ban). Whitespace is stripped; empty entries are skipped.
 func loadStaticFromEnv(d *StaticDenylist, env string) int {
@@ -247,9 +247,9 @@ var globalDenylist Denylist = NewStaticDenylist() // safe default until init run
 
 // initDenylist seeds globalDenylist. Honours:
 //
-//	CBWRTC_DENYLIST_REDIS_ADDR  — if set, use a Redis denylist; the
+//	CHROMELESS_DENYLIST_REDIS_ADDR  — if set, use a Redis denylist; the
 //	                              client adapter is in denylist_redis.go.
-//	CBWRTC_DENYLIST             — CSV-seed the static denylist.
+//	CHROMELESS_DENYLIST             — CSV-seed the static denylist.
 //
 // When both are set, Redis wins; the static CSV is logged-and-ignored
 // rather than silently dropped, because that combination is almost
@@ -258,7 +258,7 @@ var globalDenylist Denylist = NewStaticDenylist() // safe default until init run
 // initDenylist also returns the writable handle; main passes it to
 // the admin endpoint.
 func initDenylist(logger *slog.Logger) adminDenylist {
-	if addr := strings.TrimSpace(os.Getenv("CBWRTC_DENYLIST_REDIS_ADDR")); addr != "" {
+	if addr := strings.TrimSpace(os.Getenv("CHROMELESS_DENYLIST_REDIS_ADDR")); addr != "" {
 		client, err := newRedisClient(addr) // implemented in denylist_redis.go
 		if err != nil {
 			logger.Error("denylist: redis client construction failed; falling back to static",
@@ -281,7 +281,7 @@ func initDenylist(logger *slog.Logger) adminDenylist {
 			slog.Int("entries", n))
 	} else {
 		logger.Info("denylist: static backend, empty (set " + denylistEnv +
-			" or CBWRTC_DENYLIST_REDIS_ADDR to populate)")
+			" or CHROMELESS_DENYLIST_REDIS_ADDR to populate)")
 	}
 	globalDenylist = d
 	return d

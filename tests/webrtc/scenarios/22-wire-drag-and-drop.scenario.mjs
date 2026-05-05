@@ -37,7 +37,7 @@ export const scenario = {
 
     // Resolve actual source/target centers from the rendered DOM. The
     // hardcoded SOURCE/TARGET coordinates assume stock-Chrome layout but
-    // cb-chromium renders the fixture with a different box flow;
+    // chromeless renders the fixture with a different box flow;
     // getBoundingClientRect() makes the test layout-independent.
     const dndRaw = await s.runtimeEval(`JSON.stringify({
       src: document.getElementById("dndSource").getBoundingClientRect().toJSON(),

@@ -64,14 +64,14 @@ so a rollback target is obvious.
 ### Stage B — single-node canary
 
 Pin the new image to **one node** in the target region by
-labelling that node with `cb.cloud-browser/canary=encoder-factory-N`
+labelling that node with `chromeless.cloud-browser/canary=encoder-factory-N`
 and routing exactly N tenants there via the
 `BrowserSessionPool` controller's pool-pinning knob (T71 ships
 this; review before this rollout).
 
 ```bash
-kubectl label node <node> cb.cloud-browser/canary=encoder-factory-1
-helm upgrade cloud-browser ./infra/helm/cloud-browser-webrtc \
+kubectl label node <node> chromeless.cloud-browser/canary=encoder-factory-1
+helm upgrade cloud-browser ./infra/helm/chromeless \
   --set image.tag=branch-heads-NNNN-patches-rev-N-vpx1.13 \
   --set canary.encoderFactory.enabled=true \
   --set canary.encoderFactory.tenantCount=2
@@ -86,11 +86,11 @@ metrics) without exposing real-customer traffic to a fresh build.
 Watch the dashboards from T66 for the canary node's region +
 session labels:
 
-- **`cb-cluster-overview`** for the rollout view: encoder fps,
+- **`chromeless-cluster-overview`** for the rollout view: encoder fps,
   dropped frames, qp distribution, bytes/s, RTT, all
   region-filtered (T94 confirmed every encoder metric carries a
   `region` label).
-- **`cb-session-detail`** for each canary session: per-session
+- **`chromeless-session-detail`** for each canary session: per-session
   fps, qp, packet loss, client-side fps lag.
 
 Compare against the **synthetic-media baseline**: T65 produces
@@ -168,7 +168,7 @@ Two layers. Pick the lighter one when both work.
 When the new build is broken in a way that affects every codec:
 
 ```bash
-helm upgrade cloud-browser ./infra/helm/cloud-browser-webrtc \
+helm upgrade cloud-browser ./infra/helm/chromeless \
   --set image.tag=<previous-tag> \
   --reset-values=false
 ```
@@ -187,7 +187,7 @@ healthy:
 
 ```bash
 # Disable just NVENC AV1 across the fleet:
-helm upgrade cloud-browser ./infra/helm/cloud-browser-webrtc \
+helm upgrade cloud-browser ./infra/helm/chromeless \
   --set encoderConfig.preferNvencAv1=false \
   --reset-values=false
 ```
@@ -208,7 +208,7 @@ single codec / HW path.
 For every rollout stage:
 
 - **Per-encoder fps / qp / bytes_sent / dropped frames** —
-  visible on `cb-session-detail` (T66). Verified region-tagged
+  visible on `chromeless-session-detail` (T66). Verified region-tagged
   via T103 review of T94.
 - **Per-codec negotiated rate** — T54's `codec_fallback` events
   reach the metrics sidecar via the stats data channel (T72);
@@ -266,8 +266,8 @@ docs:
   **T70** / **T75** / **T83** — encoder factory + per-codec
   encoders + multi-codec fallback + BWE adapter + simulcast
   wrapper. Catalogued in T97.
-- **T66** — Grafana dashboards (`cb-cluster-overview`,
-  `cb-session-detail`).
+- **T66** — Grafana dashboards (`chromeless-cluster-overview`,
+  `chromeless-session-detail`).
 - **T67** — per-tenant signaling namespacing.
 - **T80** — Phase 1 deployment checklist + operational runbook;
   this doc layers on top.

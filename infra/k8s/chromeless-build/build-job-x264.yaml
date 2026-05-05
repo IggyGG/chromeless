@@ -1,0 +1,288 @@
+# build-job-x264.yaml — Chromium build Job, x264 profile (Track F1).
+#
+# This variant uses debian:bookworm-slim as the base image with an
+# inline depot_tools install, instead of the chromeless-build-runner image.
+# Why: triform-2's containerd metadata.db has 467/640 orphan-in-DB
+# snapshot entries (see feedback_containerd_orphan_in_db_class.md);
+# any image whose chain references a missing on-disk snapshot fails
+# to start with `Init:CreateContainerError: failed to stat parent`.
+# chromeless-build-runner:0.1.3 is one such broken chain on triform-2.
+#
+# debian:bookworm-slim was pulled into containerd's CAS at a
+# different time and its chain is intact, so it starts cleanly.
+# The bootstrap initContainer apt-installs the same packages
+# Dockerfile.build-runner does (verified equivalent set), clones
+# depot_tools to /work/depot_tools (hostPath, persists across runs),
+# downloads sccache to /work/depot_tools-bin, and stages libx264.
+# The main build container reuses /work/depot_tools and runs the
+# existing chromeless-build.sh unchanged.
+#
+# Trade-off vs chromeless-build-runner: ~60-90s extra per fresh-host pod
+# start for the apt install. Idempotent: depot_tools and sccache
+# in /work persist across runs, so warm-pod startup is faster.
+# This Job replaces the registry image dependency entirely until
+# the bbolt-surgery teammate clears the orphan-in-DB entries on
+# triform-2; once the registry chain is healthy again, this can
+# be reverted to use chromeless-build-runner:0.1.3 (sccache+depot_tools
+# pre-baked).
+#
+# Profile selector: CHROMELESS_BUILD_PROFILE=x264 in the main env. chromeless-build.sh
+# step 3.5 verifies /work/system-libs has the staged libx264 headers
+# and lib; build.sh:cmd_gen imports args.x264.gn instead of args.gn.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-build-x264
+  namespace: chromeless-build
+  labels:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: build
+    app.kubernetes.io/variant: x264
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 28800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless
+        app.kubernetes.io/component: build
+        app.kubernetes.io/variant: x264
+    spec:
+      restartPolicy: OnFailure
+      nodeName: triform-2
+      nodeSelector:
+        kubernetes.io/hostname: triform-2
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        - name: bootstrap-our-repo
+          image: debian:bookworm-slim
+          command:
+            - bash
+            - -euxc
+            - |
+              # ---- Phase 1: install OS deps ----------------------
+              # Mirrors Dockerfile.build-runner's apt-install set so the
+              # main container can rely on the same baseline.
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git python3 python3-pip \
+                build-essential pkg-config sudo lsb-release file \
+                xz-utils zstd rsync findutils libglib2.0-0 gperf \
+                bison flex
+
+              # ---- Phase 2: clone chromeless to /workspace --------
+              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              if [ ! -d /workspace/.git ]; then
+                git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                  "${AUTH_REPO}" /workspace
+                git -C /workspace remote set-url origin "${OUR_REPO}"
+              else
+                cd /workspace \
+                  && git fetch --depth 1 origin "${OUR_REPO_REF}" \
+                  && git reset --hard FETCH_HEAD
+              fi
+              [ -x /workspace/build/chromeless-build.sh ] || {
+                echo "ERROR: /workspace/build/chromeless-build.sh missing"; exit 1; }
+
+              # ---- Phase 3: depot_tools (idempotent) -------------
+              if [ ! -x /work/depot_tools/gn ] && [ ! -d /work/depot_tools/.git ]; then
+                git clone --depth 200 \
+                  https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+                  /work/depot_tools
+              else
+                cd /work/depot_tools && git pull --ff-only || true
+              fi
+
+              # ---- Phase 4: sccache (idempotent) -----------------
+              SCCACHE_VERSION=v0.8.2
+              if [ ! -x /work/depot_tools-bin/sccache ]; then
+                mkdir -p /work/depot_tools-bin
+                curl -fSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+                  -o /tmp/sccache.tar.gz
+                tar -xzf /tmp/sccache.tar.gz -C /tmp
+                install -m 0755 \
+                  "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" \
+                  /work/depot_tools-bin/sccache
+                rm -rf /tmp/sccache.tar.gz "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl"
+              fi
+
+              # ---- Phase 5: workdirs -----------------------------
+              mkdir -p /work/src/chromium /work/artifacts /work/logs
+              chown 1000:1000 /work/src /work/artifacts /work/logs
+              chown -R 1000:1000 /work/depot_tools /work/depot_tools-bin
+
+              # ---- Phase 6: x264 staging (idempotent) ------------
+              if [ ! -e /work/system-libs/include/x264.h ]; then
+                apt-get install -y --no-install-recommends libx264-dev
+                mkdir -p /work/system-libs/include /work/system-libs/lib
+                cp -a  /usr/include/x264.h         /work/system-libs/include/
+                cp -a  /usr/include/x264_config.h  /work/system-libs/include/
+                cp -aP /usr/lib/x86_64-linux-gnu/libx264.so* /work/system-libs/lib/
+                chown -R 1000:1000 /work/system-libs
+                ls -la /work/system-libs/include /work/system-libs/lib
+              fi
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # CHOWN/FOWNER/DAC_OVERRIDE: workdir setup
+              # SETUID/SETGID: apt drops to _apt user during fetch
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: build
+          image: debian:bookworm-slim
+          imagePullPolicy: IfNotPresent
+          # Runs as root — debian:bookworm-slim doesn't ship a builder
+          # user, and apt-get install (needed for the OS deps the build
+          # uses) requires root. We create a uid-1000 builder user
+          # inline, install OS deps as root, then drop to builder for
+          # the chromium compile. The chromium-src hostPath has been
+          # owned 1000:1000 since the chromeless-build-runner runs, so the
+          # ownership scheme is preserved across both build paths
+          # (this debian-based fallback and the original
+          # chromeless-build-runner once its broken chain clears).
+          command:
+            - bash
+            - -c
+            - |
+              set -euxo pipefail
+
+              # ---- OS deps (root) --------------------------------
+              # Same set as the bootstrap initContainer. apt is
+              # package-deduped so this re-pulls only what isn't in
+              # the deb cache; cost ~30s warm, ~60s cold.
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git python3 python3-pip \
+                build-essential pkg-config lsb-release file \
+                xz-utils zstd rsync findutils libglib2.0-0 gperf \
+                bison flex
+
+              # ---- builder user ---------------------------------
+              # chromeless-build-runner's image creates this at build time;
+              # we do it at runtime since debian:bookworm-slim is bare.
+              # Idempotent: -m creates /home/builder, useradd skips on
+              # existing user.
+              if ! id builder >/dev/null 2>&1; then
+                useradd -m -u 1000 -s /bin/bash builder
+              fi
+              # /home/builder/.cache is where depot_tools puts gclient
+              # state and various tool caches. Pre-create + own it.
+              mkdir -p /home/builder/.cache
+              chown -R 1000:1000 /home/builder
+
+              # ---- drop to builder + exec the build --------------
+              # depot_tools and sccache come from /work (hostPath,
+              # populated by the bootstrap initContainer).
+              # bootstrap_python3 must run once per pod start (the
+              # marker file is in depot_tools/.cipd_bin which we
+              # didn't bake — runs idempotently if marker exists).
+              su builder -c '
+                set -euxo pipefail
+                export PATH=/work/depot_tools:/work/depot_tools-bin:/usr/local/bin:/usr/bin:/bin
+                export DEPOT_TOOLS_UPDATE=0
+                export HOME=/home/builder
+                (cd /work/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3 || true
+                exec bash /workspace/build/chromeless-build.sh
+              '
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "main"
+            - name: CHROMIUM_BRANCH_NUMBER
+              value: "7727"
+            - name: CHROMELESS_REPO
+              value: "/workspace"
+            - name: CHROMELESS_WORK_ROOT
+              value: "/work"
+            - name: SCCACHE_DIR
+              value: "/sccache"
+            - name: CHROMELESS_BUILD_TARGETS
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+            - name: NINJA_PARALLELISM
+              value: "14"
+            - name: SKIP_FETCH
+              value: "1"
+            - name: STUB_MODE
+              value: ""
+            - name: SCCACHE_IDLE_TIMEOUT
+              value: "0"
+            - name: SCCACHE_CACHE_SIZE
+              value: "80G"
+            - name: CHROMELESS_BUILD_PROFILE
+              value: "x264"
+          resources:
+            requests:
+              cpu: "16"
+              memory: "96Gi"
+            limits:
+              cpu: "16"
+              memory: "96Gi"
+              ephemeral-storage: "8Gi"
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+          # Main container runs as root so apt-get install works;
+          # the bash command then `useradd builder` (uid 1000) and
+          # `su builder -c` for the chromium compile so the in-tree
+          # writes inherit 1000:1000 ownership consistent with the
+          # chromeless-build-runner-based path.
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # SETUID/SETGID for su to drop to builder; CHOWN/FOWNER
+              # for the inline /home/builder ownership setup; DAC_OVERRIDE
+              # for cross-uid file access during the apt+useradd setup.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: workdir
+          hostPath:
+            path: /mnt/data/chromeless-build-t2/chromium-src
+            type: DirectoryOrCreate
+        - name: sccache
+          hostPath:
+            path: /mnt/data/chromeless-build-t2/sccache
+            type: DirectoryOrCreate
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi

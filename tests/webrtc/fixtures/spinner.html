@@ -3,7 +3,7 @@
   tests/webrtc/fixtures/spinner.html — animated motion fixture for the
   WebRTC harness.
 
-  Loaded INTO cb-chromium as the page that streamer-page.html captures
+  Loaded INTO chromeless as the page that streamer-page.html captures
   via getDisplayMedia. The harness opens streamer-page.html which in
   turn drives capture; spinner.html only needs to provide enough motion
   that the encoder emits non-trivial frames (so out.webm has actual
@@ -29,7 +29,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>cb-chromium webrtc fixture — spinner</title>
+    <title>chromeless webrtc fixture — spinner</title>
     <style>
       html, body {
         margin: 0;
@@ -133,7 +133,7 @@
   <body>
     <div class="stage">
       <div class="label">
-        cb-chromium WebRTC harness — capture fixture
+        chromeless WebRTC harness — capture fixture
         <div style="opacity: 0.55; font-size: 13px; margin-top: 6px;">
           spinner provides motion so encoder emits real frames; timestamp
           proves frames are captured at distinct instants.

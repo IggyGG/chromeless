@@ -20,14 +20,14 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: turn-rest-secret
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: turn
 type: Opaque
 stringData:
   # Replace at deploy time. The T76 turn-issuer mints short-lived
-  # TURN-REST credentials with this secret (env CBWRTC_TURN_SHARED_SECRET);
+  # TURN-REST credentials with this secret (env CHROMELESS_TURN_SHARED_SECRET);
   # coturn validates them via use-auth-secret + static-auth-secret.
   # Both must hold the SAME value at any moment except during a
   # rotation overlap; see infra/turn-issuer/secret-rotation.md.
@@ -36,7 +36,7 @@ stringData:
   realm: "turn.example.com"
   # Optional: previous secret kept valid during a rotation window. coturn
   # accepts allocations validated under either. Pair this with the issuer's
-  # CBWRTC_TURN_SHARED_SECRET_PREV in infra/k8s/turn-issuer-deployment.yaml.
+  # CHROMELESS_TURN_SHARED_SECRET_PREV in infra/k8s/turn-issuer-deployment.yaml.
   # Leave empty in steady state.
   static-auth-secret-prev: ""
 
@@ -45,9 +45,9 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: coturn-config
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: turn
 data:
   # See https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf
@@ -94,21 +94,21 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: coturn
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: turn
 spec:
   serviceName: coturn
   replicas: 2
   selector:
     matchLabels:
-      app.kubernetes.io/name: cloud-browser-webrtc
+      app.kubernetes.io/name: chromeless
       app.kubernetes.io/component: turn
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: cloud-browser-webrtc
+        app.kubernetes.io/name: chromeless
         app.kubernetes.io/component: turn
     spec:
       # hostNetwork: true is required so coturn can use the node's
@@ -188,14 +188,14 @@ apiVersion: v1
 kind: Service
 metadata:
   name: coturn
-  namespace: cloud-browser-webrtc
+  namespace: chromeless
   labels:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: turn
 spec:
   clusterIP: None
   selector:
-    app.kubernetes.io/name: cloud-browser-webrtc
+    app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: turn
   ports:
     - name: stun-udp

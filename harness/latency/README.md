@@ -193,13 +193,13 @@ harness page itself**:
 bash harness/latency/record-y4m.sh
 # → harness/latency/fixtures/harness-loop-720p30.y4m (~150 MiB)
 
-# Then bring up the stack — compose.yaml's CBWRTC_USE_FAKE_MEDIA_FILE
-# default is /opt/cb-fixtures/harness-loop-720p30.y4m, which the
+# Then bring up the stack — compose.yaml's CHROMELESS_USE_FAKE_MEDIA_FILE
+# default is /opt/chromeless-fixtures/harness-loop-720p30.y4m, which the
 # bind-mount of harness/latency/fixtures/ makes available.
 docker compose -f infra/compose.yaml up
 ```
 
-`infra/launch-chromium.sh` translates the env var into Chromium's
+`infra/launch-chromeless.sh` translates the env var into Chromium's
 `--use-file-for-fake-video-capture-loop=<path>` flag (the `-loop`
 variant — without it, Chromium plays the file once then stops).
 

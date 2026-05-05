@@ -56,13 +56,13 @@ follow-up #1 below.**
 `cd tests/integration && go test ./...` — all eight tests pass
 (`signaling_roundtrip`, `offer_replay`, `clipboard`, `cross_tenant`,
 `file_upload`, `input_loop`, `stats_loop`; `audio_loopback` skipped
-without `CBWRTC_INTEGRATION_LIVE=1`). Cached run reports 0 s; cold
+without `CHROMELESS_INTEGRATION_LIVE=1`). Cached run reports 0 s; cold
 run is ~15 s.
 
 ### Smoke (GREEN, 7 s)
 
 `make test-smoke` → `tests/smoke/container-boot.sh`:
-- Resolved image: `cloud-browser-webrtc:dev` (auto-detected)
+- Resolved image: `chromeless:dev` (auto-detected)
 - Container started, DevTools up after 3 s
 - `/json/version`: `Chrome/147.0.7727.116`, Protocol-Version 1.3
 - `Page.navigate https://example.com` → readyState=complete
@@ -151,7 +151,7 @@ For reproducibility:
 git rev-parse HEAD                       # post-e624c0f
 make help                                 # confirm test-all-ci / test-all-nightly
 bash tests/run-regression.sh --pr-only   # → GREEN, 19 s
-rm -rf /tmp/cb-harness-loopback /tmp/cb-smoke.png   # clean state
+rm -rf /tmp/chromeless-harness-loopback /tmp/chromeless-smoke.png   # clean state
 bash tests/run-regression.sh             # → RED (spec 05), 55 s
 ```
 

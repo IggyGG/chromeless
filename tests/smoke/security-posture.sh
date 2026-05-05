@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# tests/smoke/security-posture.sh — assert the cloud-browser-webrtc
+# tests/smoke/security-posture.sh — assert the chromeless
 # image's runtime security posture matches T57's contract.
 #
 # Run against a built image:
 #
-#   docker build -t cloud-browser-webrtc:dev -f infra/Dockerfile .
-#   ./tests/smoke/security-posture.sh cloud-browser-webrtc:dev
+#   docker build -t chromeless:dev -f infra/Dockerfile .
+#   ./tests/smoke/security-posture.sh chromeless:dev
 #
 # Or, by default, against the dev tag.
 #
@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-IMAGE="${1:-cloud-browser-webrtc:dev}"
+IMAGE="${1:-chromeless:dev}"
 
 log() { printf '[security-smoke] %s\n' "$*" >&2; }
 

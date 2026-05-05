@@ -16,7 +16,7 @@
 #        the modprobe and verifies the device is reachable.
 #
 # Either way, the v4l2-writer sidecars (capture/v4l2-writer/, T92)
-# read from the cb-passthrough sockets and push frames into the
+# read from the chromeless-passthrough sockets and push frames into the
 # device + PulseAudio sink.
 #
 # The script is idempotent and never fatal — if passthrough is
@@ -24,19 +24,19 @@
 # container's startup proceeds unimpeded.
 #
 # Env:
-#   CB_PASSTHROUGH_ENABLED   "true" → run, anything else → skip
-#   CB_PASSTHROUGH_VIDEO_NR  /dev/video<N> to use; default 10
-#   CB_PASSTHROUGH_LABEL     v4l2 card label; default "Cloud Browser Camera"
+#   CHROMELESS_PASSTHROUGH_ENABLED   "true" → run, anything else → skip
+#   CHROMELESS_PASSTHROUGH_VIDEO_NR  /dev/video<N> to use; default 10
+#   CHROMELESS_PASSTHROUGH_LABEL     v4l2 card label; default "Cloud Browser Camera"
 
 set -eu
 
-if [ "${CB_PASSTHROUGH_ENABLED:-false}" != "true" ]; then
-    echo "[init-passthrough] CB_PASSTHROUGH_ENABLED!=true — skipping"
+if [ "${CHROMELESS_PASSTHROUGH_ENABLED:-false}" != "true" ]; then
+    echo "[init-passthrough] CHROMELESS_PASSTHROUGH_ENABLED!=true — skipping"
     exit 0
 fi
 
-VIDEO_NR="${CB_PASSTHROUGH_VIDEO_NR:-10}"
-LABEL="${CB_PASSTHROUGH_LABEL:-Cloud Browser Camera}"
+VIDEO_NR="${CHROMELESS_PASSTHROUGH_VIDEO_NR:-10}"
+LABEL="${CHROMELESS_PASSTHROUGH_LABEL:-Cloud Browser Camera}"
 
 # Pre-flight: if the device already exists, the host-DaemonSet
 # already loaded the module. Skip the modprobe to keep the container

@@ -11,8 +11,8 @@
 # For prod:
 #   - AWS: ElastiCache for Redis (Standard tier, encryption-at-rest,
 #     transit-encryption with token auth). Set
-#     CBWRTC_DENYLIST_REDIS_ADDR=<elasticache-endpoint>:6379
-#     CBWRTC_DENYLIST_REDIS_PASS=<from secrets manager>
+#     CHROMELESS_DENYLIST_REDIS_ADDR=<elasticache-endpoint>:6379
+#     CHROMELESS_DENYLIST_REDIS_PASS=<from secrets manager>
 #     in the signaling Deployment.
 #   - GCP: Memorystore for Redis (Standard tier).
 #   - On-prem: bitnami/redis Helm chart with Sentinel — replace this
@@ -27,10 +27,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: cb-denylist-redis
+  name: chromeless-denylist-redis
   namespace: cloud-browser
   labels:
-    app: cb-denylist-redis
+    app: chromeless-denylist-redis
     component: auth
 spec:
   type: ClusterIP
@@ -40,26 +40,26 @@ spec:
       port: 6379
       targetPort: 6379
   selector:
-    app: cb-denylist-redis
+    app: chromeless-denylist-redis
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: cb-denylist-redis
+  name: chromeless-denylist-redis
   namespace: cloud-browser
   labels:
-    app: cb-denylist-redis
+    app: chromeless-denylist-redis
     component: auth
 spec:
-  serviceName: cb-denylist-redis
+  serviceName: chromeless-denylist-redis
   replicas: 1
   selector:
     matchLabels:
-      app: cb-denylist-redis
+      app: chromeless-denylist-redis
   template:
     metadata:
       labels:
-        app: cb-denylist-redis
+        app: chromeless-denylist-redis
         component: auth
     spec:
       # Run unprivileged. Redis itself drops root via its image's
@@ -125,7 +125,7 @@ spec:
 # apiVersion: apps/v1
 # kind: Deployment
 # metadata:
-#   name: cb-signaling
+#   name: chromeless-signaling
 #   namespace: cloud-browser
 # spec:
 #   template:
@@ -133,5 +133,5 @@ spec:
 #       containers:
 #         - name: signaling
 #           env:
-#             - name: CBWRTC_DENYLIST_REDIS_ADDR
-#               value: cb-denylist-redis.cloud-browser.svc.cluster.local:6379
+#             - name: CHROMELESS_DENYLIST_REDIS_ADDR
+#               value: chromeless-denylist-redis.cloud-browser.svc.cluster.local:6379

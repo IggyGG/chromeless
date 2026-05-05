@@ -29,7 +29,7 @@ export const scenario = {
     // Focus text1 via wire-path click (proves clicks set focus).
     // Resolve the actual text1 center from the rendered DOM — the
     // hardcoded TEXT1_FOCUS coordinates assume stock-Chrome layout but
-    // cb-chromium renders the fixture with a slightly different box
+    // chromeless renders the fixture with a slightly different box
     // flow; getBoundingClientRect() makes the test layout-independent.
     const text1RawRect = await s.runtimeEval(
       `JSON.stringify(document.getElementById("text1").getBoundingClientRect().toJSON())`,

@@ -6,7 +6,7 @@
 `tests/rendering/webgl-fixture.html`, `tests/rendering/webgpu-fixture.html`,
 `tests/rendering/run-rendering-tests.sh` (T91),
 `tests/rendering/local-probe.js` (T91),
-`infra/launch-chromium.sh` (T78 — production launch flag set),
+`infra/launch-chromeless.sh` (T78 — production launch flag set),
 `docs/capture/path-of-least-resistance.md` (T15),
 `docs/research/av1-encoders.md` (T43 — GPU survey, Phase 4 hardware
 matrix), `docs/prior-art/selkies.md` (T3),
@@ -38,7 +38,7 @@ Two profiles are tested:
   signal until the Linux container probe data lands.
 - **container-swiftshader (canonical)** — pending. Run via
   `tests/rendering/run-rendering-tests.sh --boot` against the
-  cloud-browser-webrtc:dev image once it's bootable in CI. This
+  chromeless:dev image once it's bootable in CI. This
   is the row that updates the matrix below from "(approximation)"
   to "(measured)".
 
@@ -164,7 +164,7 @@ Cross-references:
 
 1. **GPU-enabled Dockerfile variant** — `infra/Dockerfile.gpu` that
    bases on `nvidia/cuda:12.6.0-base-ubuntu24.04` (or equivalent),
-   removes the `--disable-features=Vulkan` flag from launch-chromium.sh,
+   removes the `--disable-features=Vulkan` flag from launch-chromeless.sh,
    re-enables `--use-gl=angle --use-angle=vulkan`.
 2. **Re-run rendering matrix** under the GPU image. Update §2's
    confidence column from "high (approximation)" to "high
@@ -204,8 +204,8 @@ The fixture URLs default to
 which assumes infra-dev's Dockerfile copies
 `tests/rendering/*.html` to `/opt/cloud-browser/streamer-tests/`
 during image build. If the fixtures aren't yet in the image,
-override via `CBWRTC_RENDERING_WEBGL_URL=…` /
-`CBWRTC_RENDERING_WEBGPU_URL=…`.
+override via `CHROMELESS_RENDERING_WEBGL_URL=…` /
+`CHROMELESS_RENDERING_WEBGPU_URL=…`.
 
 ## 5. Open items
 

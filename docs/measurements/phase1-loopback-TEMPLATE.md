@@ -70,8 +70,8 @@ collapse the other.)
 
 | | |
 |-|-|
-| Image tag             | _e.g. `cloud-browser-webrtc:dev` SHA_ |
-| `CBWRTC_USE_FAKE_MEDIA` | _0 / 1_ — if 1, this run measures synthetic-source latency, not real screen capture |
+| Image tag             | _e.g. `chromeless:dev` SHA_ |
+| `CHROMELESS_USE_FAKE_MEDIA` | _0 / 1_ — if 1, this run measures synthetic-source latency, not real screen capture |
 | Encoder               | _vp9 / x264 / nvenc / vaapi / av1 — and which task wired it_ |
 | Audio                 | _enabled / disabled_ |
 | Cursor metadata (T26) | _enabled / disabled_ |

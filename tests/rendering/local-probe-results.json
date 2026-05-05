@@ -4,7 +4,7 @@
     {
       "profile": "default",
       "fixture": "webgl",
-      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgl-fixture.html",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/chromeless/tests/rendering/webgl-fixture.html",
       "screenshot": "tests/rendering/local-probe-default-webgl.png",
       "result": {
         "fixture": "webgl",
@@ -124,7 +124,7 @@
     {
       "profile": "default",
       "fixture": "webgpu",
-      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgpu-fixture.html",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/chromeless/tests/rendering/webgpu-fixture.html",
       "screenshot": "tests/rendering/local-probe-default-webgpu.png",
       "result": {
         "fixture": "webgpu",
@@ -228,7 +228,7 @@
     {
       "profile": "swiftshader-v1",
       "fixture": "webgl",
-      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgl-fixture.html",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/chromeless/tests/rendering/webgl-fixture.html",
       "screenshot": "tests/rendering/local-probe-swiftshader-v1-webgl.png",
       "result": {
         "fixture": "webgl",
@@ -261,7 +261,7 @@
     {
       "profile": "swiftshader-v1",
       "fixture": "webgpu",
-      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/cloud-browser-webrtc/tests/rendering/webgpu-fixture.html",
+      "url": "file:///Users/iggy/Documents/GitHub/scrapebrowse/chromeless/tests/rendering/webgpu-fixture.html",
       "screenshot": "tests/rendering/local-probe-swiftshader-v1-webgpu.png",
       "result": {
         "fixture": "webgpu",

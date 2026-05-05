@@ -48,11 +48,11 @@ COPY --from=build /out/v4l2-writer /usr/local/bin/v4l2-writer
 # `video` group (gid 44 on Debian); the K8s manifest mounts the
 # device with mode 0666 OR runs the container with that gid.
 RUN useradd --system --uid 65532 --gid 44 cbwriter \
- && mkdir -p /run/cb-passthrough \
- && chown cbwriter:44 /run/cb-passthrough
+ && mkdir -p /run/chromeless-passthrough \
+ && chown cbwriter:44 /run/chromeless-passthrough
 USER 65532:44
 
 # Default to video mode; audio mode is selected by the K8s args
 # override per-sidecar.
 ENTRYPOINT ["/usr/local/bin/v4l2-writer"]
-CMD ["--mode=video", "--socket=/run/cb-passthrough/video.sock", "--device=/dev/video10"]
+CMD ["--mode=video", "--socket=/run/chromeless-passthrough/video.sock", "--device=/dev/video10"]

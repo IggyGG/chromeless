@@ -1,0 +1,67 @@
+{{- /*
+T119: PodDisruptionBudgets for the cb-* workloads.
+
+- signaling: keep at least N reachable mid-drain (replicas=2 → 1).
+- controller: single-replica + leader-elect; maxUnavailable=0 means
+  PDB-aware evictions are blocked. Operators draining a node will
+  need to scale controller to 2 first or use --disable-eviction.
+- pool session pods: covers BOTH defaultPool + swPool via the
+  shared `app.kubernetes.io/component: session` selector. Cap at
+  50% to bound the blast radius of a single node drain.
+
+Gated on .Values.podDisruptionBudgets.enabled — opt-in because
+PDBs interact with cluster-autoscaler / drains in non-obvious ways
+and an operator should consciously turn them on.
+*/ -}}
+{{- if .Values.podDisruptionBudgets.enabled -}}
+{{- $ns := include "chromeless.namespace" . -}}
+{{- if .Values.signaling.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: signaling
+  namespace: {{ $ns }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: signaling
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.signaling.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "chromeless.selectorLabels" (merge (dict "component" "signaling") .) | nindent 6 }}
+---
+{{- end }}
+{{- if .Values.controller.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: browser-session-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudgets.controller.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "chromeless.selectorLabels" (merge (dict "component" "controller") .) | nindent 6 }}
+---
+{{- end }}
+{{- if or .Values.defaultPool.enabled .Values.swPool.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: chromeless-pool-sessions
+  namespace: {{ $ns }}
+  labels:
+    {{- include "chromeless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: session
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.pool.minAvailable | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chromeless
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: session
+{{- end }}
+{{- end }}

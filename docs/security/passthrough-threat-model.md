@@ -75,7 +75,7 @@ gates pass**, in order:
    streamer page launched with ?passthrough=true (orchestrator-set)
      │
      ▼
-   pod scheduled with cb.passthrough/device-claim allocation
+   pod scheduled with chromeless.passthrough/device-claim allocation
      │
      ▼
    v4l2 sink active for THIS session; cloud Chromium sees
@@ -105,7 +105,7 @@ it requires:
 2. The orchestrator passes `?passthrough=true&audio=…&video=…` to
    the streamer launch URL when scheduling a session for that
    tenant.
-3. The session pod has a `cb.passthrough/device-claim` annotation
+3. The session pod has a `chromeless.passthrough/device-claim` annotation
    set by the controller.
 
 Tenants who don't enable passthrough get the existing data plane

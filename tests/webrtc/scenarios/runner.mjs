@@ -2,7 +2,7 @@
 // scenarios/runner.mjs
 //
 // Discovers all *.scenario.mjs files in this directory, runs them
-// sequentially against a single cb-chromium endpoint (each scenario
+// sequentially against a single chromeless endpoint (each scenario
 // owns its own BrowserContext / Target / recording), and emits a
 // browseable HTML index (artifacts/index.html) embedding every webm
 // alongside its assertion table — so a human reviewer scrubs the
@@ -23,7 +23,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
   const out = {
-    cbUrl: process.env.CB_URL || "http://127.0.0.1:9222",
+    cbUrl: process.env.CHROMELESS_URL || "http://127.0.0.1:9222",
     artifactsDir: process.env.TEST_ARTIFACTS_DIR
       || path.resolve(process.cwd(), "artifacts"),
     only: null,    // run only matching scenario name (substring)
@@ -31,7 +31,7 @@ function parseArgs(argv) {
     failFast: false,
   };
   for (const a of argv) {
-    if (a.startsWith("--cb-url="))       out.cbUrl = a.slice("--cb-url=".length);
+    if (a.startsWith("--chromeless-url="))       out.cbUrl = a.slice("--chromeless-url=".length);
     else if (a.startsWith("--artifacts=")) out.artifactsDir = path.resolve(a.slice("--artifacts=".length));
     else if (a.startsWith("--only="))    out.only = a.slice("--only=".length);
     else if (a.startsWith("--skip="))    out.skip = a.slice("--skip=".length);
@@ -43,7 +43,7 @@ function parseArgs(argv) {
 }
 function printHelp() {
   process.stderr.write(`Usage: node runner.mjs [options]
-  --cb-url=<url>        cb-chromium /json/version base. Default 127.0.0.1:9222
+  --chromeless-url=<url>        chromeless /json/version base. Default 127.0.0.1:9222
   --artifacts=<dir>     Output directory for webm + summary.json + index.html
   --only=<substring>    Run only scenarios whose name matches
   --skip=<substring>    Skip scenarios whose name matches
@@ -236,13 +236,13 @@ function renderIndex(manifest) {
   }).join("");
 
   return `<!doctype html><html><head><meta charset="utf-8" />
-<title>cb-chromium webrtc input test report</title>
+<title>chromeless webrtc input test report</title>
 <style>${css}</style></head>
 <body>
 <header>
-  <h1>cb-chromium webrtc input test report</h1>
+  <h1>chromeless webrtc input test report</h1>
   <div class="meta">
-    cb-url: ${esc(manifest.cbUrl)} · started: ${esc(manifest.startedAt)}
+    chromeless-url: ${esc(manifest.cbUrl)} · started: ${esc(manifest.startedAt)}
     <span class="totals ${totalsCls}">${totalsTxt}</span>
   </div>
 </header>

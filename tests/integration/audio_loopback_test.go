@@ -1,7 +1,7 @@
 // audio_loopback_test.go — T64 integration check.
 //
 // "Fast(er) integration test that doesn't need a full browser" per the
-// T64 brief: launches the cloud-browser-webrtc compose stack, joins
+// T64 brief: launches the chromeless compose stack, joins
 // signaling as a fake "client" peer, waits for the streamer to send
 // its SDP offer, and asserts the offer advertises audio in its SDP.
 //
@@ -16,7 +16,7 @@
 // Lifecycle:
 //   - Default `go test ./tests/integration/...` SKIPS this test, because
 //     it needs `docker compose up` (60+ seconds, real Docker daemon).
-//     Set `CBWRTC_INTEGRATION_LIVE=1` to opt in.
+//     Set `CHROMELESS_INTEGRATION_LIVE=1` to opt in.
 //   - When opted in, TestMain itself does NOT spin up compose — each
 //     live test is responsible. This keeps the cheap signaling tests
 //     in this package running in <2s when only they're invoked.
@@ -25,7 +25,7 @@
 //
 // Dependencies:
 //   - Docker daemon reachable.
-//   - cloud-browser-webrtc:dev and cloud-browser-webrtc-signaling:dev
+//   - chromeless:dev and chromeless-signaling:dev
 //     buildable from the repo root via `docker compose ... up --build`.
 //   - **T69** (streamer-page exposes window.pc + dials signaling).
 //     Without T69 the streamer never sends an offer; the test will
@@ -51,11 +51,11 @@ import (
 )
 
 // liveStackEnabled gates every test in this file: opt-in via
-// CBWRTC_INTEGRATION_LIVE because spinning up compose is heavy.
+// CHROMELESS_INTEGRATION_LIVE because spinning up compose is heavy.
 func liveStackEnabled(t *testing.T) {
 	t.Helper()
-	if v := os.Getenv("CBWRTC_INTEGRATION_LIVE"); v != "1" && v != "true" {
-		t.Skip("set CBWRTC_INTEGRATION_LIVE=1 to run live-compose integration tests " +
+	if v := os.Getenv("CHROMELESS_INTEGRATION_LIVE"); v != "1" && v != "true" {
+		t.Skip("set CHROMELESS_INTEGRATION_LIVE=1 to run live-compose integration tests " +
 			"(this test brings up `docker compose up`, takes ~60s)")
 	}
 }

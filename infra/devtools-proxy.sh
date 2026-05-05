@@ -21,7 +21,7 @@
 # because the docker port mapping forwards host:9222 → eth0:9222 →
 # (this proxy) → 127.0.0.1:9222 → Chromium.
 #
-# Internal probes (cb-metrics-sidecar, idle-watchdog) keep dialing
+# Internal probes (chromeless-metrics-sidecar, idle-watchdog) keep dialing
 # 127.0.0.1:9222 directly and bypass this proxy — one less moving
 # part in the hot path.
 #

@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/iggy/cloud-browser-webrtc/capture/v4l2-writer/internal/pulse"
-	"github.com/iggy/cloud-browser-webrtc/capture/v4l2-writer/internal/v4l2"
-	"github.com/iggy/cloud-browser-webrtc/capture/v4l2-writer/internal/wire"
+	"github.com/iggy/chromeless/capture/v4l2-writer/internal/pulse"
+	"github.com/iggy/chromeless/capture/v4l2-writer/internal/v4l2"
+	"github.com/iggy/chromeless/capture/v4l2-writer/internal/wire"
 )
 
 func quietLogger() *slog.Logger {
