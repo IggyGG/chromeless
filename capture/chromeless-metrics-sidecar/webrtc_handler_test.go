@@ -16,8 +16,43 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
+
+// histSampleCount returns the cumulative sample_count of a single
+// histogram series (i.e. how many times Observe was called on the
+// matching label set). testutil.CollectAndCount counts distinct
+// series, not observations — for that we have to read the dto.Metric
+// proto directly. Used to assert observation discipline (e.g. "the
+// handshake histogram observed exactly once across N dc.opened
+// events" — which is what the streamer's firstDCOpenedSeen latch
+// guarantees).
+func histSampleCount(t *testing.T, h prometheus.Observer) uint64 {
+	t.Helper()
+	c, ok := h.(prometheus.Collector)
+	if !ok {
+		t.Fatalf("histSampleCount: %T does not implement prometheus.Collector", h)
+	}
+	ch := make(chan prometheus.Metric, 8)
+	go func() {
+		c.Collect(ch)
+		close(ch)
+	}()
+	var total uint64
+	for m := range ch {
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("histSampleCount: write: %v", err)
+		}
+		if pb.Histogram == nil {
+			t.Fatalf("histSampleCount: %T is not a histogram", h)
+		}
+		total += pb.Histogram.GetSampleCount()
+	}
+	return total
+}
 
 // resetWebRTCMetrics zeroes every chromeless_webrtc_* series so a test
 // can assert on a clean baseline.
@@ -91,13 +126,35 @@ func TestWebRTCEventHandler_DCOpenedWithLabel(t *testing.T) {
 	resetWebRTCMetrics()
 	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
 	h := webrtcEventHandler(quietLoggerWebRTC())
-	for _, label := range []string{"cursor", "clipboard", "file-upload"} {
-		body := `{"event":"chromeless.webrtc.dc.opened","attrs":{"label":"` + label + `","handshake_ms":250}}`
+
+	// Mirror the streamer's firstDCOpenedSeen latch: handshake_ms is
+	// attached to the FIRST dc.opened event of the session only.
+	// Subsequent dc.opened events for the same session_id carry the
+	// label but no handshake_ms, so the handshake histogram should
+	// observe exactly once across N=3 events. If a future regression
+	// attaches handshake_ms to multiple dc.opened events, this test
+	// fails fast — the previous CollectAndCount > 0 assertion would
+	// have silently passed for any N >= 1.
+	type dcEvent struct {
+		label   string
+		withHM  bool
+	}
+	events := []dcEvent{
+		{label: "cursor", withHM: true},   // first → carries handshake_ms
+		{label: "clipboard", withHM: false},
+		{label: "file-upload", withHM: false},
+	}
+	for _, ev := range events {
+		body := `{"event":"chromeless.webrtc.dc.opened","attrs":{"label":"` + ev.label + `","session_id":"s1"`
+		if ev.withHM {
+			body += `,"handshake_ms":250`
+		}
+		body += `}}`
 		r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
 		w := httptest.NewRecorder()
 		h(w, r)
 		if w.Code != http.StatusNoContent {
-			t.Fatalf("label=%s: got status %d", label, w.Code)
+			t.Fatalf("label=%s: got status %d", ev.label, w.Code)
 		}
 	}
 	if got := testutil.ToFloat64(mWebRTCDCOpened.WithLabelValues("el-test", "cursor")); got != 1 {
@@ -109,9 +166,12 @@ func TestWebRTCEventHandler_DCOpenedWithLabel(t *testing.T) {
 	if got := testutil.ToFloat64(mWebRTCDCOpened.WithLabelValues("el-test", "file-upload")); got != 1 {
 		t.Fatalf("dc_opened{label=file-upload} = %v, want 1", got)
 	}
-	// Three handshake observations should land in the histogram.
-	if got := testutil.CollectAndCount(mWebRTCSignalingHandshakeMs); got == 0 {
-		t.Fatalf("handshake histogram has no series, want >= 1")
+	// Exactly one handshake observation, regardless of how many
+	// dc.opened events fired — the streamer is responsible for the
+	// "first dc.opened only" discipline (per YAML §51-55) and the
+	// sidecar test models that contract.
+	if got := histSampleCount(t, mWebRTCSignalingHandshakeMs.WithLabelValues("el-test")); got != 1 {
+		t.Fatalf("handshake histogram sample_count = %d, want 1 (first dc.opened only per session)", got)
 	}
 }
 
