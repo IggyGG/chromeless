@@ -55,6 +55,20 @@
   // by tests that don't want a 9100/connect refused log every second).
   const METRICS_SIDECAR_URL = params.get("metrics") || "http://localhost:9100/stats-update";
 
+  // Wave 1 (chromeless-datachannel-contract.md §§4-6): three new
+  // DataChannels — `cursor`, `clipboard`, `file-upload` — wired
+  // against CDP probes injected into every user-content document.
+  //
+  // The streamer page itself runs inside the same Chromium that hosts
+  // the user content, so we can dial DevTools at ws://localhost:9222
+  // (the `--unsafely-treat-insecure-origin-as-secure=...:9000` flag
+  // grants this page enough power to open the DevTools websocket).
+  // Override via ?cdp=ws://... for tests that mock CDP elsewhere.
+  // Set to "off" to disable Wave 1 channel wiring entirely (so old
+  // tests that don't expect the new channels keep passing).
+  const CDP_BASE_URL = params.get("cdp") || "http://localhost:9222";
+  const WAVE1_DISABLED = (params.get("wave1") || "").toLowerCase() === "off";
+
   const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302"] }];
   // Phase 3 swaps in our TURN-REST issued credentials (see PROJECT_BRIEF
   // Phase 3). Phase 1 stays on public STUN.
@@ -108,7 +122,9 @@
   // -------- session ---------------------------------------------------
 
   /** @typedef {{ ws: WebSocket, pc: RTCPeerConnection, stream: MediaStream | null,
-   *              inputRelay: InputRelay | null, statsRelay: StatsRelay | null }} Session */
+   *              inputRelay: InputRelay | null, statsRelay: StatsRelay | null,
+   *              cdp: CDPClient | null,
+   *              cursorEmitter: CursorEmitter | null }} Session */
   /** @type {Session | null} */
   let active = null;
   let heartbeatTimer = null;
@@ -315,6 +331,352 @@
     }
   }
 
+  // -------- Wave 1 — CDP client + new channel emitters/receivers ----
+  //
+  // Background: the streamer.js page lives inside the headless Chromium
+  // that also hosts the user content. CDP at ws://localhost:9222
+  // gives us:
+  //   * `Runtime.addBinding` + `Page.addScriptToEvaluateOnNewDocument`
+  //     to install in-page probes that callback when the cursor shape
+  //     or clipboard contents change (matches the existing
+  //     capture/cursor-watcher and capture/clipboard-bridge sidecars,
+  //     which we don't reuse in-process because driving CDP directly
+  //     from the streamer is one fewer hop and avoids the wire-format
+  //     translation tax).
+  //   * `Browser.setClipboard` / `Runtime.evaluate` for inbound
+  //     clipboard application.
+  //   * `DOM.setFileInputFiles` for file-upload landing on the focused
+  //     `<input type=file>`.
+  //
+  // CDP failure mode: if the WebSocket dial fails (e.g. flag set
+  // doesn't expose DevTools to the page, or :9222 is unreachable), we
+  // still create the DataChannels — the labels need to land in the
+  // offer SDP so the portal-side demux doesn't drop into the
+  // `other =>` arm — but we log a single warning and leave the
+  // emitters dormant. The portal sees an open channel that never
+  // produces traffic; that's a strictly less-broken state than a
+  // closed channel that flips state on the portal side.
+  //
+  // Contract reference:
+  // /workspace/.triform/guides/chromeless-datachannel-contract.md
+  // (ships in the triform monorepo; the chromeless side reads it but
+  // does not vendor it).
+
+  // CDPClient — a tiny Chrome DevTools Protocol client speaking the
+  // /devtools/browser flat-mode shape, mirroring capture/input-bridge's
+  // dialCDP/pageSessionSender plumbing. We only need a handful of
+  // methods (Runtime.{enable,addBinding,evaluate}, Page.{enable,
+  // addScriptToEvaluateOnNewDocument}, Browser.{grantPermissions,
+  // setClipboard}, DOM.setFileInputFiles), so we don't bother with
+  // session-attach machinery — Runtime.evaluate at the browser-level
+  // target executes against the active page when no session is
+  // attached, which is sufficient for v1.
+  //
+  // Disposal: on pc.close (via teardown) we close the underlying
+  // WebSocket. `closed` is set first so any in-flight send rejects
+  // with a deterministic Error rather than racing on readyState.
+  class CDPClient {
+    constructor() {
+      this.ws = null;
+      this.closed = false;
+      this.nextId = 1;
+      /** @type {Map<number, {resolve: (v:any)=>void, reject:(e:Error)=>void}>} */
+      this.pending = new Map();
+      /** @type {((ev:{method:string, params:any})=>void)[]} */
+      this.eventListeners = [];
+    }
+
+    async connect(baseUrl) {
+      // Discover the browser-level WS URL via /json/version.
+      const versionUrl = baseUrl.replace(/\/$/, "") + "/json/version";
+      let resp;
+      try {
+        resp = await fetch(versionUrl);
+      } catch (err) {
+        throw new Error(`CDP /json/version fetch failed: ${err}`);
+      }
+      if (!resp.ok) throw new Error(`CDP /json/version status ${resp.status}`);
+      const meta = await resp.json();
+      const wsUrl = meta.webSocketDebuggerUrl;
+      if (!wsUrl) throw new Error("CDP /json/version missing webSocketDebuggerUrl");
+      await new Promise((resolve, reject) => {
+        const ws = new WebSocket(wsUrl);
+        this.ws = ws;
+        ws.onopen = () => resolve();
+        ws.onerror = (e) => reject(new Error("CDP WS open error " + (e?.message ?? "")));
+        ws.onclose = () => {
+          this.closed = true;
+          // Reject every pending request; the caller's onclose path
+          // will tear down the relevant emitters.
+          for (const p of this.pending.values()) {
+            try { p.reject(new Error("CDP disconnected")); } catch { /* ignore */ }
+          }
+          this.pending.clear();
+        };
+        ws.onmessage = (ev) => this._onMessage(ev);
+      });
+    }
+
+    _onMessage(ev) {
+      let frame;
+      try {
+        frame = JSON.parse(typeof ev.data === "string" ? ev.data : "");
+      } catch {
+        return; // malformed, drop
+      }
+      if (typeof frame.id === "number") {
+        const slot = this.pending.get(frame.id);
+        if (!slot) return;
+        this.pending.delete(frame.id);
+        if (frame.error) {
+          slot.reject(new Error(`CDP error: ${frame.error.message ?? JSON.stringify(frame.error)}`));
+        } else {
+          slot.resolve(frame.result ?? null);
+        }
+        return;
+      }
+      // Event frame
+      if (typeof frame.method === "string") {
+        for (const fn of this.eventListeners) {
+          try { fn(frame); } catch (e) { log("warn", "CDP event listener threw", String(e)); }
+        }
+      }
+    }
+
+    on(fn) {
+      this.eventListeners.push(fn);
+      return () => {
+        const i = this.eventListeners.indexOf(fn);
+        if (i >= 0) this.eventListeners.splice(i, 1);
+      };
+    }
+
+    send(method, params) {
+      if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return Promise.reject(new Error("CDP not open"));
+      }
+      const id = this.nextId++;
+      const frame = JSON.stringify({ id, method, params: params ?? {} });
+      const p = new Promise((resolve, reject) => {
+        this.pending.set(id, { resolve, reject });
+      });
+      try {
+        this.ws.send(frame);
+      } catch (err) {
+        this.pending.delete(id);
+        return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+      return p;
+    }
+
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      try {
+        if (this.ws && (this.ws.readyState === WebSocket.OPEN ||
+                         this.ws.readyState === WebSocket.CONNECTING)) {
+          this.ws.close();
+        }
+      } catch { /* ignore */ }
+      this.ws = null;
+      this.eventListeners = [];
+    }
+  }
+
+  // Helper for emitters: defensive write to a DataChannel that drops
+  // the message rather than throwing if the channel is closed mid-send
+  // (race window during teardown).
+  function dcSafeSend(dc, payload) {
+    if (!dc || dc.readyState !== "open") return false;
+    try {
+      dc.send(payload);
+      return true;
+    } catch (err) {
+      log("warn", "data channel send failed", String(err));
+      return false;
+    }
+  }
+
+  // Wave 1 §4 — CursorEmitter
+  //
+  // CDP doesn't expose a first-class "cursor changed" event (the
+  // original A1 brief mentioned `Page.setCursorChanged`, which is not
+  // part of the public DevTools Protocol). The proven path — already
+  // used by the capture/cursor-watcher Go service — is to inject a
+  // small JS probe into every document via
+  // `Page.addScriptToEvaluateOnNewDocument`, observe pointer
+  // movement + `getComputedStyle(...).cursor`, and call back through
+  // a `Runtime.addBinding` exposed function on each change.
+  //
+  // The probe keeps page-CSS-pixel coordinates (clientX/clientY are
+  // already in CSS pixels per the CSSOM spec, regardless of
+  // devicePixelRatio), matching the contract's coordinate space.
+  //
+  // Drop-stale-on-coalesce backpressure: we hold at most one
+  // outstanding cursor message per channel. If `dc.bufferedAmount`
+  // exceeds zero when the next change arrives, we replace the queued
+  // message (overwrite `pendingPayload`) rather than enqueue a
+  // second.
+  class CursorEmitter {
+    constructor(dc, cdp) {
+      this.dc = dc;
+      this.cdp = cdp;
+      this.detach = null;
+      this.pendingPayload = null; // {x,y,kind} — most-recent unflushed sample
+      this.flushPending = false;
+      this.failed = false;
+      dc.addEventListener("close", () => this.dispose("dc closed"));
+      dc.addEventListener("error", (e) => log("warn", "cursor data-channel error",
+        String((e && e.error?.message) || e)));
+    }
+
+    static probeJS() {
+      // Self-contained, idempotent. Runs in every document.
+      // Coordinates are page CSS pixels (clientX/Y). Kind is the
+      // computed-style cursor keyword for the topmost element under
+      // the pointer; we map a few common synonyms to the contract's
+      // names and otherwise pass through (the portal-side B1 handler
+      // is required to fall back to "default" for unknown kinds —
+      // contract §4).
+      return `(() => {
+        if (window.__cb_cursor_v1_installed__) return;
+        window.__cb_cursor_v1_installed__ = true;
+        let lastX = 0, lastY = 0, lastKind = "default", lastVisible = true;
+        let scheduled = false;
+        function describe(cssCursor) {
+          if (!cssCursor || cssCursor === "auto") return "default";
+          if (cssCursor === "none") return "none";
+          // First non-url() keyword (CSS allows a fallback list).
+          const head = cssCursor.split(",").map(s => s.trim()).find(s => s && !s.startsWith("url("));
+          return head ? head.split(/\\s+/)[0] : "default";
+        }
+        function emit() {
+          scheduled = false;
+          const el = document.elementFromPoint(lastX, lastY);
+          const css = el ? getComputedStyle(el).cursor : "default";
+          const kind = describe(css);
+          const visible = kind !== "none";
+          if (lastKind === kind && lastVisible === visible) return;
+          lastKind = kind; lastVisible = visible;
+          if (typeof window.__cb_cursor_v1__ === "function") {
+            try {
+              window.__cb_cursor_v1__(JSON.stringify({
+                x: lastX, y: lastY, kind: visible ? kind : "none",
+              }));
+            } catch (e) { /* ignore */ }
+          }
+        }
+        function schedule() {
+          if (scheduled) return;
+          scheduled = true;
+          requestAnimationFrame(emit);
+        }
+        document.addEventListener("pointermove", (e) => {
+          lastX = e.clientX; lastY = e.clientY;
+          if (typeof window.__cb_cursor_v1_pos__ === "function") {
+            try {
+              window.__cb_cursor_v1_pos__(JSON.stringify({
+                x: lastX, y: lastY,
+              }));
+            } catch (err) { /* ignore */ }
+          }
+          schedule();
+        }, { passive: true, capture: true });
+        document.addEventListener("pointerleave", () => {
+          if (lastVisible) {
+            lastVisible = false; lastKind = "none";
+            if (typeof window.__cb_cursor_v1__ === "function") {
+              try {
+                window.__cb_cursor_v1__(JSON.stringify({
+                  x: lastX, y: lastY, kind: "none",
+                }));
+              } catch (e) { /* ignore */ }
+            }
+          }
+        }, { passive: true });
+      })();`;
+    }
+
+    async install() {
+      // Best-effort. If any step fails, we log + flag the emitter
+      // failed and skip future activity but keep the DC open — the
+      // portal sees an open-but-quiet channel, which is the documented
+      // dormant-channel state.
+      try {
+        await this.cdp.send("Page.enable");
+        await this.cdp.send("Runtime.enable");
+        await this.cdp.send("Runtime.addBinding", { name: "__cb_cursor_v1__" });
+        await this.cdp.send("Runtime.addBinding", { name: "__cb_cursor_v1_pos__" });
+        await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+          source: CursorEmitter.probeJS(),
+        });
+        // Also install in the current document (no navigation needed).
+        await this.cdp.send("Runtime.evaluate", {
+          expression: CursorEmitter.probeJS(),
+          includeCommandLineAPI: false,
+          awaitPromise: false,
+          returnByValue: true,
+        });
+        this.detach = this.cdp.on((frame) => {
+          if (frame.method !== "Runtime.bindingCalled") return;
+          const p = frame.params || {};
+          const name = p.name;
+          if (name !== "__cb_cursor_v1__" && name !== "__cb_cursor_v1_pos__") return;
+          let payload;
+          try { payload = JSON.parse(p.payload || "{}"); }
+          catch { return; }
+          if (typeof payload.x !== "number" || typeof payload.y !== "number") return;
+          const kind = (typeof payload.kind === "string" && payload.kind) || (this.pendingPayload?.kind ?? "default");
+          this.queue({ x: payload.x, y: payload.y, kind });
+        });
+        log("ok", "cursor emitter installed");
+      } catch (err) {
+        this.failed = true;
+        log("warn", "cursor emitter install failed; channel will stay dormant",
+            String(err));
+      }
+    }
+
+    queue(payload) {
+      if (this.failed) return;
+      // Drop-stale-on-coalesce: replace whatever is queued.
+      this.pendingPayload = payload;
+      if (this.flushPending) return;
+      this.flushPending = true;
+      // Use queueMicrotask to give the bufferedAmount drain a chance
+      // before re-checking. This is not a hard cadence — the next
+      // `pointermove` will trigger another drain attempt anyway.
+      queueMicrotask(() => this.flush());
+    }
+
+    flush() {
+      this.flushPending = false;
+      const p = this.pendingPayload;
+      if (!p) return;
+      // Backpressure: if the channel has bytes queued, we keep our
+      // single pendingPayload and let the next change overwrite it.
+      // The buffered byte count is the spec-defined backpressure
+      // signal; we tolerate up to 16 KiB before pausing emit.
+      if (!this.dc || this.dc.readyState !== "open") return;
+      if (this.dc.bufferedAmount > 16_384) return;
+      const env = JSON.stringify({
+        v: 1, t: Date.now(),
+        cursor: { x: p.x, y: p.y, kind: p.kind },
+      });
+      this.pendingPayload = null;
+      dcSafeSend(this.dc, env);
+    }
+
+    dispose(reason) {
+      if (this.detach) {
+        try { this.detach(); } catch { /* ignore */ }
+        this.detach = null;
+      }
+      this.pendingPayload = null;
+      log("info", `cursor emitter disposed: ${reason}`);
+    }
+  }
+
   // T81 — passthrough sink. Lazily creates a hidden <video>/<audio>
   // for diagnostic visibility. The actual v4l2-writer / pulse sink
   // is a Phase 4 follow-up; we keep this seam so the page can route
@@ -341,6 +703,17 @@
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     if (active.inputRelay) {
       try { active.inputRelay.close(); } catch { /* ignore */ }
+    }
+    // Wave 1 — dispose new emitters/receivers + close CDP. Order:
+    // emitters first (they may try one final send), then CDP (the
+    // emitters' disposal listeners fire on dc close, which is OK to
+    // invoke after their own dispose() too — both paths are
+    // idempotent).
+    if (active.cursorEmitter) {
+      try { active.cursorEmitter.dispose("teardown"); } catch { /* ignore */ }
+    }
+    if (active.cdp) {
+      try { active.cdp.close(); } catch { /* ignore */ }
     }
     try {
       if (active.stream) {
@@ -614,13 +987,51 @@
     // in case future code paths add channels remotely).
     const inputDC  = pc.createDataChannel("input",  { ordered: true });
     const statsDC  = pc.createDataChannel("stats",  { ordered: true });
+    // Wave 1 §2: new DataChannel labels. Labels are exact and case-
+    // sensitive — any drift silently routes to the portal's
+    // `other =>` log-and-drop arm. `cursor` is one-way emit, `stats`-
+    // shaped JSON envelopes; further channels (clipboard, file-upload)
+    // land in subsequent commits.
+    const cursorDC = pc.createDataChannel("cursor", { ordered: true });
     log("info", "created data channels", {
       input: inputDC.id, stats: statsDC.id,
+      cursor: cursorDC.id,
     });
     const inputRelay = new InputRelay(inputDC, INPUT_BRIDGE_URL);
     const statsRelay = new StatsRelay(statsDC, METRICS_SIDECAR_URL);
 
-    active = { ws, pc, stream, inputRelay, statsRelay };
+    // Wave 1 — best-effort CDP attach. If this fails (e.g. the
+    // Chromium flag set blocks WebSocket connections from the
+    // streamer page to its own DevTools port, or :9222 is unreachable
+    // because of supervisord ordering), we still ship the open-but-
+    // dormant DataChannels so the portal demux sees the labels and
+    // doesn't drop them. The emitters log the install failure.
+    let cdp = null;
+    let cursorEmitter = null;
+    if (!WAVE1_DISABLED) {
+      cdp = new CDPClient();
+      cdp.connect(CDP_BASE_URL).then(() => {
+        log("ok", "CDP connected for Wave 1 channels", { base: CDP_BASE_URL });
+        cursorEmitter = new CursorEmitter(cursorDC, cdp);
+        if (active) {
+          active.cdp = cdp;
+          active.cursorEmitter = cursorEmitter;
+        }
+        cursorEmitter.install();
+      }).catch((err) => {
+        log("warn", "CDP connect failed; Wave 1 channels will stay dormant",
+            String(err));
+        try { cdp.close(); } catch { /* ignore */ }
+        cdp = null;
+      });
+    } else {
+      log("info", "Wave 1 channels disabled via ?wave1=off");
+    }
+
+    active = {
+      ws, pc, stream, inputRelay, statsRelay,
+      cdp, cursorEmitter,
+    };
 
     pc.onicecandidate = (ev) => {
       if (ws.readyState !== WebSocket.OPEN) return;
