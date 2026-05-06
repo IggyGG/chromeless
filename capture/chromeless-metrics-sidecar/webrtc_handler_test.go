@@ -58,6 +58,7 @@ func histSampleCount(t *testing.T, h prometheus.Observer) uint64 {
 // can assert on a clean baseline.
 func resetWebRTCMetrics() {
 	mWebRTCSessionCreated.Reset()
+	mWebRTCSessionClosedCount.Reset()
 	mWebRTCICEConnected.Reset()
 	mWebRTCICEFailed.Reset()
 	mWebRTCDCOpened.Reset()
@@ -186,8 +187,37 @@ func TestWebRTCEventHandler_SessionClosedDuration(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("got status %d, want 204", w.Code)
 	}
-	if got := testutil.CollectAndCount(mWebRTCSessionDurationMs); got == 0 {
-		t.Fatalf("session_duration histogram has no series, want >= 1")
+	// FU #34: session_closed bumps both the closed-count counter and
+	// observes the duration histogram. The counter is what the
+	// "active sessions = created − closed" panel reads.
+	if got := testutil.ToFloat64(mWebRTCSessionClosedCount.WithLabelValues("el-test")); got != 1 {
+		t.Fatalf("session_closed_count = %v, want 1", got)
+	}
+	if got := histSampleCount(t, mWebRTCSessionDurationMs.WithLabelValues("el-test")); got != 1 {
+		t.Fatalf("session_duration histogram sample_count = %d, want 1", got)
+	}
+}
+
+// FU #34: session_closed must increment the closed-count counter even
+// when duration_ms is absent — a closed session is closed regardless
+// of whether the emitter knew its duration. The histogram is the
+// thing that gets dropped silently in that case, not the counter.
+func TestWebRTCEventHandler_SessionClosedNoDurationStillCountsCounter(t *testing.T) {
+	resetWebRTCMetrics()
+	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
+	h := webrtcEventHandler(quietLoggerWebRTC())
+	body := `{"event":"chromeless.webrtc.session_closed","attrs":{"session_id":"s1"}}`
+	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("got status %d, want 204", w.Code)
+	}
+	if got := testutil.ToFloat64(mWebRTCSessionClosedCount.WithLabelValues("el-test")); got != 1 {
+		t.Fatalf("session_closed_count without duration_ms = %v, want 1", got)
+	}
+	if got := histSampleCount(t, mWebRTCSessionDurationMs.WithLabelValues("el-test")); got != 0 {
+		t.Fatalf("session_duration histogram observed without duration_ms = %d, want 0", got)
 	}
 }
 

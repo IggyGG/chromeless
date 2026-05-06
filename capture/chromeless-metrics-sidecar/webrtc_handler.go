@@ -65,6 +65,18 @@ var (
 		Help:        "WebRTC sessions initialised by the Pattern C broker (incremented on session_created).",
 		ConstLabels: regionLabels(),
 	}, []string{"element_id"})
+	// Counterpart to mWebRTCSessionCreated. With both, the D4-Dash
+	// "Active sessions = created − closed" panel can be built directly
+	// from /metrics — without this counter, dashboards have to derive
+	// "closed" from histogram series cardinality, which double-counts
+	// across pod restarts and is brittle. Same dimensionality as
+	// mWebRTCSessionCreated (element_id only — no `label` because the
+	// session is the unit, not the channel).
+	mWebRTCSessionClosedCount = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name:        "chromeless_webrtc_session_closed_count",
+		Help:        "WebRTC sessions terminated (incremented on session_closed). Pair with chromeless_webrtc_session_count to chart active sessions.",
+		ConstLabels: regionLabels(),
+	}, []string{"element_id"})
 	mWebRTCICEConnected = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name:        "chromeless_webrtc_ice_connected_count",
 		Help:        "ICE state transitioned to connected/completed.",
@@ -217,10 +229,13 @@ func applyWebRTCEvent(env *webrtcEventEnvelope, log *slog.Logger) error {
 		mWebRTCSessionCreated.WithLabelValues(elementID).Inc()
 
 	case "chromeless.webrtc.session_closed":
-		// Histogram observation when payload.duration_ms present;
-		// session_closed without a duration is dropped silently — the
-		// session_count counter already incremented on session_created
-		// so we have a "sessions started" metric regardless.
+		// Always bump the closed-count counter so the D4-Dash
+		// "Active sessions = created − closed" panel can read both
+		// series straight off /metrics. The duration histogram only
+		// observes when duration_ms is present (a session_closed
+		// without a duration is still a closed session — drop the
+		// observation, keep the counter).
+		mWebRTCSessionClosedCount.WithLabelValues(elementID).Inc()
 		if d, ok := env.attrFloat64("duration_ms"); ok && d >= 0 {
 			mWebRTCSessionDurationMs.WithLabelValues(elementID).Observe(d)
 		}

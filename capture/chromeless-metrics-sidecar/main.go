@@ -715,6 +715,7 @@ func main() {
 	{
 		eid := elementIDLabel()
 		mWebRTCSessionCreated.WithLabelValues(eid).Add(0)
+		mWebRTCSessionClosedCount.WithLabelValues(eid).Add(0)
 		mWebRTCICEConnected.WithLabelValues(eid).Add(0)
 		mWebRTCICEFailed.WithLabelValues(eid).Add(0)
 		mWebRTCReplayHit.WithLabelValues(eid).Add(0)
