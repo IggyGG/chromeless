@@ -124,7 +124,8 @@
   /** @typedef {{ ws: WebSocket, pc: RTCPeerConnection, stream: MediaStream | null,
    *              inputRelay: InputRelay | null, statsRelay: StatsRelay | null,
    *              cdp: CDPClient | null,
-   *              cursorEmitter: CursorEmitter | null }} Session */
+   *              cursorEmitter: CursorEmitter | null,
+   *              clipboardChannel: ClipboardChannel | null }} Session */
   /** @type {Session | null} */
   let active = null;
   let heartbeatTimer = null;
@@ -677,6 +678,227 @@
     }
   }
 
+  // Wave 1 §5 — ClipboardChannel (bidirectional + per-session sequence
+  // numbers).
+  //
+  // Outbound (chromeless→portal, dir="c2p"): when any document fires a
+  // `copy` event, the page-side probe captures the selection text /
+  // HTML and calls a binding. We translate to a contract envelope and
+  // emit on the DC, incrementing `nextOutboundSeq`.
+  //
+  // Inbound (portal→chromeless, dir="p2c"): we receive an envelope on
+  // the DC, drop if `seq <= lastSeenInboundSeq`, otherwise base64-
+  // decode `data` and write into the in-container clipboard via CDP
+  // Runtime.evaluate (`navigator.clipboard.writeText`-equivalent
+  // through Browser.grantPermissions; falls back to Input.insertText
+  // is out of scope for v1). Then advance `lastSeenInboundSeq`.
+  //
+  // MIME types: only `text/plain` and `text/html` are accepted; others
+  // are dropped with a DEBUG log line (per contract §5). Unknown
+  // direction strings are dropped.
+  class ClipboardChannel {
+    constructor(dc, cdp) {
+      this.dc = dc;
+      this.cdp = cdp;
+      this.detach = null;
+      this.nextOutboundSeq = 0;
+      this.lastSeenInboundSeq = -1;
+      this.failed = false;
+      // Echo suppression: we remember the last text we *applied
+      // inbound* so the page-side `copy` listener doesn't loop the
+      // same text right back out. Mirrors clipboard-bridge §"Echo
+      // suppression".
+      this.lastInboundText = null;
+      dc.addEventListener("close", () => this.dispose("dc closed"));
+      dc.addEventListener("error", (e) => log("warn", "clipboard data-channel error",
+        String((e && e.error?.message) || e)));
+      dc.addEventListener("message", (ev) => this.onInbound(ev.data));
+    }
+
+    static probeJS() {
+      return `(() => {
+        if (window.__cb_clipboard_v1_installed__) return;
+        window.__cb_clipboard_v1_installed__ = true;
+        document.addEventListener("copy", (e) => {
+          // Best-effort capture: the spec says the active selection
+          // is what gets copied; we read it and forward.
+          const sel = document.getSelection ? document.getSelection() : null;
+          const text = sel ? sel.toString() : "";
+          if (!text) return;
+          // No HTML capture in v1 — text/plain only on the c2p path.
+          // Adding text/html is forward-compatible (just bumps the
+          // emitter; the contract already permits it).
+          if (typeof window.__cb_clipboard_v1__ === "function") {
+            try {
+              window.__cb_clipboard_v1__(JSON.stringify({
+                mime: "text/plain", text,
+              }));
+            } catch (err) { /* ignore */ }
+          }
+        }, { capture: true });
+      })();`;
+    }
+
+    static utf8ToBase64(str) {
+      // TextEncoder + btoa pipeline; handles non-Latin-1 cleanly.
+      const bytes = new TextEncoder().encode(str);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin);
+    }
+
+    static base64ToUtf8(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    }
+
+    async install() {
+      try {
+        await this.cdp.send("Page.enable");
+        await this.cdp.send("Runtime.enable");
+        // Browser.grantPermissions makes the in-page Clipboard API
+        // calls in `applyInbound` work without a permission prompt.
+        // Some Chromium builds reject `clipboardSanitizedWrite`; we
+        // retry with the smaller set on failure.
+        try {
+          await this.cdp.send("Browser.grantPermissions", {
+            permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
+          });
+        } catch (e) {
+          await this.cdp.send("Browser.grantPermissions", {
+            permissions: ["clipboardReadWrite"],
+          }).catch(() => {});
+        }
+        await this.cdp.send("Runtime.addBinding", { name: "__cb_clipboard_v1__" });
+        await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+          source: ClipboardChannel.probeJS(),
+        });
+        await this.cdp.send("Runtime.evaluate", {
+          expression: ClipboardChannel.probeJS(),
+          includeCommandLineAPI: false,
+          awaitPromise: false,
+          returnByValue: true,
+        });
+        this.detach = this.cdp.on((frame) => {
+          if (frame.method !== "Runtime.bindingCalled") return;
+          const p = frame.params || {};
+          if (p.name !== "__cb_clipboard_v1__") return;
+          let payload;
+          try { payload = JSON.parse(p.payload || "{}"); }
+          catch { return; }
+          this.emitOutbound(payload);
+        });
+        log("ok", "clipboard channel installed");
+      } catch (err) {
+        this.failed = true;
+        log("warn", "clipboard install failed; channel stays dormant",
+            String(err));
+      }
+    }
+
+    emitOutbound(payload) {
+      if (this.failed) return;
+      const mime = payload.mime === "text/html" ? "text/html" : "text/plain";
+      const text = String(payload.text ?? "");
+      if (!text) return;
+      // Echo suppression — drop a `copy` that mirrors the last
+      // inbound write we just applied.
+      if (this.lastInboundText !== null && this.lastInboundText === text) {
+        // One-shot suppression; future `copy` events of the same
+        // text are real user activity.
+        this.lastInboundText = null;
+        return;
+      }
+      const data = ClipboardChannel.utf8ToBase64(text);
+      const env = JSON.stringify({
+        v: 1, t: Date.now(),
+        clipboard: {
+          dir: "c2p",
+          seq: this.nextOutboundSeq++,
+          mime, data,
+        },
+      });
+      dcSafeSend(this.dc, env);
+    }
+
+    onInbound(data) {
+      if (typeof data !== "string") {
+        log("warn", "clipboard inbound: non-string frame, dropping");
+        return;
+      }
+      let env;
+      try { env = JSON.parse(data); }
+      catch (err) { log("warn", "clipboard inbound: malformed JSON", String(err)); return; }
+      const v = env?.v;
+      if (v !== 1) {
+        log("warn", "webrtc_dc_clipboard_unsupported_version", { received: v });
+        return;
+      }
+      const cb = env?.clipboard;
+      if (!cb || typeof cb !== "object") return;
+      // We only act on p2c. Loopback c2p frames (shouldn't happen,
+      // but defense in depth) are ignored.
+      if (cb.dir !== "p2c") return;
+      const seq = Number(cb.seq);
+      if (!Number.isFinite(seq) || seq <= this.lastSeenInboundSeq) {
+        // Stale. Per contract §5: drop silently with DEBUG log.
+        log("info", "clipboard inbound stale; dropping",
+            { seq, last_seen: this.lastSeenInboundSeq });
+        return;
+      }
+      const mime = cb.mime;
+      if (mime !== "text/plain" && mime !== "text/html") {
+        log("info", "clipboard inbound: unsupported mime, dropping",
+            { mime });
+        // Still advance lastSeen so we don't replay it on a re-emit.
+        this.lastSeenInboundSeq = seq;
+        return;
+      }
+      let text;
+      try { text = ClipboardChannel.base64ToUtf8(String(cb.data ?? "")); }
+      catch (err) { log("warn", "clipboard inbound: base64 decode failed", String(err)); return; }
+      this.lastSeenInboundSeq = seq;
+      this.applyInbound(mime, text);
+    }
+
+    applyInbound(mime, text) {
+      if (this.failed || !this.cdp || this.cdp.closed) return;
+      this.lastInboundText = mime === "text/plain" ? text : null;
+      // Use Runtime.evaluate to call navigator.clipboard.writeText.
+      // For text/html we'd want navigator.clipboard.write with a
+      // ClipboardItem; v1 keeps both paths on writeText for the
+      // text content so paste-to-text-input always works.
+      const expr = `(async () => {
+        try {
+          await navigator.clipboard.writeText(${JSON.stringify(text)});
+          return "ok";
+        } catch (e) { return "err:" + (e && e.message || e); }
+      })()`;
+      this.cdp.send("Runtime.evaluate", {
+        expression: expr,
+        awaitPromise: true,
+        returnByValue: true,
+      }).then((res) => {
+        const v = res?.result?.value;
+        if (typeof v === "string" && v.startsWith("err:")) {
+          log("warn", "clipboard apply via navigator.clipboard failed", v);
+        }
+      }).catch((err) => {
+        log("warn", "clipboard apply CDP send failed", String(err));
+      });
+    }
+
+    dispose(reason) {
+      if (this.detach) {
+        try { this.detach(); } catch { /* ignore */ }
+        this.detach = null;
+      }
+      log("info", `clipboard channel disposed: ${reason}`);
+    }
+  }
+
   // T81 — passthrough sink. Lazily creates a hidden <video>/<audio>
   // for diagnostic visibility. The actual v4l2-writer / pulse sink
   // is a Phase 4 follow-up; we keep this seam so the page can route
@@ -711,6 +933,9 @@
     // idempotent).
     if (active.cursorEmitter) {
       try { active.cursorEmitter.dispose("teardown"); } catch { /* ignore */ }
+    }
+    if (active.clipboardChannel) {
+      try { active.clipboardChannel.dispose("teardown"); } catch { /* ignore */ }
     }
     if (active.cdp) {
       try { active.cdp.close(); } catch { /* ignore */ }
@@ -990,12 +1215,14 @@
     // Wave 1 §2: new DataChannel labels. Labels are exact and case-
     // sensitive — any drift silently routes to the portal's
     // `other =>` log-and-drop arm. `cursor` is one-way emit, `stats`-
-    // shaped JSON envelopes; further channels (clipboard, file-upload)
-    // land in subsequent commits.
-    const cursorDC = pc.createDataChannel("cursor", { ordered: true });
+    // shaped JSON envelopes; `clipboard` is bidirectional with
+    // per-session monotonic seq counters; `file-upload` lands in a
+    // subsequent commit.
+    const cursorDC    = pc.createDataChannel("cursor",    { ordered: true });
+    const clipboardDC = pc.createDataChannel("clipboard", { ordered: true });
     log("info", "created data channels", {
       input: inputDC.id, stats: statsDC.id,
-      cursor: cursorDC.id,
+      cursor: cursorDC.id, clipboard: clipboardDC.id,
     });
     const inputRelay = new InputRelay(inputDC, INPUT_BRIDGE_URL);
     const statsRelay = new StatsRelay(statsDC, METRICS_SIDECAR_URL);
@@ -1008,16 +1235,22 @@
     // doesn't drop them. The emitters log the install failure.
     let cdp = null;
     let cursorEmitter = null;
+    let clipboardChannel = null;
     if (!WAVE1_DISABLED) {
       cdp = new CDPClient();
       cdp.connect(CDP_BASE_URL).then(() => {
         log("ok", "CDP connected for Wave 1 channels", { base: CDP_BASE_URL });
-        cursorEmitter = new CursorEmitter(cursorDC, cdp);
+        cursorEmitter    = new CursorEmitter(cursorDC, cdp);
+        clipboardChannel = new ClipboardChannel(clipboardDC, cdp);
         if (active) {
           active.cdp = cdp;
           active.cursorEmitter = cursorEmitter;
+          active.clipboardChannel = clipboardChannel;
         }
+        // Install probes + bindings. Each install is independent —
+        // a clipboard install failure shouldn't prevent cursor.
         cursorEmitter.install();
+        clipboardChannel.install();
       }).catch((err) => {
         log("warn", "CDP connect failed; Wave 1 channels will stay dormant",
             String(err));
@@ -1030,7 +1263,7 @@
 
     active = {
       ws, pc, stream, inputRelay, statsRelay,
-      cdp, cursorEmitter,
+      cdp, cursorEmitter, clipboardChannel,
     };
 
     pc.onicecandidate = (ev) => {
