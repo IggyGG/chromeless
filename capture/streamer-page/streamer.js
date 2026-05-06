@@ -76,6 +76,17 @@
   const HEARTBEAT_MS = 10_000;
   const INPUT_BACKOFF_MIN_MS = 200;
   const INPUT_BACKOFF_MAX_MS = 5_000;
+  // Wave 1 §6 file-upload orphan timeout — receiver discards the
+  // partial buffer for an upload_id if no new chunk arrives within
+  // 60 s and `eof` hasn't been reached.
+  const FILE_UPLOAD_ORPHAN_MS = 60_000;
+  // Wave 1 §6 file-upload integrity rule (1): allow up to 4 chunks
+  // ahead of the expected `seq` to absorb in-flight reordering. Beyond
+  // that we drop the upload and warn.
+  const FILE_UPLOAD_REORDER_AHEAD = 4;
+  // Wave 1 §6 sanitisation: truncate the file name to 255 bytes after
+  // stripping path separators / control chars.
+  const FILE_UPLOAD_NAME_MAX_BYTES = 255;
 
   // -------- log -------------------------------------------------------
 
@@ -125,7 +136,8 @@
    *              inputRelay: InputRelay | null, statsRelay: StatsRelay | null,
    *              cdp: CDPClient | null,
    *              cursorEmitter: CursorEmitter | null,
-   *              clipboardChannel: ClipboardChannel | null }} Session */
+   *              clipboardChannel: ClipboardChannel | null,
+   *              fileUploadReceiver: FileUploadReceiver | null }} Session */
   /** @type {Session | null} */
   let active = null;
   let heartbeatTimer = null;
@@ -899,6 +911,274 @@
     }
   }
 
+  // Wave 1 §6 — FileUploadReceiver (portal→chromeless, one-way).
+  //
+  // The portal-side B3 producer chunks each upload (≤64 KiB raw bytes
+  // per chunk, base64-encoded into the JSON envelope) and pumps over
+  // the `file-upload` DC; we reassemble per `upload_id` and call CDP
+  // `DOM.setFileInputFiles` against the focused `<input type=file>`
+  // when `eof: true` arrives.
+  //
+  // Validation per contract §6:
+  //   1. seq monotonic non-decreasing per upload_id (allow 4-ahead).
+  //   2. total constant across an upload_id.
+  //   3. eof: true ⇔ seq == total - 1.
+  //   4. name sanitised (path separators / NUL / control chars
+  //      stripped, truncated to 255 bytes).
+  //
+  // Orphan timeout: 60 s of no new chunk → discard buffer + warn.
+  class FileUploadReceiver {
+    constructor(dc, cdp) {
+      this.dc = dc;
+      this.cdp = cdp;
+      /** @type {Map<string, {chunks: Map<number, Uint8Array>, total: number, name: string, mime: string, expected: number, totalBytes: number, lastSeen: number, timer: number | null}>} */
+      this.uploads = new Map();
+      dc.addEventListener("close", () => this.dispose("dc closed"));
+      dc.addEventListener("error", (e) => log("warn", "file-upload data-channel error",
+        String((e && e.error?.message) || e)));
+      dc.addEventListener("message", (ev) => this.onChunk(ev.data));
+    }
+
+    static sanitiseName(raw) {
+      if (typeof raw !== "string") return "upload.bin";
+      // Strip path separators, NUL, and other control characters.
+      // eslint-disable-next-line no-control-regex
+      let s = raw.replace(/[\\\/\x00-\x1f\x7f]/g, "_");
+      // Disallow ".." segments and leading dots that produce hidden files.
+      s = s.replace(/\.\.+/g, "_");
+      s = s.replace(/^\.+/, "");
+      if (!s) s = "upload.bin";
+      // Truncate to 255 BYTES (post-UTF-8 encode), not 255 chars.
+      const enc = new TextEncoder();
+      let bytes = enc.encode(s);
+      if (bytes.length <= FILE_UPLOAD_NAME_MAX_BYTES) return s;
+      // Walk back from the truncation point until we land on a valid
+      // UTF-8 boundary so we don't emit a half-codepoint.
+      let cutoff = FILE_UPLOAD_NAME_MAX_BYTES;
+      while (cutoff > 0 && (bytes[cutoff] & 0xc0) === 0x80) cutoff--;
+      return new TextDecoder().decode(bytes.slice(0, cutoff));
+    }
+
+    static base64ToBytes(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    onChunk(raw) {
+      if (typeof raw !== "string") {
+        log("warn", "file-upload: non-string frame, dropping");
+        return;
+      }
+      let env;
+      try { env = JSON.parse(raw); }
+      catch (err) { log("warn", "file-upload: malformed JSON", String(err)); return; }
+      const v = env?.v;
+      if (v !== 1) {
+        log("warn", "webrtc_dc_file_upload_unsupported_version", { received: v });
+        return;
+      }
+      const c = env?.chunk;
+      if (!c || typeof c !== "object") return;
+      const upload_id = String(c.upload_id ?? "");
+      const seq = Number(c.seq);
+      const total = Number(c.total);
+      const eof = !!c.eof;
+      const name = FileUploadReceiver.sanitiseName(c.name);
+      const mime = typeof c.mime === "string" && c.mime ? c.mime : "application/octet-stream";
+      if (!upload_id) {
+        log("warn", "file-upload: missing upload_id, dropping chunk");
+        return;
+      }
+      if (!Number.isInteger(seq) || seq < 0 ||
+          !Number.isInteger(total) || total <= 0) {
+        log("warn", "file-upload: bad seq/total, dropping",
+            { upload_id, seq, total });
+        return;
+      }
+      // Validation rule §6.3: eof ⇔ seq == total - 1.
+      if (eof !== (seq === total - 1)) {
+        log("warn", "file-upload: eof/seq mismatch, dropping upload",
+            { upload_id, seq, total, eof });
+        this.discard(upload_id);
+        return;
+      }
+      let entry = this.uploads.get(upload_id);
+      if (!entry) {
+        entry = {
+          chunks: new Map(),
+          total, name, mime,
+          expected: 0,
+          totalBytes: 0,
+          lastSeen: Date.now(),
+          timer: null,
+        };
+        this.uploads.set(upload_id, entry);
+      } else if (entry.total !== total) {
+        log("warn", "file-upload: total mismatch across chunks, dropping",
+            { upload_id, prev_total: entry.total, new_total: total });
+        this.discard(upload_id);
+        return;
+      }
+      // Validation rule §6.1: monotonic non-decreasing seq, with up
+      // to 4-ahead reorder window. We accept both seq < expected
+      // (duplicate retry) and seq within [expected, expected+4]
+      // (reorder); seq >= expected+5 means a hole we cannot close.
+      if (seq < entry.expected) {
+        // Duplicate/late chunk we already buffered & flushed past.
+        // Drop silently — the DC is reliable and ordered, so this
+        // is a redelivery the lower layer didn't suppress.
+        return;
+      }
+      if (seq > entry.expected + FILE_UPLOAD_REORDER_AHEAD) {
+        log("warn", "file-upload: seq jump beyond reorder window, dropping",
+            { upload_id, seq, expected: entry.expected });
+        this.discard(upload_id);
+        return;
+      }
+      let bytes;
+      try { bytes = FileUploadReceiver.base64ToBytes(String(c.data ?? "")); }
+      catch (err) { log("warn", "file-upload: base64 decode failed",
+                        { upload_id, seq, err: String(err) });
+                    this.discard(upload_id); return; }
+      // Don't double-store a chunk we already received.
+      if (!entry.chunks.has(seq)) {
+        entry.chunks.set(seq, bytes);
+        entry.totalBytes += bytes.length;
+      }
+      // Slide the expected pointer past contiguous chunks we now have.
+      while (entry.chunks.has(entry.expected)) entry.expected++;
+      entry.lastSeen = Date.now();
+      this.armOrphanTimer(upload_id);
+      // §6.3 — when we see eof and `expected` has advanced past it,
+      // we have everything in seq order. (If reorder buffered chunks
+      // higher than `expected` are still missing, expected won't have
+      // reached total yet and we wait.)
+      if (eof && entry.expected >= total) {
+        this.complete(upload_id);
+      }
+    }
+
+    armOrphanTimer(upload_id) {
+      const entry = this.uploads.get(upload_id);
+      if (!entry) return;
+      if (entry.timer !== null) clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => {
+        const e2 = this.uploads.get(upload_id);
+        if (!e2) return;
+        log("warn", "file-upload: orphan timeout, discarding",
+            { upload_id, name: e2.name, received_chunks: e2.chunks.size,
+              expected_total: e2.total });
+        this.discard(upload_id);
+      }, FILE_UPLOAD_ORPHAN_MS);
+    }
+
+    discard(upload_id) {
+      const entry = this.uploads.get(upload_id);
+      if (entry) {
+        if (entry.timer !== null) clearTimeout(entry.timer);
+        // Drop chunk byte references so the GC can reclaim memory.
+        entry.chunks.clear();
+      }
+      this.uploads.delete(upload_id);
+    }
+
+    async complete(upload_id) {
+      const entry = this.uploads.get(upload_id);
+      if (!entry) return;
+      if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
+      // Concatenate buffered chunks in seq order.
+      const merged = new Uint8Array(entry.totalBytes);
+      let offset = 0;
+      for (let i = 0; i < entry.total; i++) {
+        const chunk = entry.chunks.get(i);
+        if (!chunk) {
+          log("warn", "file-upload: missing chunk at completion, discarding",
+              { upload_id, missing_seq: i });
+          this.discard(upload_id);
+          return;
+        }
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      // Re-encode to base64 for CDP DOM.setFileInputFiles? No —
+      // setFileInputFiles wants on-disk paths, NOT bytes. v1 takes
+      // the practical fallback per the architect's brief: write the
+      // file via Runtime.evaluate using a Blob → DataTransferItem
+      // pipeline against the focused <input type=file>. This avoids
+      // touching the disk and matches B3's expectation that the
+      // bytes drive the input directly.
+      //
+      // The Runtime.evaluate path uses the page's File constructor
+      // and a synthetic DataTransfer to assemble FileList. Many
+      // pages read input.files in a `change` handler, so we
+      // dispatch a synthetic 'change' event after assignment.
+      try {
+        const b64 = (() => {
+          let bin = "";
+          for (let i = 0; i < merged.length; i++) bin += String.fromCharCode(merged[i]);
+          return btoa(bin);
+        })();
+        // Build a JS expression that:
+        //   1. Locates the focused <input type=file>; falls back to
+        //      the first such input on the page if no file input has
+        //      focus. Returns "no-input" when neither exists.
+        //   2. Decodes the base64 payload into a Uint8Array.
+        //   3. Constructs a File and a DataTransfer; assigns
+        //      input.files; dispatches `input` and `change`.
+        const expr = `(() => {
+          try {
+            let inp = document.activeElement;
+            if (!(inp instanceof HTMLInputElement) || inp.type !== "file") {
+              inp = document.querySelector('input[type="file"]');
+            }
+            if (!inp) return "no-input";
+            const bin = atob(${JSON.stringify(b64)});
+            const buf = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+            const file = new File([buf], ${JSON.stringify(entry.name)}, { type: ${JSON.stringify(entry.mime)} });
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            inp.files = dt.files;
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            inp.dispatchEvent(new Event("change", { bubbles: true }));
+            return "ok";
+          } catch (e) { return "err:" + (e && e.message || e); }
+        })()`;
+        const res = await this.cdp.send("Runtime.evaluate", {
+          expression: expr,
+          awaitPromise: false,
+          returnByValue: true,
+        });
+        const out = res?.result?.value;
+        if (out === "ok") {
+          log("info", "file-upload completed",
+              { upload_id, name: entry.name, mime: entry.mime,
+                total_bytes: entry.totalBytes });
+        } else if (out === "no-input") {
+          log("warn", "file-upload: no <input type=file> focused/available, dropping",
+              { upload_id, name: entry.name });
+        } else {
+          log("warn", "file-upload: page-side apply failed",
+              { upload_id, result: String(out) });
+        }
+      } catch (err) {
+        log("warn", "file-upload: CDP apply failed",
+            { upload_id, err: String(err) });
+      } finally {
+        this.discard(upload_id);
+      }
+    }
+
+    dispose(reason) {
+      for (const upload_id of Array.from(this.uploads.keys())) {
+        this.discard(upload_id);
+      }
+      log("info", `file-upload receiver disposed: ${reason}`);
+    }
+  }
+
   // T81 — passthrough sink. Lazily creates a hidden <video>/<audio>
   // for diagnostic visibility. The actual v4l2-writer / pulse sink
   // is a Phase 4 follow-up; we keep this seam so the page can route
@@ -936,6 +1216,9 @@
     }
     if (active.clipboardChannel) {
       try { active.clipboardChannel.dispose("teardown"); } catch { /* ignore */ }
+    }
+    if (active.fileUploadReceiver) {
+      try { active.fileUploadReceiver.dispose("teardown"); } catch { /* ignore */ }
     }
     if (active.cdp) {
       try { active.cdp.close(); } catch { /* ignore */ }
@@ -1212,17 +1495,19 @@
     // in case future code paths add channels remotely).
     const inputDC  = pc.createDataChannel("input",  { ordered: true });
     const statsDC  = pc.createDataChannel("stats",  { ordered: true });
-    // Wave 1 §2: new DataChannel labels. Labels are exact and case-
-    // sensitive — any drift silently routes to the portal's
+    // Wave 1 §2: three new DataChannel labels. Labels are exact and
+    // case-sensitive — any drift silently routes to the portal's
     // `other =>` log-and-drop arm. `cursor` is one-way emit, `stats`-
-    // shaped JSON envelopes; `clipboard` is bidirectional with
-    // per-session monotonic seq counters; `file-upload` lands in a
-    // subsequent commit.
-    const cursorDC    = pc.createDataChannel("cursor",    { ordered: true });
-    const clipboardDC = pc.createDataChannel("clipboard", { ordered: true });
+    // shaped JSON envelopes; `clipboard` is bidirectional with per-
+    // session monotonic seq counters; `file-upload` is one-way
+    // receive with chunk reassembly per upload_id.
+    const cursorDC     = pc.createDataChannel("cursor",      { ordered: true });
+    const clipboardDC  = pc.createDataChannel("clipboard",   { ordered: true });
+    const fileUploadDC = pc.createDataChannel("file-upload", { ordered: true });
     log("info", "created data channels", {
       input: inputDC.id, stats: statsDC.id,
       cursor: cursorDC.id, clipboard: clipboardDC.id,
+      file_upload: fileUploadDC.id,
     });
     const inputRelay = new InputRelay(inputDC, INPUT_BRIDGE_URL);
     const statsRelay = new StatsRelay(statsDC, METRICS_SIDECAR_URL);
@@ -1236,21 +1521,27 @@
     let cdp = null;
     let cursorEmitter = null;
     let clipboardChannel = null;
+    let fileUploadReceiver = null;
     if (!WAVE1_DISABLED) {
       cdp = new CDPClient();
       cdp.connect(CDP_BASE_URL).then(() => {
         log("ok", "CDP connected for Wave 1 channels", { base: CDP_BASE_URL });
-        cursorEmitter    = new CursorEmitter(cursorDC, cdp);
-        clipboardChannel = new ClipboardChannel(clipboardDC, cdp);
+        cursorEmitter      = new CursorEmitter(cursorDC, cdp);
+        clipboardChannel   = new ClipboardChannel(clipboardDC, cdp);
+        fileUploadReceiver = new FileUploadReceiver(fileUploadDC, cdp);
         if (active) {
           active.cdp = cdp;
           active.cursorEmitter = cursorEmitter;
           active.clipboardChannel = clipboardChannel;
+          active.fileUploadReceiver = fileUploadReceiver;
         }
         // Install probes + bindings. Each install is independent —
         // a clipboard install failure shouldn't prevent cursor.
         cursorEmitter.install();
         clipboardChannel.install();
+        // FileUploadReceiver doesn't inject any page-side probe; it
+        // just listens for inbound DC messages and uses CDP for the
+        // landing call. No install step needed.
       }).catch((err) => {
         log("warn", "CDP connect failed; Wave 1 channels will stay dormant",
             String(err));
@@ -1263,7 +1554,7 @@
 
     active = {
       ws, pc, stream, inputRelay, statsRelay,
-      cdp, cursorEmitter, clipboardChannel,
+      cdp, cursorEmitter, clipboardChannel, fileUploadReceiver,
     };
 
     pc.onicecandidate = (ev) => {
