@@ -54,6 +54,17 @@
   // different port. Set to "off" to disable the relay entirely (used
   // by tests that don't want a 9100/connect refused log every second).
   const METRICS_SIDECAR_URL = params.get("metrics") || "http://localhost:9100/stats-update";
+  // Wave 2 A4 — chromeless-metrics-sidecar /webrtc-event endpoint
+  // (sibling of /stats-update). Receives lifecycle beacons:
+  // session_created, session_closed, ice.connected, ice.failed,
+  // dc.opened, plus the per-channel counters
+  // (cursor.coalesced, clipboard.unsupported_mime / stale_seq,
+  // file_upload.orphan_timeout / completed). Schema:
+  // /workspace/chemistry/elements/tools/chromeless/.triform/observability.yaml.
+  // Override via ?webrtc_metrics=... ; "off" disables emit (tests use
+  // this so the page doesn't spam connect-refused warnings when no
+  // sidecar is bound on :9100).
+  const WEBRTC_METRICS_URL = params.get("webrtc_metrics") || "http://localhost:9100/webrtc-event";
 
   // Wave 1 (chromeless-datachannel-contract.md §§4-6): three new
   // DataChannels — `cursor`, `clipboard`, `file-upload` — wired
@@ -137,7 +148,8 @@
    *              cdp: CDPClient | null,
    *              cursorEmitter: CursorEmitter | null,
    *              clipboardChannel: ClipboardChannel | null,
-   *              fileUploadReceiver: FileUploadReceiver | null }} Session */
+   *              fileUploadReceiver: FileUploadReceiver | null,
+   *              emitSessionClosed: (reason: string) => void }} Session */
   /** @type {Session | null} */
   let active = null;
   let heartbeatTimer = null;
@@ -343,6 +355,79 @@
       });
     }
   }
+
+  // -------- Wave 2 A4 — WebRTC observability emitter ---------------
+  //
+  // Fire-and-forget POSTs to the chromeless-metrics-sidecar
+  // /webrtc-event endpoint, one per lifecycle beacon. Mirrors the
+  // StatsRelay shape (rate-limited error log on burst, single line on
+  // recovery) but doesn't relay from a DataChannel — every emit is
+  // direct from the streamer-page code path that observed the event.
+  //
+  // The sidecar translates each event into a Prometheus counter or
+  // histogram increment. Names match
+  // chemistry/elements/tools/chromeless/.triform/observability.yaml.
+  //
+  // Disabling: pass ?webrtc_metrics=off to skip emit entirely. We never
+  // throw or block on a sidecar outage — observability is best-effort.
+
+  class MetricsEmitter {
+    constructor(url) {
+      this.url = url;
+      this.disabled = (url === "off" || !url);
+      this.consecutiveFailures = 0;
+      this.successCount = 0;
+      if (this.disabled) {
+        log("info", "webrtc metrics emit disabled (url=off)");
+      } else {
+        log("info", "webrtc metrics emit → sidecar", { url });
+      }
+    }
+
+    // emit posts a single {event, attrs} envelope. Fire-and-forget;
+    // we never await, never block streamer logic on the network.
+    emit(event, attrs) {
+      if (this.disabled) return;
+      const body = JSON.stringify({ event, attrs: attrs ?? {} });
+      fetch(this.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).then((resp) => {
+        if (!resp.ok) {
+          this.consecutiveFailures++;
+          if (this.consecutiveFailures === 1 || this.consecutiveFailures % 10 === 0) {
+            log("warn", "webrtc metrics POST non-2xx",
+                { event, status: resp.status, consecutive: this.consecutiveFailures });
+          }
+          return;
+        }
+        this.successCount++;
+        if (this.consecutiveFailures > 0) {
+          log("info", "webrtc metrics emit recovered",
+              { after_failures: this.consecutiveFailures });
+          this.consecutiveFailures = 0;
+        }
+      }).catch((err) => {
+        this.consecutiveFailures++;
+        if (this.consecutiveFailures === 1 || this.consecutiveFailures % 10 === 0) {
+          // console.warn (not log()) — we don't want to flood the
+          // page-side log overlay every second when :9100 is down.
+          // The first failure and every tenth thereafter still surface.
+          console.warn("[streamer warn] webrtc metrics POST failed",
+              { event, err: String(err), consecutive: this.consecutiveFailures });
+        }
+      });
+    }
+  }
+
+  // Module-scope singleton so the emitter classes (CursorEmitter,
+  // ClipboardChannel, FileUploadReceiver) and the start() session
+  // bootstrap can all reach it without threading it through every
+  // constructor. Created on first start() call below.
+  /** @type {MetricsEmitter | null} */
+  let metrics = null;
 
   // -------- Wave 1 — CDP client + new channel emitters/receivers ----
   //
@@ -653,6 +738,12 @@
     queue(payload) {
       if (this.failed) return;
       // Drop-stale-on-coalesce: replace whatever is queued.
+      // Wave 2 A4: count each coalesce so dashboards can quantify how
+      // often backpressure replaces an unflushed payload (high-volume
+      // signal that the cursor probe outpaces its DataChannel drain).
+      if (this.pendingPayload !== null && metrics) {
+        metrics.emit("chromeless.webrtc.dc.cursor.coalesced", {});
+      }
       this.pendingPayload = payload;
       if (this.flushPending) return;
       this.flushPending = true;
@@ -858,6 +949,10 @@
         // Stale. Per contract §5: drop silently with DEBUG log.
         log("info", "clipboard inbound stale; dropping",
             { seq, last_seen: this.lastSeenInboundSeq });
+        // Wave 2 A4 — counter signals seq protocol drift (typically a
+        // late-arriving retry or a portal-side bug emitting out of
+        // order; should be near-zero in steady state).
+        if (metrics) metrics.emit("chromeless.webrtc.dc.clipboard.stale_seq", {});
         return;
       }
       const mime = cb.mime;
@@ -866,6 +961,10 @@
             { mime });
         // Still advance lastSeen so we don't replay it on a re-emit.
         this.lastSeenInboundSeq = seq;
+        // Wave 2 A4 — flag MIME the contract doesn't support; non-zero
+        // indicates a portal-side B2 producer trying to send something
+        // outside the agreed (text/plain | text/html) set.
+        if (metrics) metrics.emit("chromeless.webrtc.dc.clipboard.unsupported_mime", { mime: String(mime ?? "") });
         return;
       }
       let text;
@@ -1070,6 +1169,13 @@
         log("warn", "file-upload: orphan timeout, discarding",
             { upload_id, name: e2.name, received_chunks: e2.chunks.size,
               expected_total: e2.total });
+        // Wave 2 A4 — orphan timeout fires when the portal abandons an
+        // upload mid-stream; non-zero indicates flaky DataChannel or a
+        // portal-side bug (B3 producer not driving to eof).
+        if (metrics) metrics.emit("chromeless.webrtc.dc.file_upload.orphan_timeout", {
+          received_chunks: e2.chunks.size,
+          expected_total: e2.total,
+        });
         this.discard(upload_id);
       }, FILE_UPLOAD_ORPHAN_MS);
     }
@@ -1152,20 +1258,35 @@
           returnByValue: true,
         });
         const out = res?.result?.value;
+        // Wave 2 A4 — record outcome distribution for dashboards.
+        // Result values: "ok" (file applied to focused input),
+        // "no-input" (page had no <input type=file>), or "err" (any
+        // page-side throw). The CDP-call-failed path below also emits
+        // "err" via the catch block.
+        let result;
         if (out === "ok") {
           log("info", "file-upload completed",
               { upload_id, name: entry.name, mime: entry.mime,
                 total_bytes: entry.totalBytes });
+          result = "ok";
         } else if (out === "no-input") {
           log("warn", "file-upload: no <input type=file> focused/available, dropping",
               { upload_id, name: entry.name });
+          result = "no-input";
         } else {
           log("warn", "file-upload: page-side apply failed",
               { upload_id, result: String(out) });
+          result = "err";
         }
+        if (metrics) metrics.emit("chromeless.webrtc.dc.file_upload.completed", {
+          result, total_bytes: entry.totalBytes,
+        });
       } catch (err) {
         log("warn", "file-upload: CDP apply failed",
             { upload_id, err: String(err) });
+        if (metrics) metrics.emit("chromeless.webrtc.dc.file_upload.completed", {
+          result: "err", total_bytes: entry.totalBytes,
+        });
       } finally {
         this.discard(upload_id);
       }
@@ -1202,6 +1323,14 @@
   function teardown(reason) {
     if (!active) return;
     log("info", `tearing down: ${reason}`);
+    // Wave 2 A4 — emit session_closed BEFORE we dispose anything
+    // session-bound. The emit is fire-and-forget against the local
+    // sidecar; it doesn't depend on the PC, so calling it first keeps
+    // the duration measurement honest (between session_created and
+    // start of teardown, not the end of a multi-step disposal).
+    if (typeof active.emitSessionClosed === "function") {
+      try { active.emitSessionClosed(reason); } catch { /* never block teardown */ }
+    }
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     if (active.inputRelay) {
       try { active.inputRelay.close(); } catch { /* ignore */ }
@@ -1302,6 +1431,13 @@
   async function start() {
     log("info", "streamer boot", { signaling: SIGNALING_URL, session: SESSION_ID, fps: FRAMERATE });
 
+    // Wave 2 A4: lazily create the per-process metrics emitter on the
+    // first start() call. Nothing emits before this point; a
+    // pre-PeerConnection emit would have nowhere to flush to anyway.
+    if (!metrics) {
+      metrics = new MetricsEmitter(WEBRTC_METRICS_URL);
+    }
+
     // 1. Capture the display + audio.
     /** @type {MediaStream} */
     let stream;
@@ -1383,16 +1519,109 @@
     // the PC on window has no cross-origin implications.
     window.pc = pc;
 
+    // Wave 2 A4 — per-PC session lifecycle bookkeeping.
+    //
+    // sessionId is a UUID minted on this side so dashboards can pivot
+    // on a label that's stable across the session_created/session_closed
+    // pair. SESSION_ID (the URL param) is a logical session identifier
+    // for the broker; we keep them separate because the streamer can
+    // re-attach to a broker session multiple times during a single
+    // page life and each PC instance is observability-distinct.
+    const sessionId = (() => {
+      // crypto.randomUUID is available in Chromium 92+; the streamer
+      // runs on 147 so this is safe. Fallback path is for tests that
+      // mock crypto.
+      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+      }
+      return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    })();
+    let sessionStartedAt = null;       // ms timestamp of session_created emit
+    let sessionCreated = false;        // emit-once latch
+    let firstDCOpenedSeen = false;     // handshake_ms attached to first dc.opened only
+    let iceFailedDebounce = null;      // setTimeout handle for the 3 s ice.failed debounce
+
+    function emitSessionCreated(reason) {
+      if (sessionCreated) return;
+      sessionCreated = true;
+      sessionStartedAt = Date.now();
+      log("info", "webrtc session_created", { sessionId, reason });
+      if (metrics) {
+        metrics.emit("chromeless.webrtc.session_created", {
+          session_id: sessionId, signaling_session: SESSION_ID, reason,
+        });
+      }
+    }
+
+    function emitSessionClosed(reason) {
+      if (!sessionCreated) return; // never opened → never closes
+      const durationMs = sessionStartedAt !== null
+        ? Math.max(0, Date.now() - sessionStartedAt) : null;
+      log("info", "webrtc session_closed", { sessionId, reason, duration_ms: durationMs });
+      if (metrics) {
+        metrics.emit("chromeless.webrtc.session_closed", {
+          session_id: sessionId,
+          duration_ms: durationMs,
+          reason,
+        });
+      }
+      // Latch: a second close attempt is a no-op.
+      sessionStartedAt = null;
+      sessionCreated = false;
+    }
+
     pc.onsignalingstatechange   = () => log("info", `signalingState=${pc.signalingState}`);
     pc.oniceconnectionstatechange = () => {
-      const lvl = pc.iceConnectionState === "failed" ? "err" : "info";
-      log(lvl, `iceConnectionState=${pc.iceConnectionState}`);
+      const state = pc.iceConnectionState;
+      const lvl = state === "failed" ? "err" : "info";
+      log(lvl, `iceConnectionState=${state}`);
+      // Wave 2 A4 — dimension-less counters per D4-YAML.
+      if (state === "connected" || state === "completed") {
+        // Cancel any pending failed-debounce; ICE recovered.
+        if (iceFailedDebounce !== null) {
+          clearTimeout(iceFailedDebounce);
+          iceFailedDebounce = null;
+        }
+        if (metrics) {
+          metrics.emit("chromeless.webrtc.ice.connected", {
+            session_id: sessionId, ice_state: state,
+          });
+        }
+      } else if (state === "failed" || state === "disconnected") {
+        // Debounce ~3 s — disconnected often recovers without
+        // intervention, and the YAML's failure semantic is "stayed
+        // past the recovery window". Failed is permanent on Chromium
+        // but we route both through the same debounce for consistency.
+        if (iceFailedDebounce === null) {
+          iceFailedDebounce = setTimeout(() => {
+            iceFailedDebounce = null;
+            const finalState = pc.iceConnectionState;
+            if (finalState !== "connected" && finalState !== "completed") {
+              if (metrics) {
+                metrics.emit("chromeless.webrtc.ice.failed", {
+                  session_id: sessionId,
+                  ice_state: finalState,
+                  reason: state, // the state that triggered the debounce
+                });
+              }
+            }
+          }, 3000);
+        }
+      }
     };
     pc.onicegatheringstatechange = () => log("info", `iceGatheringState=${pc.iceGatheringState}`);
     pc.onconnectionstatechange = () => {
-      const lvl = pc.connectionState === "failed" ? "err" : "info";
-      log(lvl, `connectionState=${pc.connectionState}`);
-      if (pc.connectionState === "failed") teardown("pc failed");
+      const state = pc.connectionState;
+      const lvl = state === "failed" ? "err" : "info";
+      log(lvl, `connectionState=${state}`);
+      // Wave 2 A4 — first transition to "connected" is the session
+      // lifecycle marker. RTCPeerConnection's connected state can flap
+      // back to "connecting"/"disconnected"/"failed"; we only emit
+      // session_created once per PC.
+      if (state === "connected") {
+        emitSessionCreated("connectionState=connected");
+      }
+      if (state === "failed") teardown("pc failed");
     };
 
     // The streamer is the offerer (T34) and creates the "input"
@@ -1509,6 +1738,40 @@
       cursor: cursorDC.id, clipboard: clipboardDC.id,
       file_upload: fileUploadDC.id,
     });
+
+    // Wave 2 A4 — per-DC `open` listener emits dc.opened for every
+    // label so the YAML-declared chromeless_webrtc_dc_opened_count
+    // counter and the chromeless_webrtc_signaling_handshake_ms
+    // histogram (on the FIRST dc.opened only) populate.
+    //
+    // The handshake duration is measured from session_created (PC's
+    // first connectionState=connected) to the first DC's `open`
+    // event. With trickle-ICE that gap is typically 200-800 ms; a
+    // long tail signals slow ICE selection or signaling stalls.
+    const dcStartedAt = Date.now();
+    function wireDCOpenEmit(dc, label) {
+      dc.addEventListener("open", () => {
+        const attrs = { label, session_id: sessionId };
+        if (!firstDCOpenedSeen) {
+          firstDCOpenedSeen = true;
+          // Prefer measuring from session_created time when available
+          // (a DC can open before the PC's connectionState transitions
+          // to `connected` because data-channel readiness rides the
+          // SCTP handshake, which beats the bundle ICE check). When
+          // session_created hasn't fired yet, fall back to a
+          // page-relative measure.
+          const baseT = sessionStartedAt ?? dcStartedAt;
+          attrs.handshake_ms = Math.max(0, Date.now() - baseT);
+        }
+        if (metrics) metrics.emit("chromeless.webrtc.dc.opened", attrs);
+      });
+    }
+    wireDCOpenEmit(inputDC,      "input");
+    wireDCOpenEmit(statsDC,      "stats");
+    wireDCOpenEmit(cursorDC,     "cursor");
+    wireDCOpenEmit(clipboardDC,  "clipboard");
+    wireDCOpenEmit(fileUploadDC, "file-upload");
+
     const inputRelay = new InputRelay(inputDC, INPUT_BRIDGE_URL);
     const statsRelay = new StatsRelay(statsDC, METRICS_SIDECAR_URL);
 
@@ -1555,6 +1818,11 @@
     active = {
       ws, pc, stream, inputRelay, statsRelay,
       cdp, cursorEmitter, clipboardChannel, fileUploadReceiver,
+      // Wave 2 A4 — the closeover-bound emitSessionClosed lets the
+      // module-scope teardown() pair every session_created with
+      // exactly one session_closed. Idempotent (the latch inside the
+      // closure no-ops a second call).
+      emitSessionClosed,
     };
 
     pc.onicecandidate = (ev) => {
