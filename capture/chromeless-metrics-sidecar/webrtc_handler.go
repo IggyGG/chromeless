@@ -210,11 +210,21 @@ func (e *webrtcEventEnvelope) attrFloat64(key string) (float64, bool) {
 	return 0, false
 }
 
-// applyWebRTCEvent translates one envelope into Prometheus updates.
+// applyWebRTCEvent translates one envelope into Prometheus updates,
+// then forwards a parallel OTLP-logs emit so the dot-named events
+// reach Triform's event bus / activity feed for free (FU #28).
+//
 // Returns nil on success (including unknown event names — we accept
 // future-event compatibility silently rather than 400-ing a deploy that
 // shipped a newer streamer.js); errors only fire on malformed input.
-func applyWebRTCEvent(env *webrtcEventEnvelope, log *slog.Logger) error {
+//
+// The two emit paths are deliberately parallel and independent:
+//   - Prometheus counters serve the scrape-based metrics path used by
+//     the existing dashboards and SLO alerts.
+//   - OTLP logs serve the event-stream path Triform's activity feed
+//     consumes. A nil/no-op `otlp` (when the env isn't set) collapses
+//     to a fast drop so dev compose doesn't pay the cost.
+func applyWebRTCEvent(env *webrtcEventEnvelope, log *slog.Logger, otlp *OTLPLogger) error {
 	if env == nil {
 		return errors.New("nil envelope")
 	}
@@ -223,6 +233,18 @@ func applyWebRTCEvent(env *webrtcEventEnvelope, log *slog.Logger) error {
 	}
 
 	elementID := elementIDLabel()
+
+	// Forward every event to OTLP-logs, regardless of whether it has a
+	// matching Prometheus counter. The activity feed wants the dot-named
+	// stream verbatim (including events that the metrics path drops
+	// silently because they're broker-side, like replay.hit/miss). We
+	// stamp element_id so consumers can filter without re-deriving it.
+	otlpAttrs := map[string]any{}
+	for k, v := range env.Attrs {
+		otlpAttrs[k] = v
+	}
+	otlpAttrs["element_id"] = elementID
+	otlp.Emit(env.Event, otlpAttrs)
 
 	switch env.Event {
 	case "chromeless.webrtc.session_created":
@@ -304,7 +326,11 @@ func applyWebRTCEvent(env *webrtcEventEnvelope, log *slog.Logger) error {
 // webrtcEventHandler returns the http.HandlerFunc to register at
 // /webrtc-event. Mirrors the `/stats-update` handler shape but doesn't
 // need per-session state — every event is independent.
-func webrtcEventHandler(log *slog.Logger) http.HandlerFunc {
+//
+// `otlp` may be nil; the handler treats it as a no-op (the OTLPLogger
+// type itself also handles nil receivers safely, but accepting nil here
+// keeps the wiring at main() simple when env isn't set).
+func webrtcEventHandler(log *slog.Logger, otlp *OTLPLogger) http.HandlerFunc {
 	const maxBody = 16 * 1024 // 16 KiB; one event envelope is < 1 KiB.
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -326,7 +352,7 @@ func webrtcEventHandler(log *slog.Logger) http.HandlerFunc {
 			http.Error(w, "decode: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := applyWebRTCEvent(&env, log); err != nil {
+		if err := applyWebRTCEvent(&env, log, otlp); err != nil {
 			http.Error(w, fmt.Sprintf("apply: %v", err), http.StatusBadRequest)
 			return
 		}
