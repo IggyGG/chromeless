@@ -152,10 +152,16 @@ if [[ -z "$TAG" ]]; then
   fi
 fi
 
-# Defensive guard: never let the user typo --tag into a known prod tag.
+# Defensive guard: never let the user typo --tag into a prod-shape
+# tag. The shape (not the literal name) is what matters — the operator
+# kaniko Job pushes cr7727-* shapes, Flux ImageRepository feeds
+# release*/main*/prod*/latest/stable, and all of those are off-limits
+# from this dev fast-path. Glob-matches catch new variants
+# (cr7727-release, cr7727-v2.1.0, release-2026-05, prod-eu-west-1, …)
+# without us having to enumerate them as they appear.
 case "$TAG" in
-  cr7727-sw|cr7727-aura*|latest|main|prod|stable)
-    red "Refusing to use prod-shaped tag '$TAG'. dev-* tags only."
+  cr7727-*|release*|prod*|main*|latest|stable)
+    red "Refusing to use tag '$TAG' — matches a production-shape tag (cr7727-*/release*/prod*/main*/latest/stable). dev-* tags only."
     exit 2
     ;;
 esac
