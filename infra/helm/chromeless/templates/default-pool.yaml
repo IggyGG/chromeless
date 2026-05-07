@@ -54,8 +54,7 @@ spec:
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
-          type: Localhost
-          localhostProfile: chromeless.json
+          type: RuntimeDefault
       {{- with .Values.images.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
