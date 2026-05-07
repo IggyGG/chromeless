@@ -25,6 +25,11 @@ namespace:
 # rest of the deployment, which is unusual.
 region: ""
 
+observability:
+  # Optional OTLP/HTTP logs endpoint for chromeless.webrtc.* activity events.
+  # Leave empty to keep the metrics sidecar in Prometheus-only mode.
+  otlpLogsEndpoint: ""
+
 images:
   # Override these per-environment with --set images.<component>.tag=...
   # to point at the version you actually want to ship.

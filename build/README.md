@@ -56,15 +56,16 @@ forgejo registry. Registry auth lives there, not here.
 
 | Step | What | Cold | Warm sccache |
 |------|------|------|--------------|
-| 1/9 gclient sync       | `gclient config` + `gclient sync --no-history --shallow` to the pinned branch-head. ~30 GB checkout (vs ~80 GB with full history). | 30–60 min | 0–5 min if SKIP_FETCH=1 |
-| 2/9 symlink            | `ln -s ${CHROMELESS_REPO} ${CHROMIUM_SRC}/src/cloud-browser`. | <1 s | <1 s |
-| 3/9 apply patches      | Delegates to `capture/build-integration/build.sh apply-patches` (T49). | <5 s | <5 s |
-| 4/9 sccache setup      | `sccache --start-server` + env vars. | <5 s | <5 s |
-| 5/9 gn gen             | Delegates to T49's wrapper. | 1–3 min | 1–3 min |
-| 6/9 autoninja          | The big one — `cloud_browser_worker` + the two test targets. **The single biggest variable.** | **3–6 h** | **45–90 min** |
-| 7/9 unit tests         | `cloud_browser_encoder_unittests` + `cloud_browser_framesink_capturer_unittests`. ~52 tests per T97 §5. | 1–2 min | 1–2 min |
-| 8/9 package binary     | Strip + `tar --zstd -cf` into `/work/artifacts/`. | 1–2 min | 1–2 min |
-| 9/9 stage image context| Copies Dockerfile.runtime + supervisord.conf + launch-chromeless.sh into the kaniko context. | <5 s | <5 s |
+| 1/10 gclient sync       | `gclient config` + `gclient sync --no-history --shallow` to the pinned branch-head. ~30 GB checkout (vs ~80 GB with full history). | 30–60 min | 0–5 min if SKIP_FETCH=1 |
+| 2/10 symlink            | `ln -s ${CHROMELESS_REPO} ${CHROMIUM_SRC}/src/cloud-browser`. | <1 s | <1 s |
+| 3/10 apply patches      | Delegates to `capture/build-integration/build.sh apply-patches` (T49). | <5 s | <5 s |
+| 4/10 sccache setup      | `sccache --start-server` + env vars. | <5 s | <5 s |
+| 5/10 gn gen             | Delegates to T49's wrapper. | 1–3 min | 1–3 min |
+| 6/10 autoninja          | The big one — `cloud_browser_worker` + the two test targets. **The single biggest variable.** | **3–6 h** | **45–90 min** |
+| 7/10 unit tests         | `cloud_browser_encoder_unittests` + `cloud_browser_framesink_capturer_unittests`. ~52 tests per T97 §5. | 1–2 min | 1–2 min |
+| 8/10 package binary     | Strip + `tar --zstd -cf` into `/work/artifacts/`, then stage the worker plus ICU/GL runtime assets for the image. | 1–2 min | 1–2 min |
+| 9/10 stage image context| Copies Dockerfile.runtime, Phase 2 supervisord config, launcher, Pulse/devtools/lifecycle glue, and streamer assets into the kaniko context. | <5 s | <5 s |
+| 10/10 CDP validation    | Runs the cluster CDP validation Job against the just-built image before promotion. | 1–2 min | 1–2 min |
 | **Total**              |  | **4–8 h** | **~1 h** |
 
 T17 §4 numbers are the source of truth for the autoninja step. The

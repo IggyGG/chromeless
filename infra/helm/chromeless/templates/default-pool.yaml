@@ -134,6 +134,9 @@ spec:
             - { name: DEVTOOLS_URL, value: "http://127.0.0.1:9222" }
             - { name: METRICS_LISTEN, value: ":9100" }
             - { name: POLL_INTERVAL_S, value: "10" }
+            {{- if .Values.observability.otlpLogsEndpoint }}
+            - { name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, value: {{ .Values.observability.otlpLogsEndpoint | quote }} }
+            {{- end }}
             {{- $region := include "chromeless.region" (dict "context" . "component" "") }}
             {{- if $region }}
             - { name: CHROMELESS_REGION, value: {{ $region | quote }} }
