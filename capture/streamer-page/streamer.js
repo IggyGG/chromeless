@@ -135,12 +135,12 @@
       // Keep the legacy path working for non-absolute test URLs.
       const sep = withSession.includes("?") ? "&" : "?";
       const auth = token
-        ? `${sep}role=browser&token=${encodeURIComponent(token)}`
-        : "";
-      return `${withSession}${auth}`;
+        ? `role=browser&token=${encodeURIComponent(token)}`
+        : "role=browser";
+      return `${withSession}${sep}${auth}`;
     }
+    url.searchParams.set("role", "browser");
     if (token) {
-      url.searchParams.set("role", "browser");
       url.searchParams.set("token", token);
     }
     return url.toString();

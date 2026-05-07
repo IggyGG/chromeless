@@ -90,7 +90,11 @@ if [ -z "${CHROMELESS_BROWSER_BIN:-}" ]; then
 fi
 
 echo "[launch-chromium] session=${SESSION_ID} signaling=${SIGNALING_URL} fps=${STREAMER_FPS}" >&2
-echo "[launch-chromium] url=${STREAMER_URL}" >&2
+LOG_STREAMER_URL="${STREAMER_URL}"
+if [ -n "${SIGNALING_TOKEN}" ]; then
+    LOG_STREAMER_URL="${STREAMER_URL%%token=*}token=<redacted>"
+fi
+echo "[launch-chromium] url=${LOG_STREAMER_URL}" >&2
 echo "[launch-chromium] browser_bin=${CHROMELESS_BROWSER_BIN}" >&2
 
 open_streamer_after_devtools() {
