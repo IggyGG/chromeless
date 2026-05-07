@@ -174,9 +174,26 @@ for i in $(seq 1 "$SMOKE_READY_TIMEOUT_S"); do
 done
 [ "$ready" = "1" ] || fail "DevTools did not respond within ${SMOKE_READY_TIMEOUT_S}s"
 
-# ---------- 3. /json/version returns Chromium ---------------------------
+# ---------- 3. watchdog env propagation --------------------------------
 
-step "3. /json/version"
+step "3. watchdog env"
+WATCHDOG_LOG=""
+for i in $(seq 1 20); do
+    WATCHDOG_LOG=$(docker exec "$CONTAINER_ID" sh -c \
+        'cat /var/log/supervisor/idle-watchdog.log 2>/dev/null || true') \
+        || fail "reading idle-watchdog log failed"
+    if printf '%s\n' "$WATCHDOG_LOG" | grep -q 'idle_timeout=999999s'; then
+        log "idle-watchdog inherited IDLE_TIMEOUT_S=999999"
+        break
+    fi
+    sleep 1
+done
+printf '%s\n' "$WATCHDOG_LOG" | grep -q 'idle_timeout=999999s' \
+    || fail "idle-watchdog did not inherit IDLE_TIMEOUT_S=999999"
+
+# ---------- 4. /json/version returns Chromium ---------------------------
+
+step "4. /json/version"
 VERSION_JSON=$(docker exec "$CONTAINER_ID" curl -fsS \
     http://127.0.0.1:9222/json/version) \
     || fail "curl /json/version failed (HTTP non-200)"
@@ -191,9 +208,9 @@ print("  Browser:          " + str(data["Browser"]), file=sys.stderr)
 print("  Protocol-Version: " + str(data.get("Protocol-Version", "?")), file=sys.stderr)
 ' <<<"$VERSION_JSON" || fail "/json/version response did not contain Browser key"
 
-# ---------- 4. discover page target webSocketDebuggerUrl ---------------
+# ---------- 5. discover page target webSocketDebuggerUrl ---------------
 
-step "4. discover page target"
+step "5. discover page target"
 TARGETS_JSON=$(docker exec "$CONTAINER_ID" curl -fsS \
     http://127.0.0.1:9222/json) \
     || fail "curl /json failed"
@@ -210,14 +227,14 @@ print(pages[0]["webSocketDebuggerUrl"])
 ' <<<"$TARGETS_JSON") || fail "no page targets with webSocketDebuggerUrl"
 log "page target: $WS_URL"
 
-# ---------- 5+6. drive CDP inside the container ------------------------
+# ---------- 6+7. drive CDP inside the container ------------------------
 #
 # Bundled stdlib WebSocket client. Avoids any pip / apt dependency on the
 # in-container python3, so the smoke runs against a fresh image with no
 # network installs. The CDP wire is straightforward: text frames carrying
 # JSON, no fragmentation in practice from chromium DevTools.
 
-step "5. drive CDP (navigate + screenshot)"
+step "6. drive CDP (navigate + screenshot)"
 
 docker exec -i "$CONTAINER_ID" python3 - \
     "$WS_URL" "$SMOKE_NAVIGATE_URL" "$SCREENSHOT_IN_CONTAINER" "$SMOKE_LOAD_TIMEOUT_S" \
