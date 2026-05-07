@@ -78,7 +78,7 @@ func quietLoggerWebRTC() *slog.Logger {
 }
 
 func TestWebRTCEventHandler_RejectsNonPOST(t *testing.T) {
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	r := httptest.NewRequest(http.MethodGet, "/webrtc-event", nil)
 	w := httptest.NewRecorder()
 	h(w, r)
@@ -88,7 +88,7 @@ func TestWebRTCEventHandler_RejectsNonPOST(t *testing.T) {
 }
 
 func TestWebRTCEventHandler_RejectsMalformedJSON(t *testing.T) {
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
 	h(w, r)
@@ -98,7 +98,7 @@ func TestWebRTCEventHandler_RejectsMalformedJSON(t *testing.T) {
 }
 
 func TestWebRTCEventHandler_MissingEventName(t *testing.T) {
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(`{}`))
 	w := httptest.NewRecorder()
 	h(w, r)
@@ -110,7 +110,7 @@ func TestWebRTCEventHandler_MissingEventName(t *testing.T) {
 func TestWebRTCEventHandler_SessionCreated(t *testing.T) {
 	resetWebRTCMetrics()
 	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	body := `{"event":"chromeless.webrtc.session_created","attrs":{"session_id":"s1"}}`
 	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -126,7 +126,7 @@ func TestWebRTCEventHandler_SessionCreated(t *testing.T) {
 func TestWebRTCEventHandler_DCOpenedWithLabel(t *testing.T) {
 	resetWebRTCMetrics()
 	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 
 	// Mirror the streamer's firstDCOpenedSeen latch: handshake_ms is
 	// attached to the FIRST dc.opened event of the session only.
@@ -137,11 +137,11 @@ func TestWebRTCEventHandler_DCOpenedWithLabel(t *testing.T) {
 	// fails fast — the previous CollectAndCount > 0 assertion would
 	// have silently passed for any N >= 1.
 	type dcEvent struct {
-		label   string
-		withHM  bool
+		label  string
+		withHM bool
 	}
 	events := []dcEvent{
-		{label: "cursor", withHM: true},   // first → carries handshake_ms
+		{label: "cursor", withHM: true}, // first → carries handshake_ms
 		{label: "clipboard", withHM: false},
 		{label: "file-upload", withHM: false},
 	}
@@ -179,7 +179,7 @@ func TestWebRTCEventHandler_DCOpenedWithLabel(t *testing.T) {
 func TestWebRTCEventHandler_SessionClosedDuration(t *testing.T) {
 	resetWebRTCMetrics()
 	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	body := `{"event":"chromeless.webrtc.session_closed","attrs":{"duration_ms":12345}}`
 	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -205,7 +205,7 @@ func TestWebRTCEventHandler_SessionClosedDuration(t *testing.T) {
 func TestWebRTCEventHandler_SessionClosedNoDurationStillCountsCounter(t *testing.T) {
 	resetWebRTCMetrics()
 	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	body := `{"event":"chromeless.webrtc.session_closed","attrs":{"session_id":"s1"}}`
 	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -224,7 +224,7 @@ func TestWebRTCEventHandler_SessionClosedNoDurationStillCountsCounter(t *testing
 func TestWebRTCEventHandler_ICEFailed(t *testing.T) {
 	resetWebRTCMetrics()
 	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	body := `{"event":"chromeless.webrtc.ice.failed","attrs":{"reason":"timeout"}}`
 	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -240,7 +240,7 @@ func TestWebRTCEventHandler_ICEFailed(t *testing.T) {
 func TestWebRTCEventHandler_FileUploadCompletedResult(t *testing.T) {
 	resetWebRTCMetrics()
 	t.Setenv("CHROMELESS_ELEMENT_ID", "el-test")
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	for _, result := range []string{"ok", "no-input", "err"} {
 		body := `{"event":"chromeless.webrtc.dc.file_upload.completed","attrs":{"result":"` + result + `"}}`
 		r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
@@ -259,7 +259,7 @@ func TestWebRTCEventHandler_FileUploadCompletedResult(t *testing.T) {
 
 func TestWebRTCEventHandler_UnknownEventAccepted(t *testing.T) {
 	resetWebRTCMetrics()
-	h := webrtcEventHandler(quietLoggerWebRTC())
+	h := webrtcEventHandler(quietLoggerWebRTC(), nil)
 	body := `{"event":"chromeless.webrtc.future.thing.we.dont.know.yet"}`
 	r := httptest.NewRequest(http.MethodPost, "/webrtc-event", strings.NewReader(body))
 	w := httptest.NewRecorder()

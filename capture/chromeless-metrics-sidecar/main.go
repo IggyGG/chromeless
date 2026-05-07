@@ -399,13 +399,13 @@ func (d *devtoolsClient) evaluateGetStats(ctx context.Context, wsURL string) ([]
 // monotonic counter deltas (bytesSent, framesDropped, packetsLost) and
 // to expose those deltas as Prometheus metrics.
 type statsState struct {
-	prevBytesSent      map[string]uint64
-	prevFramesDropped  uint64
-	prevPacketsLost    uint64
-	haveBytesPrev      bool
-	haveFramesPrev     bool
-	havePacketsPrev    bool
-	prevSampleAt       time.Time
+	prevBytesSent     map[string]uint64
+	prevFramesDropped uint64
+	prevPacketsLost   uint64
+	haveBytesPrev     bool
+	haveFramesPrev    bool
+	havePacketsPrev   bool
+	prevSampleAt      time.Time
 }
 
 func newStatsState() *statsState {
@@ -700,6 +700,21 @@ func main() {
 		}
 	}()
 
+	// FU #28: OTLP-logs exporter for the chromeless.webrtc.* dot-named
+	// events. Same env-gating as tracing — a missing endpoint yields a
+	// no-op stub, so dev compose keeps a clean /metrics + /webrtc-event
+	// surface without hitting a non-existent collector.
+	otlpLogger, err := newOTLPLogger(traceCtx, version)
+	if err != nil {
+		logger.Warn("otlp logs init failed; continuing without log export", slog.Any("err", err))
+		otlpLogger = &OTLPLogger{} // safe no-op stub
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = otlpLogger.Shutdown(shutCtx)
+	}()
+
 	// Pre-register known label combinations so the metric series exist
 	// in /metrics output even before the first session runs. Without
 	// this, GaugeVec series are absent until WithLabelValues is first
@@ -747,7 +762,7 @@ func main() {
 	// /workspace/chemistry/elements/tools/chromeless/.triform/observability.yaml;
 	// the chromeless side and the physics side both honour the same
 	// `chromeless.webrtc.*` event names.
-	mux.HandleFunc("/webrtc-event", webrtcEventHandler(logger))
+	mux.HandleFunc("/webrtc-event", webrtcEventHandler(logger, otlpLogger))
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           mux,
