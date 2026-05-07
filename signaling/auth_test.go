@@ -123,49 +123,49 @@ func TestVerifyToken_Rejects(t *testing.T) {
 		wantSub   string
 	}{
 		{
-			name:    "missing token",
-			tok:     func() string { return "" },
-			sid:     "s", role: "client", wantSub: "missing",
+			name: "missing token",
+			tok:  func() string { return "" },
+			sid:  "s", role: "client", wantSub: "missing",
 		},
 		{
-			name:    "malformed (not 3 parts)",
-			tok:     func() string { return "aaa.bbb" },
-			sid:     "s", role: "client", wantSub: "malformed",
+			name: "malformed (not 3 parts)",
+			tok:  func() string { return "aaa.bbb" },
+			sid:  "s", role: "client", wantSub: "malformed",
 		},
 		{
-			name:    "bad signature",
-			tok:     func() string {
+			name: "bad signature",
+			tok: func() string {
 				_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
 				return signToken(otherPriv, good)
 			},
-			sid:  "s", role: "client", wantSub: "signature",
+			sid: "s", role: "client", wantSub: "signature",
 		},
 		{
-			name:    "expired",
-			tok:     func() string { return signToken(priv, Claims{Sub: "t", Sid: "s", Role: "client", Exp: 1_699_999_900}) },
-			sid:     "s", role: "client", wantSub: "expired",
+			name: "expired",
+			tok:  func() string { return signToken(priv, Claims{Sub: "t", Sid: "s", Role: "client", Exp: 1_699_999_900}) },
+			sid:  "s", role: "client", wantSub: "expired",
 		},
 		{
-			name:    "not yet valid (nbf in future)",
-			tok:     func() string {
+			name: "not yet valid (nbf in future)",
+			tok: func() string {
 				return signToken(priv, Claims{Sub: "t", Sid: "s", Role: "client", Exp: 1_700_001_000, Nbf: 1_700_000_500})
 			},
-			sid:  "s", role: "client", wantSub: "not yet valid",
+			sid: "s", role: "client", wantSub: "not yet valid",
 		},
 		{
-			name:    "sid mismatch",
-			tok:     func() string { return signToken(priv, good) },
-			sid:     "other-sid", role: "client", wantSub: "sid mismatch",
+			name: "sid mismatch",
+			tok:  func() string { return signToken(priv, good) },
+			sid:  "other-sid", role: "client", wantSub: "sid mismatch",
 		},
 		{
-			name:    "role mismatch",
-			tok:     func() string { return signToken(priv, good) },
-			sid:     "s", role: "browser", wantSub: "role mismatch",
+			name: "role mismatch",
+			tok:  func() string { return signToken(priv, good) },
+			sid:  "s", role: "browser", wantSub: "role mismatch",
 		},
 		{
-			name:    "tenant missing",
-			tok:     func() string { return signToken(priv, Claims{Sid: "s", Role: "client", Exp: 1_700_001_000}) },
-			sid:     "s", role: "client", wantSub: "tenant",
+			name: "tenant missing",
+			tok:  func() string { return signToken(priv, Claims{Sid: "s", Role: "client", Exp: 1_700_001_000}) },
+			sid:  "s", role: "client", wantSub: "tenant",
 		},
 	}
 	for _, tc := range cases {

@@ -46,29 +46,30 @@ var errRedisNotCompiled = errors.New(
 // build returns errRedisNotCompiled. To enable Redis:
 //
 //  1. `go get github.com/redis/go-redis/v9`
+//
 //  2. Replace the body below with:
 //
 //     import "github.com/redis/go-redis/v9"
 //
 //     func newRedisClient(addr string) (RedisClient, error) {
-//       opts := &redis.Options{Addr: addr}
-//       if db := os.Getenv("CHROMELESS_DENYLIST_REDIS_DB"); db != "" {
-//         n, _ := strconv.Atoi(db); opts.DB = n
-//       }
-//       if pw := os.Getenv("CHROMELESS_DENYLIST_REDIS_PASS"); pw != "" {
-//         opts.Password = pw
-//       }
-//       rdb := redis.NewClient(opts)
-//       return &goRedisAdapter{rdb: rdb}, nil
+//     opts := &redis.Options{Addr: addr}
+//     if db := os.Getenv("CHROMELESS_DENYLIST_REDIS_DB"); db != "" {
+//     n, _ := strconv.Atoi(db); opts.DB = n
+//     }
+//     if pw := os.Getenv("CHROMELESS_DENYLIST_REDIS_PASS"); pw != "" {
+//     opts.Password = pw
+//     }
+//     rdb := redis.NewClient(opts)
+//     return &goRedisAdapter{rdb: rdb}, nil
 //     }
 //
 //     type goRedisAdapter struct{ rdb *redis.Client }
 //     func (a *goRedisAdapter) SAdd(ctx context.Context, key string, members ...string) error {
-//       args := make([]any, len(members)); for i,m := range members { args[i]=m }
-//       return a.rdb.SAdd(ctx, key, args...).Err()
+//     args := make([]any, len(members)); for i,m := range members { args[i]=m }
+//     return a.rdb.SAdd(ctx, key, args...).Err()
 //     }
 //     func (a *goRedisAdapter) SIsMember(ctx context.Context, key, member string) (bool, error) {
-//       return a.rdb.SIsMember(ctx, key, member).Result()
+//     return a.rdb.SIsMember(ctx, key, member).Result()
 //     }
 //
 // The interface in denylist.go is intentionally narrow so the
