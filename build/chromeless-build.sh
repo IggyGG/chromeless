@@ -415,6 +415,9 @@ if [[ -n "${STUB_MODE}" ]]; then
     # its layout assumptions in stub runs.
     mkdir -p "${ARTIFACTS_DIR}/context"
     : > "${ARTIFACTS_DIR}/context/cloud_browser_worker"
+    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so; do
+        : > "${ARTIFACTS_DIR}/context/${runtime_asset}"
+    done
     log "[stub] wrote placeholder binary to ${ARTIFACTS_DIR}/context/cloud_browser_worker"
 else
     [[ -f "${binary_src}" ]] || die "build did not produce ${binary_src}"
@@ -436,6 +439,11 @@ else
     # it from there.
     mkdir -p "${ARTIFACTS_DIR}/context"
     cp "${binary_src}" "${ARTIFACTS_DIR}/context/cloud_browser_worker"
+    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so; do
+        asset_src="${CHROMIUM_SRC}/${OUT_DIR}/${runtime_asset}"
+        [[ -f "${asset_src}" ]] || die "runtime asset missing: ${asset_src}"
+        cp "${asset_src}" "${ARTIFACTS_DIR}/context/${runtime_asset}"
+    done
     log "packaged ${artifact_path}"
     log "staged binary to ${ARTIFACTS_DIR}/context/cloud_browser_worker"
 fi
@@ -455,8 +463,14 @@ step_done
 step "9/10 stage runtime image build context"
 
 cp "${CHROMELESS_REPO}/build/Dockerfile.runtime" "${ARTIFACTS_DIR}/context/Dockerfile"
-cp "${CHROMELESS_REPO}/infra/launch-chromeless.sh" "${ARTIFACTS_DIR}/context/launch-chromeless.sh" 2>/dev/null || true
-cp "${CHROMELESS_REPO}/infra/supervisord.conf"   "${ARTIFACTS_DIR}/context/supervisord.conf"   2>/dev/null || true
+cp "${CHROMELESS_REPO}/infra/launch-chromeless.sh" "${ARTIFACTS_DIR}/context/launch-chromeless.sh"
+cp "${CHROMELESS_REPO}/infra/supervisord.phase2.conf" "${ARTIFACTS_DIR}/context/supervisord.conf"
+cp "${CHROMELESS_REPO}/infra/pulse-default.pa" "${ARTIFACTS_DIR}/context/pulse-default.pa"
+cp "${CHROMELESS_REPO}/infra/devtools-proxy.sh" "${ARTIFACTS_DIR}/context/devtools-proxy.sh"
+rm -rf "${ARTIFACTS_DIR}/context/streamer" "${ARTIFACTS_DIR}/context/lifecycle"
+mkdir -p "${ARTIFACTS_DIR}/context/streamer"
+cp -R "${CHROMELESS_REPO}/capture/streamer-page/." "${ARTIFACTS_DIR}/context/streamer/"
+cp -R "${CHROMELESS_REPO}/infra/lifecycle" "${ARTIFACTS_DIR}/context/lifecycle"
 
 # Tag metadata for the kaniko sidecar to read.
 image_tag="cr${CHROMIUM_BRANCH_NUMBER}-${CHROMELESS_GIT_SHA}"
@@ -492,6 +506,17 @@ step_done
 # ---------------------------------------------------------------------
 
 step "10/10 cdp validation"
+
+if [[ -n "${STUB_MODE}" ]]; then
+    log "[stub] skipping cluster CDP validation"
+    step_done
+    log ""
+    log "chromeless-build.sh finished successfully"
+    log "  artifact:    ${artifact_path}"
+    log "  image-tag:   chromeless:${image_tag}"
+    log "  log:         ${LOG_FILE}"
+    exit 0
+fi
 
 CDP_VALIDATION_MANIFEST="${CHROMELESS_REPO}/infra/k8s/tests/chromeless-cdp-validation.yaml"
 CDP_VALIDATION_NS="chromeless-tests"

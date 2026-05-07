@@ -114,13 +114,13 @@ func devIssuerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := Claims{
-		Sub: tenant,
-		Sid: sid,
+		Sub:  tenant,
+		Sid:  sid,
 		Role: role,
-		Iat: now.Unix(),
-		Nbf: now.Add(-30 * time.Second).Unix(),
-		Exp: now.Add(devTokenTTL).Unix(),
-		Jti: jti,
+		Iat:  now.Unix(),
+		Nbf:  now.Add(-30 * time.Second).Unix(),
+		Exp:  now.Add(devTokenTTL).Unix(),
+		Jti:  jti,
 	}
 	tok := signToken(globalDevIssuer.priv, c)
 	w.Header().Set("Content-Type", "application/json")

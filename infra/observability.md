@@ -14,6 +14,11 @@ Two Prometheus endpoints, both on plain HTTP:
 | `/metrics` | signaling (`signaling/`) | `8080` | Session counts, message types, websocket close codes, active connections by role. |
 | `/metrics` | chromeless-metrics-sidecar (`capture/chromeless-metrics-sidecar/`) | `9100` | Aggregate Chromium CPU/RSS, per-track WebRTC bitrate / fps / qp / dropped frames / RTT / remote-side packet loss. |
 
+The metrics sidecar can also export structured WebRTC activity logs over
+OTLP/HTTP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. The Triform
+integration values point that at SigNoz (`/v1/logs`) while keeping
+Prometheus `/metrics` as the primary metrics path.
+
 ### Signaling metrics
 
 | Name | Type | Labels | Notes |

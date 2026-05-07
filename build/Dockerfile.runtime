@@ -29,12 +29,16 @@ FROM debian:trixie-slim
 
 # Same supervisord-driven structure as the Phase 1 image (T7) so
 # the rest of infra/ keeps working without per-image conditionals.
+# hadolint ignore=DL3008
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         ca-certificates \
+        dumb-init \
         supervisor \
         xvfb \
         pulseaudio \
+        pulseaudio-utils \
+        socat \
         # Chromium runtime deps — every cloud_browser_worker links
         # against these since they live in third_party/. If T17's
         # build env grows new deps, append here in lock-step.
@@ -75,23 +79,31 @@ RUN apt-get update && \
 # cbuser matches the Phase 1 image so file ownership semantics are
 # consistent across the two images. UID 1000 lines up with the K8s
 # securityContext we ship in browsersessionpool-examples.yaml.
-RUN useradd --create-home --shell /bin/bash --uid 1000 cbuser && \
-    mkdir -p /run/user/1000 /var/log/supervisor /opt/cloud-browser && \
-    chown -R cbuser:cbuser /run/user/1000 /var/log/supervisor /opt/cloud-browser
+RUN groupadd --gid 1000 cbuser && \
+    useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash cbuser && \
+    mkdir -p /run/user/1000/pulse \
+             /run/supervisor \
+             /run/chromeless-session \
+             /home/cbuser/.config/chromium \
+             /var/log/supervisor \
+             /opt/cloud-browser && \
+    chown -R cbuser:cbuser /run/user/1000 /run/supervisor /run/chromeless-session /home/cbuser /var/log/supervisor /opt/cloud-browser && \
+    chmod 0700 /run/user/1000
 
 # The actual binary. Built by chromeless-build.sh (T113) from the pinned
 # Chromium tree + our patch series + our cloud-browser sources.
 # Copy from the kaniko build context.
 COPY cloud_browser_worker /usr/local/bin/chromeless
-RUN chmod +x /usr/local/bin/chromeless
+RUN chmod +x /usr/local/bin/chromeless && \
+    ln -sf /usr/local/bin/chromeless /usr/local/bin/cloud_browser_worker
 
-# Chromium runtime data files. Even though args.gn sets
-# v8_use_external_startup_data=false (V8 snapshot embedded — see
-# capture/build-integration/args.gn §"V8 snapshot"), ICU data is NOT
-# embedded by default and is loaded from icudtl.dat at runtime via
-# base::PathService::Get(base::DIR_ASSETS) which resolves to the
-# binary's directory. Without it the worker exits at startup with
-# `Check failed: result. ` from base/i18n/icu_util.cc:306.
+# Chromium runtime data files. args.gn sets
+# v8_use_external_startup_data=false, so V8's snapshot is embedded in
+# the worker binary; snapshot_blob.bin is intentionally not required.
+# ICU data is not embedded by default and is loaded from icudtl.dat at
+# runtime via base::PathService::Get(base::DIR_ASSETS) which resolves
+# to the binary's directory. Without it the worker exits at startup
+# with `Check failed: result. ` from base/i18n/icu_util.cc:306.
 #
 # libEGL.so / libGLESv2.so / libvk_swiftshader.so ship the Angle +
 # SwiftShader bits the worker uses for `--use-gl=angle
@@ -103,20 +115,26 @@ RUN chmod +x /usr/local/bin/chromeless
 # binary in /usr/local/bin/ so chromium's default PathService
 # resolution finds them without an extra `--icu-data-dir` flag.
 COPY icudtl.dat            /usr/local/bin/icudtl.dat
-COPY snapshot_blob.bin     /usr/local/bin/snapshot_blob.bin
 COPY libEGL.so             /usr/local/bin/libEGL.so
 COPY libGLESv2.so          /usr/local/bin/libGLESv2.so
 COPY libvk_swiftshader.so  /usr/local/bin/libvk_swiftshader.so
 
-# Supervisord glue. The Phase 1 supervisord.conf (T7) launches
-# /usr/bin/chromium via launch-chromeless.sh; the Phase 2 path swaps
-# that program block for cloud_browser_worker. Both files are staged
-# into the build context by chromeless-build.sh Step 9 and copied here so a
-# Phase-1-vs-Phase-2 fleet difference is just an image tag, not a
-# file-layout difference.
+# Runtime glue staged by chromeless-build.sh Step 9. The Phase 2
+# supervisor launches the streamer page against cloud_browser_worker
+# and leaves pod-level metrics/event export to the explicit K8s sidecar.
+COPY pulse-default.pa     /etc/pulse/default.pa
 COPY supervisord.conf      /etc/supervisor/supervisord.conf
 COPY launch-chromeless.sh    /usr/local/bin/launch-chromeless.sh
-RUN chmod +x /usr/local/bin/launch-chromeless.sh
+COPY devtools-proxy.sh      /usr/local/bin/devtools-proxy.sh
+COPY streamer/ /opt/cloud-browser/streamer/
+COPY lifecycle/ /usr/local/lib/cloud-browser/lifecycle/
+RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bin/entrypoint.sh && \
+    ln -sf /usr/local/lib/cloud-browser/lifecycle/cold-start.sh    /usr/local/bin/cold-start.sh && \
+    ln -sf /usr/local/lib/cloud-browser/lifecycle/idle-watchdog.sh /usr/local/bin/idle-watchdog.sh && \
+    ln -sf /usr/local/lib/cloud-browser/lifecycle/restart.sh       /usr/local/bin/restart.sh && \
+    chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh && \
+    chmod +x /usr/local/bin/launch-chromeless.sh /usr/local/bin/devtools-proxy.sh && \
+    chown -R cbuser:cbuser /opt/cloud-browser
 
 # Image-tag metadata for runtime introspection. The kaniko sidecar
 # injects the same value here so `docker inspect` and
@@ -139,9 +157,7 @@ EXPOSE 9222 9100
 HEALTHCHECK --interval=10s --timeout=3s --start-period=45s --retries=3 \
     CMD curl -fsS http://127.0.0.1:9222/json/version || exit 1
 
-# Run as cbuser; supervisord drops to it via [program] user= directives
-# in supervisord.conf.
 USER cbuser
 WORKDIR /home/cbuser
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/usr/local/bin/entrypoint.sh"]

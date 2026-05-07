@@ -62,7 +62,7 @@ type Claims struct {
 	// Jti (T89) — opaque token identifier used by the denylist for
 	// per-token revocation. Optional: pre-T89 tokens omit it; the
 	// denylist still works as tenant-wide.
-	Jti  string `json:"jti,omitempty"`
+	Jti string `json:"jti,omitempty"`
 }
 
 // authConfig is mutated only by initAuth(); read-only after init.
@@ -78,6 +78,25 @@ var timeNow = time.Now
 
 // authPubkeyEnv is the environment variable consulted to enable auth.
 const authPubkeyEnv = "CHROMELESS_AUTH_PUBKEY"
+
+const (
+	regionEnv         = "CHROMELESS_REGION"
+	regionUnspecified = "_unspecified"
+)
+
+var processRegion = regionUnspecified
+
+func initRegion(logger *slog.Logger) string {
+	r := strings.TrimSpace(os.Getenv(regionEnv))
+	if r == "" {
+		processRegion = regionUnspecified
+		logger.Info("region unspecified: " + regionEnv + " is unset")
+		return processRegion
+	}
+	processRegion = r
+	logger.Info("region set", slog.String("region", r))
+	return r
+}
 
 // mAuthFailures is exported via /metrics. Each rejection records one
 // increment with a low-cardinality `reason` label.

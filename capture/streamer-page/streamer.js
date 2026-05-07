@@ -54,6 +54,31 @@
   // different port. Set to "off" to disable the relay entirely (used
   // by tests that don't want a 9100/connect refused log every second).
   const METRICS_SIDECAR_URL = params.get("metrics") || "http://localhost:9100/stats-update";
+  // Wave 2 A4 — chromeless-metrics-sidecar /webrtc-event endpoint
+  // (sibling of /stats-update). Receives lifecycle beacons:
+  // session_created, session_closed, ice.connected, ice.failed,
+  // dc.opened, plus the per-channel counters
+  // (cursor.coalesced, clipboard.unsupported_mime / stale_seq,
+  // file_upload.orphan_timeout / completed). Schema:
+  // /workspace/chemistry/elements/tools/chromeless/.triform/observability.yaml.
+  // Override via ?webrtc_metrics=... ; "off" disables emit (tests use
+  // this so the page doesn't spam connect-refused warnings when no
+  // sidecar is bound on :9100).
+  const WEBRTC_METRICS_URL = params.get("webrtc_metrics") || "http://localhost:9100/webrtc-event";
+
+  // Wave 1 (chromeless-datachannel-contract.md §§4-6): three new
+  // DataChannels — `cursor`, `clipboard`, `file-upload` — wired
+  // against CDP probes injected into every user-content document.
+  //
+  // The streamer page itself runs inside the same Chromium that hosts
+  // the user content, so we can dial DevTools at ws://localhost:9222
+  // (the `--unsafely-treat-insecure-origin-as-secure=...:9000` flag
+  // grants this page enough power to open the DevTools websocket).
+  // Override via ?cdp=ws://... for tests that mock CDP elsewhere.
+  // Set to "off" to disable Wave 1 channel wiring entirely (so old
+  // tests that don't expect the new channels keep passing).
+  const CDP_BASE_URL = params.get("cdp") || "http://localhost:9222";
+  const WAVE1_DISABLED = (params.get("wave1") || "").toLowerCase() === "off";
 
   const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302"] }];
   // Phase 3 swaps in our TURN-REST issued credentials (see PROJECT_BRIEF
@@ -62,6 +87,17 @@
   const HEARTBEAT_MS = 10_000;
   const INPUT_BACKOFF_MIN_MS = 200;
   const INPUT_BACKOFF_MAX_MS = 5_000;
+  // Wave 1 §6 file-upload orphan timeout — receiver discards the
+  // partial buffer for an upload_id if no new chunk arrives within
+  // 60 s and `eof` hasn't been reached.
+  const FILE_UPLOAD_ORPHAN_MS = 60_000;
+  // Wave 1 §6 file-upload integrity rule (1): allow up to 4 chunks
+  // ahead of the expected `seq` to absorb in-flight reordering. Beyond
+  // that we drop the upload and warn.
+  const FILE_UPLOAD_REORDER_AHEAD = 4;
+  // Wave 1 §6 sanitisation: truncate the file name to 255 bytes after
+  // stripping path separators / control chars.
+  const FILE_UPLOAD_NAME_MAX_BYTES = 255;
 
   // -------- log -------------------------------------------------------
 
@@ -108,7 +144,12 @@
   // -------- session ---------------------------------------------------
 
   /** @typedef {{ ws: WebSocket, pc: RTCPeerConnection, stream: MediaStream | null,
-   *              inputRelay: InputRelay | null, statsRelay: StatsRelay | null }} Session */
+   *              inputRelay: InputRelay | null, statsRelay: StatsRelay | null,
+   *              cdp: CDPClient | null,
+   *              cursorEmitter: CursorEmitter | null,
+   *              clipboardChannel: ClipboardChannel | null,
+   *              fileUploadReceiver: FileUploadReceiver | null,
+   *              emitSessionClosed: (reason: string) => void }} Session */
   /** @type {Session | null} */
   let active = null;
   let heartbeatTimer = null;
@@ -315,6 +356,950 @@
     }
   }
 
+  // -------- Wave 2 A4 — WebRTC observability emitter ---------------
+  //
+  // Fire-and-forget POSTs to the chromeless-metrics-sidecar
+  // /webrtc-event endpoint, one per lifecycle beacon. Mirrors the
+  // StatsRelay shape (rate-limited error log on burst, single line on
+  // recovery) but doesn't relay from a DataChannel — every emit is
+  // direct from the streamer-page code path that observed the event.
+  //
+  // The sidecar translates each event into a Prometheus counter or
+  // histogram increment. Names match
+  // chemistry/elements/tools/chromeless/.triform/observability.yaml.
+  //
+  // Disabling: pass ?webrtc_metrics=off to skip emit entirely. We never
+  // throw or block on a sidecar outage — observability is best-effort.
+
+  class MetricsEmitter {
+    constructor(url) {
+      this.url = url;
+      this.disabled = (url === "off" || !url);
+      this.consecutiveFailures = 0;
+      this.successCount = 0;
+      if (this.disabled) {
+        log("info", "webrtc metrics emit disabled (url=off)");
+      } else {
+        log("info", "webrtc metrics emit → sidecar", { url });
+      }
+    }
+
+    // emit posts a single {event, attrs} envelope. Fire-and-forget;
+    // we never await, never block streamer logic on the network.
+    emit(event, attrs) {
+      if (this.disabled) return;
+      const body = JSON.stringify({ event, attrs: attrs ?? {} });
+      fetch(this.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).then((resp) => {
+        if (!resp.ok) {
+          this.consecutiveFailures++;
+          if (this.consecutiveFailures === 1 || this.consecutiveFailures % 10 === 0) {
+            log("warn", "webrtc metrics POST non-2xx",
+                { event, status: resp.status, consecutive: this.consecutiveFailures });
+          }
+          return;
+        }
+        this.successCount++;
+        if (this.consecutiveFailures > 0) {
+          log("info", "webrtc metrics emit recovered",
+              { after_failures: this.consecutiveFailures });
+          this.consecutiveFailures = 0;
+        }
+      }).catch((err) => {
+        this.consecutiveFailures++;
+        if (this.consecutiveFailures === 1 || this.consecutiveFailures % 10 === 0) {
+          // console.warn (not log()) — we don't want to flood the
+          // page-side log overlay every second when :9100 is down.
+          // The first failure and every tenth thereafter still surface.
+          console.warn("[streamer warn] webrtc metrics POST failed",
+              { event, err: String(err), consecutive: this.consecutiveFailures });
+        }
+      });
+    }
+  }
+
+  // Module-scope singleton so the emitter classes (CursorEmitter,
+  // ClipboardChannel, FileUploadReceiver) and the start() session
+  // bootstrap can all reach it without threading it through every
+  // constructor. Created on first start() call below.
+  /** @type {MetricsEmitter | null} */
+  let metrics = null;
+
+  // -------- Wave 1 — CDP client + new channel emitters/receivers ----
+  //
+  // Background: the streamer.js page lives inside the headless Chromium
+  // that also hosts the user content. CDP at ws://localhost:9222
+  // gives us:
+  //   * `Runtime.addBinding` + `Page.addScriptToEvaluateOnNewDocument`
+  //     to install in-page probes that callback when the cursor shape
+  //     or clipboard contents change (matches the existing
+  //     capture/cursor-watcher and capture/clipboard-bridge sidecars,
+  //     which we don't reuse in-process because driving CDP directly
+  //     from the streamer is one fewer hop and avoids the wire-format
+  //     translation tax).
+  //   * `Browser.setClipboard` / `Runtime.evaluate` for inbound
+  //     clipboard application.
+  //   * `DOM.setFileInputFiles` for file-upload landing on the focused
+  //     `<input type=file>`.
+  //
+  // CDP failure mode: if the WebSocket dial fails (e.g. flag set
+  // doesn't expose DevTools to the page, or :9222 is unreachable), we
+  // still create the DataChannels — the labels need to land in the
+  // offer SDP so the portal-side demux doesn't drop into the
+  // `other =>` arm — but we log a single warning and leave the
+  // emitters dormant. The portal sees an open channel that never
+  // produces traffic; that's a strictly less-broken state than a
+  // closed channel that flips state on the portal side.
+  //
+  // Contract reference:
+  // /workspace/.triform/guides/chromeless-datachannel-contract.md
+  // (ships in the triform monorepo; the chromeless side reads it but
+  // does not vendor it).
+
+  // CDPClient — a tiny Chrome DevTools Protocol client speaking the
+  // /devtools/browser flat-mode shape, mirroring capture/input-bridge's
+  // dialCDP/pageSessionSender plumbing. We only need a handful of
+  // methods (Runtime.{enable,addBinding,evaluate}, Page.{enable,
+  // addScriptToEvaluateOnNewDocument}, Browser.{grantPermissions,
+  // setClipboard}, DOM.setFileInputFiles), so we don't bother with
+  // session-attach machinery — Runtime.evaluate at the browser-level
+  // target executes against the active page when no session is
+  // attached, which is sufficient for v1.
+  //
+  // Disposal: on pc.close (via teardown) we close the underlying
+  // WebSocket. `closed` is set first so any in-flight send rejects
+  // with a deterministic Error rather than racing on readyState.
+  class CDPClient {
+    constructor() {
+      this.ws = null;
+      this.closed = false;
+      this.nextId = 1;
+      /** @type {Map<number, {resolve: (v:any)=>void, reject:(e:Error)=>void}>} */
+      this.pending = new Map();
+      /** @type {((ev:{method:string, params:any})=>void)[]} */
+      this.eventListeners = [];
+    }
+
+    async connect(baseUrl) {
+      // Discover the browser-level WS URL via /json/version.
+      const versionUrl = baseUrl.replace(/\/$/, "") + "/json/version";
+      let resp;
+      try {
+        resp = await fetch(versionUrl);
+      } catch (err) {
+        throw new Error(`CDP /json/version fetch failed: ${err}`);
+      }
+      if (!resp.ok) throw new Error(`CDP /json/version status ${resp.status}`);
+      const meta = await resp.json();
+      const wsUrl = meta.webSocketDebuggerUrl;
+      if (!wsUrl) throw new Error("CDP /json/version missing webSocketDebuggerUrl");
+      await new Promise((resolve, reject) => {
+        const ws = new WebSocket(wsUrl);
+        this.ws = ws;
+        ws.onopen = () => resolve();
+        ws.onerror = (e) => reject(new Error("CDP WS open error " + (e?.message ?? "")));
+        ws.onclose = () => {
+          this.closed = true;
+          // Reject every pending request; the caller's onclose path
+          // will tear down the relevant emitters.
+          for (const p of this.pending.values()) {
+            try { p.reject(new Error("CDP disconnected")); } catch { /* ignore */ }
+          }
+          this.pending.clear();
+        };
+        ws.onmessage = (ev) => this._onMessage(ev);
+      });
+    }
+
+    _onMessage(ev) {
+      let frame;
+      try {
+        frame = JSON.parse(typeof ev.data === "string" ? ev.data : "");
+      } catch {
+        return; // malformed, drop
+      }
+      if (typeof frame.id === "number") {
+        const slot = this.pending.get(frame.id);
+        if (!slot) return;
+        this.pending.delete(frame.id);
+        if (frame.error) {
+          slot.reject(new Error(`CDP error: ${frame.error.message ?? JSON.stringify(frame.error)}`));
+        } else {
+          slot.resolve(frame.result ?? null);
+        }
+        return;
+      }
+      // Event frame
+      if (typeof frame.method === "string") {
+        for (const fn of this.eventListeners) {
+          try { fn(frame); } catch (e) { log("warn", "CDP event listener threw", String(e)); }
+        }
+      }
+    }
+
+    on(fn) {
+      this.eventListeners.push(fn);
+      return () => {
+        const i = this.eventListeners.indexOf(fn);
+        if (i >= 0) this.eventListeners.splice(i, 1);
+      };
+    }
+
+    send(method, params) {
+      if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return Promise.reject(new Error("CDP not open"));
+      }
+      const id = this.nextId++;
+      const frame = JSON.stringify({ id, method, params: params ?? {} });
+      const p = new Promise((resolve, reject) => {
+        this.pending.set(id, { resolve, reject });
+      });
+      try {
+        this.ws.send(frame);
+      } catch (err) {
+        this.pending.delete(id);
+        return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+      return p;
+    }
+
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      try {
+        if (this.ws && (this.ws.readyState === WebSocket.OPEN ||
+                         this.ws.readyState === WebSocket.CONNECTING)) {
+          this.ws.close();
+        }
+      } catch { /* ignore */ }
+      this.ws = null;
+      this.eventListeners = [];
+    }
+  }
+
+  // Helper for emitters: defensive write to a DataChannel that drops
+  // the message rather than throwing if the channel is closed mid-send
+  // (race window during teardown).
+  function dcSafeSend(dc, payload) {
+    if (!dc || dc.readyState !== "open") return false;
+    try {
+      dc.send(payload);
+      return true;
+    } catch (err) {
+      log("warn", "data channel send failed", String(err));
+      return false;
+    }
+  }
+
+  // Wave 1 §4 — CursorEmitter
+  //
+  // CDP doesn't expose a first-class "cursor changed" event (the
+  // original A1 brief mentioned `Page.setCursorChanged`, which is not
+  // part of the public DevTools Protocol). The proven path — already
+  // used by the capture/cursor-watcher Go service — is to inject a
+  // small JS probe into every document via
+  // `Page.addScriptToEvaluateOnNewDocument`, observe pointer
+  // movement + `getComputedStyle(...).cursor`, and call back through
+  // a `Runtime.addBinding` exposed function on each change.
+  //
+  // The probe keeps page-CSS-pixel coordinates (clientX/clientY are
+  // already in CSS pixels per the CSSOM spec, regardless of
+  // devicePixelRatio), matching the contract's coordinate space.
+  //
+  // Drop-stale-on-coalesce backpressure: we hold at most one
+  // outstanding cursor message per channel. If `dc.bufferedAmount`
+  // exceeds zero when the next change arrives, we replace the queued
+  // message (overwrite `pendingPayload`) rather than enqueue a
+  // second.
+  class CursorEmitter {
+    constructor(dc, cdp) {
+      this.dc = dc;
+      this.cdp = cdp;
+      this.detach = null;
+      this.pendingPayload = null; // {x,y,kind} — most-recent unflushed sample
+      this.flushPending = false;
+      this.failed = false;
+      dc.addEventListener("close", () => this.dispose("dc closed"));
+      dc.addEventListener("error", (e) => log("warn", "cursor data-channel error",
+        String((e && e.error?.message) || e)));
+    }
+
+    static probeJS() {
+      // Self-contained, idempotent. Runs in every document.
+      // Coordinates are page CSS pixels (clientX/Y). Kind is the
+      // computed-style cursor keyword for the topmost element under
+      // the pointer; we map a few common synonyms to the contract's
+      // names and otherwise pass through (the portal-side B1 handler
+      // is required to fall back to "default" for unknown kinds —
+      // contract §4).
+      return `(() => {
+        if (window.__cb_cursor_v1_installed__) return;
+        window.__cb_cursor_v1_installed__ = true;
+        let lastX = 0, lastY = 0, lastKind = "default", lastVisible = true;
+        let scheduled = false;
+        function describe(cssCursor) {
+          if (!cssCursor || cssCursor === "auto") return "default";
+          if (cssCursor === "none") return "none";
+          // First non-url() keyword (CSS allows a fallback list).
+          const head = cssCursor.split(",").map(s => s.trim()).find(s => s && !s.startsWith("url("));
+          return head ? head.split(/\\s+/)[0] : "default";
+        }
+        function emit() {
+          scheduled = false;
+          const el = document.elementFromPoint(lastX, lastY);
+          const css = el ? getComputedStyle(el).cursor : "default";
+          const kind = describe(css);
+          const visible = kind !== "none";
+          if (lastKind === kind && lastVisible === visible) return;
+          lastKind = kind; lastVisible = visible;
+          if (typeof window.__cb_cursor_v1__ === "function") {
+            try {
+              window.__cb_cursor_v1__(JSON.stringify({
+                x: lastX, y: lastY, kind: visible ? kind : "none",
+              }));
+            } catch (e) { /* ignore */ }
+          }
+        }
+        function schedule() {
+          if (scheduled) return;
+          scheduled = true;
+          requestAnimationFrame(emit);
+        }
+        document.addEventListener("pointermove", (e) => {
+          lastX = e.clientX; lastY = e.clientY;
+          if (typeof window.__cb_cursor_v1_pos__ === "function") {
+            try {
+              window.__cb_cursor_v1_pos__(JSON.stringify({
+                x: lastX, y: lastY,
+              }));
+            } catch (err) { /* ignore */ }
+          }
+          schedule();
+        }, { passive: true, capture: true });
+        document.addEventListener("pointerleave", () => {
+          if (lastVisible) {
+            lastVisible = false; lastKind = "none";
+            if (typeof window.__cb_cursor_v1__ === "function") {
+              try {
+                window.__cb_cursor_v1__(JSON.stringify({
+                  x: lastX, y: lastY, kind: "none",
+                }));
+              } catch (e) { /* ignore */ }
+            }
+          }
+        }, { passive: true });
+      })();`;
+    }
+
+    async install() {
+      // Best-effort. If any step fails, we log + flag the emitter
+      // failed and skip future activity but keep the DC open — the
+      // portal sees an open-but-quiet channel, which is the documented
+      // dormant-channel state.
+      try {
+        await this.cdp.send("Page.enable");
+        await this.cdp.send("Runtime.enable");
+        await this.cdp.send("Runtime.addBinding", { name: "__cb_cursor_v1__" });
+        await this.cdp.send("Runtime.addBinding", { name: "__cb_cursor_v1_pos__" });
+        await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+          source: CursorEmitter.probeJS(),
+        });
+        // Also install in the current document (no navigation needed).
+        await this.cdp.send("Runtime.evaluate", {
+          expression: CursorEmitter.probeJS(),
+          includeCommandLineAPI: false,
+          awaitPromise: false,
+          returnByValue: true,
+        });
+        this.detach = this.cdp.on((frame) => {
+          if (frame.method !== "Runtime.bindingCalled") return;
+          const p = frame.params || {};
+          const name = p.name;
+          if (name !== "__cb_cursor_v1__" && name !== "__cb_cursor_v1_pos__") return;
+          let payload;
+          try { payload = JSON.parse(p.payload || "{}"); }
+          catch { return; }
+          if (typeof payload.x !== "number" || typeof payload.y !== "number") return;
+          const kind = (typeof payload.kind === "string" && payload.kind) || (this.pendingPayload?.kind ?? "default");
+          this.queue({ x: payload.x, y: payload.y, kind });
+        });
+        log("ok", "cursor emitter installed");
+      } catch (err) {
+        this.failed = true;
+        log("warn", "cursor emitter install failed; channel will stay dormant",
+            String(err));
+      }
+    }
+
+    queue(payload) {
+      if (this.failed) return;
+      // Drop-stale-on-coalesce: replace whatever is queued.
+      // Wave 2 A4: count each coalesce so dashboards can quantify how
+      // often backpressure replaces an unflushed payload (high-volume
+      // signal that the cursor probe outpaces its DataChannel drain).
+      if (this.pendingPayload !== null && metrics) {
+        metrics.emit("chromeless.webrtc.dc.cursor.coalesced", {});
+      }
+      this.pendingPayload = payload;
+      if (this.flushPending) return;
+      this.flushPending = true;
+      // Use queueMicrotask to give the bufferedAmount drain a chance
+      // before re-checking. This is not a hard cadence — the next
+      // `pointermove` will trigger another drain attempt anyway.
+      queueMicrotask(() => this.flush());
+    }
+
+    flush() {
+      this.flushPending = false;
+      const p = this.pendingPayload;
+      if (!p) return;
+      // Backpressure: if the channel has bytes queued, we keep our
+      // single pendingPayload and let the next change overwrite it.
+      // The buffered byte count is the spec-defined backpressure
+      // signal; we tolerate up to 16 KiB before pausing emit.
+      if (!this.dc || this.dc.readyState !== "open") return;
+      if (this.dc.bufferedAmount > 16_384) return;
+      const env = JSON.stringify({
+        v: 1, t: Date.now(),
+        cursor: { x: p.x, y: p.y, kind: p.kind },
+      });
+      this.pendingPayload = null;
+      dcSafeSend(this.dc, env);
+    }
+
+    dispose(reason) {
+      if (this.detach) {
+        try { this.detach(); } catch { /* ignore */ }
+        this.detach = null;
+      }
+      this.pendingPayload = null;
+      log("info", `cursor emitter disposed: ${reason}`);
+    }
+  }
+
+  // Wave 1 §5 — ClipboardChannel (bidirectional + per-session sequence
+  // numbers).
+  //
+  // Outbound (chromeless→portal, dir="c2p"): when any document fires a
+  // `copy` event, the page-side probe captures the selection text /
+  // HTML and calls a binding. We translate to a contract envelope and
+  // emit on the DC, incrementing `nextOutboundSeq`.
+  //
+  // Inbound (portal→chromeless, dir="p2c"): we receive an envelope on
+  // the DC, drop if `seq <= lastSeenInboundSeq`, otherwise base64-
+  // decode `data` and write into the in-container clipboard via CDP
+  // Runtime.evaluate (`navigator.clipboard.writeText`-equivalent
+  // through Browser.grantPermissions; falls back to Input.insertText
+  // is out of scope for v1). Then advance `lastSeenInboundSeq`.
+  //
+  // MIME types: only `text/plain` and `text/html` are accepted; others
+  // are dropped with a DEBUG log line (per contract §5). Unknown
+  // direction strings are dropped.
+  class ClipboardChannel {
+    constructor(dc, cdp) {
+      this.dc = dc;
+      this.cdp = cdp;
+      this.detach = null;
+      this.nextOutboundSeq = 0;
+      this.lastSeenInboundSeq = -1;
+      this.failed = false;
+      // Echo suppression: we remember the last text we *applied
+      // inbound* so the page-side `copy` listener doesn't loop the
+      // same text right back out. Mirrors clipboard-bridge §"Echo
+      // suppression".
+      this.lastInboundText = null;
+      dc.addEventListener("close", () => this.dispose("dc closed"));
+      dc.addEventListener("error", (e) => log("warn", "clipboard data-channel error",
+        String((e && e.error?.message) || e)));
+      dc.addEventListener("message", (ev) => this.onInbound(ev.data));
+    }
+
+    static probeJS() {
+      return `(() => {
+        if (window.__cb_clipboard_v1_installed__) return;
+        window.__cb_clipboard_v1_installed__ = true;
+        document.addEventListener("copy", (e) => {
+          // Best-effort capture: the spec says the active selection
+          // is what gets copied; we read it and forward.
+          const sel = document.getSelection ? document.getSelection() : null;
+          const text = sel ? sel.toString() : "";
+          if (!text) return;
+          // No HTML capture in v1 — text/plain only on the c2p path.
+          // Adding text/html is forward-compatible (just bumps the
+          // emitter; the contract already permits it).
+          if (typeof window.__cb_clipboard_v1__ === "function") {
+            try {
+              window.__cb_clipboard_v1__(JSON.stringify({
+                mime: "text/plain", text,
+              }));
+            } catch (err) { /* ignore */ }
+          }
+        }, { capture: true });
+      })();`;
+    }
+
+    static utf8ToBase64(str) {
+      // TextEncoder + btoa pipeline; handles non-Latin-1 cleanly.
+      const bytes = new TextEncoder().encode(str);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin);
+    }
+
+    static base64ToUtf8(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    }
+
+    async install() {
+      try {
+        await this.cdp.send("Page.enable");
+        await this.cdp.send("Runtime.enable");
+        // Browser.grantPermissions makes the in-page Clipboard API
+        // calls in `applyInbound` work without a permission prompt.
+        // Some Chromium builds reject `clipboardSanitizedWrite`; we
+        // retry with the smaller set on failure.
+        try {
+          await this.cdp.send("Browser.grantPermissions", {
+            permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
+          });
+        } catch (e) {
+          await this.cdp.send("Browser.grantPermissions", {
+            permissions: ["clipboardReadWrite"],
+          }).catch(() => {});
+        }
+        await this.cdp.send("Runtime.addBinding", { name: "__cb_clipboard_v1__" });
+        await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+          source: ClipboardChannel.probeJS(),
+        });
+        await this.cdp.send("Runtime.evaluate", {
+          expression: ClipboardChannel.probeJS(),
+          includeCommandLineAPI: false,
+          awaitPromise: false,
+          returnByValue: true,
+        });
+        this.detach = this.cdp.on((frame) => {
+          if (frame.method !== "Runtime.bindingCalled") return;
+          const p = frame.params || {};
+          if (p.name !== "__cb_clipboard_v1__") return;
+          let payload;
+          try { payload = JSON.parse(p.payload || "{}"); }
+          catch { return; }
+          this.emitOutbound(payload);
+        });
+        log("ok", "clipboard channel installed");
+      } catch (err) {
+        this.failed = true;
+        log("warn", "clipboard install failed; channel stays dormant",
+            String(err));
+      }
+    }
+
+    emitOutbound(payload) {
+      if (this.failed) return;
+      const mime = payload.mime === "text/html" ? "text/html" : "text/plain";
+      const text = String(payload.text ?? "");
+      if (!text) return;
+      // Echo suppression — drop a `copy` that mirrors the last
+      // inbound write we just applied.
+      if (this.lastInboundText !== null && this.lastInboundText === text) {
+        // One-shot suppression; future `copy` events of the same
+        // text are real user activity.
+        this.lastInboundText = null;
+        return;
+      }
+      const data = ClipboardChannel.utf8ToBase64(text);
+      const env = JSON.stringify({
+        v: 1, t: Date.now(),
+        clipboard: {
+          dir: "c2p",
+          seq: this.nextOutboundSeq++,
+          mime, data,
+        },
+      });
+      dcSafeSend(this.dc, env);
+    }
+
+    onInbound(data) {
+      if (typeof data !== "string") {
+        log("warn", "clipboard inbound: non-string frame, dropping");
+        return;
+      }
+      let env;
+      try { env = JSON.parse(data); }
+      catch (err) { log("warn", "clipboard inbound: malformed JSON", String(err)); return; }
+      const v = env?.v;
+      if (v !== 1) {
+        log("warn", "webrtc_dc_clipboard_unsupported_version", { received: v });
+        return;
+      }
+      const cb = env?.clipboard;
+      if (!cb || typeof cb !== "object") return;
+      // We only act on p2c. Loopback c2p frames (shouldn't happen,
+      // but defense in depth) are ignored.
+      if (cb.dir !== "p2c") return;
+      const seq = Number(cb.seq);
+      if (!Number.isFinite(seq) || seq <= this.lastSeenInboundSeq) {
+        // Stale. Per contract §5: drop silently with DEBUG log.
+        log("info", "clipboard inbound stale; dropping",
+            { seq, last_seen: this.lastSeenInboundSeq });
+        // Wave 2 A4 — counter signals seq protocol drift (typically a
+        // late-arriving retry or a portal-side bug emitting out of
+        // order; should be near-zero in steady state).
+        if (metrics) metrics.emit("chromeless.webrtc.dc.clipboard.stale_seq", {});
+        return;
+      }
+      const mime = cb.mime;
+      if (mime !== "text/plain" && mime !== "text/html") {
+        log("info", "clipboard inbound: unsupported mime, dropping",
+            { mime });
+        // Still advance lastSeen so we don't replay it on a re-emit.
+        this.lastSeenInboundSeq = seq;
+        // Wave 2 A4 — flag MIME the contract doesn't support; non-zero
+        // indicates a portal-side B2 producer trying to send something
+        // outside the agreed (text/plain | text/html) set.
+        if (metrics) metrics.emit("chromeless.webrtc.dc.clipboard.unsupported_mime", { mime: String(mime ?? "") });
+        return;
+      }
+      let text;
+      try { text = ClipboardChannel.base64ToUtf8(String(cb.data ?? "")); }
+      catch (err) { log("warn", "clipboard inbound: base64 decode failed", String(err)); return; }
+      this.lastSeenInboundSeq = seq;
+      this.applyInbound(mime, text);
+    }
+
+    applyInbound(mime, text) {
+      if (this.failed || !this.cdp || this.cdp.closed) return;
+      this.lastInboundText = mime === "text/plain" ? text : null;
+      // Use Runtime.evaluate to call navigator.clipboard.writeText.
+      // For text/html we'd want navigator.clipboard.write with a
+      // ClipboardItem; v1 keeps both paths on writeText for the
+      // text content so paste-to-text-input always works.
+      const expr = `(async () => {
+        try {
+          await navigator.clipboard.writeText(${JSON.stringify(text)});
+          return "ok";
+        } catch (e) { return "err:" + (e && e.message || e); }
+      })()`;
+      this.cdp.send("Runtime.evaluate", {
+        expression: expr,
+        awaitPromise: true,
+        returnByValue: true,
+      }).then((res) => {
+        const v = res?.result?.value;
+        if (typeof v === "string" && v.startsWith("err:")) {
+          log("warn", "clipboard apply via navigator.clipboard failed", v);
+        }
+      }).catch((err) => {
+        log("warn", "clipboard apply CDP send failed", String(err));
+      });
+    }
+
+    dispose(reason) {
+      if (this.detach) {
+        try { this.detach(); } catch { /* ignore */ }
+        this.detach = null;
+      }
+      log("info", `clipboard channel disposed: ${reason}`);
+    }
+  }
+
+  // Wave 1 §6 — FileUploadReceiver (portal→chromeless, one-way).
+  //
+  // The portal-side B3 producer chunks each upload (≤64 KiB raw bytes
+  // per chunk, base64-encoded into the JSON envelope) and pumps over
+  // the `file-upload` DC; we reassemble per `upload_id` and call CDP
+  // `DOM.setFileInputFiles` against the focused `<input type=file>`
+  // when `eof: true` arrives.
+  //
+  // Validation per contract §6:
+  //   1. seq monotonic non-decreasing per upload_id (allow 4-ahead).
+  //   2. total constant across an upload_id.
+  //   3. eof: true ⇔ seq == total - 1.
+  //   4. name sanitised (path separators / NUL / control chars
+  //      stripped, truncated to 255 bytes).
+  //
+  // Orphan timeout: 60 s of no new chunk → discard buffer + warn.
+  class FileUploadReceiver {
+    constructor(dc, cdp) {
+      this.dc = dc;
+      this.cdp = cdp;
+      /** @type {Map<string, {chunks: Map<number, Uint8Array>, total: number, name: string, mime: string, expected: number, totalBytes: number, lastSeen: number, timer: number | null}>} */
+      this.uploads = new Map();
+      dc.addEventListener("close", () => this.dispose("dc closed"));
+      dc.addEventListener("error", (e) => log("warn", "file-upload data-channel error",
+        String((e && e.error?.message) || e)));
+      dc.addEventListener("message", (ev) => this.onChunk(ev.data));
+    }
+
+    static sanitiseName(raw) {
+      if (typeof raw !== "string") return "upload.bin";
+      // Strip path separators, NUL, and other control characters.
+      // eslint-disable-next-line no-control-regex
+      let s = raw.replace(/[\\\/\x00-\x1f\x7f]/g, "_");
+      // Disallow ".." segments and leading dots that produce hidden files.
+      s = s.replace(/\.\.+/g, "_");
+      s = s.replace(/^\.+/, "");
+      if (!s) s = "upload.bin";
+      // Truncate to 255 BYTES (post-UTF-8 encode), not 255 chars.
+      const enc = new TextEncoder();
+      let bytes = enc.encode(s);
+      if (bytes.length <= FILE_UPLOAD_NAME_MAX_BYTES) return s;
+      // Walk back from the truncation point until we land on a valid
+      // UTF-8 boundary so we don't emit a half-codepoint.
+      let cutoff = FILE_UPLOAD_NAME_MAX_BYTES;
+      while (cutoff > 0 && (bytes[cutoff] & 0xc0) === 0x80) cutoff--;
+      return new TextDecoder().decode(bytes.slice(0, cutoff));
+    }
+
+    static base64ToBytes(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    onChunk(raw) {
+      if (typeof raw !== "string") {
+        log("warn", "file-upload: non-string frame, dropping");
+        return;
+      }
+      let env;
+      try { env = JSON.parse(raw); }
+      catch (err) { log("warn", "file-upload: malformed JSON", String(err)); return; }
+      const v = env?.v;
+      if (v !== 1) {
+        log("warn", "webrtc_dc_file_upload_unsupported_version", { received: v });
+        return;
+      }
+      const c = env?.chunk;
+      if (!c || typeof c !== "object") return;
+      const upload_id = String(c.upload_id ?? "");
+      const seq = Number(c.seq);
+      const total = Number(c.total);
+      const eof = !!c.eof;
+      const name = FileUploadReceiver.sanitiseName(c.name);
+      const mime = typeof c.mime === "string" && c.mime ? c.mime : "application/octet-stream";
+      if (!upload_id) {
+        log("warn", "file-upload: missing upload_id, dropping chunk");
+        return;
+      }
+      if (!Number.isInteger(seq) || seq < 0 ||
+          !Number.isInteger(total) || total <= 0) {
+        log("warn", "file-upload: bad seq/total, dropping",
+            { upload_id, seq, total });
+        return;
+      }
+      // Validation rule §6.3: eof ⇔ seq == total - 1.
+      if (eof !== (seq === total - 1)) {
+        log("warn", "file-upload: eof/seq mismatch, dropping upload",
+            { upload_id, seq, total, eof });
+        this.discard(upload_id);
+        return;
+      }
+      let entry = this.uploads.get(upload_id);
+      if (!entry) {
+        entry = {
+          chunks: new Map(),
+          total, name, mime,
+          expected: 0,
+          totalBytes: 0,
+          lastSeen: Date.now(),
+          timer: null,
+        };
+        this.uploads.set(upload_id, entry);
+      } else if (entry.total !== total) {
+        log("warn", "file-upload: total mismatch across chunks, dropping",
+            { upload_id, prev_total: entry.total, new_total: total });
+        this.discard(upload_id);
+        return;
+      }
+      // Validation rule §6.1: monotonic non-decreasing seq, with up
+      // to 4-ahead reorder window. We accept both seq < expected
+      // (duplicate retry) and seq within [expected, expected+4]
+      // (reorder); seq >= expected+5 means a hole we cannot close.
+      if (seq < entry.expected) {
+        // Duplicate/late chunk we already buffered & flushed past.
+        // Drop silently — the DC is reliable and ordered, so this
+        // is a redelivery the lower layer didn't suppress.
+        return;
+      }
+      if (seq > entry.expected + FILE_UPLOAD_REORDER_AHEAD) {
+        log("warn", "file-upload: seq jump beyond reorder window, dropping",
+            { upload_id, seq, expected: entry.expected });
+        this.discard(upload_id);
+        return;
+      }
+      let bytes;
+      try { bytes = FileUploadReceiver.base64ToBytes(String(c.data ?? "")); }
+      catch (err) { log("warn", "file-upload: base64 decode failed",
+                        { upload_id, seq, err: String(err) });
+                    this.discard(upload_id); return; }
+      // Don't double-store a chunk we already received.
+      if (!entry.chunks.has(seq)) {
+        entry.chunks.set(seq, bytes);
+        entry.totalBytes += bytes.length;
+      }
+      // Slide the expected pointer past contiguous chunks we now have.
+      while (entry.chunks.has(entry.expected)) entry.expected++;
+      entry.lastSeen = Date.now();
+      this.armOrphanTimer(upload_id);
+      // §6.3 — when we see eof and `expected` has advanced past it,
+      // we have everything in seq order. (If reorder buffered chunks
+      // higher than `expected` are still missing, expected won't have
+      // reached total yet and we wait.)
+      if (eof && entry.expected >= total) {
+        this.complete(upload_id);
+      }
+    }
+
+    armOrphanTimer(upload_id) {
+      const entry = this.uploads.get(upload_id);
+      if (!entry) return;
+      if (entry.timer !== null) clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => {
+        const e2 = this.uploads.get(upload_id);
+        if (!e2) return;
+        log("warn", "file-upload: orphan timeout, discarding",
+            { upload_id, name: e2.name, received_chunks: e2.chunks.size,
+              expected_total: e2.total });
+        // Wave 2 A4 — orphan timeout fires when the portal abandons an
+        // upload mid-stream; non-zero indicates flaky DataChannel or a
+        // portal-side bug (B3 producer not driving to eof).
+        if (metrics) metrics.emit("chromeless.webrtc.dc.file_upload.orphan_timeout", {
+          received_chunks: e2.chunks.size,
+          expected_total: e2.total,
+        });
+        this.discard(upload_id);
+      }, FILE_UPLOAD_ORPHAN_MS);
+    }
+
+    discard(upload_id) {
+      const entry = this.uploads.get(upload_id);
+      if (entry) {
+        if (entry.timer !== null) clearTimeout(entry.timer);
+        // Drop chunk byte references so the GC can reclaim memory.
+        entry.chunks.clear();
+      }
+      this.uploads.delete(upload_id);
+    }
+
+    async complete(upload_id) {
+      const entry = this.uploads.get(upload_id);
+      if (!entry) return;
+      if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
+      // Concatenate buffered chunks in seq order.
+      const merged = new Uint8Array(entry.totalBytes);
+      let offset = 0;
+      for (let i = 0; i < entry.total; i++) {
+        const chunk = entry.chunks.get(i);
+        if (!chunk) {
+          log("warn", "file-upload: missing chunk at completion, discarding",
+              { upload_id, missing_seq: i });
+          this.discard(upload_id);
+          return;
+        }
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      // Re-encode to base64 for CDP DOM.setFileInputFiles? No —
+      // setFileInputFiles wants on-disk paths, NOT bytes. v1 takes
+      // the practical fallback per the architect's brief: write the
+      // file via Runtime.evaluate using a Blob → DataTransferItem
+      // pipeline against the focused <input type=file>. This avoids
+      // touching the disk and matches B3's expectation that the
+      // bytes drive the input directly.
+      //
+      // The Runtime.evaluate path uses the page's File constructor
+      // and a synthetic DataTransfer to assemble FileList. Many
+      // pages read input.files in a `change` handler, so we
+      // dispatch a synthetic 'change' event after assignment.
+      try {
+        const b64 = (() => {
+          let bin = "";
+          for (let i = 0; i < merged.length; i++) bin += String.fromCharCode(merged[i]);
+          return btoa(bin);
+        })();
+        // Build a JS expression that:
+        //   1. Locates the focused <input type=file>; falls back to
+        //      the first such input on the page if no file input has
+        //      focus. Returns "no-input" when neither exists.
+        //   2. Decodes the base64 payload into a Uint8Array.
+        //   3. Constructs a File and a DataTransfer; assigns
+        //      input.files; dispatches `input` and `change`.
+        const expr = `(() => {
+          try {
+            let inp = document.activeElement;
+            if (!(inp instanceof HTMLInputElement) || inp.type !== "file") {
+              inp = document.querySelector('input[type="file"]');
+            }
+            if (!inp) return "no-input";
+            const bin = atob(${JSON.stringify(b64)});
+            const buf = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+            const file = new File([buf], ${JSON.stringify(entry.name)}, { type: ${JSON.stringify(entry.mime)} });
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            inp.files = dt.files;
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            inp.dispatchEvent(new Event("change", { bubbles: true }));
+            return "ok";
+          } catch (e) { return "err:" + (e && e.message || e); }
+        })()`;
+        const res = await this.cdp.send("Runtime.evaluate", {
+          expression: expr,
+          awaitPromise: false,
+          returnByValue: true,
+        });
+        const out = res?.result?.value;
+        // Wave 2 A4 — record outcome distribution for dashboards.
+        // Result values: "ok" (file applied to focused input),
+        // "no-input" (page had no <input type=file>), or "err" (any
+        // page-side throw). The CDP-call-failed path below also emits
+        // "err" via the catch block.
+        let result;
+        if (out === "ok") {
+          log("info", "file-upload completed",
+              { upload_id, name: entry.name, mime: entry.mime,
+                total_bytes: entry.totalBytes });
+          result = "ok";
+        } else if (out === "no-input") {
+          log("warn", "file-upload: no <input type=file> focused/available, dropping",
+              { upload_id, name: entry.name });
+          result = "no-input";
+        } else {
+          log("warn", "file-upload: page-side apply failed",
+              { upload_id, result: String(out) });
+          result = "err";
+        }
+        if (metrics) metrics.emit("chromeless.webrtc.dc.file_upload.completed", {
+          result, total_bytes: entry.totalBytes,
+        });
+      } catch (err) {
+        log("warn", "file-upload: CDP apply failed",
+            { upload_id, err: String(err) });
+        if (metrics) metrics.emit("chromeless.webrtc.dc.file_upload.completed", {
+          result: "err", total_bytes: entry.totalBytes,
+        });
+      } finally {
+        this.discard(upload_id);
+      }
+    }
+
+    dispose(reason) {
+      for (const upload_id of Array.from(this.uploads.keys())) {
+        this.discard(upload_id);
+      }
+      log("info", `file-upload receiver disposed: ${reason}`);
+    }
+  }
+
   // T81 — passthrough sink. Lazily creates a hidden <video>/<audio>
   // for diagnostic visibility. The actual v4l2-writer / pulse sink
   // is a Phase 4 follow-up; we keep this seam so the page can route
@@ -338,9 +1323,34 @@
   function teardown(reason) {
     if (!active) return;
     log("info", `tearing down: ${reason}`);
+    // Wave 2 A4 — emit session_closed BEFORE we dispose anything
+    // session-bound. The emit is fire-and-forget against the local
+    // sidecar; it doesn't depend on the PC, so calling it first keeps
+    // the duration measurement honest (between session_created and
+    // start of teardown, not the end of a multi-step disposal).
+    if (typeof active.emitSessionClosed === "function") {
+      try { active.emitSessionClosed(reason); } catch { /* never block teardown */ }
+    }
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     if (active.inputRelay) {
       try { active.inputRelay.close(); } catch { /* ignore */ }
+    }
+    // Wave 1 — dispose new emitters/receivers + close CDP. Order:
+    // emitters first (they may try one final send), then CDP (the
+    // emitters' disposal listeners fire on dc close, which is OK to
+    // invoke after their own dispose() too — both paths are
+    // idempotent).
+    if (active.cursorEmitter) {
+      try { active.cursorEmitter.dispose("teardown"); } catch { /* ignore */ }
+    }
+    if (active.clipboardChannel) {
+      try { active.clipboardChannel.dispose("teardown"); } catch { /* ignore */ }
+    }
+    if (active.fileUploadReceiver) {
+      try { active.fileUploadReceiver.dispose("teardown"); } catch { /* ignore */ }
+    }
+    if (active.cdp) {
+      try { active.cdp.close(); } catch { /* ignore */ }
     }
     try {
       if (active.stream) {
@@ -420,6 +1430,13 @@
 
   async function start() {
     log("info", "streamer boot", { signaling: SIGNALING_URL, session: SESSION_ID, fps: FRAMERATE });
+
+    // Wave 2 A4: lazily create the per-process metrics emitter on the
+    // first start() call. Nothing emits before this point; a
+    // pre-PeerConnection emit would have nowhere to flush to anyway.
+    if (!metrics) {
+      metrics = new MetricsEmitter(WEBRTC_METRICS_URL);
+    }
 
     // 1. Capture the display + audio.
     /** @type {MediaStream} */
@@ -502,16 +1519,109 @@
     // the PC on window has no cross-origin implications.
     window.pc = pc;
 
+    // Wave 2 A4 — per-PC session lifecycle bookkeeping.
+    //
+    // sessionId is a UUID minted on this side so dashboards can pivot
+    // on a label that's stable across the session_created/session_closed
+    // pair. SESSION_ID (the URL param) is a logical session identifier
+    // for the broker; we keep them separate because the streamer can
+    // re-attach to a broker session multiple times during a single
+    // page life and each PC instance is observability-distinct.
+    const sessionId = (() => {
+      // crypto.randomUUID is available in Chromium 92+; the streamer
+      // runs on 147 so this is safe. Fallback path is for tests that
+      // mock crypto.
+      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+      }
+      return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    })();
+    let sessionStartedAt = null;       // ms timestamp of session_created emit
+    let sessionCreated = false;        // emit-once latch
+    let firstDCOpenedSeen = false;     // handshake_ms attached to first dc.opened only
+    let iceFailedDebounce = null;      // setTimeout handle for the 3 s ice.failed debounce
+
+    function emitSessionCreated(reason) {
+      if (sessionCreated) return;
+      sessionCreated = true;
+      sessionStartedAt = Date.now();
+      log("info", "webrtc session_created", { sessionId, reason });
+      if (metrics) {
+        metrics.emit("chromeless.webrtc.session_created", {
+          session_id: sessionId, signaling_session: SESSION_ID, reason,
+        });
+      }
+    }
+
+    function emitSessionClosed(reason) {
+      if (!sessionCreated) return; // never opened → never closes
+      const durationMs = sessionStartedAt !== null
+        ? Math.max(0, Date.now() - sessionStartedAt) : null;
+      log("info", "webrtc session_closed", { sessionId, reason, duration_ms: durationMs });
+      if (metrics) {
+        metrics.emit("chromeless.webrtc.session_closed", {
+          session_id: sessionId,
+          duration_ms: durationMs,
+          reason,
+        });
+      }
+      // Latch: a second close attempt is a no-op.
+      sessionStartedAt = null;
+      sessionCreated = false;
+    }
+
     pc.onsignalingstatechange   = () => log("info", `signalingState=${pc.signalingState}`);
     pc.oniceconnectionstatechange = () => {
-      const lvl = pc.iceConnectionState === "failed" ? "err" : "info";
-      log(lvl, `iceConnectionState=${pc.iceConnectionState}`);
+      const state = pc.iceConnectionState;
+      const lvl = state === "failed" ? "err" : "info";
+      log(lvl, `iceConnectionState=${state}`);
+      // Wave 2 A4 — dimension-less counters per D4-YAML.
+      if (state === "connected" || state === "completed") {
+        // Cancel any pending failed-debounce; ICE recovered.
+        if (iceFailedDebounce !== null) {
+          clearTimeout(iceFailedDebounce);
+          iceFailedDebounce = null;
+        }
+        if (metrics) {
+          metrics.emit("chromeless.webrtc.ice.connected", {
+            session_id: sessionId, ice_state: state,
+          });
+        }
+      } else if (state === "failed" || state === "disconnected") {
+        // Debounce ~3 s — disconnected often recovers without
+        // intervention, and the YAML's failure semantic is "stayed
+        // past the recovery window". Failed is permanent on Chromium
+        // but we route both through the same debounce for consistency.
+        if (iceFailedDebounce === null) {
+          iceFailedDebounce = setTimeout(() => {
+            iceFailedDebounce = null;
+            const finalState = pc.iceConnectionState;
+            if (finalState !== "connected" && finalState !== "completed") {
+              if (metrics) {
+                metrics.emit("chromeless.webrtc.ice.failed", {
+                  session_id: sessionId,
+                  ice_state: finalState,
+                  reason: state, // the state that triggered the debounce
+                });
+              }
+            }
+          }, 3000);
+        }
+      }
     };
     pc.onicegatheringstatechange = () => log("info", `iceGatheringState=${pc.iceGatheringState}`);
     pc.onconnectionstatechange = () => {
-      const lvl = pc.connectionState === "failed" ? "err" : "info";
-      log(lvl, `connectionState=${pc.connectionState}`);
-      if (pc.connectionState === "failed") teardown("pc failed");
+      const state = pc.connectionState;
+      const lvl = state === "failed" ? "err" : "info";
+      log(lvl, `connectionState=${state}`);
+      // Wave 2 A4 — first transition to "connected" is the session
+      // lifecycle marker. RTCPeerConnection's connected state can flap
+      // back to "connecting"/"disconnected"/"failed"; we only emit
+      // session_created once per PC.
+      if (state === "connected") {
+        emitSessionCreated("connectionState=connected");
+      }
+      if (state === "failed") teardown("pc failed");
     };
 
     // The streamer is the offerer (T34) and creates the "input"
@@ -614,13 +1724,106 @@
     // in case future code paths add channels remotely).
     const inputDC  = pc.createDataChannel("input",  { ordered: true });
     const statsDC  = pc.createDataChannel("stats",  { ordered: true });
+    // Wave 1 §2: three new DataChannel labels. Labels are exact and
+    // case-sensitive — any drift silently routes to the portal's
+    // `other =>` log-and-drop arm. `cursor` is one-way emit, `stats`-
+    // shaped JSON envelopes; `clipboard` is bidirectional with per-
+    // session monotonic seq counters; `file-upload` is one-way
+    // receive with chunk reassembly per upload_id.
+    const cursorDC     = pc.createDataChannel("cursor",      { ordered: true });
+    const clipboardDC  = pc.createDataChannel("clipboard",   { ordered: true });
+    const fileUploadDC = pc.createDataChannel("file-upload", { ordered: true });
     log("info", "created data channels", {
       input: inputDC.id, stats: statsDC.id,
+      cursor: cursorDC.id, clipboard: clipboardDC.id,
+      file_upload: fileUploadDC.id,
     });
+
+    // Wave 2 A4 — per-DC `open` listener emits dc.opened for every
+    // label so the YAML-declared chromeless_webrtc_dc_opened_count
+    // counter and the chromeless_webrtc_signaling_handshake_ms
+    // histogram (on the FIRST dc.opened only) populate.
+    //
+    // The handshake duration is measured from session_created (PC's
+    // first connectionState=connected) to the first DC's `open`
+    // event. With trickle-ICE that gap is typically 200-800 ms; a
+    // long tail signals slow ICE selection or signaling stalls.
+    const dcStartedAt = Date.now();
+    function wireDCOpenEmit(dc, label) {
+      dc.addEventListener("open", () => {
+        const attrs = { label, session_id: sessionId };
+        if (!firstDCOpenedSeen) {
+          firstDCOpenedSeen = true;
+          // Prefer measuring from session_created time when available
+          // (a DC can open before the PC's connectionState transitions
+          // to `connected` because data-channel readiness rides the
+          // SCTP handshake, which beats the bundle ICE check). When
+          // session_created hasn't fired yet, fall back to a
+          // page-relative measure.
+          const baseT = sessionStartedAt ?? dcStartedAt;
+          attrs.handshake_ms = Math.max(0, Date.now() - baseT);
+        }
+        if (metrics) metrics.emit("chromeless.webrtc.dc.opened", attrs);
+      });
+    }
+    wireDCOpenEmit(inputDC,      "input");
+    wireDCOpenEmit(statsDC,      "stats");
+    wireDCOpenEmit(cursorDC,     "cursor");
+    wireDCOpenEmit(clipboardDC,  "clipboard");
+    wireDCOpenEmit(fileUploadDC, "file-upload");
+
     const inputRelay = new InputRelay(inputDC, INPUT_BRIDGE_URL);
     const statsRelay = new StatsRelay(statsDC, METRICS_SIDECAR_URL);
 
-    active = { ws, pc, stream, inputRelay, statsRelay };
+    // Wave 1 — best-effort CDP attach. If this fails (e.g. the
+    // Chromium flag set blocks WebSocket connections from the
+    // streamer page to its own DevTools port, or :9222 is unreachable
+    // because of supervisord ordering), we still ship the open-but-
+    // dormant DataChannels so the portal demux sees the labels and
+    // doesn't drop them. The emitters log the install failure.
+    let cdp = null;
+    let cursorEmitter = null;
+    let clipboardChannel = null;
+    let fileUploadReceiver = null;
+    if (!WAVE1_DISABLED) {
+      cdp = new CDPClient();
+      cdp.connect(CDP_BASE_URL).then(() => {
+        log("ok", "CDP connected for Wave 1 channels", { base: CDP_BASE_URL });
+        cursorEmitter      = new CursorEmitter(cursorDC, cdp);
+        clipboardChannel   = new ClipboardChannel(clipboardDC, cdp);
+        fileUploadReceiver = new FileUploadReceiver(fileUploadDC, cdp);
+        if (active) {
+          active.cdp = cdp;
+          active.cursorEmitter = cursorEmitter;
+          active.clipboardChannel = clipboardChannel;
+          active.fileUploadReceiver = fileUploadReceiver;
+        }
+        // Install probes + bindings. Each install is independent —
+        // a clipboard install failure shouldn't prevent cursor.
+        cursorEmitter.install();
+        clipboardChannel.install();
+        // FileUploadReceiver doesn't inject any page-side probe; it
+        // just listens for inbound DC messages and uses CDP for the
+        // landing call. No install step needed.
+      }).catch((err) => {
+        log("warn", "CDP connect failed; Wave 1 channels will stay dormant",
+            String(err));
+        try { cdp.close(); } catch { /* ignore */ }
+        cdp = null;
+      });
+    } else {
+      log("info", "Wave 1 channels disabled via ?wave1=off");
+    }
+
+    active = {
+      ws, pc, stream, inputRelay, statsRelay,
+      cdp, cursorEmitter, clipboardChannel, fileUploadReceiver,
+      // Wave 2 A4 — the closeover-bound emitSessionClosed lets the
+      // module-scope teardown() pair every session_created with
+      // exactly one session_closed. Idempotent (the latch inside the
+      // closure no-ops a second call).
+      emitSessionClosed,
+    };
 
     pc.onicecandidate = (ev) => {
       if (ws.readyState !== WebSocket.OPEN) return;

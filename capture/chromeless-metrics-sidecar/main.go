@@ -708,6 +708,27 @@ func main() {
 	mOutboundBitrate.WithLabelValues("video").Set(0)
 	mOutboundBitrate.WithLabelValues("audio").Set(0)
 
+	// Wave 2 A4: pre-register the chromeless_webrtc_* counter series so
+	// dashboards bind even on an idle container. The element_id label
+	// is process-static (env-var sourced); the dc.opened label fans
+	// over the five known channel labels from the contract.
+	{
+		eid := elementIDLabel()
+		mWebRTCSessionCreated.WithLabelValues(eid).Add(0)
+		mWebRTCSessionClosedCount.WithLabelValues(eid).Add(0)
+		mWebRTCICEConnected.WithLabelValues(eid).Add(0)
+		mWebRTCICEFailed.WithLabelValues(eid).Add(0)
+		mWebRTCReplayHit.WithLabelValues(eid).Add(0)
+		mWebRTCReplayMiss.WithLabelValues(eid).Add(0)
+		mWebRTCDCCursorCoalesced.WithLabelValues(eid).Add(0)
+		mWebRTCDCClipboardUnsupportedMime.WithLabelValues(eid).Add(0)
+		mWebRTCDCClipboardStaleSeq.WithLabelValues(eid).Add(0)
+		mWebRTCDCFileUploadOrphanTimeout.WithLabelValues(eid).Add(0)
+		for _, label := range []string{"input", "stats", "cursor", "clipboard", "file-upload"} {
+			mWebRTCDCOpened.WithLabelValues(eid, label).Add(0)
+		}
+	}
+
 	pr := &procReader{procRoot: procRoot}
 	dt := &devtoolsClient{baseURL: devtoolsURL, log: logger}
 
@@ -721,6 +742,12 @@ func main() {
 	// "stats" data channel. See docs/protocols/stats-channel.md.
 	statsHandler, _ := statsUpdateHandler(logger)
 	mux.HandleFunc("/stats-update", statsHandler)
+	// Wave 2 A4: WebRTC pod-level lifecycle events (session_created,
+	// dc.opened, ice.failed, …). Schema lives in
+	// /workspace/chemistry/elements/tools/chromeless/.triform/observability.yaml;
+	// the chromeless side and the physics side both honour the same
+	// `chromeless.webrtc.*` event names.
+	mux.HandleFunc("/webrtc-event", webrtcEventHandler(logger))
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           mux,

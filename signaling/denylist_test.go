@@ -95,11 +95,11 @@ func TestStaticDenylist_LoadFromEnv(t *testing.T) {
 // ---------- RedisDenylist with a fake client ----------
 
 type fakeRedis struct {
-	mu       sync.Mutex
-	sets     map[string]map[string]struct{}
-	addErr   error
-	memErr   error
-	calls    int
+	mu     sync.Mutex
+	sets   map[string]map[string]struct{}
+	addErr error
+	memErr error
+	calls  int
 }
 
 func newFakeRedis() *fakeRedis {

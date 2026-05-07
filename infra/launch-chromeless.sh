@@ -15,6 +15,11 @@
 #   SIGNALING_URL         WS URL the streamer dials      (default: ws://signaling:8080/ws)
 #   STREAMER_FPS          display capture target fps     (default: 30)
 #   STREAMER_PORT         local static-server port       (default: 9000)
+#   STREAMER_INPUT_URL    ws endpoint for input relay    (default: ws://localhost:9200/input)
+#   STREAMER_METRICS_URL  stats endpoint                 (default: http://localhost:9100/stats-update)
+#   STREAMER_WEBRTC_METRICS_URL event endpoint           (default: http://localhost:9100/webrtc-event)
+#   CHROMELESS_BROWSER_BIN browser executable            (default: /usr/local/bin/chromeless when present,
+#                                                          otherwise /usr/bin/chromium)
 #   CHROMELESS_USE_FAKE_MEDIA T86 unblock switch — when set
 #                         to "1", appends
 #                         --use-fake-device-for-media-stream so
@@ -49,6 +54,9 @@ fi
 : "${SIGNALING_URL:=ws://signaling:8080/ws}"
 : "${STREAMER_FPS:=30}"
 : "${STREAMER_PORT:=9000}"
+: "${STREAMER_INPUT_URL:=ws://localhost:9200/input}"
+: "${STREAMER_METRICS_URL:=http://localhost:9100/stats-update}"
+: "${STREAMER_WEBRTC_METRICS_URL:=http://localhost:9100/webrtc-event}"
 : "${CHROMELESS_USE_FAKE_MEDIA:=}"
 # T109: pre-recorded harness fixture for real T65 numbers. When set,
 # Chromium's synthetic camera reads frames from this y4m file instead
@@ -66,10 +74,19 @@ fi
 : "${CHROMELESS_USE_FAKE_MEDIA_FILE:=}"
 
 STREAMER_ORIGIN="http://localhost:${STREAMER_PORT}"
-STREAMER_URL="${STREAMER_ORIGIN}/streamer/index.html?signal=${SIGNALING_URL}&session=${SESSION_ID}&fps=${STREAMER_FPS}"
+STREAMER_URL="${STREAMER_ORIGIN}/streamer/index.html?signal=${SIGNALING_URL}&session=${SESSION_ID}&fps=${STREAMER_FPS}&input=${STREAMER_INPUT_URL}&metrics=${STREAMER_METRICS_URL}&webrtc_metrics=${STREAMER_WEBRTC_METRICS_URL}"
+
+if [ -z "${CHROMELESS_BROWSER_BIN:-}" ]; then
+    if [ -x /usr/local/bin/chromeless ]; then
+        CHROMELESS_BROWSER_BIN=/usr/local/bin/chromeless
+    else
+        CHROMELESS_BROWSER_BIN=/usr/bin/chromium
+    fi
+fi
 
 echo "[launch-chromium] session=${SESSION_ID} signaling=${SIGNALING_URL} fps=${STREAMER_FPS}" >&2
 echo "[launch-chromium] url=${STREAMER_URL}" >&2
+echo "[launch-chromium] browser_bin=${CHROMELESS_BROWSER_BIN}" >&2
 
 # T86: optional --use-fake-device-for-media-stream gate. When the env
 # var is "1", we add the flag at the end of argv so it overrides any
@@ -107,7 +124,7 @@ fi
 # Chromium picks.
 #
 # shellcheck disable=SC2086  # fake_media_arg is intentionally word-split
-exec /usr/bin/chromium \
+exec "${CHROMELESS_BROWSER_BIN}" \
   --no-sandbox \
   --disable-dev-shm-usage \
   --display=:99 \

@@ -43,6 +43,9 @@ namespace:
 # Prometheus / Grafana group on.
 region: triform-eu
 
+observability:
+  otlpLogsEndpoint: "http://signoz-otel-collector.signoz.svc.cluster.local:4318/v1/logs"
+
 # ---------------------------------------------------------------------
 # Image registry — forgejo. Same path the T112 build runner uses.
 # ---------------------------------------------------------------------
