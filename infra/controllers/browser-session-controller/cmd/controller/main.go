@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -69,17 +70,18 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	logger := ctrl.Log.WithName("setup")
+	ctx := ctrl.SetupSignalHandler()
 
 	// T99: OpenTelemetry tracing. Init returns a no-op shutdown when
 	// OTEL_EXPORTER_OTLP_ENDPOINT is unset (test / dev compose
 	// without Jaeger), so this is safe to call unconditionally.
-	tracingShutdown, err := tracing.Init(ctrl.SetupSignalHandler(), version)
+	tracingShutdown, err := tracing.Init(ctx, version)
 	if err != nil {
 		logger.Error(err, "tracing init failed; continuing without tracing")
 	}
 	defer func() {
 		if tracingShutdown != nil {
-			_ = tracingShutdown(ctrl.SetupSignalHandler())
+			_ = tracingShutdown(context.Background())
 		}
 	}()
 
@@ -163,7 +165,7 @@ func main() {
 		"leader-elect", enableLeaderElection,
 		"default-pool", defaultPool,
 	)
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		logger.Error(err, "manager exited with error")
 		os.Exit(1)
 	}
