@@ -1,0 +1,111 @@
+# NetworkPolicy companion for the integration chromeless namespace.
+#
+# The cluster has default-deny style Calico policy, so the browser session
+# controller and cdp-pool services need explicit in-cluster ingress/egress
+# rules even when the Helm chart's optional NetworkPolicy bundle is disabled.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chromeless-allow-core-egress
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/part-of: chromeless
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8081 }
+        - { protocol: TCP, port: 8082 }
+        - { protocol: TCP, port: 9000 }
+        - { protocol: TCP, port: 9100 }
+        - { protocol: TCP, port: 9222 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: triform-wtf
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: triform
+      ports:
+        - { protocol: TCP, port: 3000 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: signoz
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 3478 }
+        - { protocol: UDP, port: 3478 }
+        - { protocol: UDP, port: 49152, endPort: 65535 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chromeless-allow-controller-gateway-ingress
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/part-of: chromeless
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: chromeless
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: triform-wtf
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: triform
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8082 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chromeless-allow-cdp-ingress
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/part-of: chromeless
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: triform-wtf
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: triform
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 9000 }
+        - { protocol: TCP, port: 9100 }
+        - { protocol: TCP, port: 9222 }

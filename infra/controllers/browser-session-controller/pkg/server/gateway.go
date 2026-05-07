@@ -243,6 +243,17 @@ func (g *SessionGateway) waitForReady(ctx context.Context, key types.NamespacedN
 	var sess cbv1.BrowserSession
 	for {
 		if err := g.Client.Get(ctx, key, &sess); err != nil {
+			if apierrors.IsNotFound(err) {
+				select {
+				case <-ctx.Done():
+					return sess, ctx.Err()
+				case <-deadline.C:
+					logger.Info("session gateway returning before session cache observed create", "session", key)
+					return sess, nil
+				case <-tick.C:
+					continue
+				}
+			}
 			return sess, err
 		}
 		if sess.Status.Phase == cbv1.SessionReady {
