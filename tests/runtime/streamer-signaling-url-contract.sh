@@ -22,12 +22,23 @@ case "$out" in
   *) echo "missing signaling token in streamer URL" >&2; echo "$out" >&2; exit 1 ;;
 esac
 
+case "$out" in
+  *'[launch-chromium] url='*'token=<redacted>'* ) ;;
+  *) echo "launch log must redact signaling token" >&2; echo "$out" >&2; exit 1 ;;
+esac
+
 node <<'NODE'
 const fs = require("node:fs");
 const vm = require("node:vm");
 const src = fs.readFileSync("capture/streamer-page/streamer.js", "utf8");
 if (!src.includes("buildSignalingWsUrl")) {
   throw new Error("streamer.js must keep buildSignalingWsUrl helper");
+}
+if (!src.includes('url.searchParams.set("role", "browser")')) {
+  throw new Error("streamer.js must always set role=browser on absolute signaling URLs");
+}
+if (!src.includes('"role=browser"')) {
+  throw new Error("streamer.js must always set role=browser on fallback signaling URLs");
 }
 const sample = new URL("ws://triform/api/webrtc/signaling/cb%3Aabc?role=browser&token=tok");
 if (sample.searchParams.get("role") !== "browser" || sample.searchParams.get("token") !== "tok") {

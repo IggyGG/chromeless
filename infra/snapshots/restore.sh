@@ -122,6 +122,9 @@ if [ -z "$PAGE_WS_URL" ]; then
 fi
 
 STREAMER_URL="http://localhost:${STREAMER_PORT}/streamer/index.html?signal=${SIGNALING_URL}&session=${SESSION_ID}&fps=${STREAMER_FPS}"
+if [ -n "${SIGNALING_TOKEN:-}" ]; then
+    STREAMER_URL="${STREAMER_URL}&token=${SIGNALING_TOKEN}"
+fi
 log "navigating page to streamer URL session=${SESSION_ID}"
 python3 - "$PAGE_WS_URL" "$STREAMER_URL" <<'PY'
 import json, sys
