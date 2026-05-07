@@ -93,6 +93,38 @@ echo "[launch-chromium] session=${SESSION_ID} signaling=${SIGNALING_URL} fps=${S
 echo "[launch-chromium] url=${STREAMER_URL}" >&2
 echo "[launch-chromium] browser_bin=${CHROMELESS_BROWSER_BIN}" >&2
 
+open_streamer_after_devtools() {
+    encoded_url=$(
+        STREAMER_URL="${STREAMER_URL}" python3 - <<'PY'
+import os
+import urllib.parse
+
+print(urllib.parse.quote(os.environ["STREAMER_URL"], safe=""))
+PY
+    )
+
+    attempts="${STREAMER_LAUNCH_WAIT_ATTEMPTS:-150}"
+    i=0
+    while [ "$i" -lt "$attempts" ]; do
+        if curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
+            if curl -fsS -X PUT "http://127.0.0.1:9222/json/new?${encoded_url}" \
+                    >/tmp/chromeless-streamer-target.json \
+                    2>/tmp/chromeless-streamer-open.err; then
+                echo "[launch-chromium] streamer target opened via DevTools" >&2
+                return 0
+            fi
+        fi
+        i=$((i + 1))
+        sleep 0.2
+    done
+
+    echo "[launch-chromium] WARNING: DevTools did not open streamer target after ${attempts} attempts" >&2
+    if [ -s /tmp/chromeless-streamer-open.err ]; then
+        sed 's/^/[launch-chromium] streamer-open: /' /tmp/chromeless-streamer-open.err >&2 || true
+    fi
+    return 0
+}
+
 # T86: optional --use-fake-device-for-media-stream gate. When the env
 # var is "1", we add the flag at the end of argv so it overrides any
 # earlier defaults. Logged at startup so docker-compose/k8s logs make
@@ -129,7 +161,7 @@ fi
 # Chromium picks.
 #
 # shellcheck disable=SC2086  # fake_media_arg is intentionally word-split
-exec "${CHROMELESS_BROWSER_BIN}" \
+"${CHROMELESS_BROWSER_BIN}" \
   --no-sandbox \
   --disable-dev-shm-usage \
   --display=:99 \
@@ -154,4 +186,19 @@ exec "${CHROMELESS_BROWSER_BIN}" \
   --enable-usermedia-screen-capturing \
   --unsafely-treat-insecure-origin-as-secure="${STREAMER_ORIGIN}" \
   ${fake_media_arg} \
-  --app="${STREAMER_URL}"
+  --app="${STREAMER_URL}" &
+
+chromium_pid=$!
+
+terminate() {
+    kill -TERM "${chromium_pid}" 2>/dev/null || true
+}
+trap terminate INT TERM
+
+open_streamer_after_devtools &
+opener_pid=$!
+
+wait "${chromium_pid}"
+status=$?
+wait "${opener_pid}" 2>/dev/null || true
+exit "${status}"
