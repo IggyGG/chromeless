@@ -3,6 +3,12 @@
 # The cluster has default-deny style Calico policy, so the browser session
 # controller and cdp-pool services need explicit in-cluster ingress/egress
 # rules even when the Helm chart's optional NetworkPolicy bundle is disabled.
+#
+# triform-wtf currently runs the Triform workload with hostNetwork=true. Calico
+# does not consistently observe that traffic as a namespaced pod identity, so
+# Triform-facing rules carry the podSelector form, the cluster/service CIDR form,
+# and the current node IP /32 form. Keep this list aligned with
+# `kubectl get nodes -o wide`.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,6 +38,15 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: triform
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 95.217.200.179/32 }
+        - ipBlock: { cidr: 95.217.118.227/32 }
+        - ipBlock: { cidr: 135.181.6.55/32 }
+        - ipBlock: { cidr: 157.90.35.101/32 }
+        - ipBlock: { cidr: 78.46.219.146/32 }
+        - ipBlock: { cidr: 65.109.79.94/32 }
+        - ipBlock: { cidr: 116.202.84.152/32 }
+        - ipBlock: { cidr: 49.12.172.59/32 }
       ports:
         - { protocol: TCP, port: 3000 }
     - to:
@@ -79,6 +94,15 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: triform
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 95.217.200.179/32 }
+        - ipBlock: { cidr: 95.217.118.227/32 }
+        - ipBlock: { cidr: 135.181.6.55/32 }
+        - ipBlock: { cidr: 157.90.35.101/32 }
+        - ipBlock: { cidr: 78.46.219.146/32 }
+        - ipBlock: { cidr: 65.109.79.94/32 }
+        - ipBlock: { cidr: 116.202.84.152/32 }
+        - ipBlock: { cidr: 49.12.172.59/32 }
         - podSelector: {}
       ports:
         - { protocol: TCP, port: 8080 }
@@ -104,6 +128,15 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: triform
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 95.217.200.179/32 }
+        - ipBlock: { cidr: 95.217.118.227/32 }
+        - ipBlock: { cidr: 135.181.6.55/32 }
+        - ipBlock: { cidr: 157.90.35.101/32 }
+        - ipBlock: { cidr: 78.46.219.146/32 }
+        - ipBlock: { cidr: 65.109.79.94/32 }
+        - ipBlock: { cidr: 116.202.84.152/32 }
+        - ipBlock: { cidr: 49.12.172.59/32 }
         - podSelector: {}
       ports:
         - { protocol: TCP, port: 9000 }
