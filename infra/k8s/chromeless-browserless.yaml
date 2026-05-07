@@ -93,7 +93,7 @@ spec:
             sizeLimit: 16Mi
       containers:
         - name: cb-chromium
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-1791a91c0eb1
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-81b751008c66
           imagePullPolicy: Always
           env:
             - name: SESSION_ID
@@ -148,7 +148,7 @@ spec:
             runAsUser: 1000
             runAsGroup: 1000
         - name: chromeless-metrics-sidecar
-          image: registry.triform.cloud/chromeless/chromeless-metrics-sidecar:cr7727-1791a91c0eb1
+          image: registry.triform.cloud/chromeless/chromeless-metrics-sidecar:cr7727-81b751008c66
           imagePullPolicy: Always
           env:
             - name: DEVTOOLS_URL
