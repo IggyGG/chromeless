@@ -56,6 +56,10 @@ spec:
         seccompProfile:
           type: Localhost
           localhostProfile: chromeless.json
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: dshm
           emptyDir:
