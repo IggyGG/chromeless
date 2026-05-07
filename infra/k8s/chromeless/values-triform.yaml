@@ -46,6 +46,14 @@ region: triform-eu
 observability:
   otlpLogsEndpoint: "http://signoz-otel-collector.signoz.svc.cluster.local:4318/v1/logs"
 
+capture:
+  # Integration currently validates the WebRTC/signaling/DataChannel
+  # pipeline against Chromium's synthetic media source. Real
+  # getDisplayMedia on Chromium 147 + Xvfb still fails with
+  # NotReadableError; the durable real-content path is FrameSink capture.
+  fakeMedia: true
+  fakeMediaFile: ""
+
 # ---------------------------------------------------------------------
 # Image registry — forgejo. Same path the T112 build runner uses.
 # ---------------------------------------------------------------------

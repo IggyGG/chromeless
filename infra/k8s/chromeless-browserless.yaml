@@ -93,17 +93,19 @@ spec:
             sizeLimit: 16Mi
       containers:
         - name: cb-chromium
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-81b751008c66
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-8d52631d4199
           imagePullPolicy: Always
           env:
             - name: SESSION_ID
               value: chromeless-browserless
             - name: SIGNALING_URL
-              value: ws://triform.triform-wtf.svc.cluster.local:3000/api/webrtc/signaling/cb:chromeless-browserless
+              value: ws://triform.triform-wtf.svc.cluster.local:3000/api/webrtc/signaling
             - name: STREAMER_FPS
               value: "30"
             - name: IDLE_TIMEOUT_S
               value: "999999"
+            - name: CHROMELESS_USE_FAKE_MEDIA
+              value: "1"
             - name: CHROMELESS_REGION
               value: triform-eu
           ports:

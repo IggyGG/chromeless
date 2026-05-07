@@ -109,6 +109,14 @@ spec:
               value: "30"
             - name: IDLE_TIMEOUT_S
               value: {{ .Values.swPool.idleTimeoutSeconds | quote }}
+            {{- if .Values.capture.fakeMedia }}
+            - name: CHROMELESS_USE_FAKE_MEDIA
+              value: "1"
+            {{- if .Values.capture.fakeMediaFile }}
+            - name: CHROMELESS_USE_FAKE_MEDIA_FILE
+              value: {{ .Values.capture.fakeMediaFile | quote }}
+            {{- end }}
+            {{- end }}
             # T119: SW encoder hint. The chromeless image checks for
             # CHROMELESS_ENCODER_PREFERENCE on startup; "sw" pins libvpx /
             # libx264 zero-latency and skips the NVENC factory probe.

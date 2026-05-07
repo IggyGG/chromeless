@@ -30,6 +30,15 @@ observability:
   # Leave empty to keep the metrics sidecar in Prometheus-only mode.
   otlpLogsEndpoint: ""
 
+capture:
+  # Chromium 147 + Xvfb still returns NotReadableError for real
+  # getDisplayMedia in the Phase 1 streamer path. Keep disabled by
+  # default; integration overlays may enable this to validate WebRTC,
+  # signaling, encoder, and DataChannel plumbing while FrameSink capture
+  # remains the durable real-content path.
+  fakeMedia: false
+  fakeMediaFile: ""
+
 images:
   # Override these per-environment with --set images.<component>.tag=...
   # to point at the version you actually want to ship.

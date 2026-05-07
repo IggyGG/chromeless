@@ -95,6 +95,14 @@ spec:
               value: "30"
             - name: IDLE_TIMEOUT_S
               value: "999999"
+            {{- if .Values.capture.fakeMedia }}
+            - name: CHROMELESS_USE_FAKE_MEDIA
+              value: "1"
+            {{- if .Values.capture.fakeMediaFile }}
+            - name: CHROMELESS_USE_FAKE_MEDIA_FILE
+              value: {{ .Values.capture.fakeMediaFile | quote }}
+            {{- end }}
+            {{- end }}
             {{- $region := include "chromeless.region" (dict "context" . "component" "") }}
             {{- if $region }}
             - name: CHROMELESS_REGION
