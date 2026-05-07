@@ -192,10 +192,12 @@ coturn:
 
 defaultPool:
   enabled: true
-  # Keep low for first deploy. With 8 GPUs on triform-5, warmReplicas=2
-  # means 6 GPUs free for assigned sessions; bump after T117 numbers
-  # validate the per-session GPU footprint.
-  warmReplicas: 2
+  # Triform Pattern-C sessions inject a per-session broker URL + browser JWT
+  # into the chromeless pod env. K8s pod env is immutable, so warm pods cannot
+  # be rebound safely until the controller grows an exec-based env writer.
+  # Cold-start for the first integration release; re-enable warm slots after
+  # that handoff path is implemented and tested.
+  warmReplicas: 0
   # Cap at 6 concurrent sessions: 8 GPUs - 2 warm = 6 assignable.
   # Leave headroom rather than chase 100% utilisation; oom-killing a
   # WebRTC session in the middle of a user's flow is the bad outcome.
@@ -258,7 +260,9 @@ defaultPool:
 
 swPool:
   enabled: true
-  warmReplicas: 8
+  # See defaultPool note: Pattern-C env is per-session, so warm pods remain
+  # disabled until dynamic env injection exists for the warm assignment path.
+  warmReplicas: 0
   maxSessions: 100
   maxAgeSeconds: 1800       # 30 min — recycle aggressively
   idleTimeoutSeconds: 300   # 5 min — kick idle tabs (per-session knob;

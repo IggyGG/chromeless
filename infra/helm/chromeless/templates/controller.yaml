@@ -103,10 +103,16 @@ spec:
             - "--leader-elect=true"
             - "--metrics-bind=:8080"
             - "--health-bind=:8081"
+            - "--gateway-bind=:8082"
+            - "--gateway-namespace={{ $ns }}"
             - "--default-pool={{ .Values.controller.defaultPool }}"
           {{- $region := include "chromeless.region" (dict "context" . "component" "controller") }}
-          {{- if $region }}
           env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- if $region }}
             - name: CHROMELESS_REGION
               value: {{ $region | quote }}
           {{- end }}
@@ -115,6 +121,8 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+            - name: gateway
+              containerPort: 8082
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           livenessProbe:
@@ -161,4 +169,7 @@ spec:
     - name: metrics
       port: 8080
       targetPort: metrics
+    - name: gateway
+      port: 8082
+      targetPort: gateway
 {{- end }}

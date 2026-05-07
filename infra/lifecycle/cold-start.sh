@@ -61,6 +61,7 @@ if [ -z "${SESSION_ID:-}" ]; then
     SESSION_ID="auto-${rand_hex}"
 fi
 SIGNALING_URL="${SIGNALING_URL:-ws://signaling:8080/ws}"
+SIGNALING_TOKEN="${SIGNALING_TOKEN:-}"
 STREAMER_FPS="${STREAMER_FPS:-30}"
 STREAMER_PORT="${STREAMER_PORT:-9000}"
 
@@ -73,6 +74,7 @@ chmod 0644 "$SESSION_ID_FILE"
 {
     printf 'SESSION_ID=%s\n'    "$SESSION_ID"
     printf 'SIGNALING_URL=%s\n' "$SIGNALING_URL"
+    printf 'SIGNALING_TOKEN=%s\n' "$SIGNALING_TOKEN"
     printf 'STREAMER_FPS=%s\n'  "$STREAMER_FPS"
     printf 'STREAMER_PORT=%s\n' "$STREAMER_PORT"
 } > "$SESSION_ENV_FILE"

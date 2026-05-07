@@ -255,12 +255,22 @@ const (
 	LabelSessionStateAssign = "assigned"
 	LabelSessionStateDrain  = "draining"
 
-	LabelSessionOwner = "chromeless.session/owner"      // session CR name when assigned
-	LabelSessionPool  = "chromeless.session/pool"       // pool CR name
-	LabelSessionTenant = "chromeless.session/tenant"    // tenant id, "_anonymous" if none
+	LabelSessionOwner  = "chromeless.session/owner"  // session CR name when assigned
+	LabelSessionPool   = "chromeless.session/pool"   // pool CR name
+	LabelSessionTenant = "chromeless.session/tenant" // tenant id, "_anonymous" if none
 
-	AnnotationSnapshotID = "chromeless.io/snapshot-id"  // T68
-	AnnotationSessionID  = "chromeless.io/session-id"   // session CR uid mirror
+	AnnotationSnapshotID = "chromeless.io/snapshot-id" // T68
+	AnnotationSessionID  = "chromeless.io/session-id"  // session CR uid mirror
+	// AnnotationBrokerSessionID is the Triform Pattern-C broker session the
+	// streamer should join. It may differ from metadata.name because K8s
+	// object names cannot carry every broker-safe character.
+	AnnotationBrokerSessionID = "chromeless.io/broker-session-id"
+	// AnnotationBrowserSignalingURL is the browser-side signaling endpoint
+	// base URL injected by the session gateway for native Triform WebRTC.
+	AnnotationBrowserSignalingURL = "chromeless.io/browser-signaling-url"
+	// AnnotationBrowserSignalingToken is a short-lived browser JWT for the
+	// Triform signaling broker. It is injected into the pod env on cold-start.
+	AnnotationBrowserSignalingToken = "chromeless.io/browser-signaling-token"
 
 	// AnonymousTenant matches signaling/auth.go's anonymousTenant
 	// constant. Two systems, same string — keep in sync if either

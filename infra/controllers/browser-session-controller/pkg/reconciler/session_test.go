@@ -193,6 +193,60 @@ func TestSession_WarmPool_FastAssignment(t *testing.T) {
 	}
 }
 
+func TestSession_TriformPatternCColdStartsWithSessionEnv(t *testing.T) {
+	scheme := mustScheme(t)
+	pool := samplePool("default-pool", "cb", 1)
+	sess := sampleSession("tf-11111111-2222-3333-4444-555555555555", "cb", "default-pool", "tenant-x")
+	sess.Annotations = map[string]string{
+		cbv1.AnnotationBrokerSessionID:       "cb:11111111-2222-3333-4444-555555555555",
+		cbv1.AnnotationBrowserSignalingURL:   "ws://triform.triform-wtf.svc.cluster.local:3000/api/webrtc/signaling",
+		cbv1.AnnotationBrowserSignalingToken: "jwt-token",
+	}
+	warm := warmReadyPod("warm-pod-pattern-c", "cb", "default-pool")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, sess, warm).
+		WithStatusSubresource(&cbv1.BrowserSession{}, &cbv1.BrowserSessionPool{}).
+		Build()
+	r := &SessionReconciler{Client: c, Scheme: scheme, DefaultPool: "default-pool"}
+
+	reconcileTwice(t, r, types.NamespacedName{Namespace: "cb", Name: sess.Name})
+
+	var pods corev1.PodList
+	if err := c.List(context.Background(), &pods, client.InNamespace("cb")); err != nil {
+		t.Fatal(err)
+	}
+	var assigned *corev1.Pod
+	for i := range pods.Items {
+		if pods.Items[i].Labels[cbv1.LabelSessionOwner] == sess.Name {
+			assigned = &pods.Items[i]
+			break
+		}
+	}
+	if assigned == nil {
+		t.Fatalf("expected a cold-start assigned pod; pods=%v", pods.Items)
+	}
+	if assigned.Name == warm.Name {
+		t.Fatalf("Pattern-C session reused warm pod %q; expected cold-start pod", warm.Name)
+	}
+	if len(assigned.Spec.Containers) == 0 {
+		t.Fatalf("assigned pod has no containers")
+	}
+	env := map[string]string{}
+	for _, item := range assigned.Spec.Containers[0].Env {
+		env[item.Name] = item.Value
+	}
+	if env["SESSION_ID"] != sess.Annotations[cbv1.AnnotationBrokerSessionID] {
+		t.Fatalf("SESSION_ID = %q", env["SESSION_ID"])
+	}
+	if env["SIGNALING_URL"] != sess.Annotations[cbv1.AnnotationBrowserSignalingURL] {
+		t.Fatalf("SIGNALING_URL = %q", env["SIGNALING_URL"])
+	}
+	if env["SIGNALING_TOKEN"] != sess.Annotations[cbv1.AnnotationBrowserSignalingToken] {
+		t.Fatalf("SIGNALING_TOKEN = %q", env["SIGNALING_TOKEN"])
+	}
+}
+
 func TestSession_IdleEviction(t *testing.T) {
 	scheme := mustScheme(t)
 	pool := samplePool("default-pool", "cb", 1)

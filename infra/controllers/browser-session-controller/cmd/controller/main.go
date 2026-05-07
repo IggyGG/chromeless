@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -22,6 +23,7 @@ import (
 
 	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
 	"github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/reconciler"
+	"github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/server"
 	"github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/tracing"
 )
 
@@ -42,6 +44,9 @@ func main() {
 		enableLeaderElection bool
 		leaderElectionID     string
 		defaultPool          string
+		gatewayAddr          string
+		gatewayNamespace     string
+		gatewayReadyWait     string
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind", envOr("METRICS_BIND", ":8080"), "address /metrics binds to")
 	flag.StringVar(&healthAddr, "health-bind", envOr("HEALTH_BIND", ":8081"), "address /healthz binds to")
@@ -51,6 +56,12 @@ func main() {
 		"Lease name used by leader election")
 	flag.StringVar(&defaultPool, "default-pool", envOr("DEFAULT_POOL", "default-pool"),
 		"BrowserSessionPool name used when a BrowserSession.spec.poolName is empty")
+	flag.StringVar(&gatewayAddr, "gateway-bind", envOr("GATEWAY_BIND", ":8082"),
+		"address the Triform session gateway binds to")
+	flag.StringVar(&gatewayNamespace, "gateway-namespace", envOr("GATEWAY_NAMESPACE", envOr("POD_NAMESPACE", "chromeless")),
+		"namespace where gateway-created BrowserSession resources live")
+	flag.StringVar(&gatewayReadyWait, "gateway-ready-wait", envOr("GATEWAY_READY_WAIT", "60s"),
+		"how long POST /v1/sessions waits for the BrowserSession to become Ready")
 
 	zapOpts := zap.Options{Development: false}
 	zapOpts.BindFlags(flag.CommandLine)
@@ -115,6 +126,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	readyWait, err := time.ParseDuration(gatewayReadyWait)
+	if err != nil {
+		logger.Error(err, "invalid gateway-ready-wait", "value", gatewayReadyWait)
+		os.Exit(1)
+	}
+	if err := mgr.Add(&server.SessionGateway{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: server.GatewayConfig{
+			Bind:        gatewayAddr,
+			Namespace:   gatewayNamespace,
+			DefaultPool: defaultPool,
+			ReadyWait:   readyWait,
+		},
+	}); err != nil {
+		logger.Error(err, "unable to start session gateway")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		logger.Error(err, "unable to set up health check")
 		os.Exit(1)
@@ -127,6 +157,9 @@ func main() {
 	logger.Info("starting manager",
 		"metrics-bind", metricsAddr,
 		"health-bind", healthAddr,
+		"gateway-bind", gatewayAddr,
+		"gateway-namespace", gatewayNamespace,
+		"gateway-ready-wait", readyWait.String(),
 		"leader-elect", enableLeaderElection,
 		"default-pool", defaultPool,
 	)

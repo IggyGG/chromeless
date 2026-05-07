@@ -23,6 +23,7 @@
   const params = new URLSearchParams(location.search);
   const SIGNALING_URL = params.get("signal") || "ws://signaling:8080/ws";
   const SESSION_ID    = params.get("session") || "dev";
+  const SIGNALING_TOKEN = params.get("token") || "";
   const FRAMERATE     = Number(params.get("fps") || "30");
   // T77: simulcast support. Off by default; enable with ?simulcast=true.
   // The default ladder is 1× / 0.5× / 0.25× scale, with the bottom
@@ -120,6 +121,29 @@
   }
   function safeStringify(v) {
     try { return JSON.stringify(v); } catch { return String(v); }
+  }
+
+  function buildSignalingWsUrl(baseUrl, sessionId, token) {
+    const encodedSession = encodeURIComponent(sessionId);
+    const withSession = baseUrl.includes("{session}")
+      ? baseUrl.replaceAll("{session}", encodedSession)
+      : `${baseUrl.replace(/\/+$/, "")}/${encodedSession}`;
+    let url;
+    try {
+      url = new URL(withSession);
+    } catch {
+      // Keep the legacy path working for non-absolute test URLs.
+      const sep = withSession.includes("?") ? "&" : "?";
+      const auth = token
+        ? `${sep}role=browser&token=${encodeURIComponent(token)}`
+        : "";
+      return `${withSession}${auth}`;
+    }
+    if (token) {
+      url.searchParams.set("role", "browser");
+      url.searchParams.set("token", token);
+    }
+    return url.toString();
   }
 
   // T77: parse a "1,0.5,0.25@15" comma list into [{rid, scale, fps?}].
@@ -1704,7 +1728,7 @@
     };
 
     // 3. Open the signaling WS.
-    const wsUrl = `${SIGNALING_URL}/${encodeURIComponent(SESSION_ID)}`;
+    const wsUrl = buildSignalingWsUrl(SIGNALING_URL, SESSION_ID, SIGNALING_TOKEN);
     log("info", "dialing signaling", wsUrl);
     const ws = new WebSocket(wsUrl);
     // Same window-exposure rationale as window.pc above. The watchdog

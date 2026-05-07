@@ -228,6 +228,17 @@ func (r *SessionReconciler) findBoundPod(ctx context.Context, sess *cbv1.Browser
 // assignment loop is single-threaded per pool by leader election so
 // adjacent reconciles see different first elements naturally.
 func (r *SessionReconciler) pickWarmPod(ctx context.Context, sess *cbv1.BrowserSession, pool *cbv1.BrowserSessionPool) (*corev1.Pod, error) {
+	// Triform Pattern-C sessions carry per-session broker URL + JWT in the
+	// BrowserSession annotations. K8s pod env is immutable, so an already
+	// running warm pod cannot safely be rebound to a new signaling session.
+	// Until the warm path has an exec-based env writer, force these sessions
+	// through the cold-start create path where we can stamp env before pod
+	// creation.
+	if sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" ||
+		sess.Annotations[cbv1.AnnotationBrowserSignalingToken] != "" {
+		return nil, nil
+	}
+
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(sess.Namespace),
@@ -306,7 +317,7 @@ func (r *SessionReconciler) advanceFromBoundPod(ctx context.Context, sess *cbv1.
 	}
 	sess.Status.LastActivityAt = &now
 	sess.Status.Connection = &cbv1.SessionConnection{
-		SignalingURL: fmt.Sprintf(signalingHostFmt, sess.Namespace, sess.Name),
+		SignalingURL: signalingURLForSession(sess),
 		PodName:      pod.Name,
 		PodIP:        pod.Status.PodIP,
 	}
@@ -314,6 +325,50 @@ func (r *SessionReconciler) advanceFromBoundPod(ctx context.Context, sess *cbv1.
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{}, nil
+}
+
+func signalingURLForSession(sess *cbv1.BrowserSession) string {
+	if sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" {
+		return sess.Annotations[cbv1.AnnotationBrowserSignalingURL]
+	}
+	return fmt.Sprintf(signalingHostFmt, sess.Namespace, sess.Name)
+}
+
+func brokerSessionIDForSession(sess *cbv1.BrowserSession) string {
+	if sess.Annotations[cbv1.AnnotationBrokerSessionID] != "" {
+		return sess.Annotations[cbv1.AnnotationBrokerSessionID]
+	}
+	return sess.Name
+}
+
+func applyAssignedSessionEnv(sess *cbv1.BrowserSession, pod *corev1.Pod) {
+	if pod == nil {
+		return
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name != "chromeless" {
+			continue
+		}
+		upsertEnv(&pod.Spec.Containers[i], "SESSION_ID", brokerSessionIDForSession(sess))
+		if v := sess.Annotations[cbv1.AnnotationBrowserSignalingURL]; v != "" {
+			upsertEnv(&pod.Spec.Containers[i], "SIGNALING_URL", v)
+		}
+		if v := sess.Annotations[cbv1.AnnotationBrowserSignalingToken]; v != "" {
+			upsertEnv(&pod.Spec.Containers[i], "SIGNALING_TOKEN", v)
+		}
+		return
+	}
+}
+
+func upsertEnv(container *corev1.Container, name, value string) {
+	for i := range container.Env {
+		if container.Env[i].Name == name {
+			container.Env[i].Value = value
+			container.Env[i].ValueFrom = nil
+			return
+		}
+	}
+	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
 }
 
 // checkIdle decides whether to drain a Ready session.
@@ -419,6 +474,7 @@ func (r *SessionReconciler) createPodFromTemplate(ctx context.Context, sess *cbv
 	pod.Labels[cbv1.LabelSessionPool] = pool.Name
 	if initialState == cbv1.LabelSessionStateAssign {
 		pod.Labels[cbv1.LabelSessionOwner] = sess.Name
+		applyAssignedSessionEnv(sess, pod)
 	}
 	if err := controllerutil.SetControllerReference(sess, pod, r.Scheme); err != nil {
 		return nil, err

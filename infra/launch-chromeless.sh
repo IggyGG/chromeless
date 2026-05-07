@@ -13,6 +13,7 @@
 # Env (all optional, with the same defaults the streamer page assumes):
 #   SESSION_ID            session identifier             (default: dev)
 #   SIGNALING_URL         WS URL the streamer dials      (default: ws://signaling:8080/ws)
+#   SIGNALING_TOKEN       optional browser-side JWT      (default: empty)
 #   STREAMER_FPS          display capture target fps     (default: 30)
 #   STREAMER_PORT         local static-server port       (default: 9000)
 #   STREAMER_INPUT_URL    ws endpoint for input relay    (default: ws://localhost:9200/input)
@@ -52,6 +53,7 @@ fi
 
 : "${SESSION_ID:=dev}"
 : "${SIGNALING_URL:=ws://signaling:8080/ws}"
+: "${SIGNALING_TOKEN:=}"
 : "${STREAMER_FPS:=30}"
 : "${STREAMER_PORT:=9000}"
 : "${STREAMER_INPUT_URL:=ws://localhost:9200/input}"
@@ -75,6 +77,9 @@ fi
 
 STREAMER_ORIGIN="http://localhost:${STREAMER_PORT}"
 STREAMER_URL="${STREAMER_ORIGIN}/streamer/index.html?signal=${SIGNALING_URL}&session=${SESSION_ID}&fps=${STREAMER_FPS}&input=${STREAMER_INPUT_URL}&metrics=${STREAMER_METRICS_URL}&webrtc_metrics=${STREAMER_WEBRTC_METRICS_URL}"
+if [ -n "${SIGNALING_TOKEN}" ]; then
+    STREAMER_URL="${STREAMER_URL}&token=${SIGNALING_TOKEN}"
+fi
 
 if [ -z "${CHROMELESS_BROWSER_BIN:-}" ]; then
     if [ -x /usr/local/bin/chromeless ]; then
