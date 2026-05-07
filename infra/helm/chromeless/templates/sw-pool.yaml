@@ -89,7 +89,8 @@ spec:
           emptyDir:
             sizeLimit: 64Mi
         - name: x11-socket
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 16Mi
       containers:
         - name: chromeless
           image: {{ include "chromeless.image" (dict "component" "chromium" "values" .Values "appVersion" .Chart.AppVersion) }}
