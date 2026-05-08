@@ -98,6 +98,19 @@ func warmReadyPod(name, ns, pool string) *corev1.Pod {
 	}
 }
 
+func disableStreamerAutostart(pod *corev1.Pod) {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name != "chromeless" {
+			continue
+		}
+		pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, corev1.EnvVar{
+			Name:  "CHROMELESS_AUTOSTART_STREAMER",
+			Value: "0",
+		})
+		return
+	}
+}
+
 // reconcileTwice: the first reconcile installs the finalizer + sets
 // Pending; the second is the assignment pass. Tests want the
 // post-assignment state, so we call until phase != "" and != Pending,
@@ -193,7 +206,7 @@ func TestSession_WarmPool_FastAssignment(t *testing.T) {
 	}
 }
 
-func TestSession_TriformPatternCColdStartsWithSessionEnv(t *testing.T) {
+func TestSession_TriformPatternCColdStartsWhenWarmPodAutostarts(t *testing.T) {
 	scheme := mustScheme(t)
 	pool := samplePool("default-pool", "cb", 1)
 	sess := sampleSession("tf-11111111-2222-3333-4444-555555555555", "cb", "default-pool", "tenant-x")
@@ -244,6 +257,60 @@ func TestSession_TriformPatternCColdStartsWithSessionEnv(t *testing.T) {
 	}
 	if env["SIGNALING_TOKEN"] != sess.Annotations[cbv1.AnnotationBrowserSignalingToken] {
 		t.Fatalf("SIGNALING_TOKEN = %q", env["SIGNALING_TOKEN"])
+	}
+}
+
+func TestSession_TriformPatternCUsesWarmPodWhenAutostartDisabled(t *testing.T) {
+	scheme := mustScheme(t)
+	pool := samplePool("default-pool", "cb", 1)
+	sess := sampleSession("tf-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cb", "default-pool", "tenant-x")
+	sess.Annotations = map[string]string{
+		cbv1.AnnotationBrokerSessionID:       "cb:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		cbv1.AnnotationBrowserSignalingURL:   "ws://triform.triform-wtf.svc.cluster.local:3000/api/webrtc/signaling",
+		cbv1.AnnotationBrowserSignalingToken: "jwt-token",
+	}
+	warm := warmReadyPod("warm-pod-pattern-c-no-autostart", "cb", "default-pool")
+	disableStreamerAutostart(warm)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, sess, warm).
+		WithStatusSubresource(&cbv1.BrowserSession{}, &cbv1.BrowserSessionPool{}).
+		Build()
+	r := &SessionReconciler{Client: c, Scheme: scheme, DefaultPool: "default-pool"}
+
+	reconcileTwice(t, r, types.NamespacedName{Namespace: "cb", Name: sess.Name})
+
+	var pods corev1.PodList
+	if err := c.List(context.Background(), &pods, client.InNamespace("cb")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("want warm pod reused without cold-start, got %d pods", len(pods.Items))
+	}
+
+	var assigned corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "cb", Name: warm.Name}, &assigned); err != nil {
+		t.Fatal(err)
+	}
+	if assigned.Labels[cbv1.LabelSessionState] != cbv1.LabelSessionStateAssign {
+		t.Fatalf("pod state = %q", assigned.Labels[cbv1.LabelSessionState])
+	}
+	if assigned.Labels[cbv1.LabelSessionOwner] != sess.Name {
+		t.Fatalf("pod owner = %q", assigned.Labels[cbv1.LabelSessionOwner])
+	}
+
+	var sg cbv1.BrowserSession
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "cb", Name: sess.Name}, &sg); err != nil {
+		t.Fatal(err)
+	}
+	if sg.Status.Phase != cbv1.SessionReady {
+		t.Fatalf("phase = %q, want Ready", sg.Status.Phase)
+	}
+	if sg.Status.Connection == nil || sg.Status.Connection.PodName != warm.Name {
+		t.Fatalf("connection = %+v", sg.Status.Connection)
+	}
+	if sg.Status.Connection.SignalingURL != sess.Annotations[cbv1.AnnotationBrowserSignalingURL] {
+		t.Fatalf("signalingURL = %q", sg.Status.Connection.SignalingURL)
 	}
 }
 
