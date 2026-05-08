@@ -81,9 +81,9 @@
   const CDP_BASE_URL = params.get("cdp") || "http://localhost:9222";
   const WAVE1_DISABLED = (params.get("wave1") || "").toLowerCase() === "off";
 
-  const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302"] }];
-  // Phase 3 swaps in our TURN-REST issued credentials (see PROJECT_BRIEF
-  // Phase 3). Phase 1 stays on public STUN.
+  const DEFAULT_ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302"] }];
+  const ICE_SERVERS = parseIceServersParam(params.get("ice_servers"));
+  const ICE_TRANSPORT_POLICY = parseIceTransportPolicyParam(params.get("ice_transport_policy"));
 
   const HEARTBEAT_MS = 10_000;
   const INPUT_BACKOFF_MIN_MS = 200;
@@ -121,6 +121,74 @@
   }
   function safeStringify(v) {
     try { return JSON.stringify(v); } catch { return String(v); }
+  }
+
+  function parseIceServersParam(raw) {
+    if (!raw) return DEFAULT_ICE_SERVERS;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      console.warn("[streamer warn]", "invalid ice_servers JSON; falling back to default STUN", err);
+      return DEFAULT_ICE_SERVERS;
+    }
+
+    const candidate = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.iceServers)
+        ? parsed.iceServers
+        : null;
+    if (!candidate) {
+      console.warn("[streamer warn]", "ice_servers must be an array or { iceServers: [...] }; falling back to default STUN");
+      return DEFAULT_ICE_SERVERS;
+    }
+
+    const normalized = candidate
+      .map((server) => {
+        if (!server || typeof server !== "object") return null;
+        const urls = Array.isArray(server.urls)
+          ? server.urls.filter((u) => typeof u === "string" && u.length > 0)
+          : typeof server.urls === "string" && server.urls.length > 0
+            ? server.urls
+            : null;
+        if (!urls || (Array.isArray(urls) && urls.length === 0)) return null;
+
+        const out = { urls };
+        if (typeof server.username === "string" && server.username.length > 0) {
+          out.username = server.username;
+        }
+        if (typeof server.credential === "string" && server.credential.length > 0) {
+          out.credential = server.credential;
+        }
+        return out;
+      })
+      .filter(Boolean);
+
+    if (normalized.length === 0) {
+      console.warn("[streamer warn]", "ice_servers contained no usable entries; falling back to default STUN");
+      return DEFAULT_ICE_SERVERS;
+    }
+    return normalized;
+  }
+
+  function parseIceTransportPolicyParam(raw) {
+    const value = (raw || "all").toLowerCase();
+    return value === "relay" ? "relay" : "all";
+  }
+
+  function iceServerSummary(servers) {
+    const counts = { stun: 0, turn: 0, other: 0 };
+    for (const server of servers) {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      for (const url of urls) {
+        if (typeof url !== "string") continue;
+        if (url.startsWith("stun:") || url.startsWith("stuns:")) counts.stun += 1;
+        else if (url.startsWith("turn:") || url.startsWith("turns:")) counts.turn += 1;
+        else counts.other += 1;
+      }
+    }
+    return counts;
   }
 
   function buildSignalingWsUrl(baseUrl, sessionId, token) {
@@ -1535,7 +1603,14 @@
     }
 
     // 2. Build the peer connection and attach tracks.
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    log("info", "using ICE config", {
+      ...iceServerSummary(ICE_SERVERS),
+      iceTransportPolicy: ICE_TRANSPORT_POLICY,
+    });
+    const pc = new RTCPeerConnection({
+      iceServers: ICE_SERVERS,
+      iceTransportPolicy: ICE_TRANSPORT_POLICY,
+    });
 
     // T77: simulcast requires rid-bearing encodings to be supplied at
     // transceiver creation time — `setParameters` after `addTrack`
