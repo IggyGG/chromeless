@@ -486,13 +486,11 @@
 
   // CDPClient — a tiny Chrome DevTools Protocol client speaking the
   // /devtools/browser flat-mode shape, mirroring capture/input-bridge's
-  // dialCDP/pageSessionSender plumbing. We only need a handful of
-  // methods (Runtime.{enable,addBinding,evaluate}, Page.{enable,
-  // addScriptToEvaluateOnNewDocument}, Browser.{grantPermissions,
-  // setClipboard}, DOM.setFileInputFiles), so we don't bother with
-  // session-attach machinery — Runtime.evaluate at the browser-level
-  // target executes against the active page when no session is
-  // attached, which is sufficient for v1.
+  // dialCDP/pageSessionSender plumbing. Browser-level methods stay on
+  // the root socket, while page-scoped domains (Page / Runtime / DOM)
+  // are sent through a flattened Target.attachToTarget session for the
+  // user page. Sending Page.enable to the browser target is invalid CDP
+  // and leaves the Wave 1 channels dormant.
   //
   // Disposal: on pc.close (via teardown) we close the underlying
   // WebSocket. `closed` is set first so any in-flight send rejects
@@ -506,6 +504,8 @@
       this.pending = new Map();
       /** @type {((ev:{method:string, params:any})=>void)[]} */
       this.eventListeners = [];
+      /** @type {string | null} */
+      this.pageSessionId = null;
     }
 
     async connect(baseUrl) {
@@ -536,6 +536,30 @@
           this.pending.clear();
         };
         ws.onmessage = (ev) => this._onMessage(ev);
+      });
+      await this.attachToPageTarget();
+    }
+
+    async attachToPageTarget() {
+      const targets = await this.send("Target.getTargets");
+      const infos = Array.isArray(targets?.targetInfos) ? targets.targetInfos : [];
+      const pages = infos.filter((t) => t?.type === "page" && t?.targetId);
+      const userPage = pages.find((t) => !String(t.url || "").includes("/streamer/"))
+        || pages[0];
+      if (!userPage) {
+        throw new Error("CDP Target.getTargets returned no page target");
+      }
+      const attached = await this.send("Target.attachToTarget", {
+        targetId: userPage.targetId,
+        flatten: true,
+      });
+      if (!attached?.sessionId) {
+        throw new Error("CDP Target.attachToTarget missing sessionId");
+      }
+      this.pageSessionId = attached.sessionId;
+      log("ok", "CDP page target attached", {
+        target_id: userPage.targetId,
+        url: userPage.url || "",
       });
     }
 
@@ -573,12 +597,22 @@
       };
     }
 
+    shouldUsePageSession(method) {
+      return method.startsWith("Page.")
+        || method.startsWith("Runtime.")
+        || method.startsWith("DOM.");
+    }
+
     send(method, params) {
       if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
         return Promise.reject(new Error("CDP not open"));
       }
       const id = this.nextId++;
-      const frame = JSON.stringify({ id, method, params: params ?? {} });
+      const frameObj = { id, method, params: params ?? {} };
+      if (this.pageSessionId && this.shouldUsePageSession(method)) {
+        frameObj.sessionId = this.pageSessionId;
+      }
+      const frame = JSON.stringify(frameObj);
       const p = new Promise((resolve, reject) => {
         this.pending.set(id, { resolve, reject });
       });
