@@ -59,6 +59,7 @@ fi
 : "${STREAMER_INPUT_URL:=ws://localhost:9200/input}"
 : "${STREAMER_METRICS_URL:=http://localhost:9100/stats-update}"
 : "${STREAMER_WEBRTC_METRICS_URL:=http://localhost:9100/webrtc-event}"
+: "${STREAMER_CDP_URL:=/cdp}"
 : "${CHROMELESS_USE_FAKE_MEDIA:=}"
 # T109: pre-recorded harness fixture for real T65 numbers. When set,
 # Chromium's synthetic camera reads frames from this y4m file instead
@@ -76,7 +77,7 @@ fi
 : "${CHROMELESS_USE_FAKE_MEDIA_FILE:=}"
 
 STREAMER_ORIGIN="http://localhost:${STREAMER_PORT}"
-STREAMER_URL="${STREAMER_ORIGIN}/streamer/index.html?signal=${SIGNALING_URL}&session=${SESSION_ID}&fps=${STREAMER_FPS}&input=${STREAMER_INPUT_URL}&metrics=${STREAMER_METRICS_URL}&webrtc_metrics=${STREAMER_WEBRTC_METRICS_URL}"
+STREAMER_URL="${STREAMER_ORIGIN}/streamer/index.html?signal=${SIGNALING_URL}&session=${SESSION_ID}&fps=${STREAMER_FPS}&input=${STREAMER_INPUT_URL}&metrics=${STREAMER_METRICS_URL}&webrtc_metrics=${STREAMER_WEBRTC_METRICS_URL}&cdp=${STREAMER_CDP_URL}"
 if [ -n "${SIGNALING_TOKEN}" ]; then
     STREAMER_URL="${STREAMER_URL}&token=${SIGNALING_TOKEN}"
 fi

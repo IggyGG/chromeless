@@ -39,6 +39,19 @@ capture:
   fakeMedia: false
   fakeMediaFile: ""
 
+inputBridge:
+  enabled: true
+  wsAddr: ":9200"
+  metricsAddr: ":9101"
+  cdpUrl: "http://127.0.0.1:9222"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
 images:
   # Override these per-environment with --set images.<component>.tag=...
   # to point at the version you actually want to ship.

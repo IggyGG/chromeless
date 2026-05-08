@@ -165,4 +165,27 @@ spec:
             runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532
+        {{- if .Values.inputBridge.enabled }}
+        - name: input-bridge
+          image: {{ include "chromeless.image" (dict "component" "inputBridge" "values" .Values "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["/input-bridge"]
+          args:
+            - "--source=ws"
+            - "--ws-addr={{ .Values.inputBridge.wsAddr }}"
+            - "--metrics-addr={{ .Values.inputBridge.metricsAddr }}"
+            - "--cdp-url={{ .Values.inputBridge.cdpUrl }}"
+          ports:
+            - { name: input-ws, containerPort: 9200 }
+            - { name: input-metrics, containerPort: 9101 }
+          resources:
+            {{- toYaml .Values.inputBridge.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+        {{- end }}
 {{- end }}

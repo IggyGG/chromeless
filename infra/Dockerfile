@@ -138,6 +138,7 @@ COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
 # /streamer/index.html resolves to the page chromium-dev shipped.
 COPY capture/streamer-page/ /opt/cloud-browser/streamer/
 COPY infra/launch-chromeless.sh /usr/local/bin/launch-chromeless.sh
+COPY infra/streamer-static-server.py /usr/local/bin/streamer-static-server.py
 
 # T52: small socat sidecar that bridges container_eth0:9222 ->
 # 127.0.0.1:9222 because Chromium 147 binds DevTools to loopback
@@ -165,6 +166,7 @@ RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bi
  && chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh \
  && chmod +x /usr/local/bin/launch-chromeless.sh \
  && chmod +x /usr/local/bin/devtools-proxy.sh \
+ && chmod +x /usr/local/bin/streamer-static-server.py \
  && chown -R cbuser:cbuser /opt/cloud-browser
 
 # T57: seccomp profile. COPYing into the image lets `docker run

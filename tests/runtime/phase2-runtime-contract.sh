@@ -37,28 +37,37 @@ require_file build/Dockerfile.runtime
 require_file build/chromeless-build.sh
 require_file infra/launch-chromeless.sh
 require_file infra/supervisord.phase2.conf
+require_file infra/streamer-static-server.py
 require_file capture/chromeless-metrics-sidecar/Dockerfile
 
 require_grep 'cp -R "\$\{CHROMELESS_REPO\}/capture/streamer-page/\."' build/chromeless-build.sh
 require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/supervisord.phase2.conf"' build/chromeless-build.sh
 require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/pulse-default.pa"' build/chromeless-build.sh
 require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/devtools-proxy.sh"' build/chromeless-build.sh
+require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/streamer-static-server.py"' build/chromeless-build.sh
 require_grep 'cp -R "\$\{CHROMELESS_REPO\}/infra/lifecycle"' build/chromeless-build.sh
 require_grep 'for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so' build/chromeless-build.sh
 
 require_grep 'COPY[[:space:]]+streamer/[[:space:]]+/opt/cloud-browser/streamer/' build/Dockerfile.runtime
 require_grep 'COPY[[:space:]]+pulse-default.pa[[:space:]]+/etc/pulse/default.pa' build/Dockerfile.runtime
 require_grep 'COPY[[:space:]]+devtools-proxy.sh[[:space:]]+/usr/local/bin/devtools-proxy.sh' build/Dockerfile.runtime
+require_grep 'COPY[[:space:]]+streamer-static-server.py[[:space:]]+/usr/local/bin/streamer-static-server.py' build/Dockerfile.runtime
 require_grep 'COPY[[:space:]]+lifecycle/[[:space:]]+/usr/local/lib/cloud-browser/lifecycle/' build/Dockerfile.runtime
 require_grep 'ENTRYPOINT \["/usr/bin/dumb-init", "--", "/usr/local/bin/entrypoint.sh"\]' build/Dockerfile.runtime
 
 require_grep 'CHROMELESS_BROWSER_BIN' infra/launch-chromeless.sh
 require_grep 'STREAMER_INPUT_URL' infra/launch-chromeless.sh
+require_grep 'STREAMER_CDP_URL' infra/launch-chromeless.sh
 require_grep 'input=\$\{STREAMER_INPUT_URL\}' infra/launch-chromeless.sh
+require_grep 'cdp=\$\{STREAMER_CDP_URL\}' infra/launch-chromeless.sh
+require_grep '/cdp/json/version' infra/streamer-static-server.py
 
 reject_grep 'chromeless-metrics-sidecar' infra/supervisord.phase2.conf
+require_grep 'streamer-static-server.py' infra/supervisord.phase2.conf
 require_grep 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' infra/helm/chromeless/templates/default-pool.yaml
 require_grep 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' infra/helm/chromeless/templates/sw-pool.yaml
+require_grep 'name: input-bridge' infra/helm/chromeless/templates/default-pool.yaml
+require_grep 'name: input-bridge' infra/helm/chromeless/templates/sw-pool.yaml
 require_grep 'skipping cluster CDP validation' build/chromeless-build.sh
 
 printf 'phase2-runtime-contract: ok\n'
