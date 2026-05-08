@@ -467,6 +467,7 @@ cp "${CHROMELESS_REPO}/infra/launch-chromeless.sh" "${ARTIFACTS_DIR}/context/lau
 cp "${CHROMELESS_REPO}/infra/supervisord.phase2.conf" "${ARTIFACTS_DIR}/context/supervisord.conf"
 cp "${CHROMELESS_REPO}/infra/pulse-default.pa" "${ARTIFACTS_DIR}/context/pulse-default.pa"
 cp "${CHROMELESS_REPO}/infra/devtools-proxy.sh" "${ARTIFACTS_DIR}/context/devtools-proxy.sh"
+cp "${CHROMELESS_REPO}/infra/streamer-static-server.py" "${ARTIFACTS_DIR}/context/streamer-static-server.py"
 rm -rf "${ARTIFACTS_DIR}/context/streamer" "${ARTIFACTS_DIR}/context/lifecycle"
 mkdir -p "${ARTIFACTS_DIR}/context/streamer"
 cp -R "${CHROMELESS_REPO}/capture/streamer-page/." "${ARTIFACTS_DIR}/context/streamer/"

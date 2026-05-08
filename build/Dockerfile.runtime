@@ -126,6 +126,7 @@ COPY pulse-default.pa     /etc/pulse/default.pa
 COPY supervisord.conf      /etc/supervisor/supervisord.conf
 COPY launch-chromeless.sh    /usr/local/bin/launch-chromeless.sh
 COPY devtools-proxy.sh      /usr/local/bin/devtools-proxy.sh
+COPY streamer-static-server.py /usr/local/bin/streamer-static-server.py
 COPY streamer/ /opt/cloud-browser/streamer/
 COPY lifecycle/ /usr/local/lib/cloud-browser/lifecycle/
 RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bin/entrypoint.sh && \
@@ -133,7 +134,7 @@ RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bi
     ln -sf /usr/local/lib/cloud-browser/lifecycle/idle-watchdog.sh /usr/local/bin/idle-watchdog.sh && \
     ln -sf /usr/local/lib/cloud-browser/lifecycle/restart.sh       /usr/local/bin/restart.sh && \
     chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh && \
-    chmod +x /usr/local/bin/launch-chromeless.sh /usr/local/bin/devtools-proxy.sh && \
+    chmod +x /usr/local/bin/launch-chromeless.sh /usr/local/bin/devtools-proxy.sh /usr/local/bin/streamer-static-server.py && \
     chown -R cbuser:cbuser /opt/cloud-browser
 
 # Image-tag metadata for runtime introspection. The kaniko sidecar
