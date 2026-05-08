@@ -338,7 +338,10 @@ func responseFromSession(sess cbv1.BrowserSession) sessionResponse {
 		resp.PodName = sess.Status.Connection.PodName
 		resp.PodIP = sess.Status.Connection.PodIP
 	}
-	if resp.SignalingURL == "" {
+	// The gateway can update the desired browser signaling URL for an already
+	// ready session before the reconciler has refreshed status. Return the
+	// desired URL so Triform dials the owner pod that minted this session.
+	if sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" {
 		resp.SignalingURL = sess.Annotations[cbv1.AnnotationBrowserSignalingURL]
 	}
 	return resp
