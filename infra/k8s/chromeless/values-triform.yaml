@@ -205,11 +205,9 @@ coturn:
 
 defaultPool:
   enabled: true
-  # Triform Pattern-C sessions inject a per-session broker URL + browser JWT
-  # into the chromeless pod env. K8s pod env is immutable, so warm pods cannot
-  # be rebound safely until the controller grows an exec-based env writer.
-  # Cold-start for the first integration release; re-enable warm slots after
-  # that handoff path is implemented and tested.
+  # Keep the GPU pool cold by default so NVENC capacity is reserved for
+  # explicitly requested hardware sessions. Triform's native WebRTC path uses
+  # the software pool below for its first warm slot.
   warmReplicas: 0
   # Cap at 6 concurrent sessions: 8 GPUs - 2 warm = 6 assignable.
   # Leave headroom rather than chase 100% utilisation; oom-killing a
@@ -273,9 +271,11 @@ defaultPool:
 
 swPool:
   enabled: true
-  # See defaultPool note: Pattern-C env is per-session, so warm pods remain
-  # disabled until dynamic env injection exists for the warm assignment path.
-  warmReplicas: 0
+  # Keep one ready software-encoder pod so Triform Pattern-C sessions do not
+  # pay Chromium startup time on the first WebRTC handshake. Streamer autostart
+  # is disabled; Triform launches the streamer over CDP with per-session
+  # signaling URL/JWT parameters after cookie/session hydration.
+  warmReplicas: 1
   maxSessions: 100
   maxAgeSeconds: 1800       # 30 min — recycle aggressively
   idleTimeoutSeconds: 300   # 5 min — kick idle tabs (per-session knob;

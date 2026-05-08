@@ -228,16 +228,8 @@ func (r *SessionReconciler) findBoundPod(ctx context.Context, sess *cbv1.Browser
 // assignment loop is single-threaded per pool by leader election so
 // adjacent reconciles see different first elements naturally.
 func (r *SessionReconciler) pickWarmPod(ctx context.Context, sess *cbv1.BrowserSession, pool *cbv1.BrowserSessionPool) (*corev1.Pod, error) {
-	// Triform Pattern-C sessions carry per-session broker URL + JWT in the
-	// BrowserSession annotations. K8s pod env is immutable, so an already
-	// running warm pod cannot safely be rebound to a new signaling session.
-	// Until the warm path has an exec-based env writer, force these sessions
-	// through the cold-start create path where we can stamp env before pod
-	// creation.
-	if sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" ||
-		sess.Annotations[cbv1.AnnotationBrowserSignalingToken] != "" {
-		return nil, nil
-	}
+	needsSessionScopedStreamer := sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" ||
+		sess.Annotations[cbv1.AnnotationBrowserSignalingToken] != ""
 
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
@@ -263,9 +255,41 @@ func (r *SessionReconciler) pickWarmPod(ctx context.Context, sess *cbv1.BrowserS
 		if !podReady(p) {
 			continue
 		}
+		if needsSessionScopedStreamer && !streamerAutostartDisabled(p) {
+			// Session-scoped Triform signaling used to be injected via
+			// immutable pod env, so autostarting warm pods cannot be safely
+			// rebound. Pods with autostart disabled are launched by Triform
+			// over CDP with per-session URL params, so they are safe to reuse.
+			continue
+		}
 		return p, nil
 	}
 	return nil, nil
+}
+
+func streamerAutostartDisabled(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		if container.Name != "chromeless" {
+			continue
+		}
+		for _, item := range container.Env {
+			if item.Name != "CHROMELESS_AUTOSTART_STREAMER" {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(item.Value)) {
+			case "0", "false", "no", "off":
+				return true
+			default:
+				return false
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // bindToPod labels the Pod as assigned and updates the session status.
