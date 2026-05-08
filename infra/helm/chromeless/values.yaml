@@ -38,6 +38,10 @@ capture:
   # remains the durable real-content path.
   fakeMedia: false
   fakeMediaFile: ""
+  # Standalone chromeless deployments can autostart the streamer at
+  # Chromium boot. Triform disables this because the platform opens the
+  # streamer target itself after minting per-element TURN credentials.
+  autostartStreamer: true
 
 inputBridge:
   enabled: true
