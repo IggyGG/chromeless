@@ -64,6 +64,7 @@ require_grep 'cdp=\$\{STREAMER_CDP_URL\}' infra/launch-chromeless.sh
 require_grep '/cdp/json/version' infra/streamer-static-server.py
 
 reject_grep 'chromeless-metrics-sidecar' infra/supervisord.phase2.conf
+reject_grep 'IDLE_TIMEOUT_S="600"' infra/supervisord.phase2.conf
 require_grep 'streamer-static-server.py' infra/supervisord.phase2.conf
 require_grep 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' infra/helm/chromeless/templates/default-pool.yaml
 require_grep 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' infra/helm/chromeless/templates/sw-pool.yaml
