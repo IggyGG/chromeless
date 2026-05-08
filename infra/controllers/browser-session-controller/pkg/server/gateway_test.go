@@ -95,6 +95,37 @@ func TestGatewayCreateSessionStampsPatternCAnnotations(t *testing.T) {
 	}
 }
 
+func TestResponseFromSessionPrefersDesiredSignalingURL(t *testing.T) {
+	sess := cbv1.BrowserSession{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "tf-session",
+			Annotations: map[string]string{
+				cbv1.AnnotationBrowserSignalingURL: "ws://owner-pod.example/api/webrtc/signaling",
+			},
+		},
+		Status: cbv1.BrowserSessionStatus{
+			Phase: cbv1.SessionReady,
+			Connection: &cbv1.SessionConnection{
+				PodName:      "sw-pool-0",
+				PodIP:        "10.244.0.10",
+				SignalingURL: "ws://stale-pod.example/api/webrtc/signaling",
+			},
+		},
+	}
+
+	resp := responseFromSession(sess)
+
+	if resp.SignalingURL != sess.Annotations[cbv1.AnnotationBrowserSignalingURL] {
+		t.Fatalf("signaling_url = %q", resp.SignalingURL)
+	}
+	if resp.PodName != "sw-pool-0" {
+		t.Fatalf("pod_name = %q", resp.PodName)
+	}
+	if resp.PodIP != "10.244.0.10" {
+		t.Fatalf("pod_ip = %q", resp.PodIP)
+	}
+}
+
 func TestGatewayHeartbeatUpdatesLastActivity(t *testing.T) {
 	scheme := gatewayScheme(t)
 	old := metav1.NewTime(time.Now().Add(-time.Hour))
