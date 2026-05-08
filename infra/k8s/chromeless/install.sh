@@ -208,16 +208,22 @@ kubectl -n "${CHROMELESS_NAMESPACE}" wait \
     --all deployment
 
 # 2. Signaling /healthz from inside the cluster (avoids ingress + DNS
-#    being a smoke prerequisite).
-log "smoking signaling /healthz from inside the cluster..."
-kubectl -n "${CHROMELESS_NAMESPACE}" run chromeless-smoke-signaling-$$ \
-    --image=curlimages/curl:8.10.1 \
-    --restart=Never \
-    --rm -i --quiet \
-    --command -- \
-    curl -fsS --max-time 10 \
-    "http://signaling.${CHROMELESS_NAMESPACE}.svc.cluster.local:8080/healthz"
-echo
+#    being a smoke prerequisite). Integration can intentionally disable
+#    the in-cluster signaling tier, so skip this smoke when Helm did not
+#    render/apply the Service.
+if kubectl -n "${CHROMELESS_NAMESPACE}" get service signaling >/dev/null 2>&1; then
+    log "smoking signaling /healthz from inside the cluster..."
+    kubectl -n "${CHROMELESS_NAMESPACE}" run chromeless-smoke-signaling-$$ \
+        --image=curlimages/curl:8.10.1 \
+        --restart=Never \
+        --rm -i --quiet \
+        --command -- \
+        curl -fsS --max-time 10 \
+        "http://signaling.${CHROMELESS_NAMESPACE}.svc.cluster.local:8080/healthz"
+    echo
+else
+    log "skipping signaling /healthz smoke; signaling Service is not present."
+fi
 
 # 3. Pool warm Pods come up. Look for at least the warmReplicas count
 #    of session Pods reaching Ready.
