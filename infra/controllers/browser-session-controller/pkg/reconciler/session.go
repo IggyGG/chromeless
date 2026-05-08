@@ -309,15 +309,31 @@ func (r *SessionReconciler) bindToPod(ctx context.Context, sess *cbv1.BrowserSes
 	}
 	pod.Annotations[cbv1.AnnotationSessionID] = string(sess.UID)
 
-	// Stamp ownership so deletion of the session GCs the Pod.
-	if err := controllerutil.SetControllerReference(sess, pod, r.Scheme); err != nil {
-		return reconcile.Result{}, err
+	// Cold-start pods are session-owned. Warm pods are owned by their pool so
+	// the pool reconciler sees state changes and replenishes immediately; the
+	// session finalizer still drains them by chromeless.session/owner label.
+	if !hasControllerOwnerRef(pod, "BrowserSessionPool") {
+		if err := controllerutil.SetControllerReference(sess, pod, r.Scheme); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	if err := r.Update(ctx, pod); err != nil {
 		return reconcile.Result{}, err
 	}
 
 	return r.advanceFromBoundPod(ctx, sess, pod)
+}
+
+func hasControllerOwnerRef(pod *corev1.Pod, kind string) bool {
+	if pod == nil {
+		return false
+	}
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind == kind && ref.Controller != nil && *ref.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 // advanceFromBoundPod sets the session phase based on the Pod's
