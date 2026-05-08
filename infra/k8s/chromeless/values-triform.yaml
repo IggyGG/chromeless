@@ -278,8 +278,10 @@ swPool:
   warmReplicas: 1
   maxSessions: 100
   maxAgeSeconds: 1800       # 30 min — recycle aggressively
-  idleTimeoutSeconds: 300   # 5 min — kick idle tabs (per-session knob;
-                            # not in CRD, propagates via controller default)
+  # Disable the pod-local watchdog for the warm software pool. Pool/session
+  # lifecycle belongs to the controller; killing the pod from inside Chromium
+  # can race active Pattern-C sessions and break release E2E mid-navigation.
+  idleTimeoutSeconds: 999999
   recyclePolicy: RecreatePod
   resources:
     requests:
