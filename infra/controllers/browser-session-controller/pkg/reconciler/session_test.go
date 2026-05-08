@@ -26,6 +26,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cbv1 "github.com/iggy/chromeless/infra/controllers/browser-session-controller/pkg/apis/v1"
@@ -45,7 +46,7 @@ func mustScheme(t *testing.T) *runtime.Scheme {
 
 func samplePool(name, ns string, warm int32) *cbv1.BrowserSessionPool {
 	return &cbv1.BrowserSessionPool{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(name + "-uid")},
 		Spec: cbv1.BrowserSessionPoolSpec{
 			WarmReplicas:  warm,
 			MaxAgeSeconds: 3600,
@@ -166,6 +167,9 @@ func TestSession_WarmPool_FastAssignment(t *testing.T) {
 	pool := samplePool("default-pool", "cb", 1)
 	sess := sampleSession("s2", "cb", "default-pool", "tenant-x")
 	pod := warmReadyPod("warm-pod-1", "cb", "default-pool")
+	if err := controllerutil.SetControllerReference(pool, pod, scheme); err != nil {
+		t.Fatal(err)
+	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(pool, sess, pod).
@@ -216,6 +220,9 @@ func TestSession_TriformPatternCColdStartsWhenWarmPodAutostarts(t *testing.T) {
 		cbv1.AnnotationBrowserSignalingToken: "jwt-token",
 	}
 	warm := warmReadyPod("warm-pod-pattern-c", "cb", "default-pool")
+	if err := controllerutil.SetControllerReference(pool, warm, scheme); err != nil {
+		t.Fatal(err)
+	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(pool, sess, warm).
@@ -271,6 +278,9 @@ func TestSession_TriformPatternCUsesWarmPodWhenAutostartDisabled(t *testing.T) {
 	}
 	warm := warmReadyPod("warm-pod-pattern-c-no-autostart", "cb", "default-pool")
 	disableStreamerAutostart(warm)
+	if err := controllerutil.SetControllerReference(pool, warm, scheme); err != nil {
+		t.Fatal(err)
+	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(pool, sess, warm).
