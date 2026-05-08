@@ -58,6 +58,7 @@ require_grep 'ENTRYPOINT \["/usr/bin/dumb-init", "--", "/usr/local/bin/entrypoin
 require_grep 'CHROMELESS_BROWSER_BIN' infra/launch-chromeless.sh
 require_grep 'STREAMER_INPUT_URL' infra/launch-chromeless.sh
 require_grep 'STREAMER_CDP_URL' infra/launch-chromeless.sh
+require_grep 'CHROMELESS_AUTOSTART_STREAMER' infra/launch-chromeless.sh
 require_grep 'input=\$\{STREAMER_INPUT_URL\}' infra/launch-chromeless.sh
 require_grep 'cdp=\$\{STREAMER_CDP_URL\}' infra/launch-chromeless.sh
 require_grep '/cdp/json/version' infra/streamer-static-server.py
@@ -66,6 +67,8 @@ reject_grep 'chromeless-metrics-sidecar' infra/supervisord.phase2.conf
 require_grep 'streamer-static-server.py' infra/supervisord.phase2.conf
 require_grep 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' infra/helm/chromeless/templates/default-pool.yaml
 require_grep 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' infra/helm/chromeless/templates/sw-pool.yaml
+require_grep 'CHROMELESS_AUTOSTART_STREAMER' infra/helm/chromeless/templates/default-pool.yaml
+require_grep 'CHROMELESS_AUTOSTART_STREAMER' infra/helm/chromeless/templates/sw-pool.yaml
 require_grep 'name: input-bridge' infra/helm/chromeless/templates/default-pool.yaml
 require_grep 'name: input-bridge' infra/helm/chromeless/templates/sw-pool.yaml
 require_grep 'skipping cluster CDP validation' build/chromeless-build.sh

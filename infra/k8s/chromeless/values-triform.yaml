@@ -53,6 +53,11 @@ capture:
   # NotReadableError; the durable real-content path is FrameSink capture.
   fakeMedia: true
   fakeMediaFile: ""
+  # Triform owns streamer target creation so it can pass minted TURN
+  # credentials and relay policy in the streamer URL. Auto-starting a
+  # bootstrap streamer from the pod env registers a host-only browser
+  # peer first and poisons Pattern C replay.
+  autostartStreamer: false
 
 # ---------------------------------------------------------------------
 # Image registry — forgejo. Same path the T112 build runner uses.

@@ -93,6 +93,8 @@ spec:
               value: "ws://signaling.{{ $ns }}.svc.cluster.local:8080/ws"
             - name: STREAMER_FPS
               value: "30"
+            - name: CHROMELESS_AUTOSTART_STREAMER
+              value: {{ if .Values.capture.autostartStreamer }}"1"{{ else }}"0"{{ end }}
             - name: IDLE_TIMEOUT_S
               value: "999999"
             {{- if .Values.capture.fakeMedia }}

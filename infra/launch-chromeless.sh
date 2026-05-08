@@ -19,6 +19,12 @@
 #   STREAMER_INPUT_URL    ws endpoint for input relay    (default: ws://localhost:9200/input)
 #   STREAMER_METRICS_URL  stats endpoint                 (default: http://localhost:9100/stats-update)
 #   STREAMER_WEBRTC_METRICS_URL event endpoint           (default: http://localhost:9100/webrtc-event)
+#   CHROMELESS_AUTOSTART_STREAMER
+#                         when false/0/off/no, start Chromium blank
+#                         and leave streamer target creation to an
+#                         external orchestrator (Triform Pattern C
+#                         mints per-session TURN credentials and opens
+#                         the streamer via CDP).
 #   CHROMELESS_BROWSER_BIN browser executable            (default: /usr/local/bin/chromeless when present,
 #                                                          otherwise /usr/bin/chromium)
 #   CHROMELESS_USE_FAKE_MEDIA T86 unblock switch — when set
@@ -60,6 +66,7 @@ fi
 : "${STREAMER_METRICS_URL:=http://localhost:9100/stats-update}"
 : "${STREAMER_WEBRTC_METRICS_URL:=http://localhost:9100/webrtc-event}"
 : "${STREAMER_CDP_URL:=/cdp}"
+: "${CHROMELESS_AUTOSTART_STREAMER:=1}"
 : "${CHROMELESS_USE_FAKE_MEDIA:=}"
 # T109: pre-recorded harness fixture for real T65 numbers. When set,
 # Chromium's synthetic camera reads frames from this y4m file instead
@@ -82,6 +89,15 @@ if [ -n "${SIGNALING_TOKEN}" ]; then
     STREAMER_URL="${STREAMER_URL}&token=${SIGNALING_TOKEN}"
 fi
 
+case "$(printf '%s' "${CHROMELESS_AUTOSTART_STREAMER}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|off|no)
+        AUTOSTART_STREAMER=0
+        ;;
+    *)
+        AUTOSTART_STREAMER=1
+        ;;
+esac
+
 if [ -z "${CHROMELESS_BROWSER_BIN:-}" ]; then
     if [ -x /usr/local/bin/chromeless ]; then
         CHROMELESS_BROWSER_BIN=/usr/local/bin/chromeless
@@ -91,6 +107,7 @@ if [ -z "${CHROMELESS_BROWSER_BIN:-}" ]; then
 fi
 
 echo "[launch-chromium] session=${SESSION_ID} signaling=${SIGNALING_URL} fps=${STREAMER_FPS}" >&2
+echo "[launch-chromium] streamer_autostart=${AUTOSTART_STREAMER}" >&2
 LOG_STREAMER_URL="${STREAMER_URL}"
 if [ -n "${SIGNALING_TOKEN}" ]; then
     LOG_STREAMER_URL="${STREAMER_URL%%token=*}token=<redacted>"
@@ -166,6 +183,12 @@ fi
 # Chromium picks.
 #
 # shellcheck disable=SC2086  # fake_media_arg is intentionally word-split
+if [ "${AUTOSTART_STREAMER}" = "1" ]; then
+    CHROMIUM_START_URL="${STREAMER_URL}"
+else
+    CHROMIUM_START_URL="about:blank"
+fi
+
 "${CHROMELESS_BROWSER_BIN}" \
   --no-sandbox \
   --disable-dev-shm-usage \
@@ -191,7 +214,7 @@ fi
   --enable-usermedia-screen-capturing \
   --unsafely-treat-insecure-origin-as-secure="${STREAMER_ORIGIN}" \
   ${fake_media_arg} \
-  --app="${STREAMER_URL}" &
+  --app="${CHROMIUM_START_URL}" &
 
 chromium_pid=$!
 
@@ -200,10 +223,15 @@ terminate() {
 }
 trap terminate INT TERM
 
-open_streamer_after_devtools &
-opener_pid=$!
+opener_pid=""
+if [ "${AUTOSTART_STREAMER}" = "1" ]; then
+    open_streamer_after_devtools &
+    opener_pid=$!
+fi
 
 wait "${chromium_pid}"
 status=$?
-wait "${opener_pid}" 2>/dev/null || true
+if [ -n "${opener_pid}" ]; then
+    wait "${opener_pid}" 2>/dev/null || true
+fi
 exit "${status}"
