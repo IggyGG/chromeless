@@ -437,6 +437,63 @@ func dialCDP(ctx context.Context, baseURL string, log *slog.Logger) (*pageSessio
 	return sender, nil
 }
 
+const (
+	cdpConnectTimeout      = 60 * time.Second
+	cdpDialAttemptTimeout  = 10 * time.Second
+	cdpConnectRetryBackoff = 500 * time.Millisecond
+)
+
+type cdpDialFunc func(context.Context, string, *slog.Logger) (*pageSessionSender, error)
+
+func connectCDPWithRetry(ctx context.Context, baseURL string, log *slog.Logger) (*pageSessionSender, error) {
+	return connectCDPWithRetryDialer(ctx, baseURL, log, cdpConnectTimeout, cdpConnectRetryBackoff, dialCDP)
+}
+
+func connectCDPWithRetryDialer(
+	ctx context.Context,
+	baseURL string,
+	log *slog.Logger,
+	maxWait time.Duration,
+	retryBackoff time.Duration,
+	dial cdpDialFunc,
+) (*pageSessionSender, error) {
+	retryCtx, cancel := context.WithTimeout(ctx, maxWait)
+	defer cancel()
+
+	var lastErr error
+	attempt := 0
+	for {
+		attempt++
+		dialCtx, dialCancel := context.WithTimeout(retryCtx, cdpDialAttemptTimeout)
+		cdp, err := dial(dialCtx, baseURL, log)
+		dialCancel()
+		if err == nil {
+			if attempt > 1 {
+				log.Info("connected to CDP after retry",
+					slog.Int("attempt", attempt),
+					slog.String("base_url", baseURL))
+			}
+			return cdp, nil
+		}
+		lastErr = err
+		log.Warn("CDP not ready; retrying",
+			slog.Int("attempt", attempt),
+			slog.String("base_url", baseURL),
+			slog.Any("err", err))
+
+		timer := time.NewTimer(retryBackoff)
+		select {
+		case <-retryCtx.Done():
+			timer.Stop()
+			if lastErr == nil {
+				lastErr = retryCtx.Err()
+			}
+			return nil, fmt.Errorf("CDP not ready after %s: %w", maxWait, lastErr)
+		case <-timer.C:
+		}
+	}
+}
+
 // discoverBrowserWS hits /json/version and returns the browser-level
 // debugger WS URL. With flat-mode this is the SINGLE WS we open;
 // every page session is multiplexed over it via sessionId.
@@ -1765,9 +1822,7 @@ func run(ctx context.Context, cfg config, stdin io.Reader, log *slog.Logger) err
 	if cfg.dryRun {
 		disp = newDispatcher(noopCDP{log: log}, m, log)
 	} else {
-		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		cdp, err := dialCDP(dialCtx, cfg.cdpURL, log)
-		cancel()
+		cdp, err := connectCDPWithRetry(ctx, cfg.cdpURL, log)
 		if err != nil {
 			return fmt.Errorf("connect to CDP: %w", err)
 		}
