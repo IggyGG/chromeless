@@ -168,7 +168,7 @@ func (g *SessionGateway) handleSessions(w http.ResponseWriter, r *http.Request) 
 	if ready.Status.Phase != cbv1.SessionReady {
 		status = http.StatusAccepted
 	}
-	writeJSON(w, status, responseFromSession(ready))
+	writeJSON(w, status, responseFromMintRequest(ready, name, req))
 }
 
 func (g *SessionGateway) handleSessionByID(w http.ResponseWriter, r *http.Request) {
@@ -343,6 +343,20 @@ func responseFromSession(sess cbv1.BrowserSession) sessionResponse {
 	// desired URL so Triform dials the owner pod that minted this session.
 	if sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" {
 		resp.SignalingURL = sess.Annotations[cbv1.AnnotationBrowserSignalingURL]
+	}
+	return resp
+}
+
+func responseFromMintRequest(sess cbv1.BrowserSession, sessionName string, req mintRequest) sessionResponse {
+	resp := responseFromSession(sess)
+	if resp.SessionID == "" {
+		resp.SessionID = sessionName
+	}
+	// The create/update has just accepted this desired URL. The informer cache
+	// used by waitForReady may still return an already-ready object with stale
+	// annotations, so preserve the caller's owner-pinned signaling URL here.
+	if req.SignalingURL != "" {
+		resp.SignalingURL = req.SignalingURL
 	}
 	return resp
 }

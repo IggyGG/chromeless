@@ -126,6 +126,40 @@ func TestResponseFromSessionPrefersDesiredSignalingURL(t *testing.T) {
 	}
 }
 
+func TestResponseFromMintRequestPreservesRequestedSignalingURLAcrossCacheLag(t *testing.T) {
+	sess := cbv1.BrowserSession{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "tf-session",
+			Annotations: map[string]string{
+				cbv1.AnnotationBrowserSignalingURL: "ws://old-owner.example/api/webrtc/signaling",
+			},
+		},
+		Status: cbv1.BrowserSessionStatus{
+			Phase: cbv1.SessionReady,
+			Connection: &cbv1.SessionConnection{
+				PodName:      "sw-pool-0",
+				PodIP:        "10.244.0.10",
+				SignalingURL: "ws://old-status.example/api/webrtc/signaling",
+			},
+		},
+	}
+	req := mintRequest{
+		SignalingURL: "ws://new-owner.example/api/webrtc/signaling",
+	}
+
+	resp := responseFromMintRequest(sess, "tf-session", req)
+
+	if resp.SignalingURL != req.SignalingURL {
+		t.Fatalf("signaling_url = %q", resp.SignalingURL)
+	}
+	if resp.SessionID != "tf-session" {
+		t.Fatalf("session_id = %q", resp.SessionID)
+	}
+	if resp.PodName != "sw-pool-0" {
+		t.Fatalf("pod_name = %q", resp.PodName)
+	}
+}
+
 func TestGatewayHeartbeatUpdatesLastActivity(t *testing.T) {
 	scheme := gatewayScheme(t)
 	old := metav1.NewTime(time.Now().Add(-time.Hour))
