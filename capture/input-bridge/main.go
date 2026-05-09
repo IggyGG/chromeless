@@ -11,7 +11,7 @@
 //   - --source ws     → accept envelopes over a localhost WebSocket
 //     (default ws://localhost:9100/input)
 //   - /metrics        → Prometheus metrics (events/sec by type, dispatch
-//                       latency p50/p95/p99 histograms, error counters)
+//     latency p50/p95/p99 histograms, error counters)
 //
 // Out of scope here:
 //   - The relay from the WebRTC data channel into this bridge — that
@@ -91,17 +91,18 @@ type keyData struct {
 	Key  string `json:"key"`
 	Mods int    `json:"mods"` // bitmask: Shift=1 Ctrl=2 Alt=4 Meta=8
 }
+
 // compositionData carries the v1.1 IME envelope payload. The
 // v1.0 fields (Data) are required; selection / rect / candidates
 // are optional v1.1 (T88) extensions used to drive
 // Input.imeSetComposition more accurately. Pointers so we can
 // distinguish "field omitted" from "field set to 0".
 type compositionData struct {
-	Data           string             `json:"data"`
-	SelectionStart *int               `json:"selection_start,omitempty"`
-	SelectionEnd   *int               `json:"selection_end,omitempty"`
-	Rect           *compositionRect   `json:"rect,omitempty"`
-	CandidateList  []string           `json:"candidate_list,omitempty"`
+	Data           string           `json:"data"`
+	SelectionStart *int             `json:"selection_start,omitempty"`
+	SelectionEnd   *int             `json:"selection_end,omitempty"`
+	Rect           *compositionRect `json:"rect,omitempty"`
+	CandidateList  []string         `json:"candidate_list,omitempty"`
 }
 
 type compositionRect struct {
@@ -567,11 +568,16 @@ func (c *cdpClient) Close() error {
 // pageSessionSender — flat-mode dispatch routing
 //
 // Wraps cdpClient and routes every Send call to the "current" attached
-// page session. The current session is the most recent
-// Target.attachedToTarget event whose targetInfo.type == "page". When
-// a session detaches we drop it and fall back to any other still-
-// attached page (rare in our single-target scenarios; the chromeless
-// Job runs with one page at a time).
+// page session. The current session prefers the customer page over the
+// local streamer page. Chromium exposes both as page targets in this
+// pod: the remote browsing target (for example https://example.com/)
+// and http://localhost:9000/streamer/index.html, which only captures
+// and relays WebRTC. Sending Input.dispatch* to the streamer target
+// cleanly ACKs at CDP but never clicks the remote page.
+//
+// When a session detaches we drop it and fall back to another attached
+// page, preferring known non-streamer URLs first and then unknown page
+// sessions over known streamer URLs.
 //
 // If no page session is attached yet when Send is called (race: the
 // first input envelope can arrive before chromium has emitted
@@ -585,16 +591,23 @@ type pageSessionSender struct {
 	log *slog.Logger
 
 	mu            sync.Mutex
-	pageSessions  map[string]string // sessionID → targetID; all currently-attached pages
-	currentSID    string            // most recently attached page session
-	pendingWaiter chan string       // closed when currentSID transitions ""→non-empty
+	pageSessions  map[string]pageSession // sessionID → all currently-attached pages
+	attachSeq     int64
+	currentSID    string
+	pendingWaiter chan string // closed when currentSID transitions ""→non-empty
+}
+
+type pageSession struct {
+	targetID string
+	url      string
+	seq      int64
 }
 
 func newPageSessionSender(cdp *cdpClient, log *slog.Logger) *pageSessionSender {
 	return &pageSessionSender{
 		cdp:          cdp,
 		log:          log,
-		pageSessions: make(map[string]string),
+		pageSessions: make(map[string]pageSession),
 	}
 }
 
@@ -663,6 +676,7 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 			TargetInfo struct {
 				TargetID string `json:"targetId"`
 				Type     string `json:"type"`
+				URL      string `json:"url"`
 			} `json:"targetInfo"`
 		}
 		if err := json.Unmarshal(paramsRaw, &p); err != nil {
@@ -673,11 +687,17 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 			return
 		}
 		s.mu.Lock()
-		s.pageSessions[p.SessionID] = p.TargetInfo.TargetID
+		s.attachSeq++
+		s.pageSessions[p.SessionID] = pageSession{
+			targetID: p.TargetInfo.TargetID,
+			url:      p.TargetInfo.URL,
+			seq:      s.attachSeq,
+		}
 		prevEmpty := s.currentSID == ""
-		s.currentSID = p.SessionID
+		s.currentSID = s.chooseCurrentSessionLocked()
+		currentSID := s.currentSID
 		var notify chan string
-		if prevEmpty && s.pendingWaiter != nil {
+		if prevEmpty && currentSID != "" && s.pendingWaiter != nil {
 			notify = s.pendingWaiter
 			s.pendingWaiter = nil
 		}
@@ -687,7 +707,9 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 		}
 		s.log.Info("page session attached",
 			slog.String("session_id", p.SessionID),
-			slog.String("target_id", p.TargetInfo.TargetID))
+			slog.String("target_id", p.TargetInfo.TargetID),
+			slog.String("url", p.TargetInfo.URL),
+			slog.String("current_session_id", currentSID))
 		// Diagnostic: enable the Page domain on the freshly-attached
 		// session so we receive Page.frameNavigated events. Used to
 		// falsify the "flat-mode session doesn't follow navigation"
@@ -725,10 +747,19 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 		if p.Frame.ParentID != "" {
 			return
 		}
+		s.mu.Lock()
+		if info, ok := s.pageSessions[sessionID]; ok {
+			info.url = p.Frame.URL
+			s.pageSessions[sessionID] = info
+			s.currentSID = s.chooseCurrentSessionLocked()
+		}
+		currentSID := s.currentSID
+		s.mu.Unlock()
 		s.log.Info("page navigated on bridge session",
 			slog.String("session_id", sessionID),
 			slog.String("frame_id", p.Frame.ID),
-			slog.String("url", p.Frame.URL))
+			slog.String("url", p.Frame.URL),
+			slog.String("current_session_id", currentSID))
 
 	case "Target.detachedFromTarget":
 		var p struct {
@@ -743,17 +774,51 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 			return
 		}
 		delete(s.pageSessions, p.SessionID)
-		if s.currentSID == p.SessionID {
-			s.currentSID = ""
-			// Fall back to any other still-attached page session.
-			for sid := range s.pageSessions {
-				s.currentSID = sid
-				break
-			}
-		}
+		s.currentSID = s.chooseCurrentSessionLocked()
 		s.mu.Unlock()
 		s.log.Info("page session detached", slog.String("session_id", p.SessionID))
 	}
+}
+
+func (s *pageSessionSender) chooseCurrentSessionLocked() string {
+	if sid := newestMatchingSession(s.pageSessions, func(info pageSession) bool {
+		return isConcretePageURL(info.url) && !isStreamerPageURL(info.url)
+	}); sid != "" {
+		return sid
+	}
+	if sid := newestMatchingSession(s.pageSessions, func(info pageSession) bool {
+		return !isStreamerPageURL(info.url)
+	}); sid != "" {
+		return sid
+	}
+	return newestMatchingSession(s.pageSessions, func(pageSession) bool {
+		return true
+	})
+}
+
+func newestMatchingSession(sessions map[string]pageSession, accept func(pageSession) bool) string {
+	var bestSID string
+	var bestSeq int64
+	for sid, info := range sessions {
+		if !accept(info) {
+			continue
+		}
+		if bestSID == "" || info.seq > bestSeq {
+			bestSID = sid
+			bestSeq = info.seq
+		}
+	}
+	return bestSID
+}
+
+func isConcretePageURL(raw string) bool {
+	u := strings.TrimSpace(raw)
+	return u != "" && u != "about:blank"
+}
+
+func isStreamerPageURL(raw string) bool {
+	u := strings.ToLower(strings.TrimSpace(raw))
+	return strings.Contains(u, "/streamer/")
 }
 
 // ---------------------------------------------------------------------------
@@ -777,10 +842,10 @@ type dispatcher struct {
 	// items from drag_start and reuse them on subsequent events. We
 	// also enable Input.setInterceptDrags once the first drag arrives
 	// so subsequent OS-level drag handling doesn't race us.
-	dragMu       sync.Mutex
-	dragItems    []dragItem
-	dragTypes    []string
-	dragActive   bool
+	dragMu            sync.Mutex
+	dragItems         []dragItem
+	dragTypes         []string
+	dragActive        bool
 	dragInterceptOnce sync.Once
 
 	// touchMu guards the active-touches map. CDP's
@@ -788,7 +853,7 @@ type dispatcher struct {
 	// touchPoints on every call (per puppeteer's convention: the
 	// array reflects state AFTER this event applies). The map is
 	// keyed by per-finger identifier supplied by the client.
-	touchMu      sync.Mutex
+	touchMu       sync.Mutex
 	activeTouches map[int]touchPoint
 
 	// wheelMu guards the per-session wheel gesture state. The
@@ -815,10 +880,10 @@ type dispatcher struct {
 	//
 	// We track all three here. Reads/writes are guarded by inputMu so
 	// concurrent envelopes from a single source serialize cleanly.
-	inputMu      sync.Mutex
-	heldMods     int       // protocol modifier bitmask (modShift|modCtrl|...)
-	heldButtons  int       // CDP buttons bitfield (bit 0=left, 1=right, 2=middle, 3=back, 4=forward)
-	lastClick    clickRamp // most recent mouseDown for clickCount ramp logic
+	inputMu     sync.Mutex
+	heldMods    int       // protocol modifier bitmask (modShift|modCtrl|...)
+	heldButtons int       // CDP buttons bitfield (bit 0=left, 1=right, 2=middle, 3=back, 4=forward)
+	lastClick   clickRamp // most recent mouseDown for clickCount ramp logic
 
 	metrics *metrics
 }

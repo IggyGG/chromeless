@@ -742,12 +742,12 @@ func TestDispatchTouchMultiFingerSnapshot(t *testing.T) {
 	}
 	// Snapshot of touchPoints state-AFTER each event (sorted ids):
 	want := [][]int{
-		{1},     // touchStart finger 1
-		{1, 2},  // touchStart finger 2 — both active now
-		{1, 2},  // touchMove finger 1 — both still active
-		{1, 2},  // touchMove finger 2 — both still active
-		{2},     // touchEnd finger 1 — only 2 remains
-		{},      // touchEnd finger 2 — empty
+		{1},    // touchStart finger 1
+		{1, 2}, // touchStart finger 2 — both active now
+		{1, 2}, // touchMove finger 1 — both still active
+		{1, 2}, // touchMove finger 2 — both still active
+		{2},    // touchEnd finger 1 — only 2 remains
+		{},     // touchEnd finger 2 — empty
 	}
 	for i := range want {
 		if !intsEqual(evs[i].ids, want[i]) {
@@ -1180,12 +1180,12 @@ func TestDispatchCompositionSelectionClamped(t *testing.T) {
 
 func TestUTF16Len(t *testing.T) {
 	cases := map[string]int{
-		"":       0,
-		"abc":    3,
-		"こんにちは": 5,                  // BMP CJK — 1 unit each
-		"🙂":      2,                  // outside BMP — surrogate pair
-		"a🙂b":   4,                  // 1 + 2 + 1
-		"é": 2,                 // "e" + combining acute = 2 units
+		"":      0,
+		"abc":   3,
+		"こんにちは": 5, // BMP CJK — 1 unit each
+		"🙂":     2, // outside BMP — surrogate pair
+		"a🙂b":   4, // 1 + 2 + 1
+		"é":    2, // "e" + combining acute = 2 units
 	}
 	for in, want := range cases {
 		if got := utf16Len(in); got != want {
@@ -1688,6 +1688,52 @@ func TestFlatModeDetachClearsCurrentSession(t *testing.T) {
 	sender.handleEvent("Target.detachedFromTarget", "", detachA)
 	if got := sender.CurrentSession(); got != "" {
 		t.Errorf("after detach a: CurrentSession = %q, want empty", got)
+	}
+}
+
+func TestFlatModePrefersContentPageOverStreamerPage(t *testing.T) {
+	cdp := &cdpClient{
+		pending:    make(map[int64]chan cdpResponse),
+		disconnect: make(chan struct{}),
+		log:        quietLogger(),
+	}
+	sender := newPageSessionSender(cdp, quietLogger())
+
+	content := json.RawMessage(`{"sessionId":"content","waitingForDebugger":false,"targetInfo":{"targetId":"t-content","type":"page","url":"https://example.com/"}}`)
+	streamer := json.RawMessage(`{"sessionId":"streamer","waitingForDebugger":false,"targetInfo":{"targetId":"t-streamer","type":"page","url":"http://localhost:9000/streamer/index.html?session=cb%3A123"}}`)
+
+	sender.handleEvent("Target.attachedToTarget", "", content)
+	if got := sender.CurrentSession(); got != "content" {
+		t.Fatalf("content attach: CurrentSession = %q, want content", got)
+	}
+
+	sender.handleEvent("Target.attachedToTarget", "", streamer)
+	if got := sender.CurrentSession(); got != "content" {
+		t.Fatalf("streamer attach must not steal input session: got %q, want content", got)
+	}
+}
+
+func TestFlatModeStreamerNavigationRestoresContentSession(t *testing.T) {
+	cdp := &cdpClient{
+		pending:    make(map[int64]chan cdpResponse),
+		disconnect: make(chan struct{}),
+		log:        quietLogger(),
+	}
+	sender := newPageSessionSender(cdp, quietLogger())
+
+	content := json.RawMessage(`{"sessionId":"content","waitingForDebugger":false,"targetInfo":{"targetId":"t-content","type":"page","url":"about:blank"}}`)
+	streamer := json.RawMessage(`{"sessionId":"streamer","waitingForDebugger":false,"targetInfo":{"targetId":"t-streamer","type":"page","url":"about:blank"}}`)
+
+	sender.handleEvent("Target.attachedToTarget", "", content)
+	sender.handleEvent("Target.attachedToTarget", "", streamer)
+	if got := sender.CurrentSession(); got != "streamer" {
+		t.Fatalf("before URL classification: CurrentSession = %q, want streamer", got)
+	}
+
+	streamerNav := json.RawMessage(`{"frame":{"id":"S","url":"http://localhost:9000/streamer/index.html?session=cb%3A123","loaderId":"L1"}}`)
+	sender.handleEvent("Page.frameNavigated", "streamer", streamerNav)
+	if got := sender.CurrentSession(); got != "content" {
+		t.Fatalf("streamer navigation should restore non-streamer session: got %q, want content", got)
 	}
 }
 
