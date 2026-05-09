@@ -4,11 +4,14 @@
 
 #include "capture/build-integration/cloud_browser_browser_context.h"
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/path_service.h"
+#include "base/strings/stringprintf.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "components/keyed_service/core/simple_dependency_manager.h"
 #include "components/keyed_service/core/simple_factory_key.h"
@@ -18,11 +21,17 @@ namespace cloud_browser {
 
 namespace {
 
-// Profile dir name under base::DIR_TEMP. The dir is created on first
-// run and reused on subsequent runs within the same container; on
-// container restart base::DIR_TEMP is wiped, so we get a fresh one.
-constexpr base::FilePath::CharType kProfileDirName[] =
-    FILE_PATH_LITERAL("cloud_browser_profile");
+std::atomic<uint64_t> g_next_profile_id{0};
+
+base::FilePath NextProfilePath() {
+  base::FilePath tmp_dir;
+  CHECK(base::PathService::Get(base::DIR_TEMP, &tmp_dir));
+  const uint64_t profile_id =
+      g_next_profile_id.fetch_add(1, std::memory_order_relaxed);
+  return tmp_dir.AppendASCII(
+      base::StringPrintf("cloud_browser_profile_%llu",
+                         static_cast<unsigned long long>(profile_id)));
+}
 
 }  // namespace
 
@@ -50,9 +59,7 @@ CloudBrowserBrowserContext::~CloudBrowserBrowserContext() {
 }
 
 void CloudBrowserBrowserContext::InitWhileIOAllowed() {
-  base::FilePath tmp_dir;
-  CHECK(base::PathService::Get(base::DIR_TEMP, &tmp_dir));
-  path_ = tmp_dir.Append(kProfileDirName);
+  path_ = NextProfilePath();
   // Best-effort create; if the dir already exists this is a no-op.
   // We don't propagate the failure — chromium's storage layer will
   // surface a clearer error if the path turns out to be unwritable.

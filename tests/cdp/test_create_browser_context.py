@@ -238,3 +238,85 @@ async def test_page_navigate(ws_url: str) -> None:
             f"{json.dumps(nav_response, indent=2)}"
         )
         # See `test_target_create_browser_context` for why dispose is skipped.
+
+
+@pytest.mark.asyncio
+async def test_repeated_context_target_navigate_survives(ws_url: str) -> None:
+    """Repeated BrowserContext + target creation must not abort the browser.
+
+    The production portal issues this pattern when multiple chromeless elements
+    are driven through the same long-lived worker. A regression here used to
+    abort Chromium in BrowserContextImpl once a later context navigated while a
+    prior context's renderer still held BrowserContext references.
+    """
+    async with _open_ws(ws_url) as ws:
+        for i in range(6):
+            base_id = i * 10
+            ctx_resp = await _send_and_wait(
+                ws,
+                {
+                    "id": base_id + 1,
+                    "method": "Target.createBrowserContext",
+                    "params": {},
+                },
+            )
+            _assert_no_cdp_error("Target.createBrowserContext", ctx_resp)
+            ctx_id = ctx_resp["result"]["browserContextId"]
+
+            target_resp = await _send_and_wait(
+                ws,
+                {
+                    "id": base_id + 2,
+                    "method": "Target.createTarget",
+                    "params": {
+                        "url": "about:blank",
+                        "browserContextId": ctx_id,
+                    },
+                },
+            )
+            _assert_no_cdp_error("Target.createTarget", target_resp)
+            target_id = target_resp["result"]["targetId"]
+
+            attach_resp = await _send_and_wait(
+                ws,
+                {
+                    "id": base_id + 3,
+                    "method": "Target.attachToTarget",
+                    "params": {"targetId": target_id, "flatten": True},
+                },
+            )
+            _assert_no_cdp_error("Target.attachToTarget", attach_resp)
+            sess_id = attach_resp["result"]["sessionId"]
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "id": base_id + 4,
+                        "method": "Page.navigate",
+                        "params": {"url": "https://example.com"},
+                        "sessionId": sess_id,
+                    }
+                )
+            )
+
+            nav_response: dict | None = None
+            deadline = asyncio.get_event_loop().time() + NAV_RECV_TIMEOUT_S
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+                payload = json.loads(raw)
+                if payload.get("id") == base_id + 4:
+                    nav_response = payload
+                    break
+
+            assert nav_response is not None, (
+                f"Page.navigate iteration {i} did not reply within "
+                f"{NAV_RECV_TIMEOUT_S}s"
+            )
+            _assert_no_cdp_error("Page.navigate", nav_response)
+            assert nav_response.get("result", {}).get("frameId"), (
+                "Page.navigate returned no frameId on iteration "
+                f"{i}: {json.dumps(nav_response, indent=2)}"
+            )

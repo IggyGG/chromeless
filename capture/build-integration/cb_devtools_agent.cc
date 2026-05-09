@@ -325,6 +325,14 @@ void CbDevToolsManagerDelegate::DisposeBrowserContext(
   }
   for (auto it = contexts_.begin(); it != contexts_.end(); ++it) {
     if (it->get() == context) {
+      for (auto web_contents_it = web_contents_holders_.begin();
+           web_contents_it != web_contents_holders_.end();) {
+        if ((*web_contents_it)->GetBrowserContext() == context) {
+          web_contents_it = web_contents_holders_.erase(web_contents_it);
+        } else {
+          ++web_contents_it;
+        }
+      }
       contexts_.erase(it);  // unique_ptr dtor destroys the context
       std::move(callback).Run(true, "");
       return;

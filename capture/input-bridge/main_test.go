@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -402,6 +403,66 @@ func TestDispatchUnknownTypeIgnored(t *testing.T) {
 		if c.Method != "Page.bringToFront" {
 			t.Errorf("unknown event produced unexpected CDP call %s", c.Method)
 		}
+	}
+}
+
+func TestConnectCDPWithRetryWaitsForReadiness(t *testing.T) {
+	attempts := 0
+	dialer := func(context.Context, string, *slog.Logger) (*pageSessionSender, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, errors.New("cdp not ready")
+		}
+		return newPageSessionSender(&cdpClient{
+			disconnect: make(chan struct{}),
+			log:        quietLogger(),
+		}, quietLogger()), nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cdp, err := connectCDPWithRetryDialer(
+		ctx,
+		"http://127.0.0.1:9222",
+		quietLogger(),
+		500*time.Millisecond,
+		time.Millisecond,
+		dialer,
+	)
+	if err != nil {
+		t.Fatalf("connectCDPWithRetryDialer: %v", err)
+	}
+	_ = cdp.Close()
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestConnectCDPWithRetryReturnsDeadlineError(t *testing.T) {
+	attempts := 0
+	dialer := func(context.Context, string, *slog.Logger) (*pageSessionSender, error) {
+		attempts++
+		return nil, errors.New("still booting")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := connectCDPWithRetryDialer(
+		ctx,
+		"http://127.0.0.1:9222",
+		quietLogger(),
+		20*time.Millisecond,
+		time.Millisecond,
+		dialer,
+	)
+	if err == nil {
+		t.Fatal("expected deadline error, got nil")
+	}
+	if !strings.Contains(err.Error(), "CDP not ready after") {
+		t.Fatalf("error = %q, want CDP not ready deadline", err.Error())
+	}
+	if attempts == 0 {
+		t.Fatal("expected at least one dial attempt")
 	}
 }
 
