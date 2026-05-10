@@ -38,6 +38,12 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: triform
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: triform-staging
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: triform
         - ipBlock: { cidr: 10.0.0.0/8 }
         - ipBlock: { cidr: 95.217.200.179/32 }
         - ipBlock: { cidr: 95.217.118.227/32 }
