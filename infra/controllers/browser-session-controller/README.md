@@ -184,6 +184,156 @@ status.
   owns idle eviction in cluster contexts; the in-pod watchdog is
   the fallback for `docker run` / non-K8s deploys.
 
+## Per-session signaling URL routing (Triform multi-tenant)
+
+In a multi-tenant Triform deploy each session must dial back to the
+specific physics pod that minted it (Pattern C). The mint API accepts
+a per-session signaling URL that the controller plumbs all the way to
+the worker pod's `SIGNALING_URL` env on cold-start.
+
+### `mintRequest` fields
+
+`POST /v1/sessions` accepts (see `pkg/server/gateway.go:45-54`):
+
+```json
+{
+  "tenant_id":             "<circle-uuid>",
+  "element_id":            "<element-uuid>",
+  "pool_name":             "default-pool",
+  "region":                "fsn1",
+  "idle_timeout_seconds":  600,
+  "signaling_session_id":  "cb:<element-uuid>",
+  "signaling_url":         "ws://triform-<podname>.triform.<ns>.svc.cluster.local:3000/api/webrtc/signaling",
+  "signaling_token":       "<HS256 JWT, 5-min TTL>"
+}
+```
+
+`signaling_url` and `signaling_token` are JSON snake_case; this is the
+locked contract — do not rename. `signaling_url` is the URL the
+*browser streamer pod* dials, not a portal-side URL.
+
+### What the gateway does with these fields
+
+`browserSessionFromMintRequest` (`pkg/server/gateway.go:289-306`) writes
+both fields into annotations on the `BrowserSession`:
+
+- `chromeless.io/browser-signaling-url`  → `AnnotationBrowserSignalingURL`
+- `chromeless.io/browser-signaling-token` → `AnnotationBrowserSignalingToken`
+
+Annotation constants live in `pkg/apis/v1/types.go:268-273`.
+
+### Cold-start env injection
+
+When the session reconciler creates a fresh pod from the pool template
+(`pkg/reconciler/session.go:499-526`), `applyAssignedSessionEnv`
+(lines 384-401) upserts three env vars on the `chromeless` container
+**before** `Create` is called — pod env is immutable post-create, so
+this is the only safe injection point:
+
+| Env var           | Source annotation                         |
+|-------------------|-------------------------------------------|
+| `SESSION_ID`      | `chromeless.io/broker-session-id`         |
+| `SIGNALING_URL`   | `chromeless.io/browser-signaling-url`     |
+| `SIGNALING_TOKEN` | `chromeless.io/browser-signaling-token`   |
+
+This is the only worker-delivery mechanism. There is no in-band URL
+push channel, no controller→worker push channel, and no per-session
+ConfigMap. Env injection at pod create is the contract.
+
+### Backward-compat fallback
+
+When `signaling_url` is **absent or empty** in the mint request, the
+controller falls through to the pool-template default. The session's
+status URL is computed from `signalingHostFmt`
+(`pkg/reconciler/session.go:54`):
+`ws://signaling.<ns>.svc.cluster.local:8080/ws/<name>`. The worker pod
+boots with whatever `SIGNALING_URL` was baked into the pool template.
+Single-tenant deploys (e.g. `triform-wtf` today) keep working
+unchanged — the existing static URL flows through.
+
+### Warm-pool reuse rule
+
+Warm pods boot from the pool template **before** any session is bound,
+so they have already read the template's `SIGNALING_URL` if the
+streamer auto-starts. To prevent a warm pod from racing into the wrong
+multi-tenant URL, `pickWarmPod` (`pkg/reconciler/session.go:230-268`)
+gates reuse on the streamer's autostart flag:
+
+```go
+needsSessionScopedStreamer := sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" ||
+    sess.Annotations[cbv1.AnnotationBrowserSignalingToken] != ""
+
+if needsSessionScopedStreamer && !streamerAutostartDisabled(p) {
+    continue  // skip warm pods that auto-started the streamer
+}
+```
+
+`streamerAutostartDisabled` (lines 270-293) treats
+`CHROMELESS_AUTOSTART_STREAMER` env values `0|false|no|off`
+(case-insensitive) as disabled.
+
+When `signaling_url` is set on the request:
+
+- Warm pods with `CHROMELESS_AUTOSTART_STREAMER=false`
+  → eligible; reused, env mutation is unnecessary because the streamer
+  is launched per-session over CDP after assignment with the correct
+  per-session URL.
+- Warm pods with autostart on (default)
+  → skipped; the reconciler cold-starts a fresh pod from the template
+  and `applyAssignedSessionEnv` injects the per-session URL into env
+  before `Create`.
+
+### Pool-template requirement (multi-tenant deploys)
+
+For a pool to support multi-tenant `signaling_url` routing **with warm
+reuse**, the pool template must set:
+
+```yaml
+env:
+  - name: CHROMELESS_AUTOSTART_STREAMER
+    value: "false"
+```
+
+Without this, a multi-tenant deploy still works correctly — but every
+session-mint that supplies a per-session `signaling_url` will fall
+through `pickWarmPod` and cold-start a fresh pod, sacrificing the
+warm-pool latency benefit.
+
+The Triform staging pool template lives outside this repo (in the
+Triform monorepo's `deployment/kubernetes/...`) and is owned by the
+deploy lane — staging operators must set
+`CHROMELESS_AUTOSTART_STREAMER=false` there. Single-tenant deploys
+(today's `triform-wtf`) can leave it unset; the static template URL
+is correct for every session there.
+
+### Status surface
+
+`responseFromSession` (`pkg/server/gateway.go:331-348`) prefers the
+annotation URL over `status.connection.signalingURL` so the gateway
+returns the desired URL to Triform even before the session reconciler
+has refreshed `status` post-bind. Verified by
+`TestResponseFromSessionPrefersDesiredSignalingURL` in
+`gateway_test.go`.
+
+### Test coverage
+
+- `TestSession_TriformPatternCColdStartsWhenWarmPodAutostarts`
+  (`pkg/reconciler/session_test.go:213-268`) — per-session URL set
+  + warm pods with autostart=true → cold-start, asserts
+  `SESSION_ID` / `SIGNALING_URL` / `SIGNALING_TOKEN` env on the
+  cold-start pod.
+- `TestSession_TriformPatternCUsesWarmPodWhenAutostartDisabled`
+  (`pkg/reconciler/session_test.go:270-325`) — per-session URL set
+  + warm pods with autostart=false → warm reuse, asserts
+  `status.connection.signalingURL` matches the per-session
+  annotation.
+- `TestGatewayCreateSessionStampsPatternCAnnotations`
+  (`pkg/server/gateway_test.go:33-96`) — mint request → annotations
+  stamped on the `BrowserSession`.
+- `TestResponseFromSessionPrefersDesiredSignalingURL`
+  (`pkg/server/gateway_test.go:98-127`) — annotation URL wins over
+  stale status URL.
+
 ## Cross-references
 
 - T50 — design doc this implementation tracks.
