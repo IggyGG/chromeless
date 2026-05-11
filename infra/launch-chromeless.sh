@@ -183,7 +183,25 @@ fi
 # Chromium picks.
 #
 # shellcheck disable=SC2086  # fake_media_arg is intentionally word-split
-if [ "${AUTOSTART_STREAMER}" = "1" ]; then
+# Determine the URL chromium opens at startup. Precedence:
+#   1. CHROMIUM_START_URL from pod env (highest priority) — used by
+#      Triform's BSP CR template to inject a per-pool default URL
+#      (e.g. https://triform.wtf) so newly-bound sessions land on a
+#      meaningful page without the controller having to drive a
+#      CDP Page.navigate. The "instant-create UX" sprint relies on
+#      this knob.
+#   2. STREAMER_URL when AUTOSTART_STREAMER=1 — preserves the legacy
+#      autostart-streamer-in-its-own-tab boot path for non-Pattern-C
+#      deploys.
+#   3. about:blank — the safe default when neither knob is set.
+#
+# Pod env can override (1) without touching the rest of the boot
+# sequence: physics-controlled per-circle defaults and per-element
+# overrides flow through the pod's container env, NOT through this
+# script's internal STREAMER_URL composition.
+if [ -n "${CHROMIUM_START_URL:-}" ]; then
+    : # honour the pod-env value verbatim
+elif [ "${AUTOSTART_STREAMER}" = "1" ]; then
     CHROMIUM_START_URL="${STREAMER_URL}"
 else
     CHROMIUM_START_URL="about:blank"
