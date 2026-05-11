@@ -686,6 +686,20 @@ func (s *pageSessionSender) Send(ctx context.Context, method string, params any)
 	if err != nil {
 		return nil, fmt.Errorf("waiting for page session: %w", err)
 	}
+	// P3 Bug 11/13 diagnostic: log which page session each Input.*
+	// dispatch routes to. Verifies the BrowserContext-scope auto-attach
+	// hypothesis — if Input.* lands on the streamer page session
+	// (URL contains "/streamer/") instead of a user content page,
+	// click/cursor envelopes never reach the rendered tab.
+	if strings.HasPrefix(method, "Input.") {
+		s.mu.Lock()
+		info := s.pageSessions[sid]
+		s.mu.Unlock()
+		s.log.Info("input dispatch routing",
+			slog.String("method", method),
+			slog.String("session_id", sid),
+			slog.String("target_url", info.url))
+	}
 	return s.cdp.Send(ctx, sid, method, params)
 }
 
