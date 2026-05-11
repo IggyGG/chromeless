@@ -434,24 +434,6 @@ func dialCDP(ctx context.Context, baseURL string, log *slog.Logger) (*pageSessio
 		_ = conn.Close()
 		return nil, fmt.Errorf("Target.setAutoAttach: %w", err)
 	}
-	// Auto-attach across all BrowserContexts. Browser-level
-	// Target.setAutoAttach (above) only attaches targets in the
-	// connection's "current" BrowserContext (default ctx for our
-	// bridge-level connection). After PR #16 isolated each session
-	// into its own BrowserContext via per-pid profile dirs in
-	// cloud_browser_browser_context.cc, the user content page is
-	// created in a NON-default context and therefore is invisible to
-	// the bridge — input lands on the streamer page session instead,
-	// producing the P3 Bug 11/13 symptom set (clicks don't navigate;
-	// cursor envelopes don't flow). setAutoAttachRelatedTargets is
-	// the CDP-spec'd cross-context affordance for browser-level
-	// auto-attach. See diag log "input dispatch routing" added in
-	// f250e45 for the empirical confirmation path.
-	if _, err := c.Send(ctx, "", "Target.setAutoAttachRelatedTargets",
-		map[string]any{"waitForDebuggerOnStart": false}); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("Target.setAutoAttachRelatedTargets: %w", err)
-	}
 	return sender, nil
 }
 
@@ -759,6 +741,93 @@ func (s *pageSessionSender) waitForSession(ctx context.Context) (string, error) 
 // event-targeting, no per-iframe sessionId required.
 func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json.RawMessage) {
 	switch method {
+	case "Target.targetCreated":
+		// P3 Bug 11/13 fix: chromium's browser-level Target.setAutoAttach
+		// (configured in dialCDP at init) only auto-attaches page targets
+		// in the bridge's own BrowserContext. After PR #16 isolated each
+		// session into its own BrowserContext via per-pid profile dirs in
+		// cloud_browser_browser_context.cc, user content pages are
+		// created in non-default contexts and are NOT auto-attached.
+		// chooseCurrentSessionLocked then falls through to tier 3 and
+		// routes all Input.* dispatches to the streamer page session.
+		//
+		// Target.setDiscoverTargets (also in dialCDP init) DOES fire
+		// Target.targetCreated for cross-context pages. So we listen
+		// here, filter to non-streamer pages we haven't already attached
+		// to, and issue an explicit Target.attachToTarget — chromium
+		// then emits Target.attachedToTarget which the existing case
+		// below records into pageSessions. From there
+		// chooseCurrentSessionLocked picks the content session correctly
+		// via tier 1 (concrete URL, non-streamer).
+		//
+		// Note: setAutoAttachRelatedTargets is NOT the right
+		// affordance here — per CDP spec it watches a specific
+		// already-attached target's children, not cross-BrowserContext
+		// auto-attach. An earlier fix attempt assumed otherwise and
+		// crashlooped with CDP error -32601 on the deployed chromium.
+		var p struct {
+			TargetInfo struct {
+				TargetID         string `json:"targetId"`
+				Type             string `json:"type"`
+				URL              string `json:"url"`
+				BrowserContextID string `json:"browserContextId"`
+			} `json:"targetInfo"`
+		}
+		if err := json.Unmarshal(paramsRaw, &p); err != nil {
+			s.log.Warn("Target.targetCreated: bad params", slog.Any("err", err))
+			return
+		}
+		if p.TargetInfo.Type != "page" {
+			return
+		}
+		if isStreamerPageURL(p.TargetInfo.URL) {
+			// The streamer is the in-pod /streamer/* page. It's
+			// uninteresting as an input target — Pattern C dispatch
+			// goes to user content. Skip explicit-attach; let the
+			// browser-level setAutoAttach handle it if it ever auto-
+			// attaches (typically it does, since the streamer lives in
+			// the default BrowserContext).
+			return
+		}
+		// Skip already-known targets to avoid attach storms on rapid
+		// targetCreated events for the same target (chromium can emit
+		// targetCreated again after targetInfoChanged).
+		s.mu.Lock()
+		already := false
+		for _, info := range s.pageSessions {
+			if info.targetID == p.TargetInfo.TargetID {
+				already = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if already {
+			return
+		}
+		// Issue attach asynchronously — the readLoop must keep draining
+		// or we deadlock. The attachedToTarget event will land on this
+		// same readLoop and the existing case below will handle the
+		// session registration.
+		go func(targetID, url, ctxID string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := s.cdp.Send(ctx, "", "Target.attachToTarget", map[string]any{
+				"targetId": targetID,
+				"flatten":  true,
+			}); err != nil {
+				s.log.Warn("explicit attach to cross-context target failed",
+					slog.String("target_id", targetID),
+					slog.String("url", url),
+					slog.String("browser_context_id", ctxID),
+					slog.Any("err", err))
+				return
+			}
+			s.log.Info("explicit attach to cross-context target requested",
+				slog.String("target_id", targetID),
+				slog.String("url", url),
+				slog.String("browser_context_id", ctxID))
+		}(p.TargetInfo.TargetID, p.TargetInfo.URL, p.TargetInfo.BrowserContextID)
+
 	case "Target.attachedToTarget":
 		var p struct {
 			SessionID  string `json:"sessionId"`

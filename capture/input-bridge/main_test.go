@@ -144,10 +144,18 @@ func TestProtocolButtonToCDP(t *testing.T) {
 // the Target.* setup commands and the synthetic attach event are
 // filtered so existing assertions on dispatched method counts still
 // hold.
+//
+// EmitTargetCreated + the Target.attachToTarget special case let
+// tests exercise the P3 Bug 11/13 cross-context auto-attach fix path:
+// chromium emits targetCreated for cross-context pages, the bridge
+// reacts by issuing attachToTarget, chromium emits attachedToTarget
+// for the new sessionId — the same chain the new handleEvent
+// "Target.targetCreated" case wires up.
 type fakeCDP struct {
 	mu       sync.Mutex
 	received []recordedCall
 	server   *httptest.Server
+	conn     *websocket.Conn
 
 	// writeMu serialises websocket writes for the lone connection;
 	// gorilla/websocket forbids concurrent writes.
@@ -187,6 +195,9 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 			return
 		}
 		defer conn.Close()
+		f.mu.Lock()
+		f.conn = conn
+		f.mu.Unlock()
 
 		writeJSON := func(v any) error {
 			f.writeMu.Lock()
@@ -260,25 +271,11 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 					return
 				}
 				continue
-			case "Target.setAutoAttachRelatedTargets":
-				// Same scaffolding as Target.setAutoAttach above: ack
-				// without recording. Browser-level bootstrap command
-				// (P3 Bug 11/13 fix) — per CDP spec the call MUST use
-				// sessionId="" so chromium configures cross-context
-				// auto-attach for the connection itself. Hidden from
-				// Calls() so dispatcher-layer assertions don't need to
-				// filter it, matching the existing pattern for
-				// setDiscoverTargets and setAutoAttach.
-				if err := writeJSON(map[string]any{
-					"id": env.ID, "result": map[string]any{},
-				}); err != nil {
-					return
-				}
-				continue
 			}
 
 			// Record everything else (Page.bringToFront,
-			// Input.dispatchMouseEvent, Input.dispatchKeyEvent, ...).
+			// Input.dispatchMouseEvent, Input.dispatchKeyEvent,
+			// Target.attachToTarget on cross-context fix path, ...).
 			f.mu.Lock()
 			f.received = append(f.received, recordedCall{
 				Method:    env.Method,
@@ -286,6 +283,41 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 				Params:    env.Params,
 			})
 			f.mu.Unlock()
+
+			// Special-case Target.attachToTarget: chromium responds by
+			// also emitting Target.attachedToTarget so the caller's
+			// session map updates. We mirror that so the P3 Bug 11/13
+			// cross-context fix path can be exercised end-to-end.
+			if env.Method == "Target.attachToTarget" {
+				var p struct {
+					TargetID string `json:"targetId"`
+				}
+				if jerr := json.Unmarshal(env.Params, &p); jerr == nil && p.TargetID != "" {
+					sessionID := "sid-for-" + p.TargetID
+					synth := map[string]any{
+						"method": "Target.attachedToTarget",
+						"params": map[string]any{
+							"sessionId":          sessionID,
+							"waitingForDebugger": false,
+							"targetInfo": map[string]any{
+								"targetId": p.TargetID,
+								"type":     "page",
+								"url":      "https://example.com/",
+								"attached": true,
+							},
+						},
+					}
+					if werr := writeJSON(synth); werr != nil {
+						return
+					}
+					if werr := writeJSON(map[string]any{
+						"id": env.ID, "result": map[string]any{"sessionId": sessionID},
+					}); werr != nil {
+						return
+					}
+					continue
+				}
+			}
 
 			if err := writeJSON(map[string]any{
 				"id": env.ID, "sessionId": env.SessionID, "result": map[string]any{},
@@ -296,6 +328,37 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 	})
 
 	return f
+}
+
+// EmitTargetCreated pushes a synthetic Target.targetCreated event to
+// the connected bridge. Used by the cross-context auto-attach fix tests
+// to simulate chromium discovering a page in a non-default
+// BrowserContext after the initial bootstrap handshake completes.
+//
+// Returns false if the bridge hasn't connected yet — caller should
+// have already established the connection (e.g., via dialCDP) before
+// invoking this.
+func (f *fakeCDP) EmitTargetCreated(targetID, url, browserContextID string) bool {
+	f.mu.Lock()
+	conn := f.conn
+	f.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+	return conn.WriteJSON(map[string]any{
+		"method": "Target.targetCreated",
+		"params": map[string]any{
+			"targetInfo": map[string]any{
+				"targetId":         targetID,
+				"type":             "page",
+				"url":              url,
+				"browserContextId": browserContextID,
+				"attached":         false,
+			},
+		},
+	}) == nil
 }
 
 func (f *fakeCDP) Close() { f.server.Close() }
@@ -1570,9 +1633,132 @@ func TestDispatchKeyTextSynthesis(t *testing.T) {
 //     (this is the actual fix — flat-mode sessions follow navigation)
 //   - Send blocks until the first attached session arrives
 //   - Target.detachedFromTarget clears the current session
-//   - bootstrap commands (setDiscoverTargets / setAutoAttach /
-//     setAutoAttachRelatedTargets) are not leaked into the recorded
-//     Calls() (test scaffolding sanity)
+//   - bootstrap commands (setDiscoverTargets / setAutoAttach) are not
+//     leaked into the recorded Calls() (test scaffolding sanity)
+
+func TestCrossContextTargetCreatedTriggersExplicitAttach(t *testing.T) {
+	// P3 Bug 11/13: when chromium creates a page target in a non-default
+	// BrowserContext, browser-level setAutoAttach does NOT auto-attach
+	// it. The bridge's handleEvent "Target.targetCreated" case must
+	// explicitly issue Target.attachToTarget so the new session is
+	// registered and chooseCurrentSessionLocked can route Input.* there.
+	//
+	// Empirical context: pre-fix, the deployed cb-chromium had a
+	// streamer page session attached but the user content page
+	// (https://example.com/ in a non-default ctx) never surfaced in
+	// pageSessions — all Input.dispatchMouseEvent dispatches landed on
+	// the streamer page and produced the Bug 11 (cursor stuck) + Bug 13
+	// (clicks don't navigate) symptom set.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+	// Initial bootstrap completed; CurrentSession is fake-page-1
+	// (about:blank in default ctx).
+	if got := cdp.CurrentSession(); got != fakePageSessionID {
+		t.Fatalf("pre-emit CurrentSession = %q, want %q", got, fakePageSessionID)
+	}
+
+	// Simulate chromium discovering a cross-context page (the user
+	// content target). Bridge should react with attachToTarget; the
+	// fake's special-case handler then emits a synthetic
+	// attachedToTarget which the bridge records into pageSessions.
+	crossCtxTargetID := "cross-ctx-page-1"
+	if !f.EmitTargetCreated(crossCtxTargetID, "https://example.com/", "non-default-ctx-1") {
+		t.Fatalf("EmitTargetCreated: bridge connection not ready")
+	}
+
+	// Poll: chooseCurrentSessionLocked should switch to the new
+	// session because https://example.com/ wins tier 1 (concrete
+	// URL, not streamer) over about:blank.
+	want := "sid-for-" + crossCtxTargetID
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cdp.CurrentSession() == want {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := cdp.CurrentSession(); got != want {
+		t.Errorf("after cross-context targetCreated: CurrentSession = %q, want %q",
+			got, want)
+	}
+
+	// Verify the bridge actually issued Target.attachToTarget for the
+	// new target — that's the externally-observable signal that the
+	// new handler ran. Filter to attach calls (other calls may have
+	// been recorded incidentally).
+	var attachCalls []recordedCall
+	for _, c := range f.Calls() {
+		if c.Method == "Target.attachToTarget" {
+			attachCalls = append(attachCalls, c)
+		}
+	}
+	if len(attachCalls) == 0 {
+		t.Fatalf("expected at least one Target.attachToTarget call, got 0")
+	}
+	// The relevant call should reference the cross-context target id.
+	found := false
+	for _, c := range attachCalls {
+		var p struct {
+			TargetID string `json:"targetId"`
+		}
+		if jerr := json.Unmarshal(c.Params, &p); jerr == nil && p.TargetID == crossCtxTargetID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no attachToTarget call carried targetId=%q; calls=%+v",
+			crossCtxTargetID, attachCalls)
+	}
+}
+
+func TestCrossContextStreamerTargetCreatedIgnored(t *testing.T) {
+	// Counterpart to the cross-context test: when the targetCreated
+	// event is for the streamer page itself (URL contains "/streamer/"),
+	// the bridge MUST NOT issue an explicit attachToTarget. The streamer
+	// page lives in the default BrowserContext and is handled by
+	// browser-level setAutoAttach via the existing path; double-attaching
+	// it would waste a CDP roundtrip and could race against the auto-
+	// attach event.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+
+	streamerTargetID := "streamer-tgt-1"
+	if !f.EmitTargetCreated(streamerTargetID,
+		"http://localhost:9000/streamer/index.html?signal=ws://x/y", "") {
+		t.Fatalf("EmitTargetCreated: bridge connection not ready")
+	}
+
+	// Give the bridge enough time to react if it were going to.
+	time.Sleep(200 * time.Millisecond)
+
+	for _, c := range f.Calls() {
+		if c.Method == "Target.attachToTarget" {
+			var p struct {
+				TargetID string `json:"targetId"`
+			}
+			_ = json.Unmarshal(c.Params, &p)
+			if p.TargetID == streamerTargetID {
+				t.Errorf("bridge issued attachToTarget for streamer page (target=%q); should have been skipped",
+					streamerTargetID)
+			}
+		}
+	}
+}
 
 func TestFlatModeSessionAttached(t *testing.T) {
 	f := newFakeCDP(t)
