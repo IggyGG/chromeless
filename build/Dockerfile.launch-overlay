@@ -31,5 +31,11 @@ FROM registry.triform.cloud/chromeless/chromeless:${CHROMELESS_BASE_TAG}
 
 # Replace the launch script. Path matches the original COPY destination
 # in build/Dockerfile.runtime line 127 and infra/Dockerfile line 140.
-COPY launch-chromeless.sh /usr/local/bin/launch-chromeless.sh
-RUN chmod +x /usr/local/bin/launch-chromeless.sh
+#
+# --chmod=0755 on the COPY itself avoids a separate RUN chmod step,
+# which would fail under kaniko when the base image's USER is non-root
+# (the cb-chromium runtime image switches to a non-root user for the
+# session pod's security posture; non-root can't chmod a freshly-COPYed
+# root-owned file). The --chmod form is supported by kaniko ≥1.9 and
+# by Docker BuildKit 19.03+.
+COPY --chmod=0755 launch-chromeless.sh /usr/local/bin/launch-chromeless.sh
