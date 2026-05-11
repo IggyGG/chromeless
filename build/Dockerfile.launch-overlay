@@ -1,0 +1,35 @@
+# build/Dockerfile.launch-overlay — minimal overlay on top of the
+# Phase 2 runtime image to swap in a fresh infra/launch-chromeless.sh
+# without re-baking the chromium binary.
+#
+# Use case: small SU-3-style changes to the launch script (e.g.
+# honoring a new pod-env knob) that don't touch the chromium binary
+# or any other artifact. The chromium link in build/chromeless-build.sh
+# is a multi-hour cold build, so re-using the existing cr7727-* base
+# layer and only re-pushing the script saves the full build cycle.
+#
+# Kaniko invocation (one-shot Job in chromeless-build namespace,
+# pattern from feedback_kaniko_as_chromeless_ci_substitute.md):
+#
+#   args:
+#     - --context=git://forgejo.triform.dev/triform/chromeless.git#<sha>
+#     - --context-sub-path=infra
+#     - --dockerfile=../build/Dockerfile.launch-overlay
+#     - --build-arg=CHROMELESS_BASE_TAG=cr7727-3697cd61e0e5
+#     - --destination=registry.triform.cloud/chromeless/chromeless:cr7727-<short-sha>
+#     - --cache=false
+#     - --push-retry=3
+#
+# Note on --context-sub-path: kaniko's clone of the chromeless repo
+# becomes the build root; the sub-path makes "infra/" the working
+# directory so the bare `COPY launch-chromeless.sh ...` line below
+# resolves correctly without needing to know the repo layout. The
+# --dockerfile path then walks up one level to build/.
+
+ARG CHROMELESS_BASE_TAG=cr7727-3697cd61e0e5
+FROM registry.triform.cloud/chromeless/chromeless:${CHROMELESS_BASE_TAG}
+
+# Replace the launch script. Path matches the original COPY destination
+# in build/Dockerfile.runtime line 127 and infra/Dockerfile line 140.
+COPY launch-chromeless.sh /usr/local/bin/launch-chromeless.sh
+RUN chmod +x /usr/local/bin/launch-chromeless.sh
