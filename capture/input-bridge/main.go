@@ -434,6 +434,24 @@ func dialCDP(ctx context.Context, baseURL string, log *slog.Logger) (*pageSessio
 		_ = conn.Close()
 		return nil, fmt.Errorf("Target.setAutoAttach: %w", err)
 	}
+	// Auto-attach across all BrowserContexts. Browser-level
+	// Target.setAutoAttach (above) only attaches targets in the
+	// connection's "current" BrowserContext (default ctx for our
+	// bridge-level connection). After PR #16 isolated each session
+	// into its own BrowserContext via per-pid profile dirs in
+	// cloud_browser_browser_context.cc, the user content page is
+	// created in a NON-default context and therefore is invisible to
+	// the bridge — input lands on the streamer page session instead,
+	// producing the P3 Bug 11/13 symptom set (clicks don't navigate;
+	// cursor envelopes don't flow). setAutoAttachRelatedTargets is
+	// the CDP-spec'd cross-context affordance for browser-level
+	// auto-attach. See diag log "input dispatch routing" added in
+	// f250e45 for the empirical confirmation path.
+	if _, err := c.Send(ctx, "", "Target.setAutoAttachRelatedTargets",
+		map[string]any{"waitForDebuggerOnStart": false}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("Target.setAutoAttachRelatedTargets: %w", err)
+	}
 	return sender, nil
 }
 
