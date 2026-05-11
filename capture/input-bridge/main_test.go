@@ -260,6 +260,21 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 					return
 				}
 				continue
+			case "Target.setAutoAttachRelatedTargets":
+				// Same scaffolding as Target.setAutoAttach above: ack
+				// without recording. Browser-level bootstrap command
+				// (P3 Bug 11/13 fix) — per CDP spec the call MUST use
+				// sessionId="" so chromium configures cross-context
+				// auto-attach for the connection itself. Hidden from
+				// Calls() so dispatcher-layer assertions don't need to
+				// filter it, matching the existing pattern for
+				// setDiscoverTargets and setAutoAttach.
+				if err := writeJSON(map[string]any{
+					"id": env.ID, "result": map[string]any{},
+				}); err != nil {
+					return
+				}
+				continue
 			}
 
 			// Record everything else (Page.bringToFront,
@@ -1555,8 +1570,9 @@ func TestDispatchKeyTextSynthesis(t *testing.T) {
 //     (this is the actual fix — flat-mode sessions follow navigation)
 //   - Send blocks until the first attached session arrives
 //   - Target.detachedFromTarget clears the current session
-//   - bootstrap commands (setDiscoverTargets / setAutoAttach) are not
-//     leaked into the recorded Calls() (test scaffolding sanity)
+//   - bootstrap commands (setDiscoverTargets / setAutoAttach /
+//     setAutoAttachRelatedTargets) are not leaked into the recorded
+//     Calls() (test scaffolding sanity)
 
 func TestFlatModeSessionAttached(t *testing.T) {
 	f := newFakeCDP(t)
