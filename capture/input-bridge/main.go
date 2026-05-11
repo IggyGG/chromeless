@@ -432,9 +432,45 @@ func dialCDP(ctx context.Context, baseURL string, log *slog.Logger) (*pageSessio
 		"flatten":                true,
 	}); err != nil {
 		_ = conn.Close()
+		if isCDPMethodNotFound(err) {
+			return nil, fmt.Errorf("Target.setAutoAttach not supported by deployed chromium (CDP -32601) — version or embedder cut-down: %w", err)
+		}
 		return nil, fmt.Errorf("Target.setAutoAttach: %w", err)
 	}
+	// Init-time probe: confirm we can list targets. Three purposes:
+	//   1. Catches any -32601 / config regression on init rather than
+	//      after entering the readLoop (the prior failed Option A
+	//      crashlooped this way — bridge entered retry-on-init for
+	//      60s, then the readLoop never started).
+	//   2. Acts as a positive liveness check on the CDP connection.
+	//   3. Provides a hook for future init-time methods to follow the
+	//      same wrap-with-isCDPMethodNotFound pattern.
+	// Target.getTargets is stable since chromium ~M50; if it fails
+	// with -32601, something is very wrong with the build.
+	if _, err := c.Send(ctx, "", "Target.getTargets", nil); err != nil {
+		_ = conn.Close()
+		if isCDPMethodNotFound(err) {
+			return nil, fmt.Errorf("Target.getTargets not supported by deployed chromium (CDP -32601) — build is missing Target domain commands: %w", err)
+		}
+		return nil, fmt.Errorf("Target.getTargets init probe: %w", err)
+	}
 	return sender, nil
+}
+
+// isCDPMethodNotFound returns true if err looks like a CDP JSON-RPC
+// "method not found" response (error code -32601 per spec). cdpError
+// carries the code explicitly; errors wrapping that text from
+// elsewhere also match via substring fallback so wrapped errors are
+// still detected.
+func isCDPMethodNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ce *cdpError
+	if errors.As(err, &ce) {
+		return ce.Code == -32601
+	}
+	return strings.Contains(err.Error(), "-32601")
 }
 
 const (
@@ -815,6 +851,22 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 				"targetId": targetID,
 				"flatten":  true,
 			}); err != nil {
+				// Detect CDP -32601 "method not found" specifically so
+				// operators get an unambiguous signal that the deployed
+				// chromium lacks Target.attachToTarget (extremely rare
+				// — that method is stable since chromium ~M50, but
+				// custom embedders can cut it). Without this, the
+				// operator would see a generic "attach failed" and
+				// chase networking/auth instead of a build-config
+				// regression. Same defense applies in spirit to any
+				// new CDP call this codebase introduces.
+				if isCDPMethodNotFound(err) {
+					s.log.Error("CDP method not supported by deployed chromium — likely version or embedder cut-down",
+						slog.String("method", "Target.attachToTarget"),
+						slog.String("target_id", targetID),
+						slog.Any("err", err))
+					return
+				}
 				s.log.Warn("explicit attach to cross-context target failed",
 					slog.String("target_id", targetID),
 					slog.String("url", url),

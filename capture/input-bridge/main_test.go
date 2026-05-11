@@ -271,6 +271,28 @@ func newFakeCDP(t *testing.T) *fakeCDP {
 					return
 				}
 				continue
+			case "Target.getTargets":
+				// dialCDP issues this as an init-time probe to
+				// fail-loud on -32601 / connection-broken before
+				// entering the readLoop. Ack with the fake's known
+				// page target. Hidden from Calls() — analog of the
+				// other init-time bootstrap commands above.
+				if err := writeJSON(map[string]any{
+					"id": env.ID,
+					"result": map[string]any{
+						"targetInfos": []map[string]any{
+							{
+								"targetId": fakePageTargetID,
+								"type":     "page",
+								"url":      "about:blank",
+								"attached": true,
+							},
+						},
+					},
+				}); err != nil {
+					return
+				}
+				continue
 			}
 
 			// Record everything else (Page.bringToFront,
@@ -1633,8 +1655,9 @@ func TestDispatchKeyTextSynthesis(t *testing.T) {
 //     (this is the actual fix — flat-mode sessions follow navigation)
 //   - Send blocks until the first attached session arrives
 //   - Target.detachedFromTarget clears the current session
-//   - bootstrap commands (setDiscoverTargets / setAutoAttach) are not
-//     leaked into the recorded Calls() (test scaffolding sanity)
+//   - bootstrap commands (setDiscoverTargets / setAutoAttach /
+//     getTargets) are not leaked into the recorded Calls() (test
+//     scaffolding sanity)
 
 func TestCrossContextTargetCreatedTriggersExplicitAttach(t *testing.T) {
 	// P3 Bug 11/13: when chromium creates a page target in a non-default
