@@ -840,11 +840,48 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 		if already {
 			return
 		}
-		// Issue attach asynchronously — the readLoop must keep draining
-		// or we deadlock. The attachedToTarget event will land on this
-		// same readLoop and the existing case below will handle the
-		// session registration.
+		// Hybrid wait-then-fallback strategy. Chromium's flat-mode
+		// setAutoAttach configured in dialCDP DOES auto-attach
+		// newly-created cross-context page targets — it just fires
+		// Target.targetCreated and Target.attachedToTarget within ~3ms
+		// of each other. If we issue an explicit Target.attachToTarget
+		// the moment we see targetCreated, chromium creates a SECOND
+		// session for the same target_id, fragmenting input dispatch
+		// vs. cursor event emission across two sessions (Bug 11/13
+		// fix-attempt-3 root cause — observed in bridge logs of
+		// f7567a71c7f8: session D4A005E7 from auto-attach at t+0,
+		// session A25D54F6 from explicit attach at t+3ms, input
+		// dispatched on A25D54F6 but cursor events from D4A005E7).
+		//
+		// Defensive fallback for the original cross-context-attach
+		// gap (Bug 11/13 hypothesis ★): if chromium's auto-attach
+		// somehow doesn't fire (e.g., pre-existing targets discovered
+		// via setDiscoverTargets but not delivered via attachedToTarget),
+		// we still need to explicitly attach. So we wait briefly,
+		// re-check pageSessions, and only issue the explicit attach
+		// if the auto-attach didn't beat us to it.
+		//
+		// 200ms is generous — chromium typically fires attachedToTarget
+		// within 10ms of the corresponding targetCreated. If something
+		// is going to fire, it will have by 200ms.
 		go func(targetID, url, ctxID string) {
+			time.Sleep(200 * time.Millisecond)
+			s.mu.Lock()
+			alreadyNow := false
+			for _, info := range s.pageSessions {
+				if info.targetID == targetID {
+					alreadyNow = true
+					break
+				}
+			}
+			s.mu.Unlock()
+			if alreadyNow {
+				s.log.Debug("cross-context target attached by chromium auto-attach; skipping redundant explicit attach",
+					slog.String("target_id", targetID),
+					slog.String("url", url),
+					slog.String("browser_context_id", ctxID))
+				return
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if _, err := s.cdp.Send(ctx, "", "Target.attachToTarget", map[string]any{
@@ -874,7 +911,7 @@ func (s *pageSessionSender) handleEvent(method, sessionID string, paramsRaw json
 					slog.Any("err", err))
 				return
 			}
-			s.log.Info("explicit attach to cross-context target requested",
+			s.log.Info("explicit attach to cross-context target requested (chromium auto-attach didn't fire in 200ms)",
 				slog.String("target_id", targetID),
 				slog.String("url", url),
 				slog.String("browser_context_id", ctxID))

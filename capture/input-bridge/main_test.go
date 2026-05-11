@@ -383,6 +383,37 @@ func (f *fakeCDP) EmitTargetCreated(targetID, url, browserContextID string) bool
 	}) == nil
 }
 
+// EmitAttachedToTarget pushes a synthetic Target.attachedToTarget
+// event with the given sessionId/targetId/URL. Simulates chromium's
+// flat-mode auto-attach delivering the attached event for a target
+// (whether default-context or cross-context) on its own — used by
+// the auto-attach-handled-it tests to verify the bridge does NOT
+// issue a duplicate explicit attachToTarget when chromium already
+// did the work.
+func (f *fakeCDP) EmitAttachedToTarget(sessionID, targetID, url string) bool {
+	f.mu.Lock()
+	conn := f.conn
+	f.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+	return conn.WriteJSON(map[string]any{
+		"method": "Target.attachedToTarget",
+		"params": map[string]any{
+			"sessionId":          sessionID,
+			"waitingForDebugger": false,
+			"targetInfo": map[string]any{
+				"targetId": targetID,
+				"type":     "page",
+				"url":      url,
+				"attached": true,
+			},
+		},
+	}) == nil
+}
+
 func (f *fakeCDP) Close() { f.server.Close() }
 
 func (f *fakeCDP) Calls() []recordedCall {
@@ -1659,12 +1690,23 @@ func TestDispatchKeyTextSynthesis(t *testing.T) {
 //     getTargets) are not leaked into the recorded Calls() (test
 //     scaffolding sanity)
 
-func TestCrossContextTargetCreatedTriggersExplicitAttach(t *testing.T) {
-	// P3 Bug 11/13: when chromium creates a page target in a non-default
-	// BrowserContext, browser-level setAutoAttach does NOT auto-attach
-	// it. The bridge's handleEvent "Target.targetCreated" case must
-	// explicitly issue Target.attachToTarget so the new session is
-	// registered and chooseCurrentSessionLocked can route Input.* there.
+func TestCrossContextTargetCreatedFallbackAttach(t *testing.T) {
+	// P3 Bug 11/13 fallback path: when chromium's flat-mode auto-attach
+	// (configured by setAutoAttach in dialCDP) doesn't fire for a
+	// cross-context page target (the original observed failure mode for
+	// pre-existing targets discovered via setDiscoverTargets), the
+	// handleEvent "Target.targetCreated" case must explicitly issue
+	// Target.attachToTarget after a 200ms grace window so the new
+	// session is registered and chooseCurrentSessionLocked can route
+	// Input.* there.
+	//
+	// The fake CDP's EmitTargetCreated helper deliberately does NOT
+	// emit a synthetic attachedToTarget — it only emits targetCreated
+	// — which simulates the "auto-attach didn't fire" scenario. The
+	// bridge's 200ms grace window expires without pageSessions
+	// registering the new target, the fallback fires, and the fake's
+	// Target.attachToTarget special-case then emits the synthetic
+	// attachedToTarget.
 	//
 	// Empirical context: pre-fix, the deployed cb-chromium had a
 	// streamer page session attached but the user content page
@@ -1780,6 +1822,77 @@ func TestCrossContextStreamerTargetCreatedIgnored(t *testing.T) {
 					streamerTargetID)
 			}
 		}
+	}
+}
+
+func TestCrossContextAutoAttachNoDuplicateExplicitAttach(t *testing.T) {
+	// P3 Bug 11/13 attempt-3 regression test: when chromium's flat-mode
+	// auto-attach DOES fire for a cross-context page target (the common
+	// case for newly-created targets after the bridge is connected),
+	// the bridge MUST NOT also issue an explicit Target.attachToTarget.
+	//
+	// Pre-attempt-3 behavior (commit f7567a71c7f8): the bridge issued
+	// the explicit attach immediately on Target.targetCreated, creating
+	// TWO sessions per target (one from chromium's auto-attach, one
+	// from the explicit attach). Input dispatched on one session;
+	// cursor events emitted on the other. Cursor pipeline broken.
+	//
+	// Attempt-3 fix: wait 200ms after Target.targetCreated, re-check
+	// pageSessions, only issue explicit attach if STILL not registered
+	// (the original cross-context-gap fallback path). When chromium
+	// auto-attaches within 200ms, the bridge observes the registration
+	// in pageSessions and skips the explicit attach.
+	f := newFakeCDP(t)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cdp, err := dialCDP(ctx, f.URL(), quietLogger())
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer cdp.Close()
+
+	// Simulate chromium auto-attaching a cross-context page target —
+	// emit BOTH the targetCreated event AND a corresponding
+	// attachedToTarget event within a few ms, mirroring real chromium
+	// flat-mode behavior. The bridge's handleEvent records the attach
+	// into pageSessions; its Target.targetCreated handler then enters
+	// the 200ms grace window, re-checks pageSessions, finds the entry,
+	// and skips the explicit attach.
+	autoAttachedTarget := "cross-ctx-auto-attached"
+	autoAttachedSID := "sid-auto-attached-1"
+	if !f.EmitTargetCreated(autoAttachedTarget, "https://example.com/", "non-default-ctx-2") {
+		t.Fatalf("EmitTargetCreated: bridge connection not ready")
+	}
+	if !f.EmitAttachedToTarget(autoAttachedSID, autoAttachedTarget, "https://example.com/") {
+		t.Fatalf("EmitAttachedToTarget: bridge connection not ready")
+	}
+
+	// Wait past the 200ms grace window plus generous slack so the
+	// bridge's targetCreated goroutine has fully completed its
+	// decision.
+	time.Sleep(500 * time.Millisecond)
+
+	// Assert no explicit attachToTarget was issued for this target_id.
+	for _, c := range f.Calls() {
+		if c.Method != "Target.attachToTarget" {
+			continue
+		}
+		var p struct {
+			TargetID string `json:"targetId"`
+		}
+		_ = json.Unmarshal(c.Params, &p)
+		if p.TargetID == autoAttachedTarget {
+			t.Errorf("bridge issued duplicate Target.attachToTarget for target=%q already attached via auto-attach; this is the f7567a71 regression",
+				autoAttachedTarget)
+		}
+	}
+
+	// Sanity: CurrentSession should be the auto-attached session
+	// (concrete URL beats about:blank via tier 1).
+	if got := cdp.CurrentSession(); got != autoAttachedSID {
+		t.Errorf("CurrentSession after auto-attach = %q, want %q",
+			got, autoAttachedSID)
 	}
 }
 
