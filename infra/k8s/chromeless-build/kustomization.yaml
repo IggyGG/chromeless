@@ -1,11 +1,12 @@
 # kustomization.yaml — `kubectl apply -k` entry point for the
-# Chromium build env on triform-6 (T112 + T119).
+# Chromium build env on triform-8 (T112 + T119 + CV2-rehome).
 #
 # T119 dropped the PVC manifests after openebs-localpv-provisioner
 # stopped binding new claims on the cluster. Volumes now live as
-# hostPath dirs on triform-6's /data filesystem (5.4T free,
-# /dev/md5). See build-job.yaml's header for the full rationale and
-# README.md for the workaround story + cleanup procedure.
+# hostPath dirs on triform-8's /var/lib/longhorn LVM (~983G capacity,
+# co-tenanting with Longhorn's data pool). See build-job.yaml's header
+# for the full rationale and README.md for the workaround story +
+# cleanup procedure.
 #
 # Apply order:
 #   1. namespace.yaml — creates chromeless-build ns

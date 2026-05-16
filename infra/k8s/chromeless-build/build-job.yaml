@@ -113,8 +113,8 @@ spec:
         #
         # The `type: DirectoryOrCreate` on the volumes ensures kubelet
         # creates the dir if absent; the chown happens inside that
-        # newly-created dir. We mount the parent /data/chromeless-build for
-        # this container so a single chown -R covers both subdirs in
+        # newly-created dir. We mount /work + /sccache for this
+        # container so a single chown covers both hostPath dirs in
         # one shot.
         - name: bootstrap-our-repo
           image: registry.triform.cloud/chromeless/chromeless-build-runner:0.1.4
@@ -253,8 +253,8 @@ spec:
               # gn parse the BUILD.gn at all).
               value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             # Ninja parallelism. autoninja's auto-detect picks
-            # nproc=32 on triform-6, which over-subscribes the
-            # 30-CPU container cap; gives lto + sccache server headroom.
+            # nproc=48 on triform-8, which over-subscribes the
+            # 16-CPU container limit; gives lto + sccache server headroom.
             - name: NINJA_PARALLELISM
               value: "14"
             # T113 reads SKIP_FETCH=1 to skip the gclient sync on
