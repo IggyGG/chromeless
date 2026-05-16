@@ -34,13 +34,25 @@ Targets re-exported:
     api/video:encoded_image                        (webrtc::EncodedImage)
     api/video:video_bitrate_allocation             (webrtc::VideoBitrateAllocation)
     api/video:video_frame                          (webrtc::VideoFrame, I420Buffer)
+    api/video:video_rtp_headers                    (webrtc::VideoFrame metadata
+                                                     helpers, RTP-side video info)
     api/video_codecs:video_codecs_api              (VideoEncoder, EncoderFactory,
                                                      SdpVideoFormat, VideoCodec)
+    media:rtc_media_base                           (cricket::MediaType +
+                                                     base media-stream types)
+    pc:video_track_source                          (webrtc::VideoTrackSource —
+                                                     concrete base class for the
+                                                     FrameSink track-source
+                                                     adapter)
     api:libjingle_peerconnection_api               (webrtc::PeerConnectionFactory
                                                      Interface,
                                                      PeerConnectionFactoryDeps,
                                                      RtpCodecCapability,
                                                      MediaType)
+    api:media_stream_interface                     (webrtc::MediaStreamTrack
+                                                     Interface,
+                                                     VideoTrackSourceInterface,
+                                                     VideoTrackInterface)
     api:scoped_refptr                              (webrtc::scoped_refptr)
     api:enable_media                               (webrtc::EnableMedia)
     api:create_modular_peer_connection_factory     (webrtc::CreateModular
@@ -78,8 +90,8 @@ Touched file:
 
 Resolved against branch-heads/7727 (Chromium 147 stable).
 ---
- .../webrtc_overrides/cloud_browser/BUILD.gn   | 70 +++++++++++++++++++++
- 1 file changed, 70 insertions(+)
+ .../webrtc_overrides/cloud_browser/BUILD.gn   | 74 +++++++++++++++++++++++
+ 1 file changed, 74 insertions(+)
  create mode 100644 third_party/webrtc_overrides/cloud_browser/BUILD.gn
 
 diff --git a/third_party/webrtc_overrides/cloud_browser/BUILD.gn b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
@@ -87,7 +99,7 @@ new file mode 100644
 index 0000000000..f4503f144e
 --- /dev/null
 +++ b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,74 @@
 +# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 +#
 +# Use of this source code is governed by a BSD-style license that can be
@@ -127,6 +139,7 @@ index 0000000000..f4503f144e
 +    "//third_party/webrtc/api:create_modular_peer_connection_factory",
 +    "//third_party/webrtc/api:enable_media",
 +    "//third_party/webrtc/api:libjingle_peerconnection_api",
++    "//third_party/webrtc/api:media_stream_interface",
 +    "//third_party/webrtc/api:scoped_refptr",
 +    "//third_party/webrtc/api/audio:audio_device",
 +    "//third_party/webrtc/api/audio_codecs:builtin_audio_decoder_factory",
@@ -137,11 +150,14 @@ index 0000000000..f4503f144e
 +    "//third_party/webrtc/api/video:encoded_image",
 +    "//third_party/webrtc/api/video:video_bitrate_allocation",
 +    "//third_party/webrtc/api/video:video_frame",
++    "//third_party/webrtc/api/video:video_rtp_headers",
 +    "//third_party/webrtc/api/video_codecs:builtin_video_decoder_factory",
 +    "//third_party/webrtc/api/video_codecs:video_codecs_api",
++    "//third_party/webrtc/media:rtc_media_base",
 +    "//third_party/webrtc/modules/video_coding:codec_globals_headers",
 +    "//third_party/webrtc/modules/video_coding:video_codec_interface",
 +    "//third_party/webrtc/modules/video_coding",
++    "//third_party/webrtc/pc:video_track_source",
 +    "//third_party/webrtc/rtc_base:logging",
 +    "//third_party/webrtc/rtc_base:threading",
 +  ]
