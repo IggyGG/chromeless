@@ -58,7 +58,7 @@
 #   CHROMELESS_WORK_ROOT=/work
 #   CHROMIUM_BRANCH_NUMBER=7727 (M147 stable; verify on chromiumdash)
 #   SCCACHE_DIR=/sccache
-#   CHROMELESS_BUILD_TARGETS=cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests
+#   CHROMELESS_BUILD_TARGETS=cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests cloud_browser_pcf_unittests
 #
 # Resources: 30 CPU / 120 GiB on a 32/128 box (per the brief).
 # Headroom for kubelet, sshd, the sccache server, and the linker's
@@ -253,7 +253,7 @@ spec:
               # because //cloud-browser/... isn't in chromium's root
               # build graph (a separate fix may also be needed to make
               # gn parse the BUILD.gn at all).
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
             # Ninja parallelism. autoninja's auto-detect picks
             # nproc=48 on triform-8, which over-subscribes the
             # 16-CPU container limit; gives lto + sccache server headroom.

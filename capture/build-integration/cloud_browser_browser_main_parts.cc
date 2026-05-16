@@ -10,6 +10,10 @@
 #include <string>
 #include <utility>
 
+#include "api/environment/environment.h"
+#include "api/environment/environment_factory.h"
+#include "api/peer_connection_interface.h"
+#include "api/rtp_parameters.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/logging.h"
@@ -17,6 +21,7 @@
 #include "base/strings/string_number_conversions.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
+#include "capture/build-integration/cloud_browser_pcf.h"
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_socket_factory.h"
 #include "content/public/browser/navigation_controller.h"
@@ -30,6 +35,7 @@
 #include "net/log/net_log_source.h"
 #include "net/socket/server_socket.h"
 #include "net/socket/tcp_server_socket.h"
+#include "rtc_base/thread.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/page_transition_types.h"
@@ -288,6 +294,51 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // 4. DevTools HTTP listener — bind <--remote-debugging-address>:<--remote-debugging-port>.
   StartDevToolsHttpHandler();
 
+  // 5. Browser-process PeerConnectionFactory (ChromelessV2 M1 —
+  //    CV2-26 / CV2-27).
+  //
+  //    Construct 3 dedicated rtc::Threads (network / worker /
+  //    signaling), build a webrtc::Environment, and hand them to
+  //    CreateCloudBrowserPcf() which injects CloudBrowserVideoEncoder
+  //    Factory under default Config{} (VP9 + H264 + AV1) and the M1
+  //    dummy / no-audio ADM.
+  //
+  //    This is the seam M0-R5's assertion #3 swappable probe targets
+  //    by scraping the FormatPcfVideoCodecLogLine output below from
+  //    the container log. M2 will hang a VideoTrackSource off pcf_;
+  //    M3 will create PeerConnections + DataChannels; M5.5 will
+  //    substitute its real ADM at CreateCloudBrowserDefaultAudio
+  //    DeviceModule() without touching this call site.
+  //
+  //    Thread setup: network thread MUST be CreateWithSocketServer
+  //    (it owns libwebrtc's net socket dispatch); worker + signaling
+  //    are plain Threads. Names are diagnostic-only.
+  network_thread_ = rtc::Thread::CreateWithSocketServer();
+  worker_thread_ = rtc::Thread::Create();
+  signaling_thread_ = rtc::Thread::Create();
+  network_thread_->SetName("cb-pcf-net", nullptr);
+  worker_thread_->SetName("cb-pcf-worker", nullptr);
+  signaling_thread_->SetName("cb-pcf-signaling", nullptr);
+  network_thread_->Start();
+  worker_thread_->Start();
+  signaling_thread_->Start();
+
+  webrtc::Environment env = webrtc::CreateEnvironment();
+  pcf_ = CreateCloudBrowserPcf(network_thread_.get(), worker_thread_.get(),
+                               signaling_thread_.get(), env,
+                               CreateCloudBrowserDefaultAudioDeviceModule());
+  CHECK(pcf_) << "CreateCloudBrowserPcf returned null — the browser-process "
+              << "PeerConnectionFactory failed to construct. ChromelessV2 M1 "
+              << "requires a non-null PCF for the M2+ pipeline.";
+
+  // 5a. Codec-cap probe log line (CV2-27). Pure-fn output; format is
+  //     LOAD-BEARING — M0 R5's assertion #3 swappable probe scrapes
+  //     this line from the container log by regex. The probe-strategy
+  //     selection rationale (vs. renderer-side getCapabilities or SDP
+  //     inspection) is documented on the CV2-27 ticket.
+  LOG(INFO) << FormatPcfVideoCodecLogLine(
+      pcf_->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO).codecs);
+
   return content::RESULT_CODE_NORMAL_EXIT;
 }
 
@@ -302,6 +353,34 @@ void CloudBrowserBrowserMainParts::WillRunMainMessageLoop(
 
 void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   StopDevToolsHttpHandler();
+
+  // ChromelessV2 M1 — drop the PCF + its 3 rtc::Threads BEFORE
+  // browser_context_/initial_web_contents_/aura_ (the M2+ wiring
+  // doesn't add raw pointers from PCF→context, so this is purely
+  // additive ordering — but the discipline mirrors the aura_.release()
+  // rationale at the bottom of this fn and the cc:303-328 aura
+  // precedent: drop the longer-lived holder first so its dtors don't
+  // walk into already-freed shorter-lived state).
+  //
+  // pcf_.reset() drops the strong ref the factory holds against the
+  // threads + the encoder factory + the ADM; the threads must
+  // outlive that drop because the PCF destructor marshals work onto
+  // them. Reverse-construction order on the threads after, per
+  // webrtc convention.
+  pcf_ = nullptr;
+  if (signaling_thread_) {
+    signaling_thread_->Stop();
+    signaling_thread_.reset();
+  }
+  if (worker_thread_) {
+    worker_thread_->Stop();
+    worker_thread_.reset();
+  }
+  if (network_thread_) {
+    network_thread_->Stop();
+    network_thread_.reset();
+  }
+
   // Drop the WebContents BEFORE the BrowserContext — the WebContents
   // holds raw pointers into the context's storage partition, so
   // reversing the order trips a CHECK in chromium.
