@@ -1,0 +1,5 @@
+{
+  "_provenance": "Synthetic clean fixture for R3 streamer-page-absent — represents the post-M7 image state where /opt/cloud-browser/streamer/* has been physically removed.",
+  "imageRef": "chromeless:synthetic-clean-streamer",
+  "paths": []
+}

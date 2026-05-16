@@ -1,0 +1,8 @@
+{
+  "_provenance": "Synthetic hybrid fixture for R3 test #4 — source clean, image still has streamer-page (covers 'deleted from tree but image cache still has it' regression class).",
+  "imageRef": "chromeless:synthetic-hybrid-streamer",
+  "paths": [
+    "/opt/cloud-browser/streamer/streamer.js",
+    "/opt/cloud-browser/streamer/streamer-page"
+  ]
+}

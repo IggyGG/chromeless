@@ -1,0 +1,13 @@
+{
+  "name": "@chromeless/verification",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "ChromelessV2 native-peer gate (M0). See verification/README.md.",
+  "scripts": {
+    "test": "node --test verification/__tests__/"
+  },
+  "devDependencies": {
+    "yaml": "^2.4.0"
+  }
+}
