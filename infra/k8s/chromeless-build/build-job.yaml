@@ -1,37 +1,46 @@
-# build-job.yaml — Chromium build Job for triform-6 (T112 + T119).
+# build-job.yaml — Chromium build Job for triform-6 (T112 + T119 + CV2-rehome).
 #
 # Drives T113's `build/chromeless-build.sh` end-to-end on a single Pod
 # scheduled to triform-6. The script handles gclient sync, symlink,
 # patch apply, sccache, gn gen, autoninja, unit tests, and binary
 # packaging.
 #
-# T119 hostPath workaround
-# ------------------------
-# This Job originally used PVCs (chromium-src 500 GiB,
-# sccache 100 GiB on openebs-hostpath). When the team-lead tried to
-# bring it up live on the Triform cluster, openebs-localpv-provisioner
-# was silent on every new claim — across openebs-hostpath,
-# triform-data, AND ceph-rbd. Existing 8-day-old PVCs on the cluster
-# remained healthy, so the regression is provisioner-side for new
-# claims, not disk-space (triform-6 has 5.4T free on /data) and not
-# RBAC.
+# Volume model: hostPath on triform-6's /data (5.5T RAID-1 mirror,
+# /dev/md5 on sda+sdb). The original PVC path required the
+# openebs-localpv-provisioner which silently refused new claims during
+# T119 across openebs-hostpath, triform-data, AND ceph-rbd. We replaced
+# the PVCs with hostPath dirs pinned to a named build node and stayed
+# there — provisioner-side reliability never recovered enough to be
+# worth re-introducing the dependency.
 #
-# To unblock T112 → T113 → T114, this version of the Job uses
-# hostPath volumes pinned to triform-6's /data filesystem. Trade-offs:
-#   - PRO: works today; no provisioner involvement.
-#   - PRO: 5.4T free on /dev/md5 mounted at /data on triform-6 — well
-#          beyond what the build needs.
-#   - CON: hostPath is operator-pattern, not portable. The dir is
-#          tied to a specific node; if triform-6 dies, so does this
-#          build state.
-#   - CON: requires runAsUser:0 in an init container to chown the dir
-#          for cbuser (uid 1000). The chart-wide PSP / pod-security
-#          baseline allows it; the chromeless-build ns is labelled
-#          triform.ai/purpose=build precisely to scope this kind of
-#          thing.
+# Why triform-6 (and not triform-2): the build state lives forever on
+# whichever node we pin it to (gclient checkout + sccache must not
+# travel across nodes), so the right answer is the node with the
+# biggest fast-disk and the longest-lived future. triform-6 has 5.5T
+# at /data (RAID-1 mirror across two 5.5T physical disks); triform-2
+# has 1.4T at /mnt/data. T119's interim hop to triform-2 was driven
+# by a root-fs DiskPressure incident on triform-6 — that was a ROOT
+# filesystem concern (kubelet/containerd overlay), entirely separate
+# from /data. The build's ephemeral-storage limit (8Gi) caps any
+# root-fs spill; the bulk of every artifact lives on /data via the
+# hostPath mounts below. cleanup-job.yaml already targets this same
+# path; build-job.yaml is just being re-synced to its sibling.
 #
-# When the openebs provisioner regression is fixed, revert to the
-# pre-T119 PVC version (git history will show the diff).
+# Trade-offs of the hostPath pattern:
+#   - PRO: works without any provisioner involvement.
+#   - PRO: 5T+ free on /data on triform-6 — well beyond what the
+#          build needs (chromium-src ~40GB, sccache up to 80G).
+#   - CON: state is tied to one specific node; if triform-6 dies,
+#          the build is cold-start on whichever new node we elect.
+#   - CON: requires runAsUser:0 in an init container to chown the
+#          dir for cbuser (uid 1000). The chart-wide PSP / pod-
+#          security baseline allows it; the chromeless-build ns is
+#          labelled triform.ai/purpose=build precisely to scope this
+#          kind of thing.
+#
+# When the openebs provisioner regression is fixed AND we want
+# multi-node failover, revisit. Until then, pinning to triform-6
+# is the pragmatic optimum.
 #
 # Contract with T113 (see ../../../build/chromeless-build.sh header):
 #   /workspace            — our repo, read-only mount.
@@ -78,14 +87,14 @@ spec:
       # Pin to triform-6: 32 CPU / 128 GiB. hostPath volumes below
       # require this — the directories live on triform-6's /data
       # filesystem and follow the node, not the Pod.
-      nodeName: triform-2
+      nodeName: triform-6
       # If a future cluster admin taints triform-6 (maintenance), the
       # scheduler fails this Pod cleanly rather than picking another
       # node. Repeating the hostname here makes that a NotReady error
       # rather than a silent cross-node migration that would lose
       # access to the hostPath dirs.
       nodeSelector:
-        kubernetes.io/hostname: triform-2
+        kubernetes.io/hostname: triform-6
       imagePullSecrets:
         - name: registry-pull
       initContainers:
@@ -245,16 +254,14 @@ spec:
             # so a manual `kubectl set env job/chromeless-build SKIP_FETCH=1`
             # before re-applying skips the multi-hour fetch.
             - name: SKIP_FETCH
-              # Sidesteps gclient sync — the existing 34 GB checkout at
-              # /mnt/data/chromeless-build-t2/chromium-src is already at
-              # branch-heads/7727 (HEAD 2731573cc6) from the earlier
-              # successful 411-sec sync. Tonight's gclient run wedged
-              # mid-fetch (TCP connection died, git stuck in read()),
-              # so skip the validation and run STEP 2-9 against
-              # the on-disk tree. Flip back to "" once the network-
-              # reliability issue with chromium.googlesource.com
-              # is investigated.
-              value: "1"
+              # Empty = run gclient sync. First build on triform-6 has
+              # no on-disk tree at /data/chromeless-build/chromium-src
+              # so the sync is mandatory; subsequent runs can set
+              # SKIP_FETCH=1 to skip the multi-minute fetch and reuse
+              # the on-disk tree (set via `kubectl set env
+              # job/chromeless-build SKIP_FETCH=1` before re-applying,
+              # or edit the file once the tree is populated).
+              value: ""
             # STUB_MODE=1 short-circuits the heavy steps — useful
             # for validating Job plumbing without a 4–8h wait.
             # Default off; flip to "1" for the DoD smoke run.
@@ -297,22 +304,22 @@ spec:
             seccompProfile:
               type: RuntimeDefault
       volumes:
-        # T119: hostPath workaround for the openebs-localpv-provisioner
-        # regression. /data on the pinned build node holds chromium-
-        # src + sccache. T119-followup repointed from triform-6
-        # (eviction-loop on root-fs DiskPressure under shared tenancy)
-        # to triform-2 (1.4T /mnt/data on /dev/mapper/vg0-data — note that
-        # /data on triform-2 is the small ROOT fs, NOT the big LVM;
-        # the hostPath therefore mounts /mnt/data/chromeless-build-t2/...).
-        # DirectoryOrCreate ensures kubelet creates the subdir if
-        # absent. The host-permissions initContainer chowns to 1000.
+        # CV2-rehome: hostPath on triform-6's /data (the canonical
+        # build node — 5.5T RAID-1 mirror, /dev/md5). Matches the
+        # path that cleanup-job.yaml already operates on. T119's
+        # interim hop to triform-2 (/mnt/data/chromeless-build-t2/)
+        # was driven by a root-fs DiskPressure incident that turned
+        # out to be unrelated to /data. See the file header for the
+        # full reasoning. DirectoryOrCreate lets kubelet create the
+        # subdir on first run; the host-permissions initContainer
+        # chowns to 1000.
         - name: workdir
           hostPath:
-            path: /mnt/data/chromeless-build-t2/chromium-src
+            path: /data/chromeless-build/chromium-src
             type: DirectoryOrCreate
         - name: sccache
           hostPath:
-            path: /mnt/data/chromeless-build-t2/sccache
+            path: /data/chromeless-build/sccache
             type: DirectoryOrCreate
         # Our repo lives in an emptyDir — bootstrap initContainer
         # populates it once, main container reads-only. Survival

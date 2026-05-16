@@ -51,9 +51,12 @@ spec:
         app.kubernetes.io/variant: x264
     spec:
       restartPolicy: OnFailure
-      nodeName: triform-2
+      # Re-homed to triform-6 alongside the default build-job.yaml
+      # (CV2-rehome). Build state lives on /data, the 5.5T RAID mirror;
+      # see build-job.yaml header for the full reasoning.
+      nodeName: triform-6
       nodeSelector:
-        kubernetes.io/hostname: triform-2
+        kubernetes.io/hostname: triform-6
       imagePullSecrets:
         - name: registry-pull
       initContainers:
@@ -275,13 +278,15 @@ spec:
             seccompProfile:
               type: RuntimeDefault
       volumes:
+        # Shares the /data/chromeless-build/ directory with build-job.yaml
+        # (default) — gclient checkout + sccache are warm across variants.
         - name: workdir
           hostPath:
-            path: /mnt/data/chromeless-build-t2/chromium-src
+            path: /data/chromeless-build/chromium-src
             type: DirectoryOrCreate
         - name: sccache
           hostPath:
-            path: /mnt/data/chromeless-build-t2/sccache
+            path: /data/chromeless-build/sccache
             type: DirectoryOrCreate
         - name: workspace
           emptyDir:
