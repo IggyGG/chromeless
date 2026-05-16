@@ -240,7 +240,9 @@ spec:
             - name: CHROMELESS_BUILD_TARGETS
               value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             - name: NINJA_PARALLELISM
-              value: "14"
+              # See build-job.yaml header — sized to the 40-CPU limit
+              # minus headroom for sccache server + LTO linker.
+              value: "36"
             - name: SKIP_FETCH
               # Empty = fresh gclient sync (first build on triform-8
               # has no on-disk tree at /var/lib/longhorn/chromeless-build).
@@ -258,11 +260,11 @@ spec:
           resources:
             requests:
               # Burstable QoS — see build-job.yaml header.
-              cpu: "6"
+              cpu: "12"
               memory: "96Gi"
             limits:
-              cpu: "16"
-              memory: "96Gi"
+              cpu: "40"
+              memory: "192Gi"
               ephemeral-storage: "8Gi"
           volumeMounts:
             - name: workdir
