@@ -1,0 +1,147 @@
+# .github/workflows/native-peer-gate.yml — ChromelessV2 M0 R8 CI gate.
+#
+# Two jobs:
+#
+#   native-peer-gate-scaffold  — Permissive mode. Runs on every PR (any base)
+#     and on every push to `integration/native-peer`. Permits NOT_YET_IMPLEMENTED
+#     for assertions not yet enabled per the ratified gate-blocking schedule
+#     (CV2-11). This is the always-on signal; the operator sees it green from
+#     M0 landing through M6 work.
+#
+#   native-peer-gate-strict    — Strict mode. Runs on push to
+#     `integration/native-peer` (so operators can probe live) and on PRs
+#     targeting `main` (so the M7 squash-merge MUST come in green-strict).
+#     Every assertion must PASS; NYI is a FAIL.
+#
+# Both jobs depend on `build-image` (chromeless:ci) — they reuse the gha
+# Docker layer cache populated by ci.yml's build-image job. When run in a
+# Forgejo workflow that doesn't share that cache, they build chromeless:ci
+# from infra/Dockerfile in the same job.
+#
+# Branch-protection (required-check): Forgejo's "required status checks"
+# rule lives outside the repo. Operators set
+# `native-peer-gate / native-peer-gate-scaffold` as required on
+# `integration/native-peer` and `main` per
+# verification/README.md#branch-protection. The helper
+# `verification/scripts/check-branch-protection.sh` queries the Forgejo
+# API and reports whether the rule exists.
+
+name: native-peer-gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - integration/native-peer
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-image:
+    name: Build chromeless:ci for gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build chromeless:ci (gha layer cache)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile
+          load: true
+          tags: chromeless:ci
+          cache-from: type=gha,scope=chromeless-ci
+          cache-to: type=gha,scope=chromeless-ci,mode=max
+
+      - name: Save chromeless:ci as artifact (shared with gate jobs)
+        run: |
+          docker save chromeless:ci -o /tmp/chromeless-ci.tar
+          ls -lh /tmp/chromeless-ci.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chromeless-ci-image
+          path: /tmp/chromeless-ci.tar
+          retention-days: 1
+
+  native-peer-gate-scaffold:
+    name: native-peer-gate-scaffold (permissive)
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chromeless-ci-image
+          path: /tmp/
+
+      - name: Load chromeless:ci into local daemon
+        run: docker load -i /tmp/chromeless-ci.tar
+
+      - name: Run gate (scaffold)
+        run: node verification/native-peer-gate.mjs --scaffold --image=chromeless:ci > gate-output.json
+        # Scaffold permits NYI per the gate-blocking schedule; expected to be
+        # green for the whole M0..M6 window (and after M7 if implementation
+        # holds).
+
+      - name: Print gate JSON
+        if: always()
+        run: cat gate-output.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-peer-gate-scaffold-output
+          path: gate-output.json
+          retention-days: 14
+
+  native-peer-gate-strict:
+    name: native-peer-gate-strict (M7 gate)
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    # Strict runs on PRs targeting main (so the M7 squash-merge MUST be
+    # green-strict) AND on pushes to integration/native-peer (operator
+    # check). Other PRs see only the scaffold job.
+    if: |
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/integration/native-peer')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chromeless-ci-image
+          path: /tmp/
+
+      - name: Load chromeless:ci into local daemon
+        run: docker load -i /tmp/chromeless-ci.tar
+
+      - name: Run gate (strict)
+        run: node verification/native-peer-gate.mjs --strict --image=chromeless:ci > gate-strict-output.json
+
+      - name: Print gate JSON
+        if: always()
+        run: cat gate-strict-output.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-peer-gate-strict-output
+          path: gate-strict-output.json
+          retention-days: 14
