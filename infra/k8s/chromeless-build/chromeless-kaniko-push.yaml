@@ -64,9 +64,9 @@ spec:
       restartPolicy: OnFailure
       # Pin to the node that holds the build artifacts on its
       # hostPath. CHANGE THIS for nvenc — see README.
-      nodeName: triform-6
+      nodeName: triform-8
       nodeSelector:
-        kubernetes.io/hostname: triform-6
+        kubernetes.io/hostname: triform-8
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:v1.23.2
@@ -122,11 +122,11 @@ spec:
         # here.
         #
         # CHANGE THIS for nvenc:
-        #   sw / x264 / vaapi (triform-6): /data/chromeless-build/chromium-src/artifacts/context
+        #   sw / x264 / vaapi (triform-8): /var/lib/longhorn/chromeless-build/chromium-src/artifacts/context
         #   nvenc             (triform-5): /mnt/data/chromeless-build-t5/chromium-src/artifacts/context
         - name: workspace
           hostPath:
-            path: /data/chromeless-build/chromium-src/artifacts/context
+            path: /var/lib/longhorn/chromeless-build/chromium-src/artifacts/context
             type: Directory
         # Same Secret the build-job manifests use for imagePullSecret;
         # already exists in chromeless-build ns (see README § Prereqs in

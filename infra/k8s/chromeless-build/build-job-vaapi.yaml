@@ -38,12 +38,13 @@ spec:
         app.kubernetes.io/variant: vaapi
     spec:
       restartPolicy: OnFailure
-      # Re-homed to triform-6 alongside the default build-job.yaml
-      # (CV2-rehome). Build state lives on /data, the 5.5T RAID mirror;
-      # see build-job.yaml header for the full reasoning.
-      nodeName: triform-6
+      # Re-homed to triform-8 alongside the default build-job.yaml
+      # (CV2-rehome). Build state lives on /var/lib/longhorn,
+      # co-tenanting with Longhorn's pool; see build-job.yaml header
+      # for the full reasoning.
+      nodeName: triform-8
       nodeSelector:
-        kubernetes.io/hostname: triform-6
+        kubernetes.io/hostname: triform-8
       imagePullSecrets:
         - name: registry-pull
       initContainers:
@@ -236,7 +237,11 @@ spec:
             - name: NINJA_PARALLELISM
               value: "14"
             - name: SKIP_FETCH
-              value: "1"
+              # Empty = fresh gclient sync (first build on triform-8
+              # has no on-disk tree at /var/lib/longhorn/chromeless-build).
+              # Flip to "1" after sync succeeds to skip re-sync on
+              # subsequent runs.
+              value: ""
             - name: STUB_MODE
               value: ""
             - name: SCCACHE_IDLE_TIMEOUT
@@ -247,7 +252,8 @@ spec:
               value: "vaapi"
           resources:
             requests:
-              cpu: "16"
+              # Burstable QoS — see build-job.yaml header.
+              cpu: "6"
               memory: "96Gi"
             limits:
               cpu: "16"
@@ -279,15 +285,15 @@ spec:
             seccompProfile:
               type: RuntimeDefault
       volumes:
-        # Shares the /data/chromeless-build/ directory with build-job.yaml
+        # Shares /var/lib/longhorn/chromeless-build/ with build-job.yaml
         # (default) — gclient checkout + sccache are warm across variants.
         - name: workdir
           hostPath:
-            path: /data/chromeless-build/chromium-src
+            path: /var/lib/longhorn/chromeless-build/chromium-src
             type: DirectoryOrCreate
         - name: sccache
           hostPath:
-            path: /data/chromeless-build/sccache
+            path: /var/lib/longhorn/chromeless-build/sccache
             type: DirectoryOrCreate
         - name: workspace
           emptyDir:

@@ -1,4 +1,4 @@
-# cleanup-job.yaml — wipe the hostPath build state on triform-6.
+# cleanup-job.yaml — wipe the hostPath build state on triform-8.
 #
 # Usage:
 #   kubectl apply -f infra/k8s/chromeless-build/cleanup-job.yaml
@@ -18,10 +18,15 @@
 # `apply -k` to surprise the operator by wiping them.
 #
 # Selective cleanup: edit the `command` to remove only one of
-# /data/chromeless-build/{chromium-src,sccache} when you want to keep one.
-# E.g. preserve sccache for fast incremental builds while doing a
-# clean fetch:
-#   args: ["-rxc", "rm -rf /data/chromeless-build/chromium-src && ls -la /data/chromeless-build"]
+# /var/lib/longhorn/chromeless-build/{chromium-src,sccache} when you
+# want to keep one. E.g. preserve sccache for fast incremental builds
+# while doing a clean fetch:
+#   args: ["-rxc", "rm -rf /lh/chromeless-build/chromium-src && ls -la /lh/chromeless-build"]
+#
+# NOTE: the build state co-tenants with Longhorn's data dir at
+# /var/lib/longhorn/. This cleanup ONLY removes the chromeless-build/
+# subdirectory we create; it does NOT touch Longhorn's replicas/,
+# engine-binaries/, or other Longhorn-managed files.
 
 apiVersion: batch/v1
 kind: Job
@@ -44,10 +49,10 @@ spec:
     spec:
       restartPolicy: Never
       # Same node pinning as the build Job — the hostPath we're
-      # wiping lives on triform-6 only.
-      nodeName: triform-6
+      # wiping lives on triform-8 only.
+      nodeName: triform-8
       nodeSelector:
-        kubernetes.io/hostname: triform-6
+        kubernetes.io/hostname: triform-8
       containers:
         - name: cleanup
           image: alpine:3.20
@@ -57,28 +62,27 @@ spec:
             - |
               # Show what we're about to delete (size, age). Helpful
               # for the operator reading kubectl logs after the fact.
-              if [ -d /data/chromeless-build ]; then
-                echo "[cleanup] /data/chromeless-build contents before wipe:"
-                du -sh /data/chromeless-build/* 2>/dev/null || true
-                ls -la /data/chromeless-build/ || true
+              if [ -d /lh/chromeless-build ]; then
+                echo "[cleanup] /var/lib/longhorn/chromeless-build contents before wipe:"
+                du -sh /lh/chromeless-build/* 2>/dev/null || true
+                ls -la /lh/chromeless-build/ || true
               else
-                echo "[cleanup] /data/chromeless-build does not exist; nothing to do"
+                echo "[cleanup] /var/lib/longhorn/chromeless-build does not exist; nothing to do"
                 exit 0
               fi
 
-              # Wipe both subdirs. The build Job's hostPath
-              # DirectoryOrCreate will recreate them on next apply.
-              # The :? prevents an unset-var rm from going haywire,
-              # though the literal path makes that defensive overkill.
-              rm -rf "/data/chromeless-build/chromium-src"
-              rm -rf "/data/chromeless-build/sccache"
-              # Leave /data/chromeless-build itself in place — it's the parent
+              # Wipe ONLY the chromeless-build subdirs. We must not touch
+              # neighbouring Longhorn-managed files (replicas/,
+              # engine-binaries/, longhorn-disk.cfg).
+              rm -rf "/lh/chromeless-build/chromium-src"
+              rm -rf "/lh/chromeless-build/sccache"
+              # Leave /lh/chromeless-build itself in place — it's the parent
               # the build Job's hostPath assumes exists.
 
-              echo "[cleanup] /data/chromeless-build after wipe:"
-              ls -la /data/chromeless-build/ || true
-              echo "[cleanup] free space on /data:"
-              df -h /data
+              echo "[cleanup] /var/lib/longhorn/chromeless-build after wipe:"
+              ls -la /lh/chromeless-build/ || true
+              echo "[cleanup] free space on /var/lib/longhorn:"
+              df -h /lh
           # Root + minimal capabilities — needs to chmod into the dirs
           # the build Job created as 1000:1000 to remove them.
           securityContext:
@@ -89,16 +93,16 @@ spec:
               drop: ["ALL"]
               add: ["DAC_OVERRIDE"]
           volumeMounts:
-            # Mount the parent so `df /data` works and we can list
-            # neighbouring dirs (e.g. image-backups) for sanity.
-            # The hostPath type is `Directory` (not DirectoryOrCreate)
-            # because /data MUST already exist on triform-6 — the
-            # cleanup-on-missing-mount case is a no-op handled by the
-            # `if [ -d /data/chromeless-build ]` guard above.
-            - name: data
-              mountPath: /data
+            # Mount /var/lib/longhorn (the LVM root for our build state)
+            # as /lh inside the pod for brevity in the shell commands
+            # above. The hostPath type is `Directory` (not
+            # DirectoryOrCreate) because /var/lib/longhorn MUST already
+            # exist on triform-8 — if Longhorn isn't initialized here
+            # then we have a bigger problem than a missing build dir.
+            - name: lh
+              mountPath: /lh
       volumes:
-        - name: data
+        - name: lh
           hostPath:
-            path: /data
+            path: /var/lib/longhorn
             type: Directory

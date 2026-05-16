@@ -12,7 +12,7 @@ Apply it explicitly after a successful `chromeless-build-${variant}` Job:
 kubectl apply -f infra/k8s/chromeless-build/chromeless-kaniko-push.yaml
 ```
 
-The manifest defaults to the **sw / x264** profile on **triform-6**.
+The manifest defaults to the **sw / x264** profile on **triform-8**.
 For other variants, edit the file in place per § Variant overrides
 below before applying.
 
@@ -21,7 +21,8 @@ below before applying.
 `build-job-{x264,vaapi,nvenc}.yaml` runs `chromeless-build.sh`. Step 9 of
 that script stages a kaniko-ready build context to
 `${CHROMELESS_WORK_ROOT}/artifacts/context/` — for sw/x264/vaapi on
-triform-6 that's `/data/chromeless-build/chromium-src/artifacts/context/`;
+triform-8 that's
+`/var/lib/longhorn/chromeless-build/chromium-src/artifacts/context/`;
 nvenc on triform-5 still uses `/mnt/data/chromeless-build-t5/...`. The
 script deliberately does **not** push. The push is split out so:
 
@@ -48,8 +49,8 @@ build cycle.
 
 2. **Confirm the build context is staged on the right node.**
    ```bash
-   # sw / x264 / vaapi (triform-6):
-   ssh triform-6 ls /data/chromeless-build/chromium-src/artifacts/context
+   # sw / x264 / vaapi (triform-8):
+   ssh triform-8 ls /var/lib/longhorn/chromeless-build/chromium-src/artifacts/context
    # Expect: Dockerfile  IMAGE_TAG  cloud_browser_worker  launch-chromeless.sh  supervisord.conf
 
    # nvenc (triform-5):
@@ -84,8 +85,8 @@ build cycle.
 
 | Variant | nodeName | hostPath path | CHROMELESS_KANIKO_TAG |
 |---------|----------|----------------|---------------|
-| sw / x264 (default) | `triform-6` | `/data/chromeless-build/chromium-src/artifacts/context` | `cr7727-sw` |
-| vaapi | `triform-6` | `/data/chromeless-build/chromium-src/artifacts/context` | `cr7727-vaapi` |
+| sw / x264 (default) | `triform-8` | `/var/lib/longhorn/chromeless-build/chromium-src/artifacts/context` | `cr7727-sw` |
+| vaapi | `triform-8` | `/var/lib/longhorn/chromeless-build/chromium-src/artifacts/context` | `cr7727-vaapi` |
 | nvenc | `triform-5` | `/mnt/data/chromeless-build-t5/chromium-src/artifacts/context` | `cr7727-nvenc` |
 
 The fields to edit live at three call sites in the manifest:

@@ -1,46 +1,54 @@
-# build-job.yaml — Chromium build Job for triform-6 (T112 + T119 + CV2-rehome).
+# build-job.yaml — Chromium build Job for triform-8 (T112 + T119 + CV2-rehome).
 #
 # Drives T113's `build/chromeless-build.sh` end-to-end on a single Pod
-# scheduled to triform-6. The script handles gclient sync, symlink,
+# scheduled to triform-8. The script handles gclient sync, symlink,
 # patch apply, sccache, gn gen, autoninja, unit tests, and binary
 # packaging.
 #
-# Volume model: hostPath on triform-6's /data (5.5T RAID-1 mirror,
-# /dev/md5 on sda+sdb). The original PVC path required the
-# openebs-localpv-provisioner which silently refused new claims during
-# T119 across openebs-hostpath, triform-data, AND ceph-rbd. We replaced
-# the PVCs with hostPath dirs pinned to a named build node and stayed
-# there — provisioner-side reliability never recovered enough to be
-# worth re-introducing the dependency.
+# Volume model: hostPath on triform-8's /var/lib/longhorn (the
+# dedicated vg-storage/lv-longhorn LVM, ~983GB capacity). The original
+# PVC path required openebs-localpv-provisioner which silently refused
+# new claims during T119 across openebs-hostpath, triform-data, AND
+# ceph-rbd. We replaced the PVCs with hostPath dirs pinned to a named
+# build node and stayed there — provisioner-side reliability never
+# recovered enough to be worth re-introducing the dependency.
 #
-# Why triform-6 (and not triform-2): the build state lives forever on
+# Why triform-8 (over triform-2/6): the build state lives forever on
 # whichever node we pin it to (gclient checkout + sccache must not
-# travel across nodes), so the right answer is the node with the
-# biggest fast-disk and the longest-lived future. triform-6 has 5.5T
-# at /data (RAID-1 mirror across two 5.5T physical disks); triform-2
-# has 1.4T at /mnt/data. T119's interim hop to triform-2 was driven
-# by a root-fs DiskPressure incident on triform-6 — that was a ROOT
-# filesystem concern (kubelet/containerd overlay), entirely separate
-# from /data. The build's ephemeral-storage limit (8Gi) caps any
-# root-fs spill; the bulk of every artifact lives on /data via the
-# hostPath mounts below. cleanup-job.yaml already targets this same
-# path; build-job.yaml is just being re-synced to its sibling.
+# travel across nodes), so the right answer is the node with the most
+# compute headroom AND a big fast-disk. Picks per node:
+#   - triform-6: 5.5T /data but CONTROL-PLANE (etcd, apiserver) +
+#     heavy multi-tenant (forgejo-postgres, infra-staging postgres,
+#     coder-postgres, nats, isolation-workers). A 16-CPU compile
+#     would crowd these out. CPU is the bind, not disk.
+#   - triform-2: 1.4T /mnt/data, similar tenancy concerns.
+#   - triform-8: 48 CPU (vs 32 on triform-6), NOT control-plane,
+#     lighter workload (isolation-builders + coder workspace +
+#     ingress), and Longhorn's pool here is nearly empty (~937G
+#     free of 983G). Co-tenanting with Longhorn is operator-
+#     accepted — competition is fine, S3 backups exist for nuke
+#     recovery.
 #
-# Trade-offs of the hostPath pattern:
+# Trade-offs of putting hostPath inside /var/lib/longhorn:
 #   - PRO: works without any provisioner involvement.
-#   - PRO: 5T+ free on /data on triform-6 — well beyond what the
-#          build needs (chromium-src ~40GB, sccache up to 80G).
-#   - CON: state is tied to one specific node; if triform-6 dies,
-#          the build is cold-start on whichever new node we elect.
+#   - PRO: ~937G free at chosen path; well beyond what the build
+#          needs (chromium-src ~40GB, sccache up to 80G).
+#   - CON: shares the LV with Longhorn replica storage. If Longhorn
+#          schedules replicas here, we compete for space. Operator-
+#          accepted; S3 backups + ability to bump storageReserved
+#          later if it becomes an issue.
+#   - CON: a future `kubectl delete -f` of Longhorn that wipes
+#          /var/lib/longhorn/ would nuke our state. S3 backups
+#          mitigate, but expect a multi-hour re-bootstrap.
 #   - CON: requires runAsUser:0 in an init container to chown the
 #          dir for cbuser (uid 1000). The chart-wide PSP / pod-
 #          security baseline allows it; the chromeless-build ns is
 #          labelled triform.ai/purpose=build precisely to scope this
 #          kind of thing.
 #
-# When the openebs provisioner regression is fixed AND we want
-# multi-node failover, revisit. Until then, pinning to triform-6
-# is the pragmatic optimum.
+# CPU request is burstable (request: 6, limit: 16) to fit triform-8's
+# scheduler headroom while letting autoninja burst when peers are
+# quiet. NINJA_PARALLELISM=14 still applies.
 #
 # Contract with T113 (see ../../../build/chromeless-build.sh header):
 #   /workspace            — our repo, read-only mount.
@@ -84,17 +92,17 @@ spec:
         app.kubernetes.io/component: build
     spec:
       restartPolicy: OnFailure
-      # Pin to triform-6: 32 CPU / 128 GiB. hostPath volumes below
-      # require this — the directories live on triform-6's /data
-      # filesystem and follow the node, not the Pod.
-      nodeName: triform-6
-      # If a future cluster admin taints triform-6 (maintenance), the
+      # Pin to triform-8: 48 CPU. hostPath volumes below require this
+      # — the directories live on triform-8's /var/lib/longhorn LVM
+      # and follow the node, not the Pod.
+      nodeName: triform-8
+      # If a future cluster admin taints triform-8 (maintenance), the
       # scheduler fails this Pod cleanly rather than picking another
       # node. Repeating the hostname here makes that a NotReady error
       # rather than a silent cross-node migration that would lose
       # access to the hostPath dirs.
       nodeSelector:
-        kubernetes.io/hostname: triform-6
+        kubernetes.io/hostname: triform-8
       imagePullSecrets:
         - name: registry-pull
       initContainers:
@@ -276,7 +284,12 @@ spec:
               value: "80G"
           resources:
             requests:
-              cpu: "16"
+              # Burstable QoS — fits triform-8's scheduler headroom
+              # (peer pods reserve ~41/48 CPU; our 6-CPU request fits
+              # the remaining 7). autoninja still parallelizes up to
+              # NINJA_PARALLELISM (14) when peers are quiet via the
+              # higher limit.
+              cpu: "6"
               memory: "96Gi"
             limits:
               cpu: "16"
@@ -304,22 +317,20 @@ spec:
             seccompProfile:
               type: RuntimeDefault
       volumes:
-        # CV2-rehome: hostPath on triform-6's /data (the canonical
-        # build node — 5.5T RAID-1 mirror, /dev/md5). Matches the
-        # path that cleanup-job.yaml already operates on. T119's
-        # interim hop to triform-2 (/mnt/data/chromeless-build-t2/)
-        # was driven by a root-fs DiskPressure incident that turned
-        # out to be unrelated to /data. See the file header for the
-        # full reasoning. DirectoryOrCreate lets kubelet create the
-        # subdir on first run; the host-permissions initContainer
-        # chowns to 1000.
+        # CV2-rehome: hostPath on triform-8's /var/lib/longhorn LVM
+        # (vg-storage/lv-longhorn, ~983G). Co-tenanting with Longhorn
+        # is operator-accepted; competition is fine, S3 backups exist
+        # for nuke recovery. cleanup-job.yaml needs corresponding
+        # update — wipes here too (separate commit). DirectoryOrCreate
+        # lets kubelet create the subdir on first run; the host-
+        # permissions initContainer chowns to 1000.
         - name: workdir
           hostPath:
-            path: /data/chromeless-build/chromium-src
+            path: /var/lib/longhorn/chromeless-build/chromium-src
             type: DirectoryOrCreate
         - name: sccache
           hostPath:
-            path: /data/chromeless-build/sccache
+            path: /var/lib/longhorn/chromeless-build/sccache
             type: DirectoryOrCreate
         # Our repo lives in an emptyDir — bootstrap initContainer
         # populates it once, main container reads-only. Survival
