@@ -52,8 +52,11 @@
 
 #include <memory>
 
+#include "api/peer_connection_interface.h"
+#include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
 #include "content/public/browser/browser_main_parts.h"
+#include "rtc_base/thread.h"
 
 namespace content {
 class BrowserContext;
@@ -157,6 +160,44 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;
+
+  // ChromelessV2 M1 — browser-process PeerConnectionFactory + the 3
+  // dedicated rtc::Threads it runs on. The PCF replaces the renderer-
+  // side libwebrtc PCF that the M0 streamer.js path constructed; in
+  // ChromelessV2 the browser process owns the entire WebRTC peer, so
+  // the PCF lives here.
+  //
+  // CV2-26 R-thread DECISION: own 3 bare rtc::Thread members
+  // (network / worker / signaling) rather than ThreadWrappers around
+  // chromium task runners. Simpler lifetime ordering for the mandated
+  // PCF-teardown-before-browser_context_ ordering and matches
+  // webrtc/examples/peerconnection. Caveat documented on the CV2-26
+  // ticket: PCF methods MUST be marshaled onto the signaling_thread_;
+  // M2/M3 observe this.
+  //
+  // Construction order in PreMainMessageLoopRun (after browser_context_):
+  //   1. Start the 3 threads.
+  //   2. Build the env via webrtc::CreateEnvironment().
+  //   3. Construct pcf_ = CreateCloudBrowserPcf(net, worker, signaling,
+  //                                              env, default ADM).
+  //   4. Log the PCF video-sender codec caps via
+  //      FormatPcfVideoCodecLogLine (CV2-27 M0-R5 probe target).
+  //
+  // Teardown order in PostMainMessageLoopRun:
+  //   * pcf_.reset() FIRST — drops the strong ref the factory holds
+  //     against the threads + the encoder factory + the ADM.
+  //   * Then network_thread_/worker_thread_/signaling_thread_ are
+  //     Stop()ped + reset() (in reverse-construction order, per
+  //     webrtc convention).
+  //   * THEN initial_web_contents_.reset() and browser_context_.reset()
+  //     (these were already first in the pre-M1 order; they remain
+  //     last because they hold raw pointers that the PCF doesn't,
+  //     so dropping the PCF first is purely additive). Mirrors the
+  //     aura_.release() ordering rationale at cc:303-328.
+  std::unique_ptr<rtc::Thread> network_thread_;
+  std::unique_ptr<rtc::Thread> worker_thread_;
+  std::unique_ptr<rtc::Thread> signaling_thread_;
+  rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
 
   bool devtools_http_handler_started_ = false;
 

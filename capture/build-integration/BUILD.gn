@@ -237,6 +237,33 @@ source_set("framesink_capture") {
 }
 
 # ---------------------------------------------------------------------
+# Browser-process PeerConnectionFactory seam (M1 — CV2-26 / CV2-27).
+#
+# Extracted from cloud_browser_browser_main_parts.cc so the assembly,
+# construction, and codec-line log formatting can be exercised by unit
+# tests without a full chromium browser-process boot. The embedder
+# source_set below depends on us; cloud_browser_pcf_unittests links us
+# directly.
+# ---------------------------------------------------------------------
+source_set("cloud_browser_pcf") {
+  sources = [
+    "cloud_browser_pcf.cc",
+    "cloud_browser_pcf.h",
+  ]
+  deps = [
+    ":encoder_factory",
+    # All webrtc public-API deps go through the passthrough source_set
+    # in //third_party/webrtc_overrides/cloud_browser/ — see comment on
+    # :encoder_factory above. M1-R1 widened the passthrough to
+    # re-export PCF + audio + env + threading types (see
+    # patches/0003-add-cloud-browser-webrtc-overrides.patch).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Embedder glue — our ContentBrowserClient subclass that overrides
 # the virtual added by patches/0001-expose-encoder-factory-injection.
 # patch.
@@ -266,6 +293,10 @@ source_set("embedder") {
     "content_browser_client.h",
   ]
   deps = [
+    # M1-R2 — browser-process PCF construction seam. cloud_browser_
+    # browser_main_parts.cc owns 3 rtc::Threads + the pcf_ member and
+    # calls CreateCloudBrowserPcf() from PreMainMessageLoopRun.
+    ":cloud_browser_pcf",
     ":encoder_factory",
     ":framesink_capture",
     "//base",
@@ -406,6 +437,31 @@ test("cloud_browser_encoder_unittests") {
     ":vaapi",
     ":x264",
   ]
+}
+
+# ---------------------------------------------------------------------
+# Unit tests for the browser-process PCF seam (M1 — CV2-26 / CV2-27).
+#
+# RED-by-construction pre-T17 — exercises cloud_browser_pcf.{h,cc}
+# without booting a full chromium browser process. Each test fixture
+# documents the assertion shape (see cloud_browser_pcf_test.cc); the
+# K8s chromeless-build Job on triform-2 runs them once the from-source
+# build env reports first-green.
+# ---------------------------------------------------------------------
+test("cloud_browser_pcf_unittests") {
+  sources = [ "cloud_browser_pcf_test.cc" ]
+  deps = [
+    ":cloud_browser_pcf",
+    ":encoder_factory",
+    # See cloud_browser_encoder_unittests above — Wall #37. test_support
+    # provides TestSuite + helpers; run_all_unittests is what supplies main().
+    "//base/test:run_all_unittests",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_test_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
 }
 
 # ---------------------------------------------------------------------
