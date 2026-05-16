@@ -123,28 +123,27 @@ describe('R1 gate CLI — IO + exit-code contract', () => {
     } finally { cleanup(); }
   });
 
-  test('2. scaffold exits 0 when all assertions NYI (no-blocking schedule)', () => {
+  test('2. scaffold exits 0 with no-blocking schedule regardless of per-assertion FAIL', () => {
+    // Per the corrected R2 verdict algebra: in scaffold mode, FAIL on a
+    // non-gate-blocking assertion does NOT propagate to the overall verdict
+    // (the per-assertion evidence stays honest, the gate doesn't fail).
+    // With the no-blocking schedule, NOTHING is gate-blocking, so even if
+    // R3/R4 honestly report FAIL against the current source tree, the gate
+    // verdict MUST be PASS, exit 0. This is the load-bearing UAT.
     const { path, cleanup } = noBlockingScheduleFile();
     try {
       const r = runGate(['--scaffold', '--image=chromeless:nonexistent', `--schedule=${path}`,
         `--source-root=${REPO_ROOT}`]);
       const j = parseOneJsonObject(r.stdout);
-      // All assertions should be NYI (stubs + no-blocking → not promoted to FAIL).
-      // Real probe modules may exist and run — they may FAIL. So we check verdict logic:
-      // if any assertion is FAIL the verdict is FAIL (this is the contract).
-      // For the no-blocking schedule, NYI is permissive in scaffold, so as long
-      // as no FAIL appears, exit 0.
-      const failures = j.assertions.filter(a => a.status === 'FAIL');
-      if (failures.length === 0) {
-        assert.equal(r.status, 0, `expected exit 0; got ${r.status}; stderr=${r.stderr.slice(0,200)}`);
-        assert.equal(j.gate.verdict, 'PASS');
-      } else {
-        // Real probes ran and FAILed — scaffold-on-FAIL should also exit 1.
-        // Skip the strict assertion here; this test path only triggers when
-        // R3/R4 real probes find capture/streamer-page etc. on the current tree.
-        assert.equal(r.status, 1);
-        assert.equal(j.gate.verdict, 'FAIL');
-      }
+      assert.equal(r.status, 0,
+        `expected exit 0 (no-blocking schedule); got ${r.status}; verdict=${j.gate.verdict}; stderr=${r.stderr.slice(0,200)}`);
+      assert.equal(j.gate.verdict, 'PASS');
+      // Per-assertion JSON still reports the raw probe result — including
+      // FAIL on R3 (streamer-page present on current source). The gate
+      // verdict is what doesn't propagate it. This contract is the executable
+      // form of the ratified spec resolution.
+      const allBlockedFalse = j.assertions.every(a => a.blocked === false);
+      assert.equal(allBlockedFalse, true, 'no-blocking schedule should yield blocked=false for all assertions');
     } finally { cleanup(); }
   });
 

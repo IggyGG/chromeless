@@ -118,17 +118,25 @@ export function computeVerdict({
   for (const r of perAssertion) {
     if (mode === MODE.STRICT) {
       // Strict: every assertion must be PASS (NYI/SKIPPED/FAIL all bad).
+      // The gate-blocking schedule is ignored — strict is the M7-PR-to-main gate.
       if (r.status !== Status.PASS) {
         verdict = 'FAIL';
         break;
       }
     } else {
-      // Scaffold: FAIL only on explicit FAIL, OR on NYI for a gate-blocking-active id.
+      // Scaffold: a probe contributes to the verdict ONLY when its assertion
+      // is gate-blocking-active at the current pipeline position. If
+      // !r.blocked, the probe's status is recorded honestly in per-assertion
+      // evidence but does NOT propagate to the gate verdict — preserves the
+      // ratified UAT "scaffold exits 0 against the current image" even when
+      // R3/R4 honestly report streamer/bridges PRESENT pre-M7. This is the
+      // load-bearing reason the gate-blocking schedule exists as DATA.
+      if (!r.blocked) continue;
       if (r.status === Status.FAIL) {
         verdict = 'FAIL';
         break;
       }
-      if (r.status === Status.NOT_YET_IMPLEMENTED && r.blocked) {
+      if (r.status === Status.NOT_YET_IMPLEMENTED) {
         verdict = 'FAIL';
         break;
       }

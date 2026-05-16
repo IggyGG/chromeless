@@ -100,11 +100,41 @@ describe('R2 group 1 — table-driven verdict matrix', () => {
       statuses: ['PASS', 'PASS', 'FAIL', 'PASS'],
       expectVerdict: 'FAIL', expectExitCode: 1,
     },
-    // ----- explicit FAIL trumps everything -----
+    // ----- non-blocking FAIL in scaffold does NOT propagate (load-bearing UAT row) -----
+    //
+    // Per the operator's ratified UAT "scaffold exits 0 against the current image"
+    // and the gate-blocking schedule (#1,#2 → post-M7), R3/R4 honestly reporting
+    // FAIL on the current image (streamer-page + bridges PRESENT) MUST NOT
+    // fail the gate verdict at M0. The per-assertion JSON keeps `status: FAIL`
+    // in evidence (honest); the gate verdict treats it as not-yet-gate-blocking.
+    //
+    // Spec deviation correction: previously this row asserted FAIL,1 which
+    // matched a silent re-interpretation; the ratified UAT requires PASS,0.
     {
-      name: 'scaffold/M0 + any FAIL → FAIL,1',
+      name: 'scaffold/M0 + non-blocking FAIL on #1 → PASS,0 (ratified UAT row)',
       mode: 'scaffold', position: 'M0',
       statuses: ['FAIL', 'NOT_YET_IMPLEMENTED', 'NOT_YET_IMPLEMENTED', 'NOT_YET_IMPLEMENTED'],
+      expectVerdict: 'PASS', expectExitCode: 0,
+    },
+    {
+      name: 'scaffold/M0 + non-blocking FAIL on #1+#2 (current image shape) → PASS,0',
+      mode: 'scaffold', position: 'M0',
+      statuses: ['FAIL', 'FAIL', 'NOT_YET_IMPLEMENTED', 'NOT_YET_IMPLEMENTED'],
+      expectVerdict: 'PASS', expectExitCode: 0,
+    },
+    // Once #3 is gate-blocking (M1+), a FAIL on #3 DOES propagate even though
+    // #1/#2 FAIL is still permissible (they don't gate-block until M7).
+    {
+      name: 'scaffold/M1 + non-blocking FAIL on #1+#2 + blocking FAIL on #3 → FAIL,1',
+      mode: 'scaffold', position: 'M1',
+      statuses: ['FAIL', 'FAIL', 'FAIL', 'NOT_YET_IMPLEMENTED'],
+      expectVerdict: 'FAIL', expectExitCode: 1,
+    },
+    // At M7 all four are gate-blocking — any FAIL trips the gate.
+    {
+      name: 'scaffold/M7 + FAIL on #1 → FAIL,1 (M7 regressed)',
+      mode: 'scaffold', position: 'M7',
+      statuses: ['FAIL', 'PASS', 'PASS', 'PASS'],
       expectVerdict: 'FAIL', expectExitCode: 1,
     },
   ];
