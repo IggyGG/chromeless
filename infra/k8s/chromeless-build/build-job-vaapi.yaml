@@ -103,7 +103,10 @@ spec:
 
               # ---- Phase 5: workdirs -----------------------------
               mkdir -p /work/src/chromium /work/artifacts /work/logs
-              chown 1000:1000 /work/src /work/artifacts /work/logs
+              # See build-job-x264.yaml for the rationale on chowning the
+              # empty /work/src/chromium subdir explicitly (and never -R
+              # the chromium tree once populated).
+              chown 1000:1000 /work/src /work/src/chromium /work/artifacts /work/logs
               chown -R 1000:1000 /work/depot_tools /work/depot_tools-bin
 
               # ---- Phase 6: libva staging (idempotent) -----------

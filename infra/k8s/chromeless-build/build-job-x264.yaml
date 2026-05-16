@@ -116,7 +116,13 @@ spec:
 
               # ---- Phase 5: workdirs -----------------------------
               mkdir -p /work/src/chromium /work/artifacts /work/logs
-              chown 1000:1000 /work/src /work/artifacts /work/logs
+              # chown /work/src/chromium too (the empty subdir, without -R) so
+              # chromeless-build.sh Step 1 can write .gclient inside it as uid
+              # 1000. -R is deliberately avoided on the chromium tree because
+              # it updates ctime on every .git file, breaking subsequent
+              # git apply --3way --check (rejects with 'does not match index'
+              # even though blob hashes are identical).
+              chown 1000:1000 /work/src /work/src/chromium /work/artifacts /work/logs
               chown -R 1000:1000 /work/depot_tools /work/depot_tools-bin
 
               # ---- Phase 6: x264 staging (idempotent) ------------
