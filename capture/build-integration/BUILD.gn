@@ -216,10 +216,17 @@ source_set("encoder_factory") {
 # ---------------------------------------------------------------------
 source_set("framesink_capture") {
   sources = [
+    # M2 R3 (CV2-38) — libwebrtc track-source adapter. Ingests
+    # capturer.h's OnFrameCallback, converts via video_frame_conversion
+    # (M2 R2), broadcasts webrtc::VideoFrame to attached sinks.
+    "../framesink-capturer/cb_framesink_video_track_source.cc",
+    "../framesink-capturer/cb_framesink_video_track_source.h",
     "../framesink-capturer/capturer.cc",
     "../framesink-capturer/capturer.h",
     # M2 R2 (CV2-37) — media::VideoFrame -> webrtc::VideoFrame
-    # conversion + lifetime-pinning VideoFrameBuffer wrappers.
+    # conversion + lifetime-pinning VideoFrameBuffer wrappers. Pulled
+    # into this source_set so R3's track source can call
+    # WrapMediaVideoFrameAsWebrtcFrame() without a cross-target dep.
     "../framesink-capturer/video_frame_conversion.cc",
     "../framesink-capturer/video_frame_conversion.h",
   ]
@@ -237,11 +244,14 @@ source_set("framesink_capture") {
     # M2 R2 — libyuv::NV12ToI420 + I420 plane copy helpers in
     # video_frame_conversion.cc.
     "//third_party/libyuv",
-    # M2 R2 — webrtc::VideoFrame, NV12BufferInterface,
-    # I420BufferInterface, I420Buffer::Create, rtc::TimeMicros() in
-    # video_frame_conversion.cc. Routed through patches/0003 (widened
-    # by M2 R1) so gn check is happy with the visibility chain.
-    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    # All webrtc public-API deps go through the passthrough source_set
+    # in //third_party/webrtc_overrides/cloud_browser/. M2 R1 widened
+    # this passthrough with pc:video_track_source + api:media_stream_
+    # interface (R3's track source) plus the webrtc::VideoFrame /
+    # NV12BufferInterface / I420BufferInterface / I420Buffer::Create /
+    # rtc::TimeMicros() needed by R2's video_frame_conversion.cc.
+    # Same pattern as :encoder_factory above.
+
     "//ui/gfx/geometry",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
