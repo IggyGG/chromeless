@@ -590,6 +590,60 @@ source_set("clipboard_relay") {
 }
 
 # ---------------------------------------------------------------------
+# Native file-upload DC ↔ file-bridge WS relay (CV2-35, M6 R3).
+#
+# Bidirectional relay between the WebRTC "files" DataChannel and
+# the existing file-bridge sidecar (capture/file-bridge/). Replaces
+# streamer.js's file-upload wiring (deleted in M7).
+#
+# Inbound (DC→bridge): CbFileUploadRelay is a DataChannelObserver
+# bound onto the kFileUpload channel via M3 R5's BindObserver. Each
+# DC text frame (file_upload_start / file_upload_chunk / file_upload
+# _end / file_upload_cancel — see docs/protocols/file-upload.md) is
+# forwarded verbatim to the bridge's WS endpoint (default
+# ws://127.0.0.1:9400/files).
+#
+# Outbound (bridge→DC): the same CbFileUploadBridgeWsClient owns the
+# WS read-loop. Each reply frame from the bridge (file_upload_progress
+# / file_upload_complete / file_upload_error) is forwarded via
+# dc_host->Send(kFileUpload, text).
+#
+# One duplex WS (not two unidirectional like clipboard) because the
+# file-bridge protocol is fundamentally request/response correlated
+# by upload_id, and the bridge speaks one socket per session. See
+# cb_file_upload_relay.h header for the full rationale.
+#
+# Standalone source_set so:
+#   * the unit test target (cb_file_upload_relay_test.cc, follow-up
+#     R) can link without dragging in the full embedder set
+#   * M3 R wiring can take a clean dep on us to instantiate the
+#     relay alongside CbStatsRelay + CbClipboardRelay
+#
+# Deps mirror :clipboard_relay; the WS-backend production wiring
+# (TODO in the .cc) will add either //services/network/public/cpp
+# or //net/websockets depending on the backend choice locked in for
+# R3's follow-up CL. The DRAFT compiles against the existing deps
+# because the WS hop is stubbed behind an interface for testability.
+# ---------------------------------------------------------------------
+source_set("file_upload_relay") {
+  sources = [
+    "cb_file_upload_relay.cc",
+    "cb_file_upload_relay.h",
+  ]
+  deps = [
+    "//base",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    "//net/traffic_annotation",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Send-side audio composition (M5.5 R4 — CV2-31).
 #
 # Wires M5.5 R1's AudioDeviceModule + M5.5 R3's AudioOptions helper
