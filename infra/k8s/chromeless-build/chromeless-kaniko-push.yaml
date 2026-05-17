@@ -18,7 +18,7 @@
 # is an operator step today.
 #
 # VARIANT MATRIX: this manifest defaults to the x264 / sw profile on
-# triform-2. To push vaapi or nvenc, the operator edits the file
+# triform-8. To push vaapi or nvenc, the operator edits the file
 # in place per the README. The fields that change per variant are
 # enumerated in chromeless-kaniko-push.README.md § Variant overrides.
 #

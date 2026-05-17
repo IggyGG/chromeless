@@ -46,9 +46,13 @@
 #          labelled triform.ai/purpose=build precisely to scope this
 #          kind of thing.
 #
-# CPU request is burstable (request: 6, limit: 16) to fit triform-8's
-# scheduler headroom while letting autoninja burst when peers are
-# quiet. NINJA_PARALLELISM=14 still applies.
+# CPU is burstable (request: 12, limit: 40) sized for triform-8's
+# actual idle pattern: peers reserve ~41/48 CPU but actually use ~18,
+# so ~30 CPU sits idle. Request 12 fits scheduler headroom (peers'
+# reservations); limit 40 lets autoninja burst into the idle CPUs.
+# Memory limit 192Gi accommodates ~30+ parallel compile RSS + the
+# chromium link's 10-15GB spike. NINJA_PARALLELISM=36 matches the
+# CPU limit minus 4 cores of headroom for sccache server + linker.
 #
 # Contract with T113 (see ../../../build/chromeless-build.sh header):
 #   /workspace            — our repo, read-only mount.
@@ -60,9 +64,10 @@
 #   SCCACHE_DIR=/sccache
 #   CHROMELESS_BUILD_TARGETS=cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests cloud_browser_pcf_unittests
 #
-# Resources: 30 CPU / 120 GiB on a 32/128 box (per the brief).
-# Headroom for kubelet, sshd, the sccache server, and the linker's
-# RSS spike during the chrome-target link.
+# Resources: 12 CPU req / 40 CPU limit, 96 GiB req / 192 GiB limit
+# on a 48/128 box (triform-8). See the burstable-QoS rationale at
+# lines 49-55 above. Headroom for kubelet, sshd, the sccache server,
+# and the linker's RSS spike during the chrome-target link.
 #
 # restartPolicy + backoffLimit: OnFailure + 2 = 3 attempts max.
 # Each retry's bootstrap initContainers are idempotent; the hostPath
@@ -253,19 +258,24 @@ spec:
               # because //cloud-browser/... isn't in chromium's root
               # build graph (a separate fix may also be needed to make
               # gn parse the BUILD.gn at all).
+              # 4 targets: worker + 3 unittest suites. pcf_unittests is
+              # M2-side coverage of the PCF refactor; encoder/framesink
+              # are the M1 + capture-side baselines.
               value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
-            # Ninja parallelism. autoninja's auto-detect picks
-            # nproc=48 on triform-8, which over-subscribes the
-            # 16-CPU container limit; gives lto + sccache server headroom.
+            # Ninja parallelism sized to CPU limit minus headroom for
+            # the sccache server (~1-2 cores) + the LTO linker spike
+            # (~2 cores). Limit is 40; 36 parallel ninja jobs leaves
+            # 4 cores headroom. autoninja's nproc-based default (48)
+            # would over-subscribe the 40-CPU limit.
             - name: NINJA_PARALLELISM
-              value: "14"
+              value: "36"
             # T113 reads SKIP_FETCH=1 to skip the gclient sync on
             # retries. The hostPath dirs survive across Job deletions,
             # so a manual `kubectl set env job/chromeless-build SKIP_FETCH=1`
             # before re-applying skips the multi-hour fetch.
             - name: SKIP_FETCH
-              # Empty = run gclient sync. First build on triform-6 has
-              # no on-disk tree at /data/chromeless-build/chromium-src
+              # Empty = run gclient sync. First build on triform-8 has
+              # no on-disk tree at /var/lib/longhorn/chromeless-build/chromium-src
               # so the sync is mandatory; subsequent runs can set
               # SKIP_FETCH=1 to skip the multi-minute fetch and reuse
               # the on-disk tree (set via `kubectl set env
@@ -286,16 +296,15 @@ spec:
               value: "80G"
           resources:
             requests:
-              # Burstable QoS — fits triform-8's scheduler headroom
-              # (peer pods reserve ~41/48 CPU; our 6-CPU request fits
-              # the remaining 7). autoninja still parallelizes up to
-              # NINJA_PARALLELISM (14) when peers are quiet via the
-              # higher limit.
-              cpu: "6"
+              # Burstable QoS — see build-job.yaml header. Request 12
+              # fits triform-8's scheduler headroom (~7 free CPU after
+              # peers' reservations); limit 40 bursts into the ~30 CPU
+              # peers actually leave idle.
+              cpu: "12"
               memory: "96Gi"
             limits:
-              cpu: "16"
-              memory: "96Gi"
+              cpu: "40"
+              memory: "192Gi"
               ephemeral-storage: "8Gi"
           volumeMounts:
             - name: workdir

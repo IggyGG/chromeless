@@ -2,7 +2,7 @@
 # (T112). Lives separately from `chromeless` (the runtime
 # namespace from T50) because:
 #
-# - The build needs a 500Gi PVC bound to a specific node (triform-6).
+# - The build needs hostPath storage bound to a specific node (triform-8).
 #   Mixing that into the runtime ns pollutes the per-region label
 #   semantics from T94.
 # - Resource quotas / NetworkPolicies for the runtime apps are tighter

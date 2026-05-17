@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # build/chromeless-build.sh — Phase 2 build orchestrator. Run inside the K8s
-# Job from T112 on the triform-6 build node (32 GB RAM, 16+ vCPU,
-# 200 GB SSD per T17 §4).
+# Job from T112 on the triform-8 build node (128 GiB RAM, 48 vCPU,
+# ~937 GiB free on /var/lib/longhorn; T17 §4 spec'd 32 GB / 16 vCPU
+# / 200 GB SSD and we exceed all three).
 #
 # Drives T101's Day-1 sequence end-to-end:
 #   1.  gclient config + shallow sync of Chromium at the pinned

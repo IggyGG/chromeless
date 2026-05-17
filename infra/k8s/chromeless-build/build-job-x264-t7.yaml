@@ -1,31 +1,37 @@
-# build-job-vaapi.yaml — Chromium build Job, vaapi profile (Track F2).
+# build-job-x264-t7.yaml — Chromium build Job, x264 profile, triform-7 lane.
 #
-# This variant uses debian:bookworm-slim as the base image with an
-# inline depot_tools install, instead of the chromeless-build-runner image —
-# same fallback path Track F1 (build-job-x264.yaml) took. See that
-# file's header for the full rationale (triform-2 containerd
-# orphan-in-DB metadata; once the bbolt repair clears, this can be
-# reverted to the chromeless-build-runner-based template).
+# Parallel build environment on triform-7 — twin of triform-8's
+# build-job-x264.yaml, separate hostPath state for true cross-node
+# parallelism. The two Jobs are intentionally independent: each has its
+# own /var/lib/longhorn/chromeless-build tree on its own node, so they
+# can build different chromeless branches (or the same branch with
+# different patches/gn args) at the same time without contending for
+# the same gclient checkout, sccache, or LTO linker pool.
 #
-# Profile selector: CHROMELESS_BUILD_PROFILE=vaapi in the main env.
-# chromeless-build.sh step 3.5 verifies /work/system-libs has the staged libva
-# headers + lib; build.sh:cmd_gen imports args.vaapi.gn instead of
-# args.gn.
+# Why triform-7: at rehome time triform-7 was sitting at ~3% CPU /
+# ~6% memory utilization with 826.9G free on /var/lib/longhorn —
+# the same shape as triform-8's Longhorn data dir, confirmed by node
+# probe (sdh 500G + vg-storage/lv-longhorn LVM giving ~983G total).
 #
-# Bootstrap diff vs. the x264 variant: phase 6 apt-installs
-# `libva-dev` + `libva-drm-dev` and stages the va/*.h headers + the
-# shared libs (libva.so* libva-drm.so*) into /work/system-libs.
-# Idempotent on /work/system-libs/include/va/va.h.
+# Sizing matches triform-8: requests cpu 12 / mem 96Gi, limits
+# cpu 40 / mem 192Gi, NINJA_PARALLELISM=36. triform-7 has 48 CPU
+# (same as triform-8) so the same envelope fits.
+#
+# See build-job-x264.yaml for the bbolt/containerd background on why
+# the build uses debian:bookworm-slim with an inline depot_tools
+# bootstrap instead of the chromeless-build-runner image. The two Jobs
+# share that bootstrap logic verbatim — only node, hostPath ownership
+# (per-node), and labels differ.
 
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: chromeless-build-vaapi
+  name: chromeless-build-x264-t7
   namespace: chromeless-build
   labels:
     app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: build
-    app.kubernetes.io/variant: vaapi
+    app.kubernetes.io/variant: x264-t7
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: 28800
@@ -35,16 +41,17 @@ spec:
       labels:
         app.kubernetes.io/name: chromeless
         app.kubernetes.io/component: build
-        app.kubernetes.io/variant: vaapi
+        app.kubernetes.io/variant: x264-t7
     spec:
       restartPolicy: OnFailure
-      # Re-homed to triform-8 alongside the default build-job.yaml
-      # (CV2-rehome). Build state lives on /var/lib/longhorn,
-      # co-tenanting with Longhorn's pool; see build-job.yaml header
-      # for the full reasoning.
-      nodeName: triform-8
+      # Pinned to triform-7 — second build lane. The twin Job
+      # build-job-x264.yaml lives on triform-8. Each node has its
+      # own /var/lib/longhorn/chromeless-build hostPath state, so
+      # the two Jobs do not share gclient/sccache and can run
+      # concurrently against different refs.
+      nodeName: triform-7
       nodeSelector:
-        kubernetes.io/hostname: triform-8
+        kubernetes.io/hostname: triform-7
       imagePullSecrets:
         - name: registry-pull
       initContainers:
@@ -103,35 +110,24 @@ spec:
 
               # ---- Phase 5: workdirs -----------------------------
               mkdir -p /work/src/chromium /work/artifacts /work/logs
-              # See build-job-x264.yaml for the rationale on chowning the
-              # empty /work/src/chromium subdir explicitly (and never -R
-              # the chromium tree once populated).
+              # chown /work/src/chromium too (the empty subdir, without -R) so
+              # chromeless-build.sh Step 1 can write .gclient inside it as uid
+              # 1000. -R is deliberately avoided on the chromium tree because
+              # it updates ctime on every .git file, breaking subsequent
+              # git apply --3way --check (rejects with 'does not match index'
+              # even though blob hashes are identical).
               chown 1000:1000 /work/src /work/src/chromium /work/artifacts /work/logs
               chown -R 1000:1000 /work/depot_tools /work/depot_tools-bin
 
-              # ---- Phase 6: libva staging (idempotent) -----------
-              # On Debian bookworm libva-dev is a single package that
-              # provides all the va_*.h headers (including va_drm.h +
-              # the va_enc_*.h encoder headers the source includes) and
-              # the .so symlinks for libva, libva-drm, libva-glx,
-              # libva-wayland, libva-x11. apt pulls libva2 + libva-drm2
-              # transitively for the runtime libs. There is no separate
-              # libva-drm-dev package on Debian — that name is Ubuntu-
-              # only and breaks the apt-get install with a "Unable to
-              # locate package" exit-code-100 (cost us one bootstrap run).
-              #
-              # We stage only the libs config(":vaapi") in BUILD.gn
-              # actually links: `va` (libva.so) + `va-drm` (libva-drm.so).
-              # The headless worker has no X11 surface, so libva-x11 /
-              # libva-glx / libva-wayland are skipped.
-              if [ ! -e /work/system-libs/include/va/va.h ]; then
-                apt-get install -y --no-install-recommends libva-dev
-                mkdir -p /work/system-libs/include/va /work/system-libs/lib
-                cp -a /usr/include/va/. /work/system-libs/include/va/
-                cp -aP /usr/lib/x86_64-linux-gnu/libva.so*       /work/system-libs/lib/
-                cp -aP /usr/lib/x86_64-linux-gnu/libva-drm.so*   /work/system-libs/lib/
+              # ---- Phase 6: x264 staging (idempotent) ------------
+              if [ ! -e /work/system-libs/include/x264.h ]; then
+                apt-get install -y --no-install-recommends libx264-dev
+                mkdir -p /work/system-libs/include /work/system-libs/lib
+                cp -a  /usr/include/x264.h         /work/system-libs/include/
+                cp -a  /usr/include/x264_config.h  /work/system-libs/include/
+                cp -aP /usr/lib/x86_64-linux-gnu/libx264.so* /work/system-libs/lib/
                 chown -R 1000:1000 /work/system-libs
-                ls -la /work/system-libs/include/va /work/system-libs/lib
+                ls -la /work/system-libs/include /work/system-libs/lib
               fi
           env:
             - name: OUR_REPO
@@ -168,15 +164,8 @@ spec:
         - name: build
           image: debian:bookworm-slim
           imagePullPolicy: IfNotPresent
-          # Runs as root — debian:bookworm-slim doesn't ship a builder
-          # user, and apt-get install (needed for the OS deps the build
-          # uses) requires root. We create a uid-1000 builder user
-          # inline, install OS deps as root, then drop to builder for
-          # the chromium compile. The chromium-src hostPath has been
-          # owned 1000:1000 since the chromeless-build-runner runs, so the
-          # ownership scheme is preserved across both build paths
-          # (this debian-based fallback and the original
-          # chromeless-build-runner once its broken chain clears).
+          # See build-job-x264.yaml header — same root→builder
+          # ownership scheme is reproduced here unchanged.
           command:
             - bash
             - -c
@@ -196,24 +185,13 @@ spec:
                 bison flex
 
               # ---- builder user ---------------------------------
-              # chromeless-build-runner's image creates this at build time;
-              # we do it at runtime since debian:bookworm-slim is bare.
-              # Idempotent: -m creates /home/builder, useradd skips on
-              # existing user.
               if ! id builder >/dev/null 2>&1; then
                 useradd -m -u 1000 -s /bin/bash builder
               fi
-              # /home/builder/.cache is where depot_tools puts gclient
-              # state and various tool caches. Pre-create + own it.
               mkdir -p /home/builder/.cache
               chown -R 1000:1000 /home/builder
 
               # ---- drop to builder + exec the build --------------
-              # depot_tools and sccache come from /work (hostPath,
-              # populated by the bootstrap initContainer).
-              # bootstrap_python3 must run once per pod start (the
-              # marker file is in depot_tools/.cipd_bin which we
-              # didn't bake — runs idempotently if marker exists).
               su builder -c '
                 set -euxo pipefail
                 export PATH=/work/depot_tools:/work/depot_tools-bin:/usr/local/bin:/usr/bin:/bin
@@ -226,7 +204,16 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # integration/native-peer carries the M1 work that main
+              # doesn't have yet: webrtc namespace fix (bf3de29), Q3
+              # video_coding sub-headers (2a1b9f5), Path B webrtc deps
+              # (2829fe5), Path A drop (92e6eae), and the initial M1
+              # merge (87c2dfc). Build #2 on main got to autoninja
+              # 39495/39597 then failed on rtc::Thread errors; those
+              # are exactly what bf3de29 fixed on integration/native-peer.
+              # Flip back to "main" after integration/native-peer is
+              # fast-forward-merged to main post-validation.
+              value: "integration/native-peer"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
@@ -242,11 +229,14 @@ spec:
               # minus headroom for sccache server + LTO linker.
               value: "36"
             - name: SKIP_FETCH
-              # Empty = fresh gclient sync (first build on triform-8
-              # has no on-disk tree at /var/lib/longhorn/chromeless-build).
-              # Flip to "1" after sync succeeds to skip re-sync on
-              # subsequent runs.
-              value: ""
+              # "1" because build #2's first attempt already synced the
+              # tree to refs/branch-heads/7727 on triform-7's hostPath
+              # (37GB at /work/src/chromium/src). Subsequent build #2-retry
+              # attempts wedged in gclient sync (silent stall at 5+10 min
+              # marks, exit-127 wedge pattern from build #1). SKIP_FETCH
+              # bypasses Step 1 entirely; the existing tree is at the
+              # correct ref so re-fetching adds no value and hangs.
+              value: "1"
             - name: STUB_MODE
               value: ""
             - name: SCCACHE_IDLE_TIMEOUT
@@ -254,7 +244,7 @@ spec:
             - name: SCCACHE_CACHE_SIZE
               value: "80G"
             - name: CHROMELESS_BUILD_PROFILE
-              value: "vaapi"
+              value: "x264"
           resources:
             requests:
               # Burstable QoS — see build-job.yaml header.
@@ -272,26 +262,21 @@ spec:
             - name: workspace
               mountPath: /workspace
               readOnly: true
-          # Main container runs as root so apt-get install works;
-          # the bash command then `useradd builder` (uid 1000) and
-          # `su builder -c` for the chromium compile so the in-tree
-          # writes inherit 1000:1000 ownership consistent with the
-          # chromeless-build-runner-based path.
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              # SETUID/SETGID for su to drop to builder; CHOWN/FOWNER
-              # for the inline /home/builder ownership setup; DAC_OVERRIDE
-              # for cross-uid file access during the apt+useradd setup.
               add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
             seccompProfile:
               type: RuntimeDefault
       volumes:
-        # Shares /var/lib/longhorn/chromeless-build/ with build-job.yaml
-        # (default) — gclient checkout + sccache are warm across variants.
+        # /var/lib/longhorn/chromeless-build/ on triform-7 is a fresh
+        # tree (cold gclient sync on first run, ~50-90min). Once
+        # warm, subsequent runs reuse depot_tools + sccache exactly
+        # like triform-8's twin. The two trees are intentionally
+        # separate per node — no cross-node hostPath sharing.
         - name: workdir
           hostPath:
             path: /var/lib/longhorn/chromeless-build/chromium-src
