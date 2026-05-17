@@ -504,6 +504,49 @@ source_set("input_dispatch") {
 }
 
 # ---------------------------------------------------------------------
+# Stats relay + WebRTC event emitter (M6 R1 — CV2-33).
+#
+# Browser-process replacement for streamer.js's StatsRelay and
+# MetricsEmitter (Wave 2 A4, chromeless commit 9850264). On the stats
+# DataChannel message, forwards raw frame to
+# http://localhost:9100/stats-update; on lifecycle transitions, posts
+# {event, attrs} envelopes to http://localhost:9100/webrtc-event. Both
+# routes are kept by M6 disposition (metrics-sidecar stays after the
+# M7 streamer deletion).
+#
+# Standalone source_set so:
+#   * the unit test target (cb_stats_relay_test.cc, follow-up R) can
+#     link without dragging in the full embedder set
+#   * M3 R can take a clean dep on us to wire CbStatsRelay into the
+#     "stats" DC and own a CbWebrtcEventEmitter on the PCF host
+#
+# Network deps: services/network for SimpleURLLoader + ResourceRequest,
+# net for HttpRequestHeaders + traffic annotation. These are
+# browser-process-only — the source_set must not be linked from
+# render-process code.
+# ---------------------------------------------------------------------
+source_set("stats_relay") {
+  sources = [
+    "cb_stats_relay.cc",
+    "cb_stats_relay.h",
+  ]
+  deps = [
+    "//base",
+    "//net/traffic_annotation",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
+    # webrtc::DataChannelObserver + webrtc::DataBuffer live in
+    # //third_party/webrtc/api:libjingle_peerconnection_api, which is
+    # re-exported through the passthrough source_set used everywhere
+    # else in this BUILD.gn.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Send-side audio composition (M5.5 R4 — CV2-31).
 #
 # Wires M5.5 R1's AudioDeviceModule + M5.5 R3's AudioOptions helper
