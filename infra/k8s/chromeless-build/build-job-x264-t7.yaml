@@ -237,14 +237,16 @@ spec:
               # minus headroom for sccache server + LTO linker.
               value: "36"
             - name: SKIP_FETCH
-              # "1" because build #2's first attempt already synced the
-              # tree to refs/branch-heads/7727 on triform-7's hostPath
-              # (37GB at /work/src/chromium/src). Subsequent build #2-retry
-              # attempts wedged in gclient sync (silent stall at 5+10 min
-              # marks, exit-127 wedge pattern from build #1). SKIP_FETCH
-              # bypasses Step 1 entirely; the existing tree is at the
-              # correct ref so re-fetching adds no value and hangs.
-              value: "1"
+              # "" for THIS build only: build #6 v3 (8rq9z) ran an
+              # over-aggressive `git clean -fdx` rootwide and deleted
+              # gclient-fetched binaries (buildtools/linux64/gn,
+              # third_party/llvm-build/*, etc.) which are ignored by
+              # .gitignore but legitimately downloaded by gclient
+              # runhooks. SKIP_FETCH=1 won't re-fetch them — only a
+              # full gclient sync will. After this build succeeds
+              # (~15 min cold sync + ~7 min autoninja warm), flip back
+              # to "1" for subsequent runs.
+              value: ""
             - name: STUB_MODE
               value: ""
             - name: SKIP_CDP_VALIDATION
