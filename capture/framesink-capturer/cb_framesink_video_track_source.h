@@ -248,6 +248,22 @@ class CloudBrowserFrameSinkVideoTrackSource : public webrtc::VideoTrackSource {
   // for header-only compile tests).
   CloudBrowserFrameSinkCapturer* capturer_for_test() { return capturer_.get(); }
 
+  // Explicit capture start. M2 R4 (cb_devtools_agent.cc) drives this
+  // from the devtools wire-up path. Long-term (M2 R5), capture start/
+  // stop becomes a sink-attachment-driven policy owned by this class
+  // — this method then becomes a no-op or is removed entirely. For
+  // the current R4-only landing (R5 reverted pending re-arch in
+  // capture/build-integration/cb_framesink_video_track_source.{h,cc}
+  // direct-edit form, not as a chromium patch), this method delegates
+  // straight to capturer_->Start(target) so the devtools start path
+  // works end-to-end.
+  //
+  // Idempotent in capturer_->Start's contract: second call with same
+  // target is a no-op.
+  //
+  // No-op if capturer_ is null (header-only / test bypass case).
+  void StartCapture(viz::VideoCaptureTarget target);
+
  protected:
   ~CloudBrowserFrameSinkVideoTrackSource() override;
 

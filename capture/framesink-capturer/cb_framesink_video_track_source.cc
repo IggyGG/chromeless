@@ -131,6 +131,24 @@ CloudBrowserFrameSinkVideoTrackSource::source() {
   return &broadcaster_;
 }
 
+void CloudBrowserFrameSinkVideoTrackSource::StartCapture(
+    viz::VideoCaptureTarget target) {
+  // M2 R4 entry point — see header doc. Long-term this method is
+  // replaced by M2 R5's sink-attachment-driven policy, after R5 is
+  // re-architected as a direct cloud-browser source edit (the patch
+  // form was rejected; see CV2-40).
+  //
+  // For the current R4-only landing: delegate straight to the
+  // underlying capturer's Start. capturer_->Start is idempotent
+  // (per capturer.h:87 contract: "Idempotent: a second call is a
+  // no-op"), so multiple devtools-driven invocations are safe.
+  if (!capturer_) {
+    // Header-only / test-bypass case. No-op.
+    return;
+  }
+  capturer_->Start(target);
+}
+
 void CloudBrowserFrameSinkVideoTrackSource::OnCapturerFrame(
     scoped_refptr<media::VideoFrame> media_frame) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(capturer_sequence_checker_);
