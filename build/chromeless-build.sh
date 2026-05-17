@@ -377,6 +377,16 @@ ninja_args=()
 if [[ -n "${NINJA_PARALLELISM:-}" ]]; then
     ninja_args+=(-j "${NINJA_PARALLELISM}")
 fi
+# NINJA_KEEP_GOING — ninja -k arg. When set, ninja continues past
+# failing edges instead of fast-failing on the first error, so a
+# single build pass collects EVERY failing TU. "0" = unlimited
+# (keep going regardless of failure count). Default: unset (ninja's
+# default fast-fail). Used by the build-czar nuclear cold-rebuild
+# diagnostic to surface the full chromium-API-drift surface in one
+# pass rather than iter-by-iter.
+if [[ -n "${NINJA_KEEP_GOING:-}" ]]; then
+    ninja_args+=(-k "${NINJA_KEEP_GOING}")
+fi
 
 # Targets get word-split intentionally below.
 # shellcheck disable=SC2086
