@@ -337,12 +337,6 @@ source_set("cb_audio_device_module") {
 # native ADM. All APM stages disabled — cb_capture.monitor carries
 # program audio, not a microphone. See capture/audio/cb_audio_options.h.
 # ---------------------------------------------------------------------
-source_set("cb_audio_options") {
-  sources = [
-    "../audio/cb_audio_options.cc",
-    "../audio/cb_audio_options.h",
-  ]
-  deps = [
 #
 # Builds the webrtc::AudioOptions block attached to the AudioSource /
 # AudioTrack the cloud-browser worker constructs on top of M5.5 R1's
