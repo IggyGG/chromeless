@@ -89,7 +89,14 @@
 // :framesink_capture source_set's eventual :webrtc_api_passthrough dep
 // (added in this R# — see BUILD.gn change below).
 #include "api/scoped_refptr.h"
+#include "api/make_ref_counted.h"
 #include "api/video/i420_buffer.h"
+// rtc_base/ref_counted_object.h is included so the
+// `friend class webrtc::RefCountedObject` declarations in the buffer
+// classes below compile cleanly. It's also indirectly available via
+// api/make_ref_counted.h, but the explicit include documents intent
+// and shields against transitive-include shuffling in upstream.
+#include "rtc_base/ref_counted_object.h"
 #include "api/video/nv12_buffer.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_frame_buffer.h"
@@ -154,10 +161,14 @@ class CloudBrowserMediaVideoFrameNV12Buffer
   ~CloudBrowserMediaVideoFrameNV12Buffer() override;
 
  private:
-  // Construction is via Create(); the explicit refcount macro keeps
-  // libwebrtc's webrtc::scoped_refptr<T>::Create-style factories
-  // happy (Create() above is the public factory; libwebrtc test code
-  // does not directly instantiate this class).
+  // Construction is via Create(); libwebrtc's
+  // `webrtc::make_ref_counted<T>(args)` instantiates
+  // `webrtc::RefCountedObject<T>` which subclasses T and needs ctor
+  // access. The friend declaration grants exactly that without
+  // making the ctor public — preserves the factory-only invariant.
+  template <class T>
+  friend class webrtc::RefCountedObject;
+
   explicit CloudBrowserMediaVideoFrameNV12Buffer(
       scoped_refptr<media::VideoFrame> frame);
 
@@ -208,6 +219,10 @@ class CloudBrowserMediaVideoFrameI420Buffer
   ~CloudBrowserMediaVideoFrameI420Buffer() override;
 
  private:
+  // Same friend-of-RefCountedObject pattern as the NV12 sibling above.
+  template <class T>
+  friend class webrtc::RefCountedObject;
+
   explicit CloudBrowserMediaVideoFrameI420Buffer(
       scoped_refptr<media::VideoFrame> frame);
 

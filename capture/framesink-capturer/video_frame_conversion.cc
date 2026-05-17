@@ -316,7 +316,7 @@ int64_t RebaseMediaTimestampToWebrtcMicros(base::TimeDelta media_ts) {
   // First-call path: capture the delta between rtc::TimeMicros() and
   // the media-frame clock.
   if (!g_clock_delta_set.load(std::memory_order_acquire)) {
-    const int64_t now_rtc_us = rtc::TimeMicros();
+    const int64_t now_rtc_us = webrtc::TimeMicros();
     const int64_t delta = now_rtc_us - media_us;
     // exchange-if-not-set so concurrent first calls converge on one
     // value. Either of them stores; whoever wins is fine — both deltas
