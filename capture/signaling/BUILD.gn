@@ -4,17 +4,25 @@
 #
 # # Module decomposition (CV2-50 .. CV2-54, M3)
 #
-#   R1 (this file's :cb_wire_envelope) — pure codec: typed envelope
-#       struct + JSON encode/decode for the six source-pinned tags.
-#       No I/O, no threading. Linkable on its own so tests don't drag
-#       in the chromium net stack.
-#   R2  — native WebSocket client (rides on //net's WebSocket impl).
+#   R1 (:cb_wire_envelope) — pure codec: typed envelope struct + JSON
+#       encode/decode for the six source-pinned tags. No I/O, no
+#       threading. Linkable on its own so tests don't drag in the
+#       chromium net stack.
+#   R2 (:cb_signaling_ws_client) — native WebSocket client (rides on
+#       //services/network's NetworkContext::CreateWebSocket Mojo
+#       interface). This file.
 #   R3  — ICE config endpoint fetch + TURN credential rotation.
 #   R4  — PeerConnection wire-up on M1's PCF.
 #   R5  — DataChannel host (input, cursor, ancillary).
 #
-# Only R1 is in this commit; R2..R5 add more source_sets to this same
-# BUILD.gn as they land.
+# R1 and R2 are both present in this file; R3..R5 add more source_sets
+# as they land.
+#
+# Pre-merge note (M3 R2 draft) — this BUILD.gn was authored alongside
+# the cv2/m3-signaling-ws-client branch and assumes the cv2/m3-wire-
+# envelope-codec branch (R1, commit f51d5c4) has merged first; the
+# :cb_wire_envelope target below is duplicated verbatim from R1 to
+# keep R2 self-contained until the merge resolves the duplicate.
 
 import("//testing/test.gni")  # provides test() template used below
 
@@ -35,10 +43,6 @@ source_set("cb_wire_envelope") {
   deps = [
     "//base",
   ]
-  # Repo-root include path so "capture/signaling/cb_wire_envelope.h"
-  # resolves the same way the encoder + PCF source_sets resolve their
-  # "capture/build-integration/cloud_browser_pcf.h" includes. T17 +
-  # M1's Wall #20 — propagated transitively.
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
@@ -46,21 +50,68 @@ source_set("cb_wire_envelope") {
 
 # ---------------------------------------------------------------------
 # R1 unit tests — round-trip + negative.
-#
-# RED-by-construction pre-T17 — exercises Decode/Encode without
-# spinning up any chromium browser-process scaffolding. The K8s
-# chromeless-build Job runs them after first-green.
 # ---------------------------------------------------------------------
 test("cb_wire_envelope_unittests") {
   sources = [ "cb_wire_envelope_test.cc" ]
   deps = [
     ":cb_wire_envelope",
-    # See cloud_browser_encoder_unittests in
-    # capture/build-integration/BUILD.gn — Wall #37. test_support
-    # provides TestSuite + helpers; run_all_unittests supplies main().
     "//base/test:run_all_unittests",
     "//testing/gmock",
     "//testing/gtest",
   ]
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
 }
+
+# ---------------------------------------------------------------------
+# R2 — native browser-process WebSocket signaling client.
+#
+# Consumes :cb_wire_envelope for inbound decode + outbound encode.
+# Talks to the chromium network service via the
+# network::mojom::NetworkContext::CreateWebSocket() Mojo interface;
+# the embedder (cloud_browser_browser_main_parts) supplies the
+# NetworkContext pointer from the BrowserContext's default
+# StoragePartition.
+#
+# Pure browser-process code — no renderer / no //content/renderer
+# deps. The :cb_include_paths config is propagated through the
+# :cb_wire_envelope public_configs above.
+# ---------------------------------------------------------------------
+source_set("cb_signaling_ws_client") {
+  sources = [
+    "cb_signaling_ws_client.cc",
+    "cb_signaling_ws_client.h",
+  ]
+  deps = [
+    ":cb_wire_envelope",
+    "//base",
+    "//mojo/public/cpp/bindings",
+    "//mojo/public/cpp/system",
+    # //net carries net::IsolationInfo, SiteForCookies, the network
+    # traffic annotation taxonomy, GURL/Origin. Pure browser-process
+    # dep — no renderer surface.
+    "//net",
+    # //services/network/public/mojom — the WebSocket + NetworkContext
+    # Mojo interface bindings (PendingRemote<WebSocket>,
+    # PendingReceiver<WebSocketClient>, WebSocketHandshakeClient,
+    # WebSocketMessageType, etc).
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R2 unit tests — URL builder, env loader, and a FakeNetworkContext
+# round-trip that exercises the handshake + read + write pumps with
+# a stubbed network service implementation.
+#
+# TODO(M3-R2-tests): RED-by-construction pre-T17 — adds
+# cb_signaling_ws_client_test.cc alongside the R1 tests in a follow-
+# up commit. The fixture shape mirrors content_shell's WebSocket
+# test pattern (FakeNetworkContext + mojo::Receiver<NetworkContext>
+# pair); putting it in once we know the chromium revision's exact
+# WebSocket-Mojo arg list keeps the test from drifting twice.
+# ---------------------------------------------------------------------
