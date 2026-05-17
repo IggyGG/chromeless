@@ -121,7 +121,7 @@ CloudBrowserFrameSinkVideoTrackSource::GetConversionStats() const {
   return conversion_stats_;
 }
 
-rtc::VideoSourceInterface<webrtc::VideoFrame>*
+webrtc::VideoSourceInterface<webrtc::VideoFrame>*
 CloudBrowserFrameSinkVideoTrackSource::source() {
   // webrtc::VideoTrackSource (base) forwards AddOrUpdateSink /
   // RemoveSink to whatever this returns. webrtc::VideoBroadcaster

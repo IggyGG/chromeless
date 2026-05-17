@@ -256,7 +256,7 @@ class CloudBrowserFrameSinkVideoTrackSource : public webrtc::VideoTrackSource {
   // We use webrtc::VideoBroadcaster (the canonical multi-sink
   // fanout that ships with libwebrtc and is what every other
   // webrtc::VideoTrackSource subclass uses).
-  rtc::VideoSourceInterface<webrtc::VideoFrame>* source() override;
+  webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override;
 
  private:
   // Ingress called by the capturer's OnFrameCallback. Runs on the
