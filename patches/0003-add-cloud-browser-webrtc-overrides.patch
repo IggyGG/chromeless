@@ -36,8 +36,6 @@ Targets re-exported:
     api/video:video_frame                          (webrtc::VideoFrame, I420Buffer)
     api/video_codecs:video_codecs_api              (VideoEncoder, EncoderFactory,
                                                      SdpVideoFormat, VideoCodec)
-    api:create_peerconnection_factory              (webrtc::CreateModularPeer
-                                                     ConnectionFactory)
     api:libjingle_peerconnection_api               (webrtc::PeerConnectionFactory
                                                      Interface,
                                                      PeerConnectionFactoryDeps,
@@ -55,7 +53,6 @@ Targets re-exported:
     modules/video_coding                           (CodecSpecificInfo, h264_globals,
                                                      video_codec_interface, error_codes)
     rtc_base:logging                               (RTC_LOG)
-    rtc_base:rtc_base                              (rtc_base base utilities)
     rtc_base:threading                             (rtc::Thread, ThreadManager)
   webrtc_test_passthrough (testonly):
     test:test_support                              (gtest fixtures, helpers)
@@ -65,8 +62,8 @@ Touched file:
 
 Resolved against branch-heads/7727 (Chromium 147 stable).
 ---
- .../webrtc_overrides/cloud_browser/BUILD.gn   | 68 +++++++++++++++++++
- 1 file changed, 68 insertions(+)
+ .../webrtc_overrides/cloud_browser/BUILD.gn   | 66 +++++++++++++++++
+ 1 file changed, 66 insertions(+)
  create mode 100644 third_party/webrtc_overrides/cloud_browser/BUILD.gn
 
 diff --git a/third_party/webrtc_overrides/cloud_browser/BUILD.gn b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
@@ -74,7 +71,7 @@ new file mode 100644
 index 0000000000..f4503f144e
 --- /dev/null
 +++ b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,66 @@
 +# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 +#
 +# Use of this source code is governed by a BSD-style license that can be
@@ -111,7 +108,6 @@ index 0000000000..f4503f144e
 +  # public_deps so the headers + their transitive types are visible to
 +  # any //cloud-browser/* target that depends on us.
 +  public_deps = [
-+    "//third_party/webrtc/api:create_peerconnection_factory",
 +    "//third_party/webrtc/api:enable_media",
 +    "//third_party/webrtc/api:libjingle_peerconnection_api",
 +    "//third_party/webrtc/api:scoped_refptr",
@@ -127,7 +123,6 @@ index 0000000000..f4503f144e
 +    "//third_party/webrtc/api/video_codecs:video_codecs_api",
 +    "//third_party/webrtc/modules/video_coding",
 +    "//third_party/webrtc/rtc_base:logging",
-+    "//third_party/webrtc/rtc_base:rtc_base",
 +    "//third_party/webrtc/rtc_base:threading",
 +  ]
 +}
