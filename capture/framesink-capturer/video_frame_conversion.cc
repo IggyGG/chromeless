@@ -95,19 +95,19 @@ const uint8_t* CloudBrowserMediaVideoFrameNV12Buffer::DataY() const {
   // visible_data(plane) returns the pointer offset to the visible_rect
   // origin, which is exactly what webrtc expects on the plane
   // accessors (libwebrtc treats the buffer as visible-sized).
-  return frame_->visible_data(media::VideoFrame::kYPlane);
+  return frame_->visible_data(media::VideoFrame::Plane::kY);
 }
 
 const uint8_t* CloudBrowserMediaVideoFrameNV12Buffer::DataUV() const {
-  return frame_->visible_data(media::VideoFrame::kUVPlane);
+  return frame_->visible_data(media::VideoFrame::Plane::kUV);
 }
 
 int CloudBrowserMediaVideoFrameNV12Buffer::StrideY() const {
-  return frame_->stride(media::VideoFrame::kYPlane);
+  return frame_->stride(media::VideoFrame::Plane::kY);
 }
 
 int CloudBrowserMediaVideoFrameNV12Buffer::StrideUV() const {
-  return frame_->stride(media::VideoFrame::kUVPlane);
+  return frame_->stride(media::VideoFrame::Plane::kUV);
 }
 
 webrtc::scoped_refptr<webrtc::I420BufferInterface>
@@ -184,27 +184,27 @@ int CloudBrowserMediaVideoFrameI420Buffer::height() const {
 }
 
 const uint8_t* CloudBrowserMediaVideoFrameI420Buffer::DataY() const {
-  return frame_->visible_data(media::VideoFrame::kYPlane);
+  return frame_->visible_data(media::VideoFrame::Plane::kY);
 }
 
 const uint8_t* CloudBrowserMediaVideoFrameI420Buffer::DataU() const {
-  return frame_->visible_data(media::VideoFrame::kUPlane);
+  return frame_->visible_data(media::VideoFrame::Plane::kU);
 }
 
 const uint8_t* CloudBrowserMediaVideoFrameI420Buffer::DataV() const {
-  return frame_->visible_data(media::VideoFrame::kVPlane);
+  return frame_->visible_data(media::VideoFrame::Plane::kV);
 }
 
 int CloudBrowserMediaVideoFrameI420Buffer::StrideY() const {
-  return frame_->stride(media::VideoFrame::kYPlane);
+  return frame_->stride(media::VideoFrame::Plane::kY);
 }
 
 int CloudBrowserMediaVideoFrameI420Buffer::StrideU() const {
-  return frame_->stride(media::VideoFrame::kUPlane);
+  return frame_->stride(media::VideoFrame::Plane::kU);
 }
 
 int CloudBrowserMediaVideoFrameI420Buffer::StrideV() const {
-  return frame_->stride(media::VideoFrame::kVPlane);
+  return frame_->stride(media::VideoFrame::Plane::kV);
 }
 
 // I420BufferInterface inherits ToI420() returning |this| (the default
