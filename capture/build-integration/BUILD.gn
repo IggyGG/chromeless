@@ -292,6 +292,44 @@ source_set("active_webcontents_resolver") {
 }
 
 # ---------------------------------------------------------------------
+# Native audio ADM seam (M5.5 — CV2-28).
+#
+# Built-in libwebrtc PulseAudio ADM ("choice b" per CV2-28). Provides
+# CreateCloudBrowserNativeAudioDeviceModule() — invoked by
+# cloud_browser_pcf.cc:CreateCloudBrowserDefaultAudioDeviceModule()
+# (the M5.5 injection slot M1-R2 set up). Kept in its own source_set
+# so the audio-impl deps stay localized; the PCF source_set itself
+# remains audio-agnostic.
+#
+# TODO(M5.5-R1-passthrough): if gn check / autoninja rejects the cc
+# file because the kPlatformDefaultAudio factory can't resolve the
+# PulseAudio backend symbols, patches/0003-add-cloud-browser-webrtc-
+# overrides.patch must be widened to re-export
+#   //third_party/webrtc/modules/audio_device:audio_device_impl
+# This is the cross-cut with gn-investigator's prior patches/0003
+# work — coordinate before widening.
+# ---------------------------------------------------------------------
+source_set("cb_audio_device_module") {
+  sources = [
+    "../audio/cb_audio_device_module.cc",
+    "../audio/cb_audio_device_module.h",
+  ]
+  deps = [
+    # The webrtc-overrides passthrough already re-exports
+    # api/audio:audio_device (the AudioDeviceModule interface +
+    # static Create factory declaration). The actual factory
+    # implementation lives in modules/audio_device:audio_device_impl;
+    # M1's kDummyAudio path proves it's already linked transitively
+    # through api:libjingle_peerconnection_api, so the DRAFT does NOT
+    # add an explicit dep here. See TODO above if that assumption
+    # fails to hold for the PulseAudio backend at link time.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Browser-process PeerConnectionFactory seam (M1 — CV2-26 / CV2-27).
 #
 # Extracted from cloud_browser_browser_main_parts.cc so the assembly,
@@ -306,6 +344,7 @@ source_set("cloud_browser_pcf") {
     "cloud_browser_pcf.h",
   ]
   deps = [
+    ":cb_audio_device_module",                    # M5.5-R1 — CV2-28.
     ":encoder_factory",
     # All webrtc public-API deps go through the passthrough source_set
     # in //third_party/webrtc_overrides/cloud_browser/ — see comment on

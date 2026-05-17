@@ -23,7 +23,9 @@
 #include "api/task_queue/default_task_queue_factory.h"
 #include "api/task_queue/task_queue_factory.h"
 #include "api/video_codecs/builtin_video_decoder_factory.h"
+#include "capture/audio/cb_audio_device_module.h"
 #include "capture/encoder/encoder_factory.h"
+#include "rtc_base/logging.h"
 #include "rtc_base/thread.h"
 
 namespace cloud_browser {
@@ -101,8 +103,12 @@ CreateCloudBrowserPcf(
 
 webrtc::scoped_refptr<webrtc::AudioDeviceModule>
 CreateCloudBrowserDefaultAudioDeviceModule() {
-  // M1's default ADM is the kDummyAudio path — satisfies libwebrtc's
-  // non-null ADM expectation but emits no real audio frames.
+  // M5.5-R1 (CV2-28): the "default" ADM is now the real libwebrtc
+  // built-in PulseAudio backend (kPlatformDefaultAudio), constructed
+  // by capture/audio/cb_audio_device_module.cc. The function name is
+  // kept stable so every M1 call site
+  // (cloud_browser_browser_main_parts.cc, the test fixtures, and the
+  // BuildCloudBrowserPcfDependencies fallback above) is unchanged.
   //
   // chromium-bundled libwebrtc replaced the old
   // `AudioDeviceModule::Create(audio_layer, task_queue_factory*)`
@@ -118,13 +124,23 @@ CreateCloudBrowserDefaultAudioDeviceModule() {
   // and torn down before the process exits — the leak is bounded by
   // process lifetime.
   //
-  // TODO(M5.5): replace this body with the real cb-audio ADM
-  // construction. The signature stays the same; every M1 call site
-  // (cloud_browser_browser_main_parts.cc) is audio-agnostic.
-  static const webrtc::Environment* const env =
-      new webrtc::Environment(webrtc::CreateEnvironment());
-  return webrtc::CreateAudioDeviceModule(
-      *env, webrtc::AudioDeviceModule::kDummyAudio);
+  // Fallback: if cb-audio's native ADM construction fails (PulseAudio
+  // server not up yet, cb_capture.monitor not registered, etc.), fall
+  // back to the kDummyAudio path so the browser-process worker still
+  // boots — video + datachannel come up regardless and the M2/M3/M4
+  // pipeline keeps its M0 R5/R6 acceptance gates green. The error is
+  // logged inside CreateCloudBrowserNativeAudioDeviceModule.
+  static webrtc::TaskQueueFactory* const task_queue_factory =
+      webrtc::CreateDefaultTaskQueueFactory().release();
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
+      CreateCloudBrowserNativeAudioDeviceModule(task_queue_factory);
+  if (adm != nullptr) {
+    return adm;
+  }
+  RTC_LOG(LS_WARNING) << "CloudBrowser: native ADM unavailable — "
+                         "falling back to kDummyAudio (no-audio path)";
+  return webrtc::AudioDeviceModule::Create(
+      webrtc::AudioDeviceModule::kDummyAudio, task_queue_factory);
 }
 
 std::string FormatPcfVideoCodecLogLine(

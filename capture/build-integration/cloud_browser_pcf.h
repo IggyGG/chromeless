@@ -125,20 +125,24 @@ CreateCloudBrowserPcf(
     const webrtc::Environment& env,
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm);
 
-// M1's default AudioDeviceModule — the dummy / no-audio path.
+// The cloud-browser default AudioDeviceModule.
 //
-// Returns a non-null AudioDeviceModule that satisfies libwebrtc's
-// PCF expectation of an ADM at the audio_device_module slot but
-// emits no real audio frames. Backed by
-// webrtc::AudioDeviceModule::kDummyAudio.
+// As of M5.5-R1 (CV2-28) this is the real libwebrtc built-in
+// PulseAudio ADM (kPlatformDefaultAudio), constructed via
+// capture/audio/cb_audio_device_module.cc. The recording device
+// resolves to the PulseAudio server-default source — pinned to
+// cb_capture.monitor by infra/pulse-default.pa.
 //
-// This is the M5.5 injection slot. M5.5 replaces this implementation
-// (NOT the call sites) with the real cb-audio ADM construction —
-// every other M1 file is audio-agnostic and stays stable across
-// the M5.5 landing.
+// Fallback: if cb-audio's native ADM construction fails (PulseAudio
+// not up, cb_capture.monitor not registered, etc.) the implementation
+// falls back to webrtc::AudioDeviceModule::kDummyAudio so the
+// browser-process worker still boots. The failure is logged.
 //
-// TODO(M5.5): replace the kDummyAudio body with the real cb-audio
-// ADM construction.
+// The function name is kept stable so every M1 call site
+// (cloud_browser_browser_main_parts.cc, BuildCloudBrowserPcf
+// Dependencies' nullptr-ADM fallback above) is unchanged. This is the
+// cross-module hand-off seam M1-R2 set up specifically so M5.5 could
+// land without touching M1 call sites.
 webrtc::scoped_refptr<webrtc::AudioDeviceModule>
 CreateCloudBrowserDefaultAudioDeviceModule();
 
