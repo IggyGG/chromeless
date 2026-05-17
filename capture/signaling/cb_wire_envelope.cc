@@ -266,7 +266,8 @@ std::optional<EnvelopeData> DecodeData(EnvelopeType type,
 }  // namespace
 
 std::optional<Envelope> Decode(std::string_view json) {
-  std::optional<base::Value> parsed = base::JSONReader::Read(json);
+  std::optional<base::Value> parsed =
+      base::JSONReader::Read(json, base::JSON_PARSE_RFC);
   if (!parsed || !parsed->is_dict()) return std::nullopt;
   const base::DictValue& dict = parsed->GetDict();
 

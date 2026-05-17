@@ -137,8 +137,8 @@ constexpr char kRejectedSdpOfferEnvelope[] = R"({
 // matter — only semantic equivalence does).
 testing::AssertionResult JsonSemanticEq(std::string_view a,
                                         std::string_view b) {
-  auto va = base::JSONReader::Read(a);
-  auto vb = base::JSONReader::Read(b);
+  auto va = base::JSONReader::Read(a, base::JSON_PARSE_RFC);
+  auto vb = base::JSONReader::Read(b, base::JSON_PARSE_RFC);
   if (!va) return testing::AssertionFailure() << "lhs not parseable: " << a;
   if (!vb) return testing::AssertionFailure() << "rhs not parseable: " << b;
   if (*va != *vb) {
