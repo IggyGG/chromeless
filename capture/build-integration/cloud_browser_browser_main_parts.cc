@@ -12,6 +12,7 @@
 
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
+#include "api/make_ref_counted.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtp_parameters.h"
 #include "base/command_line.h"
@@ -385,13 +386,19 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "FrameSinkVideoCapturer producer remote failed to bind during "
       << "browser-process video track source construction.";
 
+  // R3's canonical construction pattern is webrtc::make_ref_counted
+  // (see cb_framesink_video_track_source.h:175). Drafter wrote
+  // CreateCloudBrowserFrameSinkVideoTrackSource expecting a free
+  // factory; R3 doesn't ship one. Call the public ctor via
+  // make_ref_counted directly.
   cb_track_source_ =
-      CreateCloudBrowserFrameSinkVideoTrackSource(std::move(producer));
+      webrtc::make_ref_counted<CloudBrowserFrameSinkVideoTrackSource>(
+          std::move(producer));
   CHECK(cb_track_source_)
-      << "CreateCloudBrowserFrameSinkVideoTrackSource returned null — "
-      << "Cb.startFrameSinkCapture would fail with ServerError on every "
-      << "invocation. ChromelessV2 M2 R4 (CV2-39) requires a non-null "
-      << "track source for the M3 peer-track wiring.";
+      << "make_ref_counted<CloudBrowserFrameSinkVideoTrackSource> "
+      << "returned null — Cb.startFrameSinkCapture would fail with "
+      << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
+      << "requires a non-null track source for the M3 peer-track wiring.";
 
   return content::RESULT_CODE_NORMAL_EXIT;
 }
