@@ -351,6 +351,37 @@ source_set("input_dispatch") {
 }
 
 # ---------------------------------------------------------------------
+# M4 R3 (CV2-43) — mouse + wheel native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderWidgetHost::ForwardMouseEvent / ForwardWheelEvent. Owns the
+# held-button / held-modifier (shared with R4) / click-ramp / wheel-
+# phase state machines and the content→widget coord map (DSF-aware).
+# ---------------------------------------------------------------------
+source_set("input_dispatch_mouse") {
+  sources = [
+    "cb_input_dispatch_mouse.cc",
+    "cb_input_dispatch_mouse.h",
+  ]
+  deps = [
+    "//base",
+    # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
+    ":input_dispatch",
+    # RenderWidgetHost::ForwardMouseEvent / ForwardWheelEvent,
+    # RenderWidgetHostView::GetDeviceScaleFactor + Focus, WebContents::
+    # WasShown + GetRenderViewHost + GetRenderWidgetHostView.
+    "//content/public/browser",
+    # blink::WebMouseEvent / WebMouseWheelEvent / WebInputEvent
+    # modifier flags (kShiftKey / kLeftButtonDown / kPhaseBegan / …).
+    "//third_party/blink/public/common:headers",
+    # ui::ScrollGranularity for WebMouseWheelEvent::delta_units.
+    "//ui/events:events_base",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Embedder glue — our ContentBrowserClient subclass that overrides
 # the virtual added by patches/0001-expose-encoder-factory-injection.
 # patch.
