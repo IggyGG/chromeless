@@ -520,6 +520,29 @@ if [[ -n "${STUB_MODE}" ]]; then
     exit 0
 fi
 
+# SKIP_CDP_VALIDATION=1 short-circuits only STEP 10 (unlike STUB_MODE
+# which skips the earlier build steps). Use when the build pod's
+# container image lacks kubectl: the default chromeless-build pods run
+# from debian:bookworm-slim with no kubectl, so this step's
+# `kubectl apply` fails with exit 127. Observed on build #1 and build
+# #3 (2026-05-17): each consumed all 3 backoffLimit attempts at
+# STEP 10 even though the binary was already successfully built,
+# packaged, and staged at STEPS 6-9. SKIP_CDP_VALIDATION=1 lets the
+# binary ship without round-tripping through CDP validation here;
+# run validation separately from an env that DOES have kubectl, e.g.
+# from a workspace pod via the same manifest path.
+if [[ -n "${SKIP_CDP_VALIDATION:-}" ]]; then
+    log "[SKIP_CDP_VALIDATION=1] skipping cluster CDP validation"
+    log "  -> run validation separately via 'kubectl apply -f ${CHROMELESS_REPO:-?}/infra/k8s/tests/chromeless-cdp-validation.yaml' from an env with kubectl"
+    step_done
+    log ""
+    log "chromeless-build.sh finished successfully"
+    log "  artifact:    ${artifact_path}"
+    log "  image-tag:   chromeless:${image_tag}"
+    log "  log:         ${LOG_FILE}"
+    exit 0
+fi
+
 CDP_VALIDATION_MANIFEST="${CHROMELESS_REPO}/infra/k8s/tests/chromeless-cdp-validation.yaml"
 CDP_VALIDATION_NS="chromeless-tests"
 CDP_VALIDATION_JOB="chromeless-cdp-validation"
