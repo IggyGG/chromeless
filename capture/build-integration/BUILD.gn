@@ -536,10 +536,53 @@ source_set("stats_relay") {
     "//services/network/public/cpp",
     "//services/network/public/mojom",
     "//url",
-    # webrtc::DataChannelObserver + webrtc::DataBuffer live in
-    # //third_party/webrtc/api:libjingle_peerconnection_api, which is
-    # re-exported through the passthrough source_set used everywhere
-    # else in this BUILD.gn.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Native clipboard DC ↔ bridge WS relay (CV2-34, M6 R2).
+#
+# Bidirectional relay between the WebRTC "clipboard" DataChannel and
+# the existing clipboard-bridge sidecar (capture/clipboard-bridge/).
+# Replaces streamer.js's clipboard wiring (deleted in M7).
+#
+# Inbound (DC→bridge): CbClipboardRelay is a DataChannelObserver
+# bound onto the kClipboard channel via M3 R5's BindObserver. Each
+# DC text frame is forwarded verbatim to the bridge's WS source
+# endpoint (default ws://127.0.0.1:9300/clipboard).
+#
+# Outbound (bridge→DC): CbClipboardOutboundServer accepts WS
+# connections from the bridge's WS sink (default 127.0.0.1:9301
+# path /clipboard). Each frame is forwarded via dc_host->Send(
+# kClipboard, text).
+#
+# Standalone source_set so:
+#   * the unit test target (cb_clipboard_relay_test.cc, follow-up R)
+#     can link without dragging in the full embedder set
+#   * M3 R wiring can take a clean dep on us to instantiate both
+#     halves of the relay alongside CbStatsRelay
+#
+# Deps mirror :stats_relay; the WS-backend production wiring (TODO
+# in the .cc) will add either //services/network/public/cpp or
+# //net/server depending on the backend choice locked in for R2's
+# follow-up CL. The DRAFT compiles against the existing deps because
+# the WS hop is stubbed behind an interface for testability.
+# ---------------------------------------------------------------------
+source_set("clipboard_relay") {
+  sources = [
+    "cb_clipboard_relay.cc",
+    "cb_clipboard_relay.h",
+  ]
+  deps = [
+    "//base",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    "//net/traffic_annotation",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
