@@ -164,12 +164,15 @@ cmd_apply_patches() {
         # #6 v2: patches/0003 failed because
         # third_party/webrtc_overrides/cloud_browser/BUILD.gn was
         # untracked in the tree (residue from prior partial apply).
-        # `git clean -fdx` removes them: -f actually delete, -d recurse
-        # into untracked directories, -x ignore .gitignore (the
-        # chromium .gitignore would protect out/ etc. but those don't
-        # exist at this point; patch-created files can be anywhere).
-        (cd "${CHROMIUM_SRC}" && git clean -fdx) >/dev/null 2>&1 || \
-            log "WARN: git clean -fdx failed; untracked files may persist"
+        # `git clean -fdx` removes them. -f delete, -d recurse, -x
+        # ignore .gitignore. -e cloud-browser PRESERVES the symlink
+        # that chromeless-build.sh STEP 2 just created (it's untracked
+        # from the chromium tree's POV but load-bearing for the
+        # //cloud-browser/... gn paths that gn gen will resolve in
+        # STEP 5). Without -e the clean would delete the symlink and
+        # gn gen would die on missing target.
+        (cd "${CHROMIUM_SRC}" && git clean -fdx -e cloud-browser) >/dev/null 2>&1 || \
+            log "WARN: clean failed; untracked files may persist"
     fi
 
     log "Applying ${#patches[@]} patch(es) to ${CHROMIUM_SRC}..."
