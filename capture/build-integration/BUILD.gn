@@ -218,6 +218,10 @@ source_set("framesink_capture") {
   sources = [
     "../framesink-capturer/capturer.cc",
     "../framesink-capturer/capturer.h",
+    # M2 R2 (CV2-37) — media::VideoFrame -> webrtc::VideoFrame
+    # conversion + lifetime-pinning VideoFrameBuffer wrappers.
+    "../framesink-capturer/video_frame_conversion.cc",
+    "../framesink-capturer/video_frame_conversion.h",
   ]
   deps = [
     "//base",
@@ -230,6 +234,14 @@ source_set("framesink_capture") {
     "//mojo/public/cpp/bindings",
     "//services/viz/privileged/mojom",
     "//third_party/abseil-cpp:absl",
+    # M2 R2 — libyuv::NV12ToI420 + I420 plane copy helpers in
+    # video_frame_conversion.cc.
+    "//third_party/libyuv",
+    # M2 R2 — webrtc::VideoFrame, NV12BufferInterface,
+    # I420BufferInterface, I420Buffer::Create, rtc::TimeMicros() in
+    # video_frame_conversion.cc. Routed through patches/0003 (widened
+    # by M2 R1) so gn check is happy with the visibility chain.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
     "//ui/gfx/geometry",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
