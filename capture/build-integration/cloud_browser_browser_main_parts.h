@@ -225,7 +225,7 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // peer tracks installed; tearing PCF first would leave dangling
   // weak refs in the broadcaster's sink list. Same ordering rationale
   // as the pcf_-before-threads comment block above.
-  rtc::scoped_refptr<CloudBrowserFrameSinkVideoTrackSource> cb_track_source_;
+  webrtc::scoped_refptr<CloudBrowserFrameSinkVideoTrackSource> cb_track_source_;
 
   bool devtools_http_handler_started_ = false;
 
