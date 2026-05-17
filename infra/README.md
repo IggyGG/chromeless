@@ -8,9 +8,9 @@ runtime.
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Base image: Debian bookworm-slim + Chromium + Xvfb + PulseAudio (null sink) + python3 + supervisord. |
-| `supervisord.conf` | Process supervisor; starts Xvfb → PulseAudio → streamer-static → Chromium → idle-watchdog. |
+| `supervisord.conf` | Process supervisor; starts Xvfb → PulseAudio → Chromium → devtools-proxy → metrics-sidecar. M7: native peer (M1+M3) replaced the in-container streamer page and idle-watchdog. |
 | `pulse-default.pa` | PulseAudio bootstrap script, copied to `/etc/pulse/default.pa`. Two null sinks (cb_audio playback + cb_capture intermediary) plus a loopback — see `audio-routing.md`. |
-| `launch-chromeless.sh` | Wrapper invoked by supervisord; expands `SESSION_ID` / `SIGNALING_URL` / `STREAMER_FPS` into the streamer URL then execs Chromium with the full T28 flag list. |
+| `launch-chromeless.sh` | Wrapper invoked by supervisord; takes `SESSION_ID` / `SIGNALING_URL` / `CHROMIUM_START_URL` and execs Chromium with the native-peer flag list. |
 | `audio-routing.md` | Topology + manual smoke procedure for the in-container audio path. |
 | `lifecycle/` | Container session lifecycle (T31): `entrypoint.sh`, `cold-start.sh`, `idle-watchdog.sh`, `restart.sh`, `README.md`. |
 | `compose.yaml` | Local dev stack: real signaling (T13) + chromium with lifecycle wiring + nginx-served client. |
@@ -18,7 +18,8 @@ runtime.
 ## Build
 
 The build context is the **repo root** (not `infra/`), because the
-Dockerfile COPYs `capture/streamer-page/` alongside `infra/*`:
+Dockerfile COPYs runtime glue from `infra/*` alongside the Chromium
+binary built by `build/chromeless-build.sh`:
 
 ```
 docker build -t chromeless:dev -f infra/Dockerfile .

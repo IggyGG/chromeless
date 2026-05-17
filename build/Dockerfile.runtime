@@ -119,22 +119,20 @@ COPY libEGL.so             /usr/local/bin/libEGL.so
 COPY libGLESv2.so          /usr/local/bin/libGLESv2.so
 COPY libvk_swiftshader.so  /usr/local/bin/libvk_swiftshader.so
 
-# Runtime glue staged by chromeless-build.sh Step 9. The Phase 2
-# supervisor launches the streamer page against cloud_browser_worker
-# and leaves pod-level metrics/event export to the explicit K8s sidecar.
+# Runtime glue staged by chromeless-build.sh Step 9. M7: native peer
+# instantiates the PeerConnection in cloud_browser_main_parts.cc; no
+# in-container streamer page or static page server. Pod-level
+# metrics/event export remains on the explicit K8s sidecar.
 COPY pulse-default.pa     /etc/pulse/default.pa
 COPY supervisord.conf      /etc/supervisor/supervisord.conf
 COPY launch-chromeless.sh    /usr/local/bin/launch-chromeless.sh
 COPY devtools-proxy.sh      /usr/local/bin/devtools-proxy.sh
-COPY streamer-static-server.py /usr/local/bin/streamer-static-server.py
-COPY streamer/ /opt/cloud-browser/streamer/
 COPY lifecycle/ /usr/local/lib/cloud-browser/lifecycle/
 RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bin/entrypoint.sh && \
     ln -sf /usr/local/lib/cloud-browser/lifecycle/cold-start.sh    /usr/local/bin/cold-start.sh && \
-    ln -sf /usr/local/lib/cloud-browser/lifecycle/idle-watchdog.sh /usr/local/bin/idle-watchdog.sh && \
     ln -sf /usr/local/lib/cloud-browser/lifecycle/restart.sh       /usr/local/bin/restart.sh && \
     chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh && \
-    chmod +x /usr/local/bin/launch-chromeless.sh /usr/local/bin/devtools-proxy.sh /usr/local/bin/streamer-static-server.py && \
+    chmod +x /usr/local/bin/launch-chromeless.sh /usr/local/bin/devtools-proxy.sh && \
     chown -R cbuser:cbuser /opt/cloud-browser
 
 # Image-tag metadata for runtime introspection. The kaniko sidecar
