@@ -1,0 +1,93 @@
+# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#
+# gn targets for the cb-chromium native cursor egress pipeline.
+#
+# # Module decomposition (CV2-19 .. CV2-24, M5)
+#
+#   R1 — capture/build-integration/cb_cursor_client.{h,cc}
+#        Embedder aura::client::CursorClient registered on
+#        host_->window(). Already shipped on cv2/m5-cursor-client-hook.
+#   R2 (this file's :cb_cursor_envelope) — pure assembler: maps
+#        ui::mojom::CursorType + visibility into the cursor-channel v1
+#        JSON envelope the existing capture/cursor-watcher/ Go sidecar
+#        emits today. No I/O, no threading. Linkable on its own so
+#        unit tests don't drag in aura / RWH.
+#   R3 — DataChannel emission (binds R2 onto M3 R5's DC host via the
+#        CbCursorClient::change_callback_ seam R1 prepared).
+#   R4 — pointer-position observer (aura mouse-move pre-target obs).
+#   R5 — custom-image plumbing (SkBitmap → PNG → base64, 64 KiB cap).
+#   R6 — physical removal of capture/cursor-watcher/ + the JS probe
+#        in capture/streamer-page/. Locked by the M0 gate harness
+#        assertion #2 (cursor-watcher absence in integration).
+#
+# Only R2 is in this commit; R3..R6 add more source_sets (R3) or
+# delete code from this BUILD.gn's scope (R6) as they land.
+
+import("//testing/test.gni")  # provides test() template
+
+# ---------------------------------------------------------------------
+# R2 — ui::Cursor → cursor-channel v1 envelope assembler.
+#
+# Pure C++ codec: takes an embedder-side cursor change and produces
+# the JSON string the M3 R5 DC host will write. The only chromium
+# deps are //base (Value / JSONWriter / Time) and the
+# ui::mojom::CursorType enum from
+# //ui/base/cursor/mojom:cursor_type_shared. Mirrors the
+# :cb_wire_envelope source_set shape from
+# //cloud-browser/capture/signaling/BUILD.gn — same isolation,
+# same include-paths config, same test() pattern.
+# ---------------------------------------------------------------------
+source_set("cb_cursor_envelope") {
+  sources = [
+    "cb_cursor_envelope.cc",
+    "cb_cursor_envelope.h",
+  ]
+  deps = [
+    "//base",
+    # The mojom-shared variant exposes just the C++ enum without the
+    # full mojo type-mapper graph — keeps the dep cone tight and
+    # mirrors how //ui/aura/client/cursor_client.h picks it up.
+    "//ui/base/cursor/mojom:cursor_type_shared",
+  ]
+  # Repo-root include path so "capture/cursor/cb_cursor_envelope.h"
+  # resolves the same way the encoder + signaling source_sets resolve
+  # their cross-directory cb_*.h includes (M3 R1 wall #-style note).
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R2 unit tests — enum-to-shape round-trip + JSON shape + footgun
+# pins.
+#
+# RED-by-construction pre-T17 — exercises the assembler without
+# spinning up any aura/RWH scaffolding. The K8s chromeless-build Job
+# runs them after first-green. Test file will land in M5 R2 + tests
+# follow-up; commented out for the draft commit so we don't push a
+# BUILD.gn that references a non-existent .cc.
+#
+# TODO(M5-R2-tests): land cb_cursor_envelope_test.cc + uncomment the
+# block below. Fixtures must cover:
+#   * kPointer → "default"   (footgun #1 from the header)
+#   * kHand    → "pointer"   (footgun #1 from the header)
+#   * visible=false overrides shape to "none" regardless of type
+#   * kCustom emits shape="custom" with custom_image_b64 absent (R5
+#     gap, documented + accepted by the protocol)
+#   * seq strictly increases across consecutive Assemble calls on
+#     the same assembler instance
+#   * t pinning via the now_epoch_ms != 0 sentinel is deterministic
+#
+# test("cb_cursor_envelope_unittests") {
+#   sources = [ "cb_cursor_envelope_test.cc" ]
+#   deps = [
+#     ":cb_cursor_envelope",
+#     # test_support + run_all_unittests — same wiring as
+#     # cb_wire_envelope_unittests in
+#     # //cloud-browser/capture/signaling/BUILD.gn (M3 R1 Wall #37).
+#     "//base/test:test_support",
+#     "//base/test:run_all_unittests",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }
