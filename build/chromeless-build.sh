@@ -60,7 +60,19 @@ set -euo pipefail
 
 : "${CHROMELESS_REPO:=/workspace}"
 : "${CHROMIUM_BRANCH_NUMBER:=7727}"
-: "${SCCACHE_DIR:=/sccache}"
+# build-czar 2026-05-17: default SCCACHE_DIR to /work/sccache, not the
+# legacy /sccache hostPath mount. Commit 73e37e7 (S3 sccache backend)
+# removed the per-node /sccache hostPath volume + volumeMount + the
+# SCCACHE_DIR env that pinned it. STEP 4's `mkdir -p ${SCCACHE_DIR}`
+# then tried to create /sccache on the read-only container root →
+# `Permission denied` → STEP 4 abort → OnFailure restart (Build #24
+# vp5rw restart=1). In S3 mode sccache's real cache is the Hetzner
+# bucket; SCCACHE_DIR is only the local daemon scratch/socket dir, so
+# any writable path works. /work is the always-mounted, uid-1000-owned
+# workdir hostPath — safe for both S3 mode and any future local mode.
+# An explicit SCCACHE_DIR env (if ever re-added to the manifest) still
+# overrides this default.
+: "${SCCACHE_DIR:=/work/sccache}"
 : "${SKIP_FETCH:=}"
 : "${STUB_MODE:=}"
 
