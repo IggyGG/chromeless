@@ -99,7 +99,7 @@ new file mode 100644
 index 0000000000..f4503f144e
 --- /dev/null
 +++ b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,75 @@
 +# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 +#
 +# Use of this source code is governed by a BSD-style license that can be
@@ -142,6 +142,7 @@ index 0000000000..f4503f144e
 +    "//third_party/webrtc/api:media_stream_interface",
 +    "//third_party/webrtc/api:scoped_refptr",
 +    "//third_party/webrtc/api/audio:audio_device",
++    "//third_party/webrtc/api/audio:create_audio_device_module",
 +    "//third_party/webrtc/api/audio_codecs:builtin_audio_decoder_factory",
 +    "//third_party/webrtc/api/audio_codecs:builtin_audio_encoder_factory",
 +    "//third_party/webrtc/api/environment:environment",
