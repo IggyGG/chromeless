@@ -146,19 +146,19 @@ source_set("cb_ice_config") {
   ]
   deps = [
     "//base",
-    # The webrtc passthrough exposes the api/ headers under the
-    # //third_party/webrtc/api group; the M1 PCF target depends on
-    # the same group for webrtc::PeerConnectionFactoryDependencies
-    # (peer_connection_interface.h transitively).
-    #
-    # TODO(M3-R3-webrtc-dep): on the first compile pass on triform-8,
-    # confirm whether the right gn label is
-    # "//third_party/webrtc/api:libjingle_peerconnection_api" (the
-    # narrow target that owns peer_connection_interface.h) or one of
-    # the umbrella groups exposed via patches/0003. The M1 PCF
-    # source_set in capture/build-integration/BUILD.gn already pulls
-    # in this header through whatever its current dep is — align
-    # this dep to that exact label rather than guess here.
+    # M3-R3 TODO resolved by build-czar 2026-05-17 (CV2-69 cleanup):
+    # CV2-69 (6e7e425) added `#include "api/peer_connection_interface.h"`
+    # to cb_ice_config.h:92 but the corresponding GN dep was missing —
+    # m67vr (#176 first attempt) fast-failed at STEP-6 with
+    # "'api/peer_connection_interface.h' file not found". Sibling targets
+    # cb_offerer_driver (L239) and cb_dc_host (L327) both use the
+    # webrtc_overrides cloud-browser passthrough as the canonical pattern
+    # for accessing api/ headers (//third_party/webrtc/api/* has
+    # visibility restricted to webrtc/* + webrtc_overrides/* only —
+    # external consumers MUST go through the passthrough exposed by
+    # patches/0003-add-cloud-browser-webrtc-overrides.patch). Mirroring
+    # that pattern here resolves the missing-include error.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
   configs += [
     "//cloud-browser/capture/build-integration:cb_include_paths",
