@@ -12,12 +12,13 @@
 #       //services/network's NetworkContext::CreateWebSocket Mojo
 #       interface).
 #   R3 (:cb_ice_config) — env-driven ICE-server loader.
-#   R4 (:cb_offerer_driver) — offerer handshake driver (SDP+ICE dance,
-#       this commit's new entry).
-#   R5  — DataChannel host (input, cursor, ancillary).
+#   R4 (:cb_offerer_driver) — offerer handshake driver (SDP+ICE dance).
+#   R5 (:cb_dc_host) — DataChannel host: owns the five outbound DCs
+#       (input, stats, cursor, clipboard, file-upload) created on R4's
+#       PeerConnection; provides observer-binding + Send() API for the
+#       M4/M5/M6 consumer modules.
 #
-# R1..R4 are all present in this file; R5 adds more source_sets as
-# it lands.
+# R1..R5 are all present in this file.
 
 import("//testing/test.gni")  # provides test() template used below
 
@@ -267,3 +268,37 @@ source_set("cb_offerer_driver") {
 #   * Inbound `request_renegotiate` (R4 only) → FailWithReason.
 #   * Inbound `offer` → FailWithReason (broker-misroute negative).
 # ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# R5 — DataChannel host.
+#
+# Owns the post-handshake DCs created on M3 R4's PeerConnection.
+# Single source_set with no test() target in R1 — the unit-test
+# scaffolding for the host lands once M1 first-green proves the
+# fixtures actually compile against the chromium-pinned libwebrtc.
+# TODO(M3-R5-tests): cb_dc_host_test.cc + test() target — covers
+# the observer-trampoline forwarding, latched all-open semantics,
+# Send()-while-not-open kInvalidState, Shutdown-before-PC-drop
+# ordering, and the create_called_ idempotence guard.
+# ---------------------------------------------------------------------
+source_set("cb_dc_host") {
+  sources = [
+    "cb_dc_host.cc",
+    "cb_dc_host.h",
+  ]
+  deps = [
+    "//base",
+    # libwebrtc — DataChannelInterface, PeerConnectionInterface,
+    # rtc::CopyOnWriteBuffer. The patches/0003 webrtc deps wired in
+    # M1 Path B (commit 2829fe5) are the upstream of these labels.
+    "//third_party/webrtc/api:libjingle_peerconnection_api",
+    "//third_party/webrtc/api:scoped_refptr",
+    "//third_party/webrtc/rtc_base:copy_on_write_buffer",
+  ]
+  # Repo-root include-path config — propagated transitively so the
+  # `#include "capture/signaling/cb_dc_host.h"` form resolves the same
+  # way M1's headers resolve. Same config M3 R1..R4 use.
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
