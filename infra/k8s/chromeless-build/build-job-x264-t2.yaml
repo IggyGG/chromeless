@@ -1,0 +1,256 @@
+# build-job-x264-t2.yaml — Chromium build Job, x264 profile, triform-2 lane.
+#
+# Third parallel build environment (after triform-8's build-job-x264.yaml and
+# triform-7's build-job-x264-t7.yaml). Created 2026-05-17 because triform-8
+# became OVER-SUBSCRIBED (77 CPU requested vs 48 capacity → OutOfcpu on
+# build #4 launch). triform-2 had 37 CPU free at survey, no GPU, no taints,
+# longhorn-storage=true → ideal cold lane.
+#
+# Why triform-2 vs triform-1: triform-1 is the control-plane node; while
+# its taints are currently removed, avoiding control-plane load preserves
+# scheduler latency for the wider cluster.
+#
+# Why triform-2 vs triform-3: triform-2 had the most free CPU after t1
+# at survey time (37 free vs 39 for t3). Differential is minor; either
+# would work.
+#
+# Sizing matches triform-7/8: requests cpu 12 / mem 96Gi, limits
+# cpu 40 / mem 192Gi, NINJA_PARALLELISM=36. triform-2 has 64 CPU (vs
+# 48 on t7/t8) so there's extra headroom if needed.
+#
+# Cold-start cost: triform-2 has no pre-existing chromium-src on
+# /var/lib/longhorn, so SKIP_FETCH="" (default) forces a full gclient
+# sync (~15-30 min). This is the cost of cross-node parallelism when
+# triform-7/8 are unavailable.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-build-x264-t2
+  namespace: chromeless-build
+  labels:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: build
+    app.kubernetes.io/variant: x264-t2
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 28800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless
+        app.kubernetes.io/component: build
+        app.kubernetes.io/variant: x264-t2
+    spec:
+      restartPolicy: OnFailure
+      # Pinned to triform-2 — third build lane after t8 + t7.
+      nodeName: triform-2
+      nodeSelector:
+        kubernetes.io/hostname: triform-2
+      imagePullSecrets:
+        - name: registry-pull
+      initContainers:
+        - name: bootstrap-our-repo
+          image: debian:bookworm-slim
+          command:
+            - bash
+            - -euxc
+            - |
+              # ---- Phase 1: install OS deps ----------------------
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git python3 python3-pip \
+                build-essential pkg-config sudo lsb-release file \
+                xz-utils zstd rsync findutils libglib2.0-0 gperf \
+                bison flex
+
+              # ---- Phase 2: clone chromeless to /workspace --------
+              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              if [ ! -d /workspace/.git ]; then
+                git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                  "${AUTH_REPO}" /workspace
+                git -C /workspace remote set-url origin "${OUR_REPO}"
+              else
+                cd /workspace \
+                  && git fetch --depth 1 origin "${OUR_REPO_REF}" \
+                  && git reset --hard FETCH_HEAD
+              fi
+              [ -x /workspace/build/chromeless-build.sh ] || {
+                echo "ERROR: /workspace/build/chromeless-build.sh missing"; exit 1; }
+
+              # ---- Phase 3: depot_tools (idempotent) -------------
+              if [ ! -x /work/depot_tools/gn ] && [ ! -d /work/depot_tools/.git ]; then
+                git clone --depth 200 \
+                  https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+                  /work/depot_tools
+              else
+                cd /work/depot_tools && git pull --ff-only || true
+              fi
+
+              # ---- Phase 4: sccache (idempotent) -----------------
+              SCCACHE_VERSION=v0.8.2
+              if [ ! -x /work/depot_tools-bin/sccache ]; then
+                mkdir -p /work/depot_tools-bin
+                curl -fSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+                  -o /tmp/sccache.tar.gz
+                tar -xzf /tmp/sccache.tar.gz -C /tmp
+                install -m 0755 \
+                  "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" \
+                  /work/depot_tools-bin/sccache
+                rm -rf /tmp/sccache.tar.gz "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl"
+              fi
+
+              # ---- Phase 5: workdirs -----------------------------
+              mkdir -p /work/src/chromium /work/artifacts /work/logs
+              chown 1000:1000 /work/src /work/src/chromium /work/artifacts /work/logs
+              chown -R 1000:1000 /work/depot_tools /work/depot_tools-bin
+
+              # ---- Phase 6: x264 staging (idempotent) ------------
+              if [ ! -e /work/system-libs/include/x264.h ]; then
+                apt-get install -y --no-install-recommends libx264-dev
+                mkdir -p /work/system-libs/include /work/system-libs/lib
+                cp -a  /usr/include/x264.h         /work/system-libs/include/
+                cp -a  /usr/include/x264_config.h  /work/system-libs/include/
+                cp -aP /usr/lib/x86_64-linux-gnu/libx264.so* /work/system-libs/lib/
+                chown -R 1000:1000 /work/system-libs
+                ls -la /work/system-libs/include /work/system-libs/lib
+              fi
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              value: "cv2/m2-track-source-deps"
+            - name: FORGEJO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: username
+            - name: FORGEJO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-credentials
+                  key: password
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: build
+          image: debian:bookworm-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -c
+            - |
+              set -euxo pipefail
+
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git python3 python3-pip \
+                build-essential pkg-config lsb-release file \
+                xz-utils zstd rsync findutils libglib2.0-0 gperf \
+                bison flex
+
+              if ! id builder >/dev/null 2>&1; then
+                useradd -m -u 1000 -s /bin/bash builder
+              fi
+              mkdir -p /home/builder/.cache
+              chown -R 1000:1000 /home/builder
+
+              su builder -c '
+                set -euxo pipefail
+                export PATH=/work/depot_tools:/work/depot_tools-bin:/usr/local/bin:/usr/bin:/bin
+                export DEPOT_TOOLS_UPDATE=0
+                export HOME=/home/builder
+                (cd /work/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3 || true
+                exec bash /workspace/build/chromeless-build.sh
+              '
+          env:
+            - name: OUR_REPO
+              value: "https://forgejo.triform.dev/triform/chromeless.git"
+            - name: OUR_REPO_REF
+              # cv2/m2-track-source-deps validates M2 R1 (track-source
+              # webrtc deps in patches/0003) on top of M1's base
+              # (bf3de29 namespace fix from integration/native-peer)
+              # plus main's build.sh self-healing fix (cd429b1).
+              # See cv2/m2-track-source-deps branch tip ae37eed.
+              value: "cv2/m2-track-source-deps"
+            - name: CHROMIUM_BRANCH_NUMBER
+              value: "7727"
+            - name: CHROMELESS_REPO
+              value: "/workspace"
+            - name: CHROMELESS_WORK_ROOT
+              value: "/work"
+            - name: SCCACHE_DIR
+              value: "/sccache"
+            - name: CHROMELESS_BUILD_TARGETS
+              # 4 targets: worker + 3 unittest suites incl. pcf_unittests.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
+            - name: NINJA_PARALLELISM
+              value: "36"
+            - name: SKIP_FETCH
+              # "" — triform-2 has no on-disk chromium tree. Fresh
+              # gclient sync (~15-30 min) is mandatory on first build.
+              # Flip to "1" on subsequent runs once the tree is warm.
+              value: ""
+            - name: STUB_MODE
+              value: ""
+            - name: SCCACHE_IDLE_TIMEOUT
+              value: "0"
+            - name: SCCACHE_CACHE_SIZE
+              value: "80G"
+            - name: CHROMELESS_BUILD_PROFILE
+              value: "x264"
+          resources:
+            requests:
+              cpu: "12"
+              memory: "96Gi"
+            limits:
+              cpu: "40"
+              memory: "192Gi"
+              ephemeral-storage: "8Gi"
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+            - name: sccache
+              mountPath: /sccache
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        # /var/lib/longhorn/chromeless-build/ on triform-2 — fresh on
+        # first build (cold gclient sync ~50-90min). Subsequent runs
+        # reuse depot_tools + sccache like t7/t8.
+        - name: workdir
+          hostPath:
+            path: /var/lib/longhorn/chromeless-build/chromium-src
+            type: DirectoryOrCreate
+        - name: sccache
+          hostPath:
+            path: /var/lib/longhorn/chromeless-build/sccache
+            type: DirectoryOrCreate
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi
