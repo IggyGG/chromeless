@@ -332,16 +332,17 @@ source_set("cb_dc_host") {
   deps = [
     "//base",
     # libwebrtc — DataChannelInterface, PeerConnectionInterface,
-    # rtc::CopyOnWriteBuffer. build-czar M-stack fix (2026-05-17):
-    # //third_party/webrtc/api:* has visibility restricted to webrtc/*
-    # and webrtc_overrides/* — go through the cloud-browser passthrough
-    # which re-exports the api/ surface (DataChannelInterface,
-    # PeerConnectionInterface, scoped_refptr) per patches/0003 + M1-R1
-    # widening. copy_on_write_buffer lives outside api/ and keeps its
-    # own (likely-open) visibility; tentatively retained — if its own
-    # visibility check fires next, fold it under the passthrough too.
+    # rtc::CopyOnWriteBuffer all routed through the cloud-browser
+    # passthrough. build-czar M-stack fix iter 2 (2026-05-17): Build #17
+    # clgjx STEP 5 gn-fail confirmed //third_party/webrtc/rtc_base:
+    # copy_on_write_buffer has identical visibility restriction
+    # (webrtc/* + webrtc_overrides/* only). cb_input_dispatch.cc uses
+    # rtc::CopyOnWriteBuffer too and its BUILD.gn deps only on the
+    # passthrough — proves the M1-R1 widening of
+    # patches/0003-add-cloud-browser-webrtc-overrides.patch already
+    # re-exports CopyOnWriteBuffer transitively. Drop the direct dep
+    # entirely; the passthrough covers it.
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
-    "//third_party/webrtc/rtc_base:copy_on_write_buffer",
   ]
   # Repo-root include-path config — propagated transitively so the
   # `#include "capture/signaling/cb_dc_host.h"` form resolves the same
