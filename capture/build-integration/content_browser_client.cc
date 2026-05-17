@@ -10,6 +10,7 @@
 #include "capture/build-integration/cb_devtools_agent.h"
 #include "capture/build-integration/cloud_browser_browser_main_parts.h"
 #include "capture/encoder/encoder_factory.h"
+#include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_main_parts.h"
 #include "content/public/browser/devtools_manager_delegate.h"
@@ -80,8 +81,17 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
       main_parts_ ? main_parts_->browser_context() : nullptr;
   aura::Window* aura_context =
       main_parts_ ? main_parts_->aura_root_window() : nullptr;
-  return std::make_unique<CbDevToolsManagerDelegate>(default_context,
-                                                     aura_context);
+  // ChromelessV2 M2 R4 (CV2-39) — forward the browser-process video
+  // track source so Cb.startFrameSinkCapture can route into it. By the
+  // time CreateDevToolsManagerDelegate fires (lazy, on first
+  // DevToolsAgentHost::GetOrCreateFor inside PreMainMessageLoopRun
+  // step 3), PreMainMessageLoopRun step 5b has already constructed
+  // cb_track_source_. nullptr is tolerated — the delegate emits a
+  // ServerError envelope on Cb.startFrameSinkCapture rather than UAFing.
+  CloudBrowserFrameSinkVideoTrackSource* cb_track_source =
+      main_parts_ ? main_parts_->cb_track_source() : nullptr;
+  return std::make_unique<CbDevToolsManagerDelegate>(
+      default_context, aura_context, cb_track_source);
 }
 
 }  // namespace cloud_browser

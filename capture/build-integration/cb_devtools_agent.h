@@ -65,9 +65,14 @@ class GURL;
 namespace cloud_browser {
 
 class CloudBrowserBrowserContext;
-class CloudBrowserFrameSinkCapturer;
+class CloudBrowserFrameSinkVideoTrackSource;
 
-// Owns at most one active CloudBrowserFrameSinkCapturer at a time.
+// Routes the Cb.startFrameSinkCapture CDP method into the
+// browser-process-owned CloudBrowserFrameSinkVideoTrackSource (held by
+// CloudBrowserBrowserMainParts, peer-adjacent to the PeerConnection
+// Factory). The delegate no longer owns the capturer — see ChromelessV2
+// M2 R4 (CV2-39) for the ownership move.
+//
 // Lifetime is tied to the DevToolsManagerDelegate, which content/
 // keeps alive for the duration of remote-debugging service.
 class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
@@ -90,9 +95,17 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // is tolerated for safety; the targets created in that path will
   // exhibit the original BUGS-529 symptom (input drops) but the
   // delegate itself stays functional.
+  //
+  // |track_source| is the browser-process-owned video track source
+  // (ChromelessV2 M2 R3/R4 — CV2-38/CV2-39). main_parts holds the
+  // scoped_refptr; we hold a raw_ptr because the delegate is destroyed
+  // before main_parts tears the track source down. nullptr is tolerated
+  // for safety; Cb.startFrameSinkCapture returns a ServerError envelope
+  // when track_source_ is null instead of dispatching the capturer dance.
   explicit CbDevToolsManagerDelegate(
       content::BrowserContext* default_browser_context = nullptr,
-      aura::Window* aura_context_window = nullptr);
+      aura::Window* aura_context_window = nullptr,
+      CloudBrowserFrameSinkVideoTrackSource* track_source = nullptr);
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -185,12 +198,18 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       content::DevToolsAgentHostClientChannel* channel,
       std::string* out_error);
 
-  // The active capturer instance — at most one. Constructed on first
-  // Cb.startFrameSinkCapture; replaced on each subsequent call (the
-  // previous instance's Stop() is implicit in destructor; outstanding
-  // BufferHandleScopes still call Done() through their own RAII path,
-  // see capture/framesink-capturer/capturer.cc::BufferHandleScope).
-  std::unique_ptr<CloudBrowserFrameSinkCapturer> active_capturer_;
+  // Browser-process video track source (ChromelessV2 M2 R3/R4).
+  // NOT owned — main_parts holds the scoped_refptr next to the
+  // PeerConnectionFactory; we hold a raw_ptr for the
+  // HandleStartFrameSinkCapture call site. May be nullptr; null is
+  // treated as a ServerError on the wire.
+  //
+  // Ownership move rationale (CV2-39 §"Ownership recommendation"):
+  // active_capturer_ used to live here; it now lives inside the track
+  // source (along with the ingest callback that feeds the broadcaster),
+  // so the delegate is reduced to a thin "resolve FrameSinkId +
+  // forward the producer remote" trampoline.
+  raw_ptr<CloudBrowserFrameSinkVideoTrackSource> track_source_ = nullptr;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser

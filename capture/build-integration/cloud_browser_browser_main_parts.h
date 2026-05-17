@@ -75,6 +75,7 @@ namespace cloud_browser {
 
 class CbAuraPlatformData;
 class CloudBrowserBrowserContext;
+class CloudBrowserFrameSinkVideoTrackSource;
 
 class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
  public:
@@ -117,6 +118,20 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // ShellBrowserMainParts::browser_context() for the analogous
   // upstream pattern.
   aura::Window* aura_root_window() const;
+
+  // Public read-only accessor for the browser-process video track
+  // source (ChromelessV2 M2 R4 — CV2-39). nullptr until PreMain
+  // MessageLoopRun has constructed it (peer-adjacent with pcf_).
+  // CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate
+  // forwards this raw pointer to CbDevToolsManagerDelegate at delegate-
+  // construction time so Cb.startFrameSinkCapture can route the
+  // resolved FrameSinkId + producer mojo into the track source rather
+  // than owning a CloudBrowserFrameSinkCapturer in the delegate. Raw
+  // pointer (not scoped_refptr) because the consumer never bumps the
+  // refcount — main_parts holds the only strong reference for the
+  // lifetime of the worker. Defined out-of-line so the header doesn't
+  // need to pull in the track-source class definition.
+  CloudBrowserFrameSinkVideoTrackSource* cb_track_source() const;
 
  private:
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
@@ -198,6 +213,19 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   std::unique_ptr<webrtc::Thread> worker_thread_;
   std::unique_ptr<webrtc::Thread> signaling_thread_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
+
+  // ChromelessV2 M2 R4 (CV2-39) — peer-adjacent browser-process video
+  // track source. Owns the CloudBrowserFrameSinkCapturer + R2 frame
+  // conversion + libwebrtc broadcaster (R3 — CV2-38). The
+  // CbDevToolsManagerDelegate Cb.startFrameSinkCapture handler reaches
+  // into this via cb_track_source() to feed it a producer mojo +
+  // resolved FrameSinkId; sinks (the libwebrtc peer track from M3)
+  // attach via AddOrUpdateSink. Reset BEFORE pcf_ in PostMainMessage
+  // LoopRun — the broadcaster may carry sink registrations the PCF's
+  // peer tracks installed; tearing PCF first would leave dangling
+  // weak refs in the broadcaster's sink list. Same ordering rationale
+  // as the pcf_-before-threads comment block above.
+  rtc::scoped_refptr<CloudBrowserFrameSinkVideoTrackSource> cb_track_source_;
 
   bool devtools_http_handler_started_ = false;
 

@@ -22,6 +22,15 @@
 #include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
+#include "capture/framesink-capturer/cb_framesink_video_track_source.h"
+#include "components/viz/host/host_frame_sink_manager.h"
+#include "content/browser/compositor/surface_utils.h"  // nogncheck — same
+                                                       // visibility caveat
+                                                       // as cb_devtools_agent.cc;
+                                                       // patches/0005 unblock
+                                                       // applies here too.
+#include "mojo/public/cpp/bindings/remote.h"
+#include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_socket_factory.h"
 #include "content/public/browser/navigation_controller.h"
@@ -153,6 +162,15 @@ aura::Window* CloudBrowserBrowserMainParts::aura_root_window() const {
     return nullptr;
   }
   return aura_->host()->window();
+}
+
+CloudBrowserFrameSinkVideoTrackSource*
+CloudBrowserBrowserMainParts::cb_track_source() const {
+  // scoped_refptr<...>::get() — bare pointer for the delegate's raw_ptr
+  // (the delegate never bumps the refcount; main_parts holds the only
+  // strong ref). Returns nullptr until PreMainMessageLoopRun step 5b
+  // has constructed cb_track_source_.
+  return cb_track_source_.get();
 }
 
 namespace {
@@ -339,6 +357,42 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   LOG(INFO) << FormatPcfVideoCodecLogLine(
       pcf_->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO).codecs);
 
+  // 5b. Browser-process video track source (ChromelessV2 M2 R4 —
+  //     CV2-39). Peer-adjacent to pcf_: M3 will hand this scoped_refptr
+  //     to PeerConnectionFactoryInterface::CreateVideoTrack(...), and
+  //     the CbDevToolsManagerDelegate Cb.startFrameSinkCapture handler
+  //     reaches it through CloudBrowserContentBrowserClient::Create
+  //     DevToolsManagerDelegate (which forwards cb_track_source() at
+  //     delegate-construction time).
+  //
+  //     R3 (CV2-38) ships CreateCloudBrowserFrameSinkVideoTrackSource()
+  //     as a factory that internally constructs the CloudBrowserFrame
+  //     SinkCapturer with a callback bound to the soon-to-exist track
+  //     source. Matches the CreateCloudBrowserPcf precedent above —
+  //     embedder hands in the externally-allocated dep (producer mojo
+  //     here / threads + ADM there), factory owns the rest.
+  //
+  //     GetHostFrameSinkManager() lives behind the same patches/0005
+  //     visibility patch the delegate originally used; the include
+  //     above carries the matching //nogncheck.
+  viz::HostFrameSinkManager* manager = content::GetHostFrameSinkManager();
+  CHECK(manager) << "HostFrameSinkManager unavailable in PreMainMessageLoopRun "
+                 << "step 5b — the cb-chromium worker cannot construct its "
+                 << "browser-process video track source without it.";
+  mojo::Remote<viz::mojom::FrameSinkVideoCapturer> producer;
+  manager->CreateVideoCapturer(producer.BindNewPipeAndPassReceiver());
+  CHECK(producer.is_bound())
+      << "FrameSinkVideoCapturer producer remote failed to bind during "
+      << "browser-process video track source construction.";
+
+  cb_track_source_ =
+      CreateCloudBrowserFrameSinkVideoTrackSource(std::move(producer));
+  CHECK(cb_track_source_)
+      << "CreateCloudBrowserFrameSinkVideoTrackSource returned null — "
+      << "Cb.startFrameSinkCapture would fail with ServerError on every "
+      << "invocation. ChromelessV2 M2 R4 (CV2-39) requires a non-null "
+      << "track source for the M3 peer-track wiring.";
+
   return content::RESULT_CODE_NORMAL_EXIT;
 }
 
@@ -362,6 +416,15 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // precedent: drop the longer-lived holder first so its dtors don't
   // walk into already-freed shorter-lived state).
   //
+  // ChromelessV2 M2 R4 (CV2-39): drop the video track source FIRST,
+  // before pcf_. The track source's broadcaster carries sink
+  // registrations the M3 peer tracks installed via libwebrtc's
+  // AddOrUpdateSink; tearing pcf_ first would invalidate those
+  // weak refs while the broadcaster still expects to deliver
+  // pending OnFrame() calls. Same drop-the-consumer-before-its-
+  // producer rationale as the pcf_-before-threads ordering below.
+  cb_track_source_ = nullptr;
+
   // pcf_.reset() drops the strong ref the factory holds against the
   // threads + the encoder factory + the ADM; the threads must
   // outlive that drop because the PCF destructor marshals work onto

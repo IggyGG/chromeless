@@ -48,6 +48,7 @@ class VideoEncoderFactory;
 namespace cloud_browser {
 
 class CloudBrowserBrowserMainParts;
+class CloudBrowserFrameSinkVideoTrackSource;
 
 class CloudBrowserContentBrowserClient : public content::ContentBrowserClient {
  public:

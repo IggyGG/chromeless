@@ -24,24 +24,17 @@
 //     used by every embedder dispatcher in upstream (shell + headless).
 //
 // HostFrameSinkManager access — known caveat:
-//   content/browser/compositor/surface_utils.h is intentionally
-//   under content/browser/, not content/public/. Embedders typically
-//   reach the host via that path with a 'nogncheck' allowance and a
-//   build-side dep on a content-internal source_set, which the
-//   chromium visibility list rejects for out-of-tree consumers.
-//
-//   For the Phase-2 cloud-browser worker we own the chromium tree
-//   (we apply our own patch series — patches/), so the planned
-//   resolution path is to add a small embedder-exposure patch in
-//   patches/0005-expose-host-frame-sink-manager.patch that re-
-//   exports GetHostFrameSinkManager() through a public header.
-//   Until that patch lands the include below is marked nogncheck
-//   so gn check doesn't fail; the linker still needs the symbol
-//   so the patch is the actual unblocker for autoninja.
-//
-//   This is intentional shape-only behavior matching patches/README.md
-//   §"The patch series is currently shape-only" — first build will
-//   surface the symbol-resolution gap; we add the patch then.
+//   ChromelessV2 M2 R4 (CV2-39) moved the GetHostFrameSinkManager()
+//   call out of this file. It now lives in
+//   cloud_browser_browser_main_parts.cc step 5b, which constructs the
+//   producer mojo + capturer + CloudBrowserFrameSinkVideoTrackSource
+//   at boot time and hands the track source to this delegate via
+//   CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate.
+//   The patches/0005-expose-host-frame-sink-manager.patch + the
+//   matching //nogncheck escape still apply — they just apply over
+//   there now, not here. The shape-only-until-first-build caveat
+//   described in patches/README.md §"The patch series is currently
+//   shape-only" is unchanged in substance.
 
 #include "capture/build-integration/cb_devtools_agent.h"
 
@@ -55,24 +48,15 @@
 #include "ui/base/page_transition_types.h"
 #include "url/gurl.h"
 
-#include "base/functional/bind.h"
-#include "base/functional/callback.h"
 #include "base/logging.h"
-#include "base/memory/scoped_refptr.h"
-#include "capture/framesink-capturer/capturer.h"
+#include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/surfaces/video_capture_target.h"
-#include "components/viz/host/host_frame_sink_manager.h"
-#include "content/browser/compositor/surface_utils.h"  // nogncheck — see file
-                                                       // header note above.
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_agent_host_client_channel.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
-#include "media/base/video_frame.h"
-#include "mojo/public/cpp/bindings/remote.h"
-#include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
 #include "third_party/inspector_protocol/crdtp/cbor.h"
 #include "third_party/inspector_protocol/crdtp/dispatch.h"
 #include "third_party/inspector_protocol/crdtp/serializable.h"
@@ -110,31 +94,38 @@ std::vector<uint8_t> EncodeStartResponse(const std::string& frame_sink_id_str) {
   return out;
 }
 
-// Trampoline that lets us pass the OnFrameCallback as a plain function
-// pointer without bouncing through an instance of the agent. The
-// frame is dropped at the end of this function (refcount → 0 →
-// BufferHandleScope dtor → Done() ack to the producer).
-void LogReceivedFrame(scoped_refptr<media::VideoFrame> frame) {
-  if (!frame) {
-    return;
-  }
-  // INFO so the e2e test log scrape can assert the line is present.
-  // Format intentionally mirrors the test's grep pattern in
-  // tests/e2e/09-cb-chromium-framesink-capture.spec.ts —
-  //   /CloudBrowserFrameSinkCapturer::OnFrameCaptured.*coded_size=/
-  // Keep both in sync if you rename this log line.
-  LOG(INFO) << "CloudBrowserFrameSinkCapturer::OnFrameCaptured "
-            << "coded_size=" << frame->coded_size().ToString()
-            << " timestamp=" << frame->timestamp().InMicroseconds() << "us";
-}
+// NOTE (ChromelessV2 M2 R4 — CV2-39): the LogReceivedFrame
+// trampoline that previously lived here was the drop-and-log shape
+// used to prove the capturer was reachable from a CDP-driven trigger
+// (T55 runtime engagement). With R3's CloudBrowserFrameSinkVideoTrack
+// Source landing, frames flow into the track source's ingest callback
+// → R2 conversion → broadcaster → libwebrtc peer track instead. The
+// trampoline is physically removed from the binary; M0-R3's CI gate
+// asserts `nm` / grep cannot find LogReceivedFrame in the linked
+// cloud_browser_worker (load-bearing physical-absence assertion;
+// matches the M0 contract for "no streamer-side leftovers").
 
 }  // namespace
 
 CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     content::BrowserContext* default_browser_context,
-    aura::Window* aura_context_window)
-    : default_browser_context_(default_browser_context),
+    aura::Window* aura_context_window,
+    CloudBrowserFrameSinkVideoTrackSource* track_source)
+    : track_source_(track_source),
+      default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
+  if (track_source_) {
+    LOG(INFO) << "CbDevToolsManagerDelegate: constructed with track source "
+                 "ptr=" << track_source_.get()
+              << " — Cb.startFrameSinkCapture will route into the browser-"
+                 "process video track source (ChromelessV2 M2 R4).";
+  } else {
+    LOG(WARNING) << "CbDevToolsManagerDelegate: no video track source "
+                    "supplied — Cb.startFrameSinkCapture will fail with a "
+                    "ServerError. Check CloudBrowserContentBrowserClient::"
+                    "CreateDevToolsManagerDelegate wiring against "
+                    "CloudBrowserBrowserMainParts::cb_track_source().";
+  }
   if (default_browser_context_) {
     LOG(INFO) << "CbDevToolsManagerDelegate: constructed with default "
                  "browser context ptr="
@@ -206,6 +197,20 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
     std::string* out_error) {
   DCHECK(out_error);
 
+  // 0. Refuse early if the browser-process video track source isn't
+  //    wired (ChromelessV2 M2 R4 — CV2-39). main_parts is responsible
+  //    for instantiating it next to the PeerConnectionFactory; if
+  //    that wiring is broken we want a structured error envelope on
+  //    the wire, not a UAF in step 4.
+  if (!track_source_) {
+    *out_error =
+        "Cb.startFrameSinkCapture: no CloudBrowserFrameSinkVideoTrackSource "
+        "wired into the DevTools delegate (check "
+        "CloudBrowserBrowserMainParts::cb_track_source() at delegate-ctor "
+        "time)";
+    return {};
+  }
+
   // 1. Resolve the active tab's WebContents from the channel.
   content::DevToolsAgentHost* agent_host = channel->GetAgentHost();
   if (!agent_host) {
@@ -239,40 +244,27 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
     return {};
   }
 
-  // 3. Bind a producer-side mojo::Remote to the host frame sink
-  //    manager's freshly-created FrameSinkVideoCapturer. The receiver
-  //    is sent off to viz; we keep the Remote and pass it to our
-  //    consumer.
+  // 3. Drive the boot-constructed capturer at the resolved target via
+  //    R3's pass-through StartCapture(). The producer-mojo + capturer
+  //    construction dance that used to live here moved to CloudBrowser
+  //    BrowserMainParts step 5b — R3's factory
+  //    (CreateCloudBrowserFrameSinkVideoTrackSource) owns it now.
+  //    Defaults (1280x720 NV12 @ 60Hz from capturer.h:136-138) apply
+  //    unless R5's auto-start policy overrides via
+  //    track_source->Configure() before we land here.
   //
-  //    GetHostFrameSinkManager() lives in content/browser/compositor/
-  //    surface_utils.h — see the file-header note for the visibility
-  //    caveat and the planned patch.
-  viz::HostFrameSinkManager* manager = content::GetHostFrameSinkManager();
-  if (!manager) {
-    *out_error = "Cb.startFrameSinkCapture: HostFrameSinkManager unavailable";
-    return {};
-  }
-  mojo::Remote<viz::mojom::FrameSinkVideoCapturer> producer;
-  manager->CreateVideoCapturer(producer.BindNewPipeAndPassReceiver());
-  if (!producer.is_bound()) {
-    *out_error = "Cb.startFrameSinkCapture: producer remote failed to bind";
-    return {};
-  }
+  // TODO(M2-R4-MULTI-TAB): the boot-time one-capturer model means
+  // Cb.startFrameSinkCapture invocations for a DIFFERENT WebContents
+  // (different FrameSinkId) hit capturer.h:87's idempotent Start
+  // no-op path and silently miss the new target. The M0 e2e gate
+  // only ever drives one start, so this is fine for the R4 unblock;
+  // the multi-tab story belongs to a later R# under CV2-39's
+  // "auto-start policy (R5)" non-goal carve-out (which already names
+  // R5 as the lifecycle owner).
+  track_source_->StartCapture(viz::VideoCaptureTarget(frame_sink_id));
 
-  // 4. Construct the consumer. Replace any previous active capturer —
-  //    the e2e test only ever issues one start; in steady state this
-  //    keeps the agent stateless from a "max 1 in flight" perspective.
-  active_capturer_ = std::make_unique<CloudBrowserFrameSinkCapturer>(
-      std::move(producer), base::BindRepeating(&LogReceivedFrame));
-
-  // 5. Start it on the resolved target. The capturer's defaults
-  //    (1280x720 NV12 @ 60Hz from capturer.h:136-138) are correct
-  //    for the Phase-2 streaming use case — no Configure() override
-  //    necessary.
-  active_capturer_->Start(viz::VideoCaptureTarget(frame_sink_id));
-
-  LOG(INFO) << "Cb.startFrameSinkCapture: started capture on "
-            << frame_sink_id.ToString();
+  LOG(INFO) << "Cb.startFrameSinkCapture: track-source pass-through started "
+            << "capture on " << frame_sink_id.ToString();
 
   return EncodeStartResponse(frame_sink_id.ToString());
 }
