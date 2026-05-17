@@ -600,6 +600,50 @@ test("cloud_browser_encoder_unittests") {
 }
 
 # ---------------------------------------------------------------------
+# M4 R8 — clipboard_copy_request dispatch (CV2-48).
+#
+# Synthesises a Ctrl+C NativeWebKeyboardEvent pair on the focused
+# frame in response to a `clipboard_copy_request` envelope. The
+# resulting clipboard delta flows back over M6 R2's clipboard
+# DataChannel, not the input channel. See the file header for the
+# (A) synthesised-keystroke vs (B) WebContents::Copy() decision +
+# rationale.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_clipboard") {
+  sources = [
+    "cb_input_dispatch_clipboard.cc",
+    "cb_input_dispatch_clipboard.h",
+  ]
+  deps = [
+    "//base",
+    # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
+    # TODO(M4-R8-r1-merge): no-op once R1 merges; today this dep
+    # points at a source_set that only exists on
+    # cv2/m4-input-dc-sink.
+    ":input_dispatch",
+    # R3's WebContentsResolver forward-declared interface (R8
+    # depends on the same interface R4/R5/R6/R7 do).
+    # TODO(M4-R8-r3-merge): no-op once R3 merges; today this dep
+    # points at a source_set that only exists on
+    # cv2/m4-r3-mouse-dispatch.
+    ":input_dispatch_mouse",
+    # R4's CbHeldModifierState — read-only diagnostic dependency
+    # (R8 never mutates the shared state).
+    # TODO(M4-R8-r4-merge): no-op once R4 merges; today this dep
+    # points at a source_set that only exists on
+    # cv2/m4-r4-keyboard-dispatch.
+    ":input_dispatch_keyboard",
+    # RenderWidgetHost::ForwardKeyboardEvent, RenderViewHost,
+    # NativeWebKeyboardEvent.
+    "//content/public/browser",
+    # blink::WebInputEvent::Modifiers bits.
+    "//third_party/blink/public/common:headers",
+  ]
+  configs += [ ":cb_include_paths" ]                # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Unit tests for the browser-process PCF seam (M1 — CV2-26 / CV2-27).
 #
 # RED-by-construction pre-T17 — exercises cloud_browser_pcf.{h,cc}
