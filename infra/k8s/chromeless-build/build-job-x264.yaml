@@ -139,7 +139,12 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # cv2/m2-track-source-deps for M2 R1-R4 validation on t8.
+              # Init container MUST match build container's value so
+              # /workspace has the right script (see 337bc88 for the
+              # bite that taught us this invariant). Flip back to "main"
+              # after M2 merges to main.
+              value: "cv2/m2-track-source-deps"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -228,7 +233,12 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # cv2/m2-track-source-deps for M2 R1-R4 validation on t8.
+              # Init container MUST match build container's value so
+              # /workspace has the right script (see 337bc88 for the
+              # bite that taught us this invariant). Flip back to "main"
+              # after M2 merges to main.
+              value: "cv2/m2-track-source-deps"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
@@ -244,11 +254,13 @@ spec:
               # minus headroom for sccache server + LTO linker.
               value: "36"
             - name: SKIP_FETCH
-              # Empty = fresh gclient sync (first build on triform-8
-              # has no on-disk tree at /var/lib/longhorn/chromeless-build).
-              # Flip to "1" after sync succeeds to skip re-sync on
-              # subsequent runs.
-              value: ""
+              # "1" — triform-8 has chromium-src + sccache warm from
+              # build #1 (main, pre-M1). f9017f5 in build.sh now does
+              # surgical clean (only third_party/webrtc_overrides/
+              # cloud_browser/) so the SKIP_FETCH retry path is safe;
+              # no risk of nuking buildtools/gn etc. like the rootwide
+              # clean did on triform-7.
+              value: "1"
             - name: STUB_MODE
               value: ""
             - name: SCCACHE_IDLE_TIMEOUT
@@ -259,8 +271,11 @@ spec:
               value: "x264"
           resources:
             requests:
-              # Burstable QoS — see build-job.yaml header.
-              cpu: "12"
+              # cpu 6 (not 12) to fit triform-8's actual headroom
+              # ~6.7 free CPU after triform-tf workspace + isolation
+              # builders + longhorn instance-manager. Limit stays at
+              # 40 so autoninja bursts into idle CPU when peers leave.
+              cpu: "6"
               memory: "96Gi"
             limits:
               cpu: "40"
