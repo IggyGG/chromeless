@@ -13,28 +13,20 @@
 #   R3 — capture/build-integration/cb_cursor_xy_join.{h,cc}
 #        Joins R1's type callback with M4 R3's last pointer
 #        snapshot into a JoinedCursorState.
-#   R4 (this file's :cb_cursor_emit_policy) — emission policy
-#        layer above R3: dedupe, debounce, per-channel monotonic
-#        seq, replay buffer for reconnect. No I/O, no threading,
-#        no JSON. Linkable on its own so unit tests don't drag in
-#        the DC host or the M3 R5 plumbing.
-#   R5 — custom-image plumbing (SkBitmap → PNG → base64, 64 KiB cap).
-#   R6 — DataChannel emission glue (binds R3's emit-callback → R4's
-#        Decide() → R2's AssembleAndEncode → M3 R5 DC host's Send).
+#   R4 — capture/cursor/cb_cursor_emit_policy.{h,cc}
+#        Emission policy layer above R3: dedupe, debounce,
+#        per-channel monotonic seq, replay buffer for reconnect.
+#   R5 — capture/cursor/cb_custom_cursor_image.{h,cc}
+#        Pure extractor: ui::Cursor.custom_bitmap() → PNG → base64,
+#        with 64 KiB encoded cap + envelope-apply helper.
+#   R6 — capture/cursor/cb_cursor_dc_emitter.{h,cc}
+#        DataChannel binder: wires R3's emit-callback → R4's Decide
+#        → R2's encode → M3 R5 DC host's Send(kCursor).
 
 import("//testing/test.gni")  # provides test() template
 
 # ---------------------------------------------------------------------
 # R2 — ui::Cursor → cursor-channel v1 envelope assembler.
-#
-# Pure C++ codec: takes an embedder-side cursor change and produces
-# the JSON string the M3 R5 DC host will write. The only chromium
-# deps are //base (Value / JSONWriter / Time) and the
-# ui::mojom::CursorType enum from
-# //ui/base/cursor/mojom:cursor_type_shared. Mirrors the
-# :cb_wire_envelope source_set shape from
-# //cloud-browser/capture/signaling/BUILD.gn — same isolation,
-# same include-paths config, same test() pattern.
 # ---------------------------------------------------------------------
 source_set("cb_cursor_envelope") {
   sources = [
@@ -43,14 +35,8 @@ source_set("cb_cursor_envelope") {
   ]
   deps = [
     "//base",
-    # The mojom-shared variant exposes just the C++ enum without the
-    # full mojo type-mapper graph — keeps the dep cone tight and
-    # mirrors how //ui/aura/client/cursor_client.h picks it up.
     "//ui/base/cursor/mojom:cursor_type_shared",
   ]
-  # Repo-root include path so "capture/cursor/cb_cursor_envelope.h"
-  # resolves the same way the encoder + signaling source_sets resolve
-  # their cross-directory cb_*.h includes (M3 R1 wall #-style note).
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
@@ -58,19 +44,6 @@ source_set("cb_cursor_envelope") {
 
 # ---------------------------------------------------------------------
 # R4 — Cursor-channel emission policy.
-#
-# Pure C++ policy: takes a R3 JoinedCursorState and returns an
-# EmitDecision (emit yes/no + reason). Owns the per-channel monotonic
-# seq counter that R2's wire encoder MUST be threaded with (see
-# header note "Seq divergence note (R2 seq vs R4 seq)"), and the
-# capacity-bounded replay buffer R6 reads on a fresh peer DC bind.
-#
-# Mirrors R2's :cb_cursor_envelope source_set shape — same isolation,
-# same include-paths config, same test() pattern. Lives in
-# capture/cursor/ (not capture/build-integration/) because R4 is pure
-# policy with no chromium-browser deps beyond //base + the cursor
-# mojom enum + R3's JoinedCursorState — it doesn't need to be in the
-# build-integration directory.
 # ---------------------------------------------------------------------
 source_set("cb_cursor_emit_policy") {
   sources = [
@@ -79,17 +52,9 @@ source_set("cb_cursor_emit_policy") {
   ]
   deps = [
     "//base",
-    # M5 R3 — JoinedCursorState struct. R3's :cursor_xy_join is the
-    # smallest source_set that exports the struct definition.
     "//cloud-browser/capture/build-integration:cursor_xy_join",
-    # ui::mojom::CursorType — same mojom-shared variant R2 uses
-    # (keeps the dep cone tight; no full mojo type-mapper graph).
     "//ui/base/cursor/mojom:cursor_type_shared",
   ]
-  # Repo-root include path so "capture/cursor/cb_cursor_emit_policy.h"
-  # and "capture/build-integration/cb_cursor_xy_join.h" resolve the
-  # same way the encoder + signaling source_sets resolve their cross-
-  # directory cb_*.h includes (M3 R1 wall #-style note).
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
@@ -97,10 +62,6 @@ source_set("cb_cursor_emit_policy") {
 
 # ---------------------------------------------------------------------
 # R5 — custom CSS cursor image extractor.
-#
-# Pure C++ helper: reads a ui::Cursor, encodes its SkBitmap as PNG,
-# base64s the bytes, enforces the cursor-channel v1 64 KiB encoded
-# cap, and applies the result onto a R2 V1EnvelopeView.
 # ---------------------------------------------------------------------
 source_set("cb_custom_cursor_image") {
   sources = [
@@ -124,14 +85,37 @@ source_set("cb_custom_cursor_image") {
 }
 
 # ---------------------------------------------------------------------
-# R2 unit tests — enum-to-shape round-trip + JSON shape + footgun
-# pins.
+# R6 — Cursor DataChannel binder + state observer.
 #
-# RED-by-construction pre-T17 — exercises the assembler without
-# spinning up any aura/RWH scaffolding. Test file commented out for
-# the draft commit so we don't push a BUILD.gn that references a
-# non-existent .cc.
-#
+# Integration glue: takes JoinedCursorState edges from R3, runs them
+# through R4's EmitPolicy, encodes via R2's EnvelopeAssembler, and
+# writes onto M3 R5's CbDataChannelHost on CbDcLabel::kCursor. Owns
+# the replay-on-reconnect dance and the pending_while_closed_ slot.
+# ---------------------------------------------------------------------
+source_set("cb_cursor_dc_emitter") {
+  sources = [
+    "cb_cursor_dc_emitter.cc",
+    "cb_cursor_dc_emitter.h",
+  ]
+  deps = [
+    "//base",
+    ":cb_cursor_envelope",
+    ":cb_cursor_emit_policy",
+    "//cloud-browser/capture/build-integration:cursor_xy_join",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    "//third_party/webrtc/api:libjingle_peerconnection_api",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Unit tests (RED-by-construction pre-T17 — all commented out for
+# draft commits so we don't push a BUILD.gn that references a
+# non-existent .cc).
+# ---------------------------------------------------------------------
+
 # test("cb_cursor_envelope_unittests") {
 #   sources = [ "cb_cursor_envelope_test.cc" ]
 #   deps = [
@@ -143,18 +127,21 @@ source_set("cb_custom_cursor_image") {
 #   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
 # }
 
-# ---------------------------------------------------------------------
-# R4 unit tests — dedupe / debounce / seq / replay invariants.
-#
-# RED-by-construction pre-T17. Exercises EmitPolicy with hand-built
-# JoinedCursorState values — no aura, no R3 plumbing, no DC. Test file
-# commented out for the draft commit so we don't push a BUILD.gn that
-# references a non-existent .cc.
-#
 # test("cb_cursor_emit_policy_unittests") {
 #   sources = [ "cb_cursor_emit_policy_test.cc" ]
 #   deps = [
 #     ":cb_cursor_emit_policy",
+#     "//base/test:test_support",
+#     "//base/test:run_all_unittests",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }
+
+# test("cb_cursor_dc_emitter_unittests") {
+#   sources = [ "cb_cursor_dc_emitter_test.cc" ]
+#   deps = [
+#     ":cb_cursor_dc_emitter",
 #     "//base/test:test_support",
 #     "//base/test:run_all_unittests",
 #     "//testing/gtest",
