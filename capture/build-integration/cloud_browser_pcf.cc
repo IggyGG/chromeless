@@ -137,10 +137,18 @@ CreateCloudBrowserDefaultAudioDeviceModule() {
   if (adm != nullptr) {
     return adm;
   }
+  // build-czar iter 4 (2026-05-17): the chromium-bundled libwebrtc has
+  // removed the static webrtc::AudioDeviceModule::Create(kDummyAudio,
+  // task_queue_factory*) factory that this fallback used to call. The
+  // dummy-ADM no-audio path is no longer reachable via a one-liner;
+  // returning nullptr is the chromium-canonical "skip audio entirely"
+  // signal — PCF caller sets deps.adm = nullptr, libwebrtc then bypasses
+  // audio device init. M5.5 R1's CreateCloudBrowserNativeAudioDeviceModule
+  // is the only supported audio path in CV2; a hard nullptr here is
+  // strictly better than a silent dummy that masks native-ADM failures.
   RTC_LOG(LS_WARNING) << "CloudBrowser: native ADM unavailable — "
-                         "falling back to kDummyAudio (no-audio path)";
-  return webrtc::AudioDeviceModule::Create(
-      webrtc::AudioDeviceModule::kDummyAudio, task_queue_factory);
+                         "no-audio path (deps.adm = nullptr)";
+  return nullptr;
 }
 
 std::string FormatPcfVideoCodecLogLine(
