@@ -171,7 +171,11 @@ spec:
             # Track main by default; set to a tag/SHA for reproducible
             # builds (`kubectl set env job/chromeless-build OUR_REPO_REF=v0.2.0`).
             - name: OUR_REPO_REF
-              value: "main"
+              # cv2/m2-track-source-deps for build #4: validates M2 R1
+              # (track-source webrtc deps in patches/0003) on top of
+              # integration/native-peer's M1 base (bf3de29 namespace fix).
+              # Flip back to "main" after M2 validation merges to main.
+              value: "cv2/m2-track-source-deps"
             # Creds for cloning private/internal Forgejo repos. The
             # forgejo-credentials Secret holds username + password
             # (Forgejo PAT). Same Secret pattern used by flux-system
@@ -233,7 +237,11 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # cv2/m2-track-source-deps for build #4: validates M2 R1
+              # (track-source webrtc deps in patches/0003) on top of
+              # integration/native-peer's M1 base (bf3de29 namespace fix).
+              # Flip back to "main" after M2 validation merges to main.
+              value: "cv2/m2-track-source-deps"
             # T113 expects branch number, NOT a full ref. M147 stable
             # tracks 147.0.7727.x — branch 7727. Verify on
             # chromiumdash.appspot.com/branches before each roll.
@@ -274,14 +282,14 @@ spec:
             # so a manual `kubectl set env job/chromeless-build SKIP_FETCH=1`
             # before re-applying skips the multi-hour fetch.
             - name: SKIP_FETCH
-              # Empty = run gclient sync. First build on triform-8 has
-              # no on-disk tree at /var/lib/longhorn/chromeless-build/chromium-src
-              # so the sync is mandatory; subsequent runs can set
-              # SKIP_FETCH=1 to skip the multi-minute fetch and reuse
-              # the on-disk tree (set via `kubectl set env
-              # job/chromeless-build SKIP_FETCH=1` before re-applying,
-              # or edit the file once the tree is populated).
-              value: ""
+              # "1" — triform-8 already has chromium-src synced from
+              # build #1 (against main, pre-M1). cd429b1's build.sh
+              # apply-patches now resets to refs/remotes/branch-heads/
+              # ${CHROMIUM_BRANCH_NUMBER} when LKGM isn't in the shallow
+              # clone, so the tree's stale-from-main-patches state will
+              # be self-healed before patch apply. Saves ~15-30 min vs
+              # a fresh gclient sync.
+              value: "1"
             # STUB_MODE=1 short-circuits the heavy steps — useful
             # for validating Job plumbing without a 4–8h wait.
             # Default off; flip to "1" for the DoD smoke run.
