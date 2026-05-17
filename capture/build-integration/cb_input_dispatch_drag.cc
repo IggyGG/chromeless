@@ -51,7 +51,7 @@ constexpr int kDragOperationCopyV1 = 1;
 // vector. Tolerates malformed entries (missing fields) by skipping
 // them + logging — the protocol acceptance test for drag_start
 // asserts servers MUST NOT crash on partial items.
-std::vector<CbDragItem> ParseItems(const base::Value::List* items_list) {
+std::vector<CbDragItem> ParseItems(const base::ListValue* items_list) {
   std::vector<CbDragItem> out;
   if (!items_list) {
     return out;
@@ -98,7 +98,7 @@ std::vector<CbDragItem> ParseItems(const base::Value::List* items_list) {
   return out;
 }
 
-std::vector<std::string> ParseTypes(const base::Value::List* types_list) {
+std::vector<std::string> ParseTypes(const base::ListValue* types_list) {
   std::vector<std::string> out;
   if (!types_list) {
     return out;
@@ -220,8 +220,8 @@ void CbInputDispatchDrag::DispatchDragStart(const base::DictValue& data,
 
   // Parse + cache payload. Done BEFORE state transition so a malformed
   // items array doesn't leave us in kActive with empty cached payload.
-  const base::Value::List* items_list = data.FindList("items");
-  const base::Value::List* types_list = data.FindList("types");
+  const base::ListValue* items_list = data.FindList("items");
+  const base::ListValue* types_list = data.FindList("types");
   cached_items_ = ParseItems(items_list);
   cached_types_ = ParseTypes(types_list);
 
@@ -352,8 +352,8 @@ void CbInputDispatchDrag::DispatchDrop(const base::DictValue& data,
   // Protocol: drop re-asserts items + types. Overwrite cached state
   // in case the client mutated between drag_start and drop. Per the
   // input-bridge/main.go Dispatch() drop arm.
-  const base::Value::List* items_list = data.FindList("items");
-  const base::Value::List* types_list = data.FindList("types");
+  const base::ListValue* items_list = data.FindList("items");
+  const base::ListValue* types_list = data.FindList("types");
   cached_items_ = ParseItems(items_list);
   cached_types_ = ParseTypes(types_list);
 

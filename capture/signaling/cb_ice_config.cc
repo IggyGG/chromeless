@@ -80,7 +80,7 @@ void TryAppendServer(const base::DictValue& entry,
       return;
     }
     server.urls.push_back(*single);
-  } else if (const base::Value::List* list = urls_value->GetIfList()) {
+  } else if (const base::ListValue* list = urls_value->GetIfList()) {
     for (const auto& v : *list) {
       const std::string* s = v.GetIfString();
       if (s && !s->empty()) {
@@ -126,7 +126,7 @@ ParseIceServersJson(std::string_view raw_json) {
 
   // Accept either the bare array form `[...]` or the wrapped form
   // `{"iceServers": [...]}` — streamer.js accepts both.
-  const base::Value::List* candidate = nullptr;
+  const base::ListValue* candidate = nullptr;
   if (parsed->is_list()) {
     candidate = &parsed->GetList();
   } else if (parsed->is_dict()) {
