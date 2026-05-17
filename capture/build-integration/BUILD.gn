@@ -442,6 +442,36 @@ source_set("input_dispatch_keyboard") {
 }
 
 # ---------------------------------------------------------------------
+# M5 R3 (CV2-21) — cursor x,y join.
+#
+# Tiny coordinator that subscribes to M5 R1's CbCursorClient::
+# CursorChangeCallback (type + visible) and on each fire reads M4 R3's
+# CbInputDispatchMouse::last_pointer() snapshot (x, y, buttons, at),
+# assembling a JoinedCursorState that M5 R2 then formats + emits on
+# the cursor DataChannel.
+# ---------------------------------------------------------------------
+source_set("cursor_xy_join") {
+  sources = [
+    "cb_cursor_xy_join.cc",
+    "cb_cursor_xy_join.h",
+  ]
+  deps = [
+    "//base",
+    # M5 R1 — CbCursorClient + CursorChangeCallback. Lives in
+    # :embedder per R1's BUILD.gn diff.
+    ":embedder",
+    # M4 R3 — CbInputDispatchMouse + CbLastPointerSnapshot struct.
+    ":input_dispatch_mouse",
+    # ui::mojom::CursorType — already a public_dep of //ui/aura which
+    # :embedder pulls in transitively, but R3's header includes the
+    # mojom-forward directly so make the dep explicit.
+    "//ui/base/cursor/mojom:cursor_type_shared",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Embedder glue — our ContentBrowserClient subclass that overrides
 # the virtual added by patches/0001-expose-encoder-factory-injection.
 # patch.
