@@ -286,6 +286,38 @@ source_set("cloud_browser_pcf") {
 }
 
 # ---------------------------------------------------------------------
+# Input DataChannel sink (M4 — CV2-41).
+#
+# webrtc::DataChannelObserver subclass that consumes the v1 input wire
+# protocol (docs/protocols/input-channel.md) on the libwebrtc signaling
+# thread and PostTask's a typed dispatch onto BrowserThread::UI. The
+# delegate interface stays empty-ish for R1 (LoggingDelegate); R3 / R4 /
+# R5 / R6 / R7 / R8 of M4 plug in real RWHV / Input.* / touch / drag
+# injection.
+#
+# Standalone source_set so:
+#   * the unit test target (R1 ships with cb_input_dispatch_test.cc)
+#     can link only this without dragging in the full embedder set
+#   * M3 R can take a clean dep on us to wire the observer into the
+#     "input" DataChannel without coupling to embedder internals
+# ---------------------------------------------------------------------
+source_set("input_dispatch") {
+  sources = [
+    "cb_input_dispatch.cc",
+    "cb_input_dispatch.h",
+  ]
+  deps = [
+    "//base",
+    # webrtc::DataChannelObserver + webrtc::DataBuffer live in
+    # //third_party/webrtc/api:libjingle_peerconnection_api, which is
+    # re-exported through the passthrough source_set.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Embedder glue — our ContentBrowserClient subclass that overrides
 # the virtual added by patches/0001-expose-encoder-factory-injection.
 # patch.
