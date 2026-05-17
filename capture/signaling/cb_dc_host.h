@@ -265,7 +265,7 @@ class CbDataChannelHost {
   //     UI thread interacts with the host only via the public Send()
   //     + BindObserver() APIs, which are thread-safe.
   CbDataChannelHost(
-      rtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+      webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
       CbDataChannelHostObserver* host_observer,
       scoped_refptr<base::SequencedTaskRunner> signaling_task_runner);
 
@@ -360,7 +360,7 @@ class CbDataChannelHost {
 
   // Backing storage. Index = static_cast<size_t>(CbDcLabel).
   struct ChannelSlot {
-    rtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
     std::unique_ptr<ChannelObserver> trampoline;
     bool ever_opened = false;  // latched on first kOpen
   };
@@ -380,7 +380,7 @@ class CbDataChannelHost {
   // destruct BEFORE |pc_| so trampoline UnregisterObserver lands on
   // a still-alive DataChannel that's still attached to a still-alive
   // PC. The dtor runs Shutdown() first, which is belt-and-braces.
-  rtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
   raw_ptr<CbDataChannelHostObserver> host_observer_;
   scoped_refptr<base::SequencedTaskRunner> signaling_task_runner_;
 

@@ -66,7 +66,7 @@ const char* StateName(OffererState s) {
 // ---------------------------------------------------------------------
 
 CbOffererDriver::CbOffererDriver(
-    rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
+    webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
     SignalingWsClient* ws_client,
     webrtc::PeerConnectionInterface::RTCConfiguration ice_config,
     OffererDriverObserver* observer,
@@ -274,7 +274,7 @@ void CbOffererDriver::OnRenegotiationNeeded() {
 }
 
 void CbOffererDriver::OnDataChannel(
-    rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) {
   // The browser peer is the offerer and never receives inbound
   // DataChannels in v1 — the portal client never opens one. M4 / M5
   // create channels FROM the browser side, observed via their own
@@ -284,8 +284,8 @@ void CbOffererDriver::OnDataChannel(
 }
 
 void CbOffererDriver::OnAddTrack(
-    rtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
-    const std::vector<rtc::scoped_refptr<webrtc::MediaStreamInterface>>&
+    webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+    const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>&
         streams) {
   // v1 contract: browser sends, never receives. Sanity-log.
   VLOG(1) << kLogPrefix << "OnAddTrack receiver kind="
@@ -294,7 +294,7 @@ void CbOffererDriver::OnAddTrack(
 }
 
 void CbOffererDriver::OnTrack(
-    rtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver) {
+    webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver) {
   VLOG(2) << kLogPrefix
           << "OnTrack mid=" << transceiver->mid().value_or("-");
 }
@@ -449,7 +449,7 @@ void CbOffererDriver::HopHandleCreateOfferSuccess(std::string sdp_type,
   state_ = OffererState::kSettingLocal;
   pc_->SetLocalDescription(
       std::move(local),
-      rtc::scoped_refptr<webrtc::SetLocalDescriptionObserverInterface>(
+      webrtc::scoped_refptr<webrtc::SetLocalDescriptionObserverInterface>(
           this));
 }
 
@@ -596,7 +596,7 @@ void CbOffererDriver::HandleAnswerEnvelope(const Envelope& env) {
   state_ = OffererState::kSettingRemote;
   pc_->SetRemoteDescription(
       std::move(remote),
-      rtc::scoped_refptr<webrtc::SetRemoteDescriptionObserverInterface>(
+      webrtc::scoped_refptr<webrtc::SetRemoteDescriptionObserverInterface>(
           this));
 }
 

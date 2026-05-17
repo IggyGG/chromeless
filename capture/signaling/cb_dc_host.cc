@@ -147,7 +147,7 @@ class CbDataChannelHost::ChannelObserver
 // ---------------------------------------------------------------------
 
 CbDataChannelHost::CbDataChannelHost(
-    rtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
     CbDataChannelHostObserver* host_observer,
     scoped_refptr<base::SequencedTaskRunner> signaling_task_runner)
     : pc_(std::move(pc)),
@@ -280,7 +280,7 @@ SendResult CbDataChannelHost::Send(CbDcLabel label,
   RunOnSignalingSync(base::BindOnce(
       [](CbDataChannelHost* self, CbDcLabel label, std::string body,
          webrtc::RTCError* out) {
-        rtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+        webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
         {
           base::AutoLock lock(self->slots_lock_);
           dc = self->slots_[static_cast<size_t>(label)].dc;
@@ -321,7 +321,7 @@ SendResult CbDataChannelHost::SendBinary(CbDcLabel label,
   RunOnSignalingSync(base::BindOnce(
       [](CbDataChannelHost* self, CbDcLabel label,
          rtc::CopyOnWriteBuffer body, webrtc::RTCError* out) {
-        rtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+        webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
         {
           base::AutoLock lock(self->slots_lock_);
           dc = self->slots_[static_cast<size_t>(label)].dc;

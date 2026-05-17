@@ -239,7 +239,7 @@ class CbOffererDriver
   //               Typically base::SequencedTaskRunner::
   //               GetCurrentDefault() captured at construction.
   CbOffererDriver(
-      rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
+      webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
       SignalingWsClient* ws_client,
       webrtc::PeerConnectionInterface::RTCConfiguration ice_config,
       OffererDriverObserver* observer,
@@ -323,13 +323,13 @@ class CbOffererDriver
       webrtc::PeerConnectionInterface::PeerConnectionState new_state) override;
   void OnRenegotiationNeeded() override;
   void OnDataChannel(
-      rtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override;
+      webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override;
   void OnAddTrack(
-      rtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
-      const std::vector<rtc::scoped_refptr<webrtc::MediaStreamInterface>>&
+      webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+      const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>&
           streams) override;
   void OnTrack(
-      rtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver)
+      webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver)
       override;
 
   // webrtc::CreateSessionDescriptionObserver — CreateOffer completion.
@@ -408,14 +408,14 @@ class CbOffererDriver
   void FailWithReason(std::string_view reason);
 
   // Construction-time inputs.
-  rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
   raw_ptr<SignalingWsClient> ws_client_;
   webrtc::PeerConnectionInterface::RTCConfiguration ice_config_;
   raw_ptr<OffererDriverObserver> observer_;
   scoped_refptr<base::SequencedTaskRunner> ui_runner_;
 
   // Established on Start(); released on dtor / FailWithReason / bye.
-  rtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
 
   OffererState state_ = OffererState::kIdle;
 
