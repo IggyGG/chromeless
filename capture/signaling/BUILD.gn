@@ -1,0 +1,66 @@
+# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#
+# gn targets for the cb-chromium ↔ physics signaling client.
+#
+# # Module decomposition (CV2-50 .. CV2-54, M3)
+#
+#   R1 (this file's :cb_wire_envelope) — pure codec: typed envelope
+#       struct + JSON encode/decode for the six source-pinned tags.
+#       No I/O, no threading. Linkable on its own so tests don't drag
+#       in the chromium net stack.
+#   R2  — native WebSocket client (rides on //net's WebSocket impl).
+#   R3  — ICE config endpoint fetch + TURN credential rotation.
+#   R4  — PeerConnection wire-up on M1's PCF.
+#   R5  — DataChannel host (input, cursor, ancillary).
+#
+# Only R1 is in this commit; R2..R5 add more source_sets to this same
+# BUILD.gn as they land.
+
+import("//testing/test.gni")  # provides test() template used below
+
+# ---------------------------------------------------------------------
+# R1 — wire-envelope codec.
+#
+# Pure C++ ↔ JSON codec, no I/O. The only chromium dep is //base for
+# base::JSONReader / base::JSONWriter / base::Value. The repo-root
+# include path config lives in capture/build-integration/BUILD.gn —
+# tests + the embedder pick it up via the existing :cb_include_paths
+# config; this BUILD.gn references the codec target by absolute label.
+# ---------------------------------------------------------------------
+source_set("cb_wire_envelope") {
+  sources = [
+    "cb_wire_envelope.cc",
+    "cb_wire_envelope.h",
+  ]
+  deps = [
+    "//base",
+  ]
+  # Repo-root include path so "capture/signaling/cb_wire_envelope.h"
+  # resolves the same way the encoder + PCF source_sets resolve their
+  # "capture/build-integration/cloud_browser_pcf.h" includes. T17 +
+  # M1's Wall #20 — propagated transitively.
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R1 unit tests — round-trip + negative.
+#
+# RED-by-construction pre-T17 — exercises Decode/Encode without
+# spinning up any chromium browser-process scaffolding. The K8s
+# chromeless-build Job runs them after first-green.
+# ---------------------------------------------------------------------
+test("cb_wire_envelope_unittests") {
+  sources = [ "cb_wire_envelope_test.cc" ]
+  deps = [
+    ":cb_wire_envelope",
+    # See cloud_browser_encoder_unittests in
+    # capture/build-integration/BUILD.gn — Wall #37. test_support
+    # provides TestSuite + helpers; run_all_unittests supplies main().
+    "//base/test:run_all_unittests",
+    "//testing/gmock",
+    "//testing/gtest",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
