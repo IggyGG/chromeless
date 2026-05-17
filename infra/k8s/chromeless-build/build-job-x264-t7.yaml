@@ -133,7 +133,16 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # MUST stay in sync with the build container's
+              # OUR_REPO_REF below. The init container clones this ref
+              # into /workspace; the build container executes
+              # /workspace/build/chromeless-build.sh from THAT ref's
+              # snapshot. Mismatch silently runs an old script — bit us
+              # 2026-05-17: init=main + build=cv2/m2 meant the
+              # SKIP_CDP_VALIDATION fix on cv2/m2's script never ran
+              # because /workspace had main's older script. Build #5
+              # attempts 1 + 2 both hit STEP 10 exit 127.
+              value: "cv2/m2-track-source-deps"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
