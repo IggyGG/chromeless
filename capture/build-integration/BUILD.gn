@@ -736,10 +736,14 @@ source_set("input_dispatch_mouse") {
     # RenderWidgetHost::ForwardMouseEvent / ForwardWheelEvent,
     # RenderWidgetHostView::GetDeviceScaleFactor + Focus, WebContents::
     # WasShown + GetRenderViewHost + GetRenderWidgetHostView.
+    # build-czar iter 3 (2026-05-17): //content/public/browser re-exports
+    # blink::WebMouseEvent / WebMouseWheelEvent / WebInputEvent via its
+    # public_deps (RenderWidgetHost forward APIs take WebMouseEvent& by
+    # contract). //third_party/blink/public/common:headers visibility
+    # excludes //cloud-browser/* — direct dep was a gn-check fail at
+    # STEP 5 (Build #19 6vljq); the transitive re-export through
+    # content is the same documented pattern as webrtc_api_passthrough.
     "//content/public/browser",
-    # blink::WebMouseEvent / WebMouseWheelEvent / WebInputEvent
-    # modifier flags (kShiftKey / kLeftButtonDown / kPhaseBegan / …).
-    "//third_party/blink/public/common:headers",
     # ui::ScrollGranularity for WebMouseWheelEvent::delta_units.
     "//ui/events:events_base",
   ]
@@ -773,11 +777,13 @@ source_set("input_dispatch_keyboard") {
     # keyboard dispatcher.
     ":input_dispatch_mouse",
     # RenderWidgetHost::ForwardKeyboardEvent, RenderWidgetHostView,
-    # NativeWebKeyboardEvent.
+    # NativeWebKeyboardEvent. build-czar iter 3 (2026-05-17):
+    # //content/public/browser re-exports blink::WebKeyboardEvent +
+    # WebInputEvent::Modifiers via its public_deps (NativeWebKeyboardEvent
+    # is itself a blink-event wrapper). //third_party/blink/public/common
+    # :headers visibility excludes //cloud-browser/* — using the content
+    # re-export path same as input_dispatch_mouse above.
     "//content/public/browser",
-    # blink::WebKeyboardEvent::kTextLengthCap +
-    # blink::WebInputEvent::Modifiers bits.
-    "//third_party/blink/public/common:headers",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
@@ -1035,10 +1041,10 @@ source_set("input_dispatch_clipboard") {
     # cv2/m4-r4-keyboard-dispatch.
     ":input_dispatch_keyboard",
     # RenderWidgetHost::ForwardKeyboardEvent, RenderViewHost,
-    # NativeWebKeyboardEvent.
+    # NativeWebKeyboardEvent. build-czar iter 3 (2026-05-17):
+    # //content/public/browser re-exports blink::WebInputEvent::Modifiers
+    # transitively (same fix as input_dispatch_mouse + _keyboard above).
     "//content/public/browser",
-    # blink::WebInputEvent::Modifiers bits.
-    "//third_party/blink/public/common:headers",
   ]
   configs += [ ":cb_include_paths" ]                # T17.
   public_configs = [ ":cb_include_paths" ]
