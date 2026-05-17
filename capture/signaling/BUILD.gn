@@ -10,19 +10,13 @@
 #       chromium net stack.
 #   R2 (:cb_signaling_ws_client) — native WebSocket client (rides on
 #       //services/network's NetworkContext::CreateWebSocket Mojo
-#       interface). This file.
-#   R3  — ICE config endpoint fetch + TURN credential rotation.
+#       interface).
+#   R3 (:cb_ice_config) — env-driven ICE-server loader (this commit).
 #   R4  — PeerConnection wire-up on M1's PCF.
 #   R5  — DataChannel host (input, cursor, ancillary).
 #
-# R1 and R2 are both present in this file; R3..R5 add more source_sets
-# as they land.
-#
-# Pre-merge note (M3 R2 draft) — this BUILD.gn was authored alongside
-# the cv2/m3-signaling-ws-client branch and assumes the cv2/m3-wire-
-# envelope-codec branch (R1, commit f51d5c4) has merged first; the
-# :cb_wire_envelope target below is duplicated verbatim from R1 to
-# keep R2 self-contained until the merge resolves the duplicate.
+# R1, R2, and R3 are all present in this file; R4..R5 add more
+# source_sets as they land.
 
 import("//testing/test.gni")  # provides test() template used below
 
@@ -115,3 +109,100 @@ source_set("cb_signaling_ws_client") {
 # pair); putting it in once we know the chromium revision's exact
 # WebSocket-Mojo arg list keeps the test from drifting twice.
 # ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# R3 — ICE-server config source.
+#
+# Pure config code: reads env vars, parses the streamer.js-shape JSON
+# (via //base/json), and returns a value-typed IceConfig holding a
+# vector of webrtc::PeerConnectionInterface::IceServer ready to slot
+# into RTCConfiguration::servers.
+#
+# Deps:
+#   //base — base::JSONReader / base::Value for the JSON parser.
+#   //third_party/webrtc/api — webrtc::PeerConnectionInterface::
+#     IceServer + IceTransportsType live in
+#     "api/peer_connection_interface.h"; the M1 PCF target already
+#     consumes this header via the same passthrough config
+#     (capture/build-integration/BUILD.gn :cb_include_paths), so the
+#     dep + include path here mirror that pattern.
+#
+# No mojo, no //net, no chromium UI deps — R3 is pre-PeerConnection
+# pure config, deliberately the smallest possible link surface so the
+# config parser is testable without the network service.
+# ---------------------------------------------------------------------
+source_set("cb_ice_config") {
+  sources = [
+    "cb_ice_config.cc",
+    "cb_ice_config.h",
+  ]
+  deps = [
+    "//base",
+    # The webrtc passthrough exposes the api/ headers under the
+    # //third_party/webrtc/api group; the M1 PCF target depends on
+    # the same group for webrtc::PeerConnectionFactoryDependencies
+    # (peer_connection_interface.h transitively).
+    #
+    # TODO(M3-R3-webrtc-dep): on the first compile pass on triform-8,
+    # confirm whether the right gn label is
+    # "//third_party/webrtc/api:libjingle_peerconnection_api" (the
+    # narrow target that owns peer_connection_interface.h) or one of
+    # the umbrella groups exposed via patches/0003. The M1 PCF
+    # source_set in capture/build-integration/BUILD.gn already pulls
+    # in this header through whatever its current dep is — align
+    # this dep to that exact label rather than guess here.
+  ]
+  configs += [
+    "//cloud-browser/capture/build-integration:cb_include_paths",
+  ]
+  public_configs = [
+    "//cloud-browser/capture/build-integration:cb_include_paths",
+  ]
+}
+
+# ---------------------------------------------------------------------
+# R3 unit tests — JSON parser + transport-policy mapper + summary
+# counter + env-defaulting behaviour.
+#
+# RED-by-construction pre-T17 — adds cb_ice_config_test.cc in a
+# follow-up commit. Test plan (each one falsifiable on a single-
+# behaviour change to cb_ice_config.cc):
+#
+#   * ParseIceServersJson:
+#       - empty input → nullopt;
+#       - malformed JSON → nullopt;
+#       - non-array, non-{iceServers:[]} object → nullopt;
+#       - entry without `urls` → dropped, surviving entries kept;
+#       - urls string + urls array forms both work;
+#       - username/credential populated only when present + non-empty;
+#       - all entries dropped → nullopt (so the loader falls back to
+#         default STUN, not an empty list).
+#   * ParseIceTransportPolicy:
+#       - "relay", "RELAY", "Relay" → kRelay;
+#       - "all", "", "garbage", "blocked" → kAll.
+#   * BuildDefaultIceServers:
+#       - returns exactly one server with one url == kDefaultStunUrl.
+#   * SummariseIceServers:
+#       - mixed stun: / stuns: / turn: / turns: / http: counts split
+#         into stun + turn + other respectively.
+#   * LoadConfigFromEnv:
+#       - WEBRTC_ICE_SERVERS unset → config.servers == default STUN;
+#       - WEBRTC_ICE_SERVERS valid → config.servers == parsed list;
+#       - WEBRTC_ICE_TRANSPORT_POLICY=relay → config.transport_policy
+#         == kRelay; otherwise kAll.
+#
+# TODO(M3-R3-tests): the LoadConfigFromEnv tests need a deterministic
+# env-mutation helper. base::ScopedEnvironmentVariableOverride is the
+# right tool here (used elsewhere in chromium browser-process tests);
+# wire it in once we know the chromium revision's exact include path.
+# ---------------------------------------------------------------------
+# test("cb_ice_config_unittests") {
+#   sources = [ "cb_ice_config_test.cc" ]
+#   deps = [
+#     ":cb_ice_config",
+#     "//base/test:run_all_unittests",
+#     "//testing/gmock",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }
