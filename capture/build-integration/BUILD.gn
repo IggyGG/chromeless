@@ -790,6 +790,74 @@ test("cloud_browser_pointer_state_unittests") {
 }
 
 # ---------------------------------------------------------------------
+# Native audio ADM test support — M5.5 R2 (CV2-29).
+#
+# Observer half of the empirical ADM-source RED test. Buffers the
+# 16-bit PCM the libwebrtc Linux ADM delivers and reports RMS;
+# cloud_browser_adm_unittests below links us. Kept as a source_set
+# (not folded into the test target) so future M5.5 tests — e.g.
+# rate-stability or jitter — can share the observer without
+# re-implementing the AudioTransport.
+# ---------------------------------------------------------------------
+source_set("cb_audio_test_recorder") {
+  testonly = true
+  sources = [
+    "../audio/cb_audio_test_recorder.cc",
+    "../audio/cb_audio_test_recorder.h",
+  ]
+  deps = [
+    # AudioTransport is re-exported by webrtc_api_passthrough today —
+    # the M1 PCF test fixture uses the same surface for its
+    # TestAudioDeviceModule callers. If a libwebrtc rebase moves the
+    # header (the TODO in cb_audio_test_recorder.h covers that), the
+    # widening goes in patches/0003, not here.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Unit tests for the native AudioDeviceModule (M5.5 — CV2-28 / CV2-29).
+#
+# RED-by-construction. Three tests in priority order — see
+# capture/audio/cb_audio_device_module_test.cc for the full surface
+# and the escalation block that names which RED categories specifically
+# demand choice (a) (cb_pulse_adm.{h,cc}).
+#
+# The iron test (MonitorSourceDeliversToneRms) gates on
+# CB_M55_R2_TONE_RUNNING=1 — set by harness/m5.5/run_red_test.sh.
+# Without that env, the iron test SKIPS rather than RED-failing on a
+# missing tone — see the M0 R2-fix's SKIPPED-for-verdict semantics.
+#
+# Dependencies:
+#   * :cb_audio_device_module — added by M5.5 R1 (cv2/m55-r1-native-adm).
+#     Until that branch merges to integration/native-peer this target
+#     is RED at gn-check time (target-not-found). Intentional RED-by-
+#     construction; the M0 build pod runs the test only once R1+R2 are
+#     both on integration/native-peer.
+#   * :cb_audio_test_recorder — added by this R2 patch above.
+# ---------------------------------------------------------------------
+test("cloud_browser_adm_unittests") {
+  sources = [ "../audio/cb_audio_device_module_test.cc" ]
+  deps = [
+    ":cb_audio_device_module",                       # M5.5-R1, CV2-28.
+    ":cb_audio_test_recorder",                       # M5.5-R2, this patch.
+    # See cloud_browser_encoder_unittests above — Wall #37.
+    # run_all_unittests supplies main(); test_support brings TaskQueue
+    # helpers some libwebrtc Linux ADM init paths reach for during
+    # InitRecording.
+    "//base/test:run_all_unittests",
+    "//base/test:test_support",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_test_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+}
+
+# ---------------------------------------------------------------------
 # Unit tests for the FrameSink capturer (T55).
 # ---------------------------------------------------------------------
 test("cloud_browser_framesink_capturer_unittests") {
