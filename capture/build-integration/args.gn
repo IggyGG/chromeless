@@ -41,6 +41,18 @@ rtc_include_tests        = false
 enable_libaom            = true
 enable_dav1d_decoder     = true
 
+# ---- Audio Device Module --------------------------------------------
+# webrtc/api/audio:create_audio_device_module + the AudioDeviceModuleImpl
+# gn targets only register when this flag is true. Default is
+# !build_with_chromium = false in chromium builds; webrtc expects
+# chromium embedders to provide their own ADM via the audio service.
+# For our M1 PCF placeholder ADM (kDummyAudio via
+# webrtc::CreateAudioDeviceModule), we DO need the webrtc internal
+# implementation linked in. Set to true to make the symbol available.
+# M5.5 ships the real Pulse-based ADM; this flag stays true since
+# that path also uses webrtc::AudioDeviceModuleImpl under the hood.
+rtc_include_internal_audio_device = true
+
 # ---- Headless / server-shaped ---------------------------------------
 use_ozone                = true
 ozone_platform_headless  = true
