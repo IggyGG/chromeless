@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "api/audio/audio_device.h"
+#include "api/audio/create_audio_device_module.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/create_modular_peer_connection_factory.h"
@@ -103,21 +104,27 @@ CreateCloudBrowserDefaultAudioDeviceModule() {
   // M1's default ADM is the kDummyAudio path — satisfies libwebrtc's
   // non-null ADM expectation but emits no real audio frames.
   //
-  // The TaskQueueFactory is created once per process and intentionally
-  // leaked. AudioDeviceModule::Create takes a bare TaskQueueFactory*
-  // and holds it across the ADM's lifetime; the ADM is owned by the
-  // PCF, which is owned by CloudBrowserBrowserMainParts and torn down
-  // before the process exits. A static/leaky factory is the simplest
-  // shape that satisfies the lifetime requirement without paying the
-  // cost of an extra owning member on every embedder seam.
+  // chromium-bundled libwebrtc replaced the old
+  // `AudioDeviceModule::Create(audio_layer, task_queue_factory*)`
+  // static factory with the free function
+  // `webrtc::CreateAudioDeviceModule(env, audio_layer)` — env is now
+  // the only dependency container (Environment owns the
+  // TaskQueueFactory + clock + field-trial + RTC event log under one
+  // umbrella). See third_party/webrtc/api/audio/create_audio_device_module.h.
+  //
+  // The Environment is constructed once per process and intentionally
+  // leaked, mirroring the old leaky-TaskQueueFactory shape. The ADM
+  // is owned by the PCF, which is owned by CloudBrowserBrowserMainParts
+  // and torn down before the process exits — the leak is bounded by
+  // process lifetime.
   //
   // TODO(M5.5): replace this body with the real cb-audio ADM
   // construction. The signature stays the same; every M1 call site
   // (cloud_browser_browser_main_parts.cc) is audio-agnostic.
-  static webrtc::TaskQueueFactory* const task_queue_factory =
-      webrtc::CreateDefaultTaskQueueFactory().release();
-  return webrtc::AudioDeviceModule::Create(
-      webrtc::AudioDeviceModule::kDummyAudio, task_queue_factory);
+  static const webrtc::Environment* const env =
+      new webrtc::Environment(webrtc::CreateEnvironment());
+  return webrtc::CreateAudioDeviceModule(
+      *env, webrtc::AudioDeviceModule::kDummyAudio);
 }
 
 std::string FormatPcfVideoCodecLogLine(
