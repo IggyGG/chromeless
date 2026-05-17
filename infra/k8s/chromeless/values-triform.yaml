@@ -12,7 +12,10 @@
 #   - triform-4: role=app, GPU-tainted but no GPU label (small box, 20 CPU)
 #   - triform-5: role=app, nvidia.com/gpu.present=true, 8× RTX PRO 6000
 #                Blackwell, 48 CPU / 263 GiB. Tainted nvidia.com/gpu=present:NoSchedule
-#   - triform-6: role=app, build node (T112), 32 CPU / 128 GiB
+#   - triform-6: role=app, control-plane (etcd, apiserver), 32 CPU / 128 GiB.
+#                Was the build node under T112; rehomed to triform-8 in CV2.
+#   - triform-8: role=app, build node (T112 + T119 + CV2-rehome), 48 CPU / 128 GiB.
+#                hostPath at /var/lib/longhorn/chromeless-build/{chromium-src,sccache}.
 #   - Ingress: nginx (k8s.io/ingress-nginx)
 #   - Cluster issuers: letsencrypt-production (preferred), letsencrypt-prod
 #   - GPU: nvidia-device-plugin DaemonSet only; no GPU operator,
@@ -151,9 +154,9 @@ controller:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 500m, memory: 256Mi }
   region: triform-eu
-  # Keep the controller off triform-5 (GPU; tainted) and triform-6
-  # (build; saturated when a build is running). triform-2 / -3 / -1
-  # are all fine; let the scheduler pick.
+  # Keep the controller off triform-5 (GPU; tainted) and triform-8
+  # (build; saturated when a chromium build is running). triform-2 / -3
+  # / -1 / -6 are all fine; let the scheduler pick.
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -161,7 +164,7 @@ controller:
           - matchExpressions:
               - key: kubernetes.io/hostname
                 operator: NotIn
-                values: ["triform-5", "triform-6"]
+                values: ["triform-5", "triform-8"]
 
 # ---------------------------------------------------------------------
 # TURN issuer — minted REST credentials for the client. Secrets empty;
@@ -189,7 +192,7 @@ turnIssuer:
           - matchExpressions:
               - key: kubernetes.io/hostname
                 operator: NotIn
-                values: ["triform-5", "triform-6"]
+                values: ["triform-5", "triform-8"]
 
 # ---------------------------------------------------------------------
 # coturn — DISABLED. Phase 2 demo uses Cloudflare TURN (managed).
@@ -298,9 +301,9 @@ swPool:
   nodeSelector: {}
   # Skip triform-5 (GPU box reserved for defaultPool — its 8 GPUs +
   # 263 GiB RAM stay free for hardware-encode sessions) and skip
-  # triform-6 (build node — busy under T112 image bakes). Use
-  # nodeAntiAffinity rather than a tolerations gate because neither
-  # node carries a NoSchedule taint we'd be tolerating.
+  # triform-8 (build node since CV2-rehome — busy under T112 image
+  # bakes). Use nodeAntiAffinity rather than a tolerations gate
+  # because neither node carries a NoSchedule taint we'd be tolerating.
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -308,7 +311,7 @@ swPool:
           - matchExpressions:
               - key: kubernetes.io/hostname
                 operator: NotIn
-                values: ["triform-5", "triform-6"]
+                values: ["triform-5", "triform-8"]
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
         - weight: 100

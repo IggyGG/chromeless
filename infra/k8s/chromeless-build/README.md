@@ -1,6 +1,6 @@
-# chromeless-build — Chromium build environment on triform-6 (T112 + T119)
+# chromeless-build — Chromium build environment on triform-8 (T112 + T119 + CV2-rehome)
 
-Realises T17 + T101's plan: a K8s Job pinned to triform-6 (32 CPU /
+Realises T17 + T101's plan: a K8s Job pinned to triform-8 (48 CPU /
 128 GiB) that runs `chromeless-build.sh` (T113) to produce
 `cloud_browser_worker` and the encoder unit-test binary from a
 Chromium source checkout + our patch series.
@@ -12,16 +12,16 @@ on `openebs-hostpath`). The first live attempt to bring it up on the
 Triform cluster hit a **provisioner regression**: openebs-localpv-provisioner
 was silent on every new claim across `openebs-hostpath`,
 `triform-data`, and `ceph-rbd`. PVCs from 8+ days earlier remained
-healthy; only new claims failed. Not disk-space (triform-6 has 5.4T
-free on `/data`), not RBAC.
+healthy; only new claims failed. Not disk-space, not RBAC.
 
-The pragmatic workaround: pin the build state to triform-6's
-`/data/chromeless-build/{chromium-src,sccache}` via hostPath. Trade-offs:
+The pragmatic workaround: pin the build state to triform-8's
+`/var/lib/longhorn/chromeless-build/{chromium-src,sccache}` via hostPath.
+Trade-offs:
 
 - **PRO:** works today, no provisioner involvement.
-- **PRO:** /data is /dev/md5 with 5.4T free — bigger than the PVC
-  sizing.
-- **CON:** hostPath isn't portable. The dirs are tied to triform-6;
+- **PRO:** ~937 GiB free at the chosen path — well beyond the PVC
+  sizing the build needs.
+- **CON:** hostPath isn't portable. The dirs are tied to triform-8;
   rebuild the node and you lose the build state.
 - **CON:** needs an init container running as root (with `CHOWN` cap)
   to chown the hostPath for the unprivileged builder user. The
@@ -38,8 +38,8 @@ shows the diff, and resurrecting `pvc-chromium-src.yaml` +
 | File | Purpose |
 |------|---------|
 | `namespace.yaml` | `chromeless-build` ns. Isolated from the runtime ns so build-only quotas / network policies / labels don't leak. |
-| `build-job.yaml` | The Job. nodeName=triform-6, 30 CPU / 120 GiB, OnFailure / backoffLimit=2 / 8h activeDeadline. hostPath volumes per T119. |
-| `cleanup-job.yaml` | **Manual** Job to wipe `/data/chromeless-build/` on triform-6. NOT in the kustomize bundle — operator runs explicitly when starting from scratch. |
+| `build-job.yaml` | The Job. nodeName=triform-8, burstable QoS (12 CPU req / 40 limit, 96 GiB req / 192 GiB limit), OnFailure / backoffLimit=2 / 8h activeDeadline. hostPath volumes per T119. |
+| `cleanup-job.yaml` | **Manual** Job to wipe `/var/lib/longhorn/chromeless-build/` on triform-8. NOT in the kustomize bundle — operator runs explicitly when starting from scratch. |
 | `Dockerfile.build-runner` | Build-runner image: Debian 12 + depot_tools + sccache + git + python3 + sudo + zstd. Pushed to forgejo. |
 | `kustomization.yaml` | `kubectl apply -k .` entry. |
 
@@ -62,7 +62,7 @@ If you don't have a local docker, push from a cluster node:
 
 ```bash
 # On triform-1 or any node with crictl:
-ssh triform-6 \
+ssh triform-8 \
   'sudo ctr -n k8s.io images pull registry.triform.cloud/chromeless/chromeless-build-runner:0.1.0'
 ```
 
@@ -99,8 +99,8 @@ kubectl apply -k infra/k8s/chromeless-build/
 
 This creates the namespace, both PVCs, and the Job. The PVCs bind
 when the Job's Pod is scheduled (openebs-hostpath uses
-WaitForFirstConsumer); since the Job is `nodeName: triform-6`, the
-PVs land on triform-6's local disk.
+WaitForFirstConsumer); since the Job is `nodeName: triform-8`, the
+PVs land on triform-8's local disk.
 
 Validate without applying:
 
@@ -125,8 +125,8 @@ kubectl get pods -n chromeless-build -l job-name=chromeless-build -w
 kubectl get job chromeless-build -n chromeless-build -o jsonpath='{.status}' | jq
 ```
 
-If the Pod is `Pending` for >2 minutes, check that triform-6 has
-schedulable resources (`kubectl describe node triform-6`) and that
+If the Pod is `Pending` for >2 minutes, check that triform-8 has
+schedulable resources (`kubectl describe node triform-8`) and that
 the PVCs are `Pending` waiting for `WaitForFirstConsumer` (this is
 expected before the Pod schedules; abnormal once the Pod is running).
 
@@ -143,7 +143,7 @@ Three retrieval paths, ordered by preference:
 kubectl run -n chromeless-build chromeless-build-debug \
   --image=registry.triform.cloud/chromeless/chromeless-build-runner:0.1.0 \
   --restart=Never \
-  --overrides='{"spec":{"nodeName":"triform-6","volumes":[{"name":"src","persistentVolumeClaim":{"claimName":"chromium-src"}}],"containers":[{"name":"chromeless-build-debug","image":"registry.triform.cloud/chromeless/chromeless-build-runner:0.1.0","command":["sleep","3600"],"volumeMounts":[{"name":"src","mountPath":"/work/src"}]}],"imagePullSecrets":[{"name":"registry-pull"}]}}' \
+  --overrides='{"spec":{"nodeName":"triform-8","volumes":[{"name":"src","persistentVolumeClaim":{"claimName":"chromium-src"}}],"containers":[{"name":"chromeless-build-debug","image":"registry.triform.cloud/chromeless/chromeless-build-runner:0.1.0","command":["sleep","3600"],"volumeMounts":[{"name":"src","mountPath":"/work/src"}]}],"imagePullSecrets":[{"name":"registry-pull"}]}}' \
   -- sleep 3600
 
 kubectl cp -n chromeless-build \
@@ -174,8 +174,8 @@ the per-file overhead of the cp implementation).
 
 ## Iterate on the build
 
-Once the first build is green, **don't** delete `/data/chromeless-build/` on
-triform-6 unless you need to start from scratch. The hostPath dirs
+Once the first build is green, **don't** delete `/var/lib/longhorn/chromeless-build/` on
+triform-8 unless you need to start from scratch. The hostPath dirs
 survive Job deletion, so successive builds reuse the synced
 Chromium tree + sccache. The fast-path is:
 
@@ -217,7 +217,7 @@ To wipe selectively (e.g. preserve sccache for a fast next build),
 edit `cleanup-job.yaml`'s `command` to remove only the directory you
 want gone before applying.
 
-Direct ssh to triform-6 also works — `sudo rm -rf /data/chromeless-build/*` —
+Direct ssh to triform-8 also works — `sudo rm -rf /var/lib/longhorn/chromeless-build/*` —
 but only if you're already comfortable opening that shell. The
 cleanup Job is the kubectl-only path.
 
@@ -235,13 +235,13 @@ T113's expected default.
 | Var | Value | Purpose |
 |-----|-------|---------|
 | `CHROMELESS_REPO` | `/workspace` | Our repo root. Read-only emptyDir mount populated by the bootstrap initContainer. |
-| `CHROMELESS_WORK_ROOT` | `/work` | Work-tree root. Holds `src/chromium/` (Chromium checkout), `artifacts/` (output binaries), `logs/` (timestamped log files). hostPath: `/data/chromeless-build/chromium-src` on triform-6. |
+| `CHROMELESS_WORK_ROOT` | `/work` | Work-tree root. Holds `src/chromium/` (Chromium checkout), `artifacts/` (output binaries), `logs/` (timestamped log files). hostPath: `/var/lib/longhorn/chromeless-build/chromium-src` on triform-8. |
 | `CHROMIUM_BRANCH_NUMBER` | `7727` | Plain integer, NOT `refs/branch-heads/...`. Script constructs the full ref. M147 stable; verify on chromiumdash before each roll. |
 | `CHROMELESS_BUILD_TARGETS` | `cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests` | autoninja targets. |
 | `SCCACHE_DIR` | `/sccache` | Local-disk cache (sccache PVC mount). |
 | `SCCACHE_CACHE_SIZE` | `80G` | sccache eviction trigger. |
 | `SCCACHE_IDLE_TIMEOUT` | `0` | Keep sccache server alive for full build. |
-| `NINJA_PARALLELISM` | `28` | Capped under the 30-CPU container cap; gives lto + sccache server headroom. |
+| `NINJA_PARALLELISM` | `36` | Sized to the 40-CPU container limit minus headroom for sccache server (~1-2 cores) and the LTO linker spike (~2 cores). |
 | `SKIP_FETCH` | `""` | Set to `"1"` on Job retries that don't need a fresh gclient sync. The bootstrap initContainer doesn't set this — flip via `kubectl set env` if needed. |
 | `STUB_MODE` | `""` | Set to `"1"` for plumbing-only validation (skips heavy steps). DoD smoke run uses this. |
 | `OUR_REPO`, `OUR_REPO_REF` | (forgejo URL, `main`) | Diagnostic logging; the initContainer has already synced. |
@@ -261,16 +261,16 @@ T113's expected default.
 
 | Symptom | Diagnosis | Fix |
 |---------|-----------|-----|
-| Pod stuck `Pending` | Triform-6 oversubscribed | `kubectl describe pod -n chromeless-build` — read the events. Resize / drain another workload off triform-6. |
-| Pod stuck `ContainerCreating` with hostPath error | `/data` missing on triform-6, or kubelet refused the hostPath | ssh triform-6, confirm `/data` is mounted (`df -h /data`). hostPath `DirectoryOrCreate` will create `/data/chromeless-build/{chromium-src,sccache}` but the parent must exist. |
+| Pod stuck `Pending` | Triform-8 oversubscribed | `kubectl describe pod -n chromeless-build` — read the events. Resize / drain another workload off triform-8. |
+| Pod stuck `ContainerCreating` with hostPath error | `/var/lib/longhorn` missing on triform-8, or kubelet refused the hostPath | ssh triform-8, confirm `/var/lib/longhorn` is mounted (`df -h /var/lib/longhorn`). hostPath `DirectoryOrCreate` will create `/var/lib/longhorn/chromeless-build/{chromium-src,sccache}` but the parent must exist. |
 | `host-permissions` initContainer fails with "operation not permitted" on chown | Cluster PSP / pod-security blocks the CHOWN cap | The chromeless-build ns is labelled `triform.ai/purpose=build` to allow this. If a tighter cluster policy lands, scope the policy to exclude this ns or replace this initContainer with a privileged hostPath chown via a DaemonSet. |
-| `bootstrap-our-repo` fails on git clone | OUR_REPO unreachable / wrong ref | Check forgejo.triform.dev reachability from triform-6; verify `OUR_REPO_REF` exists. |
+| `bootstrap-our-repo` fails on git clone | OUR_REPO unreachable / wrong ref | Check forgejo.triform.dev reachability from triform-8; verify `OUR_REPO_REF` exists. |
 | `bootstrap-our-repo` reports "build/chromeless-build.sh missing" | T113 hasn't landed the script | Check the `OUR_REPO_REF` branch HEAD. Block until T113. |
-| Main container OOMKilled | Linker peak exceeded 120 GiB | Reduce parallelism: set `NINJA_PARALLELISM` env to 16 (default is 28). Or split: build `cloud_browser_worker` first, then the unit-test target. |
+| Main container OOMKilled | Linker peak exceeded 192 GiB | Reduce parallelism: set `NINJA_PARALLELISM` env to a lower value (default is 36). Or split: build `cloud_browser_worker` first, then the unit-test target. |
 | `gclient sync` HTTPS errors | Egress to chromium.googlesource.com blocked | Confirm cluster egress NetworkPolicies don't drop the chromeless-build ns. (Default: no policy applied; this should be open.) |
 | Build wall-clock > 8h | Pod hits `activeDeadlineSeconds` | First build with cold sccache is the slow one — bump deadline once for the cold run, or wipe sccache only via `cleanup-job.yaml` selectively to keep the chromium tree. |
 | Same patch fails to apply repeatedly | Patch context drift after a Chromium roll | Rebase patches/ against `${CHROMIUM_BRANCH_NUMBER}` HEAD; tracking-issue the rebase. |
-| Free space on `/data` shrinking faster than expected | Stale build state from a previous roll | `kubectl logs -n chromeless-build job/chromeless-build-cleanup` after running cleanup-job; or ssh triform-6 and `du -sh /data/chromeless-build/*`. |
+| Free space on `/var/lib/longhorn` shrinking faster than expected | Stale build state from a previous roll | `kubectl logs -n chromeless-build job/chromeless-build-cleanup` after running cleanup-job; or ssh triform-8 and `du -sh /var/lib/longhorn/chromeless-build/*`. |
 
 ## Cross-references
 

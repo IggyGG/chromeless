@@ -17,8 +17,9 @@ The install wrapper is `infra/k8s/chromeless/install.sh`.
 | triform-2 | worker | 64/263Gi/342Gi | signaling target |
 | triform-3 | worker | 64/263Gi/342Gi | signaling target, role=infra |
 | triform-4 | worker | 20/65Gi/1.8Ti | GPU-tainted but no GPU label (small box) |
-| triform-5 | worker | 48/263Gi/920Gi | **8× RTX PRO 6000 Blackwell** (driver 590.48.01, compute 12.0). Tainted `nvidia.com/gpu=present:NoSchedule` |
-| triform-6 | worker | 32/131Gi/102Gi | Build node (T112) |
+| triform-5 | worker | 48/263Gi/920Gi | **8× RTX PRO 6000 Blackwell** (driver 590.48.01, compute 12.0). Tainted `nvidia.com/gpu=present:NoSchedule`. nvenc build variant pins here. |
+| triform-6 | worker | 32/131Gi/102Gi | App-shaped worker (control-plane: etcd, apiserver). Originally the build node under T112; rehomed to triform-8 in CV2 to free this node's tenancy footprint. |
+| triform-8 | worker | 48/128Gi/~983Gi | **Build node (T112 + T119 + CV2-rehome).** hostPath at `/var/lib/longhorn/chromeless-build/{chromium-src,sccache}`. |
 
 **Cluster services already running:**
 
@@ -87,7 +88,9 @@ DRY_RUN=1 ./infra/k8s/chromeless/install.sh
 `install.sh`:
 
 1. Validates the kubectl context is the Triform cluster (checks for
-   triform-5 + triform-6 nodes).
+   triform-5 + triform-6 nodes — cluster-identity sanity check; both
+   nodes exist on this cluster regardless of which one is the current
+   build host).
 2. Creates the `chromeless` namespace if absent.
 3. Copies the `registry-pull` secret from the `default` ns into
    `chromeless` if absent.

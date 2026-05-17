@@ -64,9 +64,10 @@
 #   SCCACHE_DIR=/sccache
 #   CHROMELESS_BUILD_TARGETS=cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests
 #
-# Resources: 30 CPU / 120 GiB on a 32/128 box (per the brief).
-# Headroom for kubelet, sshd, the sccache server, and the linker's
-# RSS spike during the chrome-target link.
+# Resources: 12 CPU req / 40 CPU limit, 96 GiB req / 192 GiB limit
+# on a 48/128 box (triform-8). See the burstable-QoS rationale at
+# lines 49-55 above. Headroom for kubelet, sshd, the sccache server,
+# and the linker's RSS spike during the chrome-target link.
 #
 # restartPolicy + backoffLimit: OnFailure + 2 = 3 attempts max.
 # Each retry's bootstrap initContainers are idempotent; the hostPath
@@ -270,8 +271,8 @@ spec:
             # so a manual `kubectl set env job/chromeless-build SKIP_FETCH=1`
             # before re-applying skips the multi-hour fetch.
             - name: SKIP_FETCH
-              # Empty = run gclient sync. First build on triform-6 has
-              # no on-disk tree at /data/chromeless-build/chromium-src
+              # Empty = run gclient sync. First build on triform-8 has
+              # no on-disk tree at /var/lib/longhorn/chromeless-build/chromium-src
               # so the sync is mandatory; subsequent runs can set
               # SKIP_FETCH=1 to skip the multi-minute fetch and reuse
               # the on-disk tree (set via `kubectl set env

@@ -73,8 +73,12 @@ command -v kubectl >/dev/null || die "kubectl not on PATH"
 command -v helm    >/dev/null || die "helm not on PATH"
 
 # Sanity: confirm we're talking to the Triform cluster. Cheap check is
-# the presence of triform-5 (GPU) + triform-6 (build) nodes; both
-# exist on Triform and on no other cluster.
+# the presence of triform-5 (GPU) + triform-6 (worker) nodes; both
+# exist on Triform and on no other cluster. (Build host since
+# CV2-rehome is triform-8, but the cluster-identity check below is
+# unchanged — triform-5 and triform-6 still uniquely identify this
+# cluster, and bringing triform-8 into the check would gate install on
+# a node a future operator might temporarily drain during maintenance.)
 if ! kubectl get node triform-5 triform-6 >/dev/null 2>&1; then
     die "kubectl context doesn't see triform-5 + triform-6 nodes;
    refusing to install. Confirm with: kubectl config current-context"
