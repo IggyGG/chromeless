@@ -263,6 +263,18 @@ spec:
               value: "1"
             - name: STUB_MODE
               value: ""
+            - name: SKIP_CDP_VALIDATION
+              # "1" — build container image is debian:bookworm-slim
+              # which has no kubectl. STEP 10's `kubectl apply` of the
+              # CDP validation manifest fails with exit 127. Without
+              # this, STEP 10 forces Job=Failed even though STEPS 1-9
+              # built + packaged + staged a working binary. Observed
+              # on build #3 + build #7 v11 (l6mkv). Per
+              # chromeless-build.sh:520+ (the matching guard added in
+              # a0d1fe9), value=1 short-circuits the kubectl call and
+              # exits 0 cleanly. Same shape as build-job-x264-t7.yaml's
+              # SKIP_CDP_VALIDATION env.
+              value: "1"
             - name: SCCACHE_IDLE_TIMEOUT
               value: "0"
             - name: SCCACHE_CACHE_SIZE
