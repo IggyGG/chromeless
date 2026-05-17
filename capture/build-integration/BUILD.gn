@@ -382,6 +382,68 @@ source_set("cb_audio_options") {
 }
 
 # ---------------------------------------------------------------------
+# Audio send-path lifecycle owner (M5.5 — CV2-32).
+#
+# CbAudioLifecycle owns the M5.5 R4 send-side audio bindings
+# (AudioSourceInterface + AudioTrackInterface + sendonly
+# RtpTransceiverInterface) for the lifetime of a single peer session
+# and binds their teardown to the M3 R4/R6 peer/session lifecycle.
+#
+# The "load-bearing" function of this source_set is the orphan
+# PulseAudio stream window: PrepareForTeardown() calls
+# transceiver->StopStandard() BEFORE the embedder calls driver.Close(),
+# which lets libwebrtc's worker-thread sender teardown unhook the
+# AudioSourceInterface from AudioState (and run ADM::StopRecording on
+# the PulseAudio backend) while the PeerConnection is still alive. See
+# capture/audio/cb_audio_lifecycle.h for the full design discussion.
+#
+# Kept in its own source_set, like :cb_audio_device_module above, so the
+# audio-impl deps stay localized. The :embedder source_set depends on
+# us; the :cloud_browser_pcf source_set does NOT — R5 sits above the
+# PCF, not inside it.
+# ---------------------------------------------------------------------
+# Pre-merge note (M5.5 R5 DRAFT) — this source_set depends on
+# //cloud-browser/capture/signaling:cb_offerer_driver, which is the
+# target M3 R4 (CV2-54) adds in capture/signaling/BUILD.gn on the
+# cv2/m3-r4-offerer-driver branch (and is extended by M3 R6 /
+# CV2-56 on cv2/m3-r6-renegotiate-teardown). Neither of those has
+# landed on integration/native-peer at draft time, so a gn-check
+# pass against integration/native-peer + this branch alone will
+# report the dep as unresolved. The integration merge expects M3
+# R4 + R6 + this branch all on the same base; at that point the
+# resolve becomes trivial.
+#
+# We deliberately do NOT inline a copy of the OffererDriverObserver
+# interface into this source_set — that would defeat M3 R6's contract
+# (single observer interface across the codebase) and force a
+# duplicate-symbol cleanup at integration time. The TODO marker is
+# the integration signal.
+source_set("cb_audio_lifecycle") {
+  sources = [
+    "../audio/cb_audio_lifecycle.cc",
+    "../audio/cb_audio_lifecycle.h",
+  ]
+  deps = [
+    "//base",
+    # TODO(M55-R5-merge-with-m3-r4-r6) — :cb_offerer_driver is added
+    # by cv2/m3-r4-offerer-driver in capture/signaling/BUILD.gn.
+    "//cloud-browser/capture/signaling:cb_offerer_driver",
+    # libwebrtc public-API surfaces (AudioSourceInterface,
+    # AudioTrackInterface, RtpTransceiverInterface,
+    # PeerConnectionInterface) all go through the same passthrough
+    # source_set the rest of M1/M3/M5.5 uses; the API headers are
+    # already re-exported there (see patches/0003-add-cloud-browser-
+    # webrtc-overrides.patch, widened in M1 R1).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    # AudioDeviceModule pointer is held raw_ptr-only for log lines
+    # (see cb_audio_lifecycle.h "ADM ref-cycle care" section). The
+    # API header for it rides the passthrough above; no extra dep.
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Browser-process PeerConnectionFactory seam (M1 — CV2-26 / CV2-27).
 #
 # Extracted from cloud_browser_browser_main_parts.cc so the assembly,
