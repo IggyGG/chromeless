@@ -442,6 +442,61 @@ source_set("input_dispatch") {
 }
 
 # ---------------------------------------------------------------------
+# Send-side audio composition (M5.5 R4 — CV2-31).
+#
+# Wires M5.5 R1's AudioDeviceModule + M5.5 R3's AudioOptions helper
+# into the M3 R4 PeerConnection by way of M1's PCF: CreateAudioSource
+# → CreateAudioTrack → AddTransceiver(sendonly). See
+# capture/audio/cb_audio_track.h for the full composition rationale.
+#
+# Source files live in ../audio/ alongside R1's cb_audio_device_module
+# (mirrors the M5.5 layout convention — audio-related source files
+# share capture/audio/, BUILD targets live in capture/build-integration/
+# because that's where gn-check-clean visibility into the webrtc
+# passthrough lives).
+#
+# This source_set does NOT depend on R1's :cb_audio_device_module
+# source_set — R4 only consumes PCF/PC interfaces, both of which come
+# in via the webrtc-overrides passthrough. R1's ADM only affects what
+# the PCF's AudioSource is bound to under the hood; R4 doesn't see it.
+# TODO(M55-R4-r1-r3-merge): when R1, R3, R4 all land on
+# integration/native-peer, audit whether grouping them under a single
+# `cb_audio` source_set is cleaner than three siblings — for the
+# parallel draft we keep the source_sets disjoint so the merges don't
+# need to coordinate on BUILD.gn ordering.
+#
+# TODO(M55-R4-r3-source-set): R4 takes the cricket::AudioOptions
+# value by const ref so it does NOT include R3's helper header — R4
+# is the consumer of the value, not the producer. The R4 caller
+# (M5.5 R5 lifecycle owner) is the one that #includes R3's header,
+# calls R3's helper, and threads the result through R4. When R3
+# lands and R5 wires the chain end-to-end, the integration commit
+# will add R3's source_set name as a dep on R5's source_set, not
+# on this one. This dep list is intentionally narrow.
+# ---------------------------------------------------------------------
+source_set("cb_audio_track") {
+  sources = [
+    "../audio/cb_audio_track.cc",
+    "../audio/cb_audio_track.h",
+  ]
+  deps = [
+    # PeerConnectionFactoryInterface + PeerConnectionInterface +
+    # AudioSourceInterface + AudioTrackInterface +
+    # RtpTransceiverInterface + cricket::AudioOptions all ride in
+    # via the webrtc-overrides passthrough. M1-R1 already widened
+    # the passthrough to re-export api:libjingle_peerconnection_api
+    # (which transitively exposes the audio + RTP transceiver
+    # interfaces). If gn check rejects this source_set at first
+    # compile, patches/0003 needs to widen further — coordinate
+    # with gn-investigator before doing so (mirror of the M5.5 R1
+    # TODO(M5.5-R1-passthrough)).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # M4 R10 (CV2-50) — last-pointer snapshot + pointer-leave disposition.
 #
 # Standalone state holder + envelope helpers consumed by R3 (mouse).
