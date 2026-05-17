@@ -1,6 +1,7 @@
 // Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 //
-// Native browser-process offerer handshake driver — M3 R4 (CV2-54).
+// Native browser-process offerer handshake driver — M3 R4 (CV2-54),
+// extended by M3 R6 (CV2-56) with renegotiation + explicit teardown.
 //
 // Bridges the four ChromelessV2 native-peer pieces into a single SDP+ICE
 // dance owner:
@@ -13,8 +14,12 @@
 //             in parallel on cv2/m3-r3-ice-config).
 //
 // The browser peer is ALWAYS the offerer; the portal client is the
-// answerer. Renegotiation is unsupported in v1 (R6 territory; not
-// touched here).
+// answerer. Renegotiation IS supported here (R6 amendment, CV2-56):
+// the dance re-enters from kIceInFlight, traverses the same
+// kCreatingOffer → kSettingLocal → kAwaitingAnswer → kSettingRemote →
+// kIceInFlight loop, and emits a fresh `offer` envelope. R6 also adds
+// the `bye`-emitting public teardown path + the inbound
+// `request_renegotiate` handler (which in R4 was a terminal failure).
 //
 // # Sequence (offerer dance)
 //
@@ -86,6 +91,35 @@
 // dropped on terminal failure to surface the failure to oncall via
 // the iceConnectionState=closed transition.
 //
+// Clean teardown (R6) takes the parallel path: SendByeEnvelope() →
+// transition to kClosed → drop PC → observer_->OnClosed. Inbound `bye`
+// from the portal client follows the same path EXCEPT the bye is NOT
+// echoed back on the wire (one-way close envelope; the broker forwards
+// per the wire contract).
+//
+// # Renegotiation contract (R6)
+//
+// Three trigger sites converge on BeginRenegotiation():
+//   1. Embedder calls RequestRenegotiation() — explicit nudge after
+//      mutating transceivers / DataChannels on pc().
+//   2. libwebrtc fires OnRenegotiationNeeded() AFTER the initial dance
+//      completed (i.e. while in kIceInFlight). R4's latch — now
+//      renamed initial_renegotiation_consumed_ — is no longer a
+//      "no more negotiations allowed" gate; it's a one-shot marker
+//      for "have we left kCreatingPc". Once set, subsequent
+//      OnRenegotiationNeeded fires route to BeginRenegotiation()
+//      instead of the initial-dance branch.
+//   3. Inbound `request_renegotiate` envelope from the portal client.
+//      In R4 this was a terminal-fail; in R6 it kicks off CreateOffer.
+//
+// Concurrency: renegotiation is BEGIN-FROM-kIceInFlight ONLY. Triggers
+// that fire mid-dance (e.g. embedder calling RequestRenegotiation()
+// while we're already in kCreatingOffer) are coalesced: a single
+// pending_renegotiation_ flag re-fires the dance on the next return to
+// kIceInFlight. This avoids the SetLocalDescription / SetRemote
+// description observer-thrash that interleaved CreateOffer calls would
+// produce.
+//
 // Cross-references:
 //   * capture/build-integration/cloud_browser_pcf.{h,cc}     (M1)
 //   * capture/signaling/cb_wire_envelope.{h,cc}              (M3 R1)
@@ -137,9 +171,9 @@ enum class OffererState : uint8_t {
   kFailed,          // Terminal failure; PC is dropped.
 };
 
-// Optional terminal-failure + ICE-state observer. The embedder may
-// pass nullptr to use VLOG / LOG(ERROR) only. R7 (CV2-57) wires
-// reconnect on top of OnFailed.
+// Optional terminal-failure + ICE-state + lifecycle observer. The
+// embedder may pass nullptr to use VLOG / LOG(ERROR) only. R7 (CV2-57)
+// wires reconnect on top of OnFailed.
 class OffererDriverObserver {
  public:
   virtual ~OffererDriverObserver() = default;
@@ -150,6 +184,30 @@ class OffererDriverObserver {
   // thread.
   virtual void OnIceConnectionStateChanged(
       webrtc::PeerConnectionInterface::IceConnectionState state) {}
+
+  // Renegotiation lifecycle hooks (R6). The embedder uses these to
+  // gate UI signals (e.g. brief "renegotiating" indicator) and to
+  // suspend non-essential mutations to pc() while the dance is in
+  // flight. Both fire on the driver's UI thread.
+  //
+  // OnRenegotiationStarted fires at the kIceInFlight → kCreatingOffer
+  // transition; OnRenegotiationCompleted fires at the kSettingRemote
+  // → kIceInFlight transition on the renegotiated dance. The pair
+  // does NOT fire for the initial dance — that's signaled implicitly
+  // by the first OnIceConnectionStateChanged(kIceConnectionConnected).
+  virtual void OnRenegotiationStarted(std::string_view trigger) {}
+  virtual void OnRenegotiationCompleted() {}
+
+  // Clean teardown (R6). Fires when either:
+  //   * Embedder called Close() — `reason` is the embedder-supplied
+  //     reason string (default "session ended").
+  //   * Inbound `bye` envelope from the portal client — `reason` is
+  //     "remote bye".
+  //   * The ws client closed cleanly via OnClosed(code, reason) — in
+  //     R4 this transitioned silently; R6 now surfaces it.
+  // The driver has already dropped the PC; reuse requires constructing
+  // a new driver. Fires on the driver's UI thread.
+  virtual void OnClosed(std::string_view reason) {}
 
   // Terminal failure. The driver has already dropped the PC; restart
   // requires tearing the driver down and constructing a new one
@@ -203,6 +261,38 @@ class CbOffererDriver
   //
   // Idempotent: a second call is logged + ignored.
   void Start();
+
+  // Renegotiation trigger (R6). Embedder-initiated nudge after mutating
+  // transceivers, codecs, or DataChannels on pc(). Valid only from
+  // kIceInFlight; called in any other state, the request is coalesced
+  // into pending_renegotiation_ and re-fires on the next transition
+  // back to kIceInFlight. Idempotent across rapid bursts: a second
+  // call while one is in flight sets the pending flag once.
+  //
+  // The embedder typically does NOT need to call this explicitly —
+  // libwebrtc's OnRenegotiationNeeded() callback also routes to
+  // BeginRenegotiation() in R6, so transceiver mutations on pc()
+  // self-trigger. RequestRenegotiation() exists for the cases where
+  // the embedder knows the mutation was renegotiation-relevant but
+  // libwebrtc's heuristic may not have fired (e.g. M4 R8 clipboard
+  // DC label changes the m-line set without a new transceiver).
+  void RequestRenegotiation();
+
+  // Explicit teardown (R6). Sends a `bye` envelope on the wire (best-
+  // effort — failure is logged but does not block teardown), drops
+  // pc_, transitions to kClosed, and fires observer_->OnClosed(reason).
+  //
+  // |reason| is informational only; the bye envelope itself carries
+  // no payload (the wire contract omits the `data` field for `bye`).
+  // Reason flows to the observer + the log line.
+  //
+  // Idempotent: calls in kClosed/kFailed are no-ops. Calls in any
+  // mid-dance state (kCreatingOffer, kSettingLocal, kAwaitingAnswer,
+  // kSettingRemote) collapse the dance cleanly — the bye envelope
+  // arrives at the broker, the broker forwards to any waiting
+  // portal client, and the portal client tears down its half. We do
+  // NOT wait for the broker's ack before transitioning to kClosed.
+  void Close(std::string_view reason);
 
   // State accessor for tests + the embedder's readiness gate.
   OffererState state() const;
@@ -284,6 +374,34 @@ class CbOffererDriver
   void SendIceCandidateEnvelope(
       const webrtc::IceCandidateInterface& candidate);
   void SendIceEndOfCandidates();
+  // R6: emit a `bye` envelope. The wire contract omits the `data`
+  // field entirely (not null, not {}; see cb_wire_envelope.h:27-28),
+  // so the codec layer produces a two-field {type, from} JSON object.
+  // Returns false if the ws Send rejected — caller logs but proceeds
+  // with teardown regardless.
+  bool SendByeEnvelope();
+
+  // R6: renegotiation orchestrator. Three call sites converge here:
+  // RequestRenegotiation(), HopHandleRenegotiationNeeded() (post-
+  // initial), and HandleRequestRenegotiateEnvelope(). |trigger| is
+  // logged + propagated to OnRenegotiationStarted for embedder
+  // observability ("embedder" / "libwebrtc" / "remote").
+  //
+  // Behavior by current state:
+  //   * kIceInFlight              — transition to kCreatingOffer,
+  //                                 issue pc_->CreateOffer, fire
+  //                                 observer_->OnRenegotiationStarted.
+  //   * kCreatingOffer..kSettingRemote — set pending_renegotiation_;
+  //                                 BeginRenegotiation() will be
+  //                                 re-invoked on the next return to
+  //                                 kIceInFlight.
+  //   * any terminal/pre-ICE state — log + drop.
+  void BeginRenegotiation(std::string_view trigger);
+
+  // R6: clean-teardown helper. Idempotent in kClosed/kFailed.
+  // Used by both the public Close() entry point and the inbound `bye`
+  // envelope path. |source| is logged + propagated to OnClosed.
+  void CloseInternal(std::string_view reason, std::string_view source);
 
   // Terminal failure helper. Drops the PC, transitions to kFailed,
   // fires observer_->OnFailed.
@@ -302,9 +420,37 @@ class CbOffererDriver
   OffererState state_ = OffererState::kIdle;
 
   // Latch: OnRenegotiationNeeded() fires once on the initial transceiver
-  // adds; subsequent fires (e.g. M2 R5 capture-lifecycle resume) MUST
-  // NOT trigger a second CreateOffer in v1. R6 territory.
-  bool first_renegotiation_consumed_ = false;
+  // adds; the first fire transitions kCreatingPc → kCreatingOffer. In
+  // R4 this latch stayed set forever (single-offer contract). In R6 it
+  // is still set forever — once the initial dance kicks off, subsequent
+  // OnRenegotiationNeeded fires no longer drive the initial-dance
+  // branch; instead they route to BeginRenegotiation() iff state_ is
+  // kIceInFlight (the steady-state guard). The latch is therefore a
+  // pure "have we left kCreatingPc?" marker now, NOT a "no more
+  // negotiations allowed" gate.
+  bool initial_renegotiation_consumed_ = false;
+
+  // R6: coalesced renegotiation request. If a trigger fires while
+  // state_ is anywhere other than kIceInFlight (e.g. mid-dance), we
+  // set this flag and re-invoke BeginRenegotiation() on the next
+  // transition back to kIceInFlight (in HopHandleSetRemoteDescription
+  // Complete on the renegotiated dance, or after the initial dance
+  // completes).
+  bool pending_renegotiation_ = false;
+
+  // R6: terminal-state guard for the public Close() / CloseInternal()
+  // path. Once set true, further Close() calls and inbound `bye`
+  // envelopes are no-ops; this prevents the observer's OnClosed from
+  // firing more than once if both the embedder and the portal client
+  // initiate teardown concurrently.
+  bool teardown_emitted_ = false;
+
+  // R6: distinguishes the initial dance from renegotiated ones at the
+  // kSettingRemote → kIceInFlight transition. Set true the first time
+  // we reach kIceInFlight; thereafter any subsequent reach is a
+  // renegotiation, which fires OnRenegotiationCompleted on the
+  // observer. We don't reset it on teardown — once true, always true.
+  bool was_in_ice_flight_once_ = false;
 
   SEQUENCE_CHECKER(sequence_checker_);
   base::WeakPtrFactory<CbOffererDriver> weak_factory_{this};

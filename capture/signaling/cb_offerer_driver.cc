@@ -1,6 +1,17 @@
 // Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 //
 // cb_offerer_driver.cc — see cb_offerer_driver.h.
+//
+// R6 (CV2-56) amendments — renegotiation + explicit teardown:
+//   * Renegotiation dance re-enters from kIceInFlight via
+//     BeginRenegotiation(); three trigger sites converge (embedder
+//     RequestRenegotiation, post-initial OnRenegotiationNeeded,
+//     inbound `request_renegotiate` envelope).
+//   * Clean teardown via Close() / inbound `bye` flows through
+//     CloseInternal() + SendByeEnvelope(); the prior R4 path that
+//     handled inbound `bye` is collapsed into CloseInternal().
+//   * Observer gains OnRenegotiationStarted / OnRenegotiationCompleted /
+//     OnClosed hooks; OnFailed semantics unchanged.
 
 #include "capture/signaling/cb_offerer_driver.h"
 
@@ -22,9 +33,11 @@ namespace cloud_browser::signaling {
 namespace {
 
 // Log prefix — "CloudBrowser:" lineage matches the M0 R5 scrape regex
-// family already used by FormatPcfVideoCodecLogLine. The "M3R4 offerer
-// driver:" qualifier is unique to this file so grep is precise.
-constexpr char kLogPrefix[] = "CloudBrowser: M3R4 offerer driver: ";
+// family already used by FormatPcfVideoCodecLogLine. The qualifier
+// "M3R4/R6 offerer driver:" covers both the R4 base class + the R6
+// renegotiation/teardown amendments; grep on "M3R4/R6 offerer driver:"
+// is precise enough for either layer.
+constexpr char kLogPrefix[] = "CloudBrowser: M3R4/R6 offerer driver: ";
 
 const char* StateName(OffererState s) {
   switch (s) {
@@ -116,6 +129,22 @@ void CbOffererDriver::Start() {
                            "OnRenegotiationNeeded after embedder track adds";
 }
 
+void CbOffererDriver::RequestRenegotiation() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (state_ == OffererState::kClosed ||
+      state_ == OffererState::kFailed) {
+    VLOG(1) << kLogPrefix
+            << "RequestRenegotiation ignored, state=" << StateName(state_);
+    return;
+  }
+  BeginRenegotiation("embedder");
+}
+
+void CbOffererDriver::Close(std::string_view reason) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CloseInternal(reason, "embedder");
+}
+
 OffererState CbOffererDriver::state() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return state_;
@@ -163,10 +192,15 @@ void CbOffererDriver::OnClosed(uint16_t code, std::string_view reason) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   VLOG(1) << kLogPrefix << "ws closed code=" << code
           << " reason=" << reason;
-  // Clean close is not a failure. R7 territory for reconnect; for now
-  // the embedder treats kClosed as terminal.
-  state_ = OffererState::kClosed;
-  pc_ = nullptr;
+  // R6: route ws close through the unified teardown path so the
+  // embedder receives OnClosed exactly once across the three close
+  // origins (embedder Close, remote `bye`, ws close). R7 (CV2-57)
+  // will intercept this BEFORE we hit CloseInternal in the reconnect
+  // case — for now ws close is terminal.
+  CloseInternal(
+      std::string("ws closed code=") + std::to_string(code) +
+          " reason=" + std::string(reason),
+      "ws");
 }
 
 void CbOffererDriver::OnError(std::string_view reason) {
@@ -322,12 +356,18 @@ void CbOffererDriver::OnSetRemoteDescriptionComplete(webrtc::RTCError error) {
 void CbOffererDriver::HopHandleIceCandidate(
     std::unique_ptr<webrtc::IceCandidateInterface> candidate) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (state_ < OffererState::kSettingLocal ||
-      state_ > OffererState::kIceInFlight) {
-    // Pre-offer or post-failure — drop on the floor. Pre-offer
-    // candidates would race the offer envelope; libwebrtc doesn't
-    // emit any before SetLocalDescription completes, so this is
-    // defensive.
+  // R6: ICE flows freely once the initial dance has reached
+  // kSettingLocal. During renegotiation the state cycles back through
+  // kCreatingOffer / kSettingLocal / kAwaitingAnswer / kSettingRemote,
+  // and libwebrtc continues to emit ICE candidates for the existing
+  // transceivers throughout. The only hard drop is pre-initial (no
+  // SDP yet, broker would have nothing to attach the candidate to)
+  // and terminal (kClosed / kFailed).
+  const bool pre_initial =
+      !was_in_ice_flight_once_ && state_ < OffererState::kSettingLocal;
+  const bool terminal = state_ == OffererState::kClosed ||
+                        state_ == OffererState::kFailed;
+  if (pre_initial || terminal) {
     VLOG(1) << kLogPrefix << "ICE candidate dropped, state="
             << StateName(state_);
     return;
@@ -358,24 +398,25 @@ void CbOffererDriver::HopHandleIceConnectionChange(
 
 void CbOffererDriver::HopHandleRenegotiationNeeded() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (first_renegotiation_consumed_) {
-    VLOG(1) << kLogPrefix
-            << "OnRenegotiationNeeded ignored (v1 single-offer)";
+  if (!initial_renegotiation_consumed_) {
+    // First fire — initial dance. M2's video transceiver + M4/M5's
+    // data channels are already wired by the embedder before this
+    // callback fires, so they're folded into the offer automatically.
+    initial_renegotiation_consumed_ = true;
+    if (state_ != OffererState::kCreatingPc) {
+      FailWithReason("OnRenegotiationNeeded in unexpected state");
+      return;
+    }
+    state_ = OffererState::kCreatingOffer;
+    webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
+    pc_->CreateOffer(this, opts);
     return;
   }
-  first_renegotiation_consumed_ = true;
-  if (state_ != OffererState::kCreatingPc) {
-    FailWithReason("OnRenegotiationNeeded in unexpected state");
-    return;
-  }
-  state_ = OffererState::kCreatingOffer;
-
-  webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
-  // No constraints — accept the libwebrtc default. M2's video
-  // transceiver + M4/M5's data channels are already wired by the
-  // embedder before this callback fires, so they're folded into the
-  // offer automatically.
-  pc_->CreateOffer(this, opts);
+  // R6: subsequent fires — libwebrtc tells us SDP needs refresh
+  // (e.g. M2 R5 capture-lifecycle resume re-attached the video
+  // transceiver, or M4 R8 clipboard DC added a new m-line). Route
+  // through the coalescing renegotiation orchestrator.
+  BeginRenegotiation("libwebrtc");
 }
 
 void CbOffererDriver::HopHandleCreateOfferSuccess(std::string sdp_type,
@@ -443,8 +484,32 @@ void CbOffererDriver::HopHandleSetRemoteDescriptionComplete(
     FailWithReason("SetRemoteDescription complete in unexpected state");
     return;
   }
+  // R6: detect whether this is the initial dance or a renegotiated
+  // one. If observer_ has already received OnIceConnectionStateChanged
+  // for a prior cycle, we treat this as renegotiation completion. The
+  // cheaper proxy: was the dance triggered from kIceInFlight? We can
+  // observe that by remembering whether initial_renegotiation_consumed_
+  // was set AND a prior kIceInFlight was reached. Track via a second
+  // flag — see was_in_ice_flight_once_ initialized lazily in the same
+  // transition below.
+  const bool was_renegotiation = was_in_ice_flight_once_;
   state_ = OffererState::kIceInFlight;
-  VLOG(1) << kLogPrefix << "remote SDP set; ICE in flight";
+  was_in_ice_flight_once_ = true;
+  VLOG(1) << kLogPrefix
+          << (was_renegotiation
+                  ? "remote SDP set (renegotiated); ICE in flight"
+                  : "remote SDP set (initial); ICE in flight");
+
+  if (was_renegotiation && observer_) {
+    observer_->OnRenegotiationCompleted();
+  }
+  // R6: drain a pending renegotiation request that was deferred while
+  // the dance was in flight. BeginRenegotiation() is idempotent in
+  // kIceInFlight and will set pending_renegotiation_ false on entry.
+  if (pending_renegotiation_) {
+    pending_renegotiation_ = false;
+    BeginRenegotiation("coalesced-pending");
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -584,18 +649,39 @@ void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
 }
 
 void CbOffererDriver::HandleByeEnvelope() {
-  VLOG(1) << kLogPrefix << "received bye; closing PC";
-  state_ = OffererState::kClosed;
-  pc_ = nullptr;
+  // R6: route inbound `bye` through the unified teardown path.
+  // CloseInternal handles idempotency, observer fan-out, and the
+  // teardown_emitted_ guard.
+  CloseInternal("remote bye", "remote");
 }
 
 void CbOffererDriver::HandleRequestRenegotiateEnvelope() {
-  // R6 territory. v1 contract is single-offer; surface as failure so
-  // the portal client knows renegotiation isn't supported. Physics
-  // marks `request_renegotiate` as REPLAYABLE so the portal client
-  // may retry across reconnects.
-  FailWithReason(
-      "renegotiation requested but unsupported in v1 (R6 territory)");
+  // R6: inbound `request_renegotiate` from the portal client. Valid
+  // only in kIceInFlight — the portal client asked us to refresh SDP.
+  // Out-of-sequence (pre-initial-dance or mid-dance) is a protocol
+  // violation: REPLAYABLE_TYPES contains `request_renegotiate` so the
+  // broker may deliver it ahead of the answer if the portal client
+  // sent it during a reconnect race; treat the pre-kIceInFlight case
+  // as "coalesce for later" rather than a hard fail, to be robust to
+  // R7's reconnect storms.
+  if (state_ == OffererState::kIceInFlight) {
+    BeginRenegotiation("remote");
+    return;
+  }
+  if (state_ == OffererState::kClosed ||
+      state_ == OffererState::kFailed ||
+      state_ == OffererState::kIdle) {
+    VLOG(1) << kLogPrefix
+            << "inbound request_renegotiate dropped, state="
+            << StateName(state_);
+    return;
+  }
+  // Mid-dance — coalesce. Will be drained on the next kIceInFlight
+  // transition (HopHandleSetRemoteDescriptionComplete).
+  VLOG(1) << kLogPrefix
+          << "inbound request_renegotiate coalesced (mid-dance), state="
+          << StateName(state_);
+  pending_renegotiation_ = true;
 }
 
 void CbOffererDriver::HandleProbeResultEnvelope(const Envelope& /*env*/) {
@@ -609,6 +695,105 @@ void CbOffererDriver::HandleProbeResultEnvelope(const Envelope& /*env*/) {
   // the numeric knobs.
   VLOG(1) << kLogPrefix
           << "probe_result received; ignored (TODO probe-result-apply)";
+}
+
+// ---------------------------------------------------------------------
+// R6: renegotiation orchestrator + clean teardown
+// ---------------------------------------------------------------------
+
+void CbOffererDriver::BeginRenegotiation(std::string_view trigger) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (state_ == OffererState::kClosed ||
+      state_ == OffererState::kFailed ||
+      state_ == OffererState::kIdle ||
+      state_ == OffererState::kCreatingPc) {
+    VLOG(1) << kLogPrefix
+            << "BeginRenegotiation dropped (pre-ICE or terminal), state="
+            << StateName(state_) << " trigger=" << trigger;
+    return;
+  }
+  if (state_ != OffererState::kIceInFlight) {
+    // Mid-dance — coalesce. Will be drained on the next return to
+    // kIceInFlight in HopHandleSetRemoteDescriptionComplete.
+    VLOG(1) << kLogPrefix
+            << "BeginRenegotiation coalesced (mid-dance), state="
+            << StateName(state_) << " trigger=" << trigger;
+    pending_renegotiation_ = true;
+    return;
+  }
+  // Steady state — kick off a fresh offer dance.
+  VLOG(1) << kLogPrefix
+          << "BeginRenegotiation: dance re-entering kCreatingOffer, "
+             "trigger=" << trigger;
+  state_ = OffererState::kCreatingOffer;
+  if (observer_) {
+    observer_->OnRenegotiationStarted(trigger);
+  }
+  // TODO(M3-R6-renegotiation-opts): the initial CreateOffer in
+  // HopHandleRenegotiationNeeded passes a default RTCOfferAnswerOptions.
+  // For renegotiation, libwebrtc supports
+  // RTCOfferAnswerOptions::ice_restart = true to force a fresh ICE
+  // username-fragment pair (per draft-ietf-ice-rfc5245bis §9.1.1.1).
+  // We don't enable ice_restart by default — only the embedder knows
+  // whether the network path actually changed. Wire a parameter onto
+  // RequestRenegotiation() that maps through here when the embedder
+  // explicitly opts in. The OnRenegotiationNeeded()-driven trigger
+  // never sets ice_restart.
+  webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
+  pc_->CreateOffer(this, opts);
+}
+
+void CbOffererDriver::CloseInternal(std::string_view reason,
+                                    std::string_view source) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (teardown_emitted_) {
+    VLOG(1) << kLogPrefix
+            << "Close dropped (already emitted), source=" << source
+            << " reason=" << reason;
+    return;
+  }
+  if (state_ == OffererState::kFailed) {
+    // Failure already terminated us; OnFailed already fired. Don't
+    // also fire OnClosed.
+    VLOG(1) << kLogPrefix
+            << "Close dropped (already failed), source=" << source
+            << " reason=" << reason;
+    teardown_emitted_ = true;
+    return;
+  }
+  VLOG(1) << kLogPrefix << "Closing: source=" << source
+          << " reason=" << reason << " from state=" << StateName(state_);
+  // Best-effort bye emit. Skip if the close source is the ws layer
+  // itself (the socket is already gone); skip if we never reached a
+  // post-PC state (no signaling channel established). Failure of the
+  // ws Send is logged but does NOT block teardown — the broker times
+  // out the session on its own per the wire contract.
+  const bool emit_bye = source != "ws" && source != "remote" &&
+                        state_ >= OffererState::kCreatingOffer &&
+                        state_ <= OffererState::kIceInFlight;
+  if (emit_bye) {
+    if (!SendByeEnvelope()) {
+      VLOG(1) << kLogPrefix << "Close: bye send failed (logged, ignored)";
+    }
+  }
+  state_ = OffererState::kClosed;
+  teardown_emitted_ = true;
+  pc_ = nullptr;
+  if (observer_) {
+    observer_->OnClosed(reason);
+  }
+}
+
+bool CbOffererDriver::SendByeEnvelope() {
+  // The bye envelope omits the `data` field entirely per the wire
+  // contract (cb_wire_envelope.h:27-28). std::monostate is the codec's
+  // representation of "no data field" for the kBye tag, so we leave
+  // env.data default-constructed.
+  Envelope env;
+  env.type = EnvelopeType::kBye;
+  env.from = PeerRole::kBrowser;
+  // env.data left default — monostate, encoder omits the wire field.
+  return ws_client_->Send(env);
 }
 
 // ---------------------------------------------------------------------

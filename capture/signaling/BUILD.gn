@@ -17,6 +17,9 @@
 #       (input, stats, cursor, clipboard, file-upload) created on R4's
 #       PeerConnection; provides observer-binding + Send() API for the
 #       M4/M5/M6 consumer modules.
+#   R6 (:cb_offerer_driver, ext.) — renegotiation + teardown amendments
+#       to R4's source_set; headers + sources changed in
+#       cb_offerer_driver.{h,cc}, BUILD.gn target unchanged.
 #
 # R1..R5 are all present in this file.
 
@@ -254,19 +257,51 @@ source_set("cb_offerer_driver") {
 # ---------------------------------------------------------------------
 # R4 unit tests.
 #
-# TODO(M3-R4-tests): RED-by-construction pre-T17 — adds
-# cb_offerer_driver_test.cc in a follow-up commit. Fixture mirrors
-# libwebrtc's pc_test_fixture pattern (FakePeerConnection if libwebrtc
-# bundles it, else gmock'd PeerConnectionInterface) + FakeSignalingWs
-# Client (gmock'd around SignalingClientObserver). Coverage:
-#   * Start() → CreatePeerConnection → first OnRenegotiationNeeded →
-#     CreateOffer → SetLocalDescription → `offer` envelope emitted.
-#   * Inbound `answer` → SetRemoteDescription → kIceInFlight.
-#   * OnIceCandidate × N + OnIceGatheringChange(complete) →
-#     `ice` envelopes + end-of-candidates marker.
-#   * Inbound `ice` candidates / end-of-candidates → AddIceCandidate.
-#   * Inbound `request_renegotiate` (R4 only) → FailWithReason.
-#   * Inbound `offer` → FailWithReason (broker-misroute negative).
+# cb_offerer_driver_test.cc in a follow-up commit. The fixture shape
+# mirrors libwebrtc's pc_test_fixture pattern: a FakePeerConnection
+# (or libwebrtc's bundled FakePeerConnection if available) + a
+# FakeSignalingWsClient (gmock'd around the SignalingClientObserver
+# contract), exercising:
+#   * Start() → CreatePeerConnection succeeds → first
+#     OnRenegotiationNeeded → CreateOffer → SetLocalDescription →
+#     `offer` envelope on the wire (verbatim string match against
+#     the M3 R1 round-trip fixture's offer-from-streamer.js corpus).
+#   * Inbound `answer` envelope → SetRemoteDescription → state ==
+#     kIceInFlight.
+#   * OnIceCandidate (3x) → 3 `ice` envelopes on the wire.
+#   * OnIceGatheringChange(complete) → `ice` end-of-candidates marker
+#     (the MakeIceEndOfCandidates fixture).
+#   * Inbound `ice` (3x + end-of-candidates) → AddIceCandidate (3x) +
+#     AddIceCandidate(nullptr).
+#   * Inbound `offer` → FailWithReason (v1 broker-misroute negative).
+#
+# R6 (CV2-56) adds the following to the fixture in addition to R4:
+#   * Inbound `request_renegotiate` in kIceInFlight → BeginRenegotiation
+#     → CreateOffer → SetLocalDescription → SendOfferEnvelope (verbatim
+#     against an offer-renegotiated corpus). Observer's
+#     OnRenegotiationStarted("remote") fires once.
+#   * RequestRenegotiation() from the embedder in kIceInFlight → same
+#     dance; observer's OnRenegotiationStarted("embedder") fires once.
+#   * Second OnRenegotiationNeeded() from libwebrtc post-initial →
+#     same dance; observer's OnRenegotiationStarted("libwebrtc") fires
+#     once.
+#   * Coalescing: 3 rapid RequestRenegotiation() calls mid-dance → exactly
+#     one BeginRenegotiation("coalesced-pending") fires on the next
+#     kIceInFlight transition.
+#   * Inbound `bye` → CloseInternal → observer's OnClosed("remote bye")
+#     fires once; pc dropped; state = kClosed. Second `bye` is a no-op.
+#   * Close("session ended") in kIceInFlight → SendByeEnvelope → observer's
+#     OnClosed("session ended") fires once. Second Close() is a no-op.
+#   * Close() during kCreatingOffer → bye emit suppressed (state guard);
+#     observer's OnClosed fires; pc dropped. No CreateOffer success/fail
+#     handlers fire after teardown (weak_factory_'s WeakPtr invalidates
+#     them).
+#
+# Putting the tests in once we know the chromium revision's libwebrtc
+# FakePeerConnection availability keeps the test from drifting twice.
+# If libwebrtc's bundled FakePeerConnection is unavailable in the
+# chromium-bundled tree, a hand-rolled gmock<PeerConnectionInterface>
+# is fine — every method the driver calls is on the public interface.
 # ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
