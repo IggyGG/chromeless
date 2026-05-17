@@ -203,10 +203,8 @@ void CbInputDispatchMouse::DispatchMouseMove(const base::Value::Dict& data,
 
   rwh->ForwardMouseEvent(event);
 
-  last_pointer_.x = widget.x;
-  last_pointer_.y = widget.y;
-  last_pointer_.buttons_blink = held_buttons_blink_;
-  last_pointer_.at = event_time;
+  last_pointer_state_.Update(widget.x, widget.y, held_buttons_blink_,
+                             event_time);
 }
 
 void CbInputDispatchMouse::DispatchMouseButton(const base::Value::Dict& data,
@@ -297,10 +295,8 @@ void CbInputDispatchMouse::DispatchMouseButton(const base::Value::Dict& data,
 
   rwh->ForwardMouseEvent(event);
 
-  last_pointer_.x = widget.x;
-  last_pointer_.y = widget.y;
-  last_pointer_.buttons_blink = held_buttons_blink_;
-  last_pointer_.at = event_time;
+  last_pointer_state_.Update(widget.x, widget.y, held_buttons_blink_,
+                             event_time);
 }
 
 void CbInputDispatchMouse::DispatchMouseWheel(const base::Value::Dict& data,
@@ -420,10 +416,8 @@ void CbInputDispatchMouse::DispatchMouseWheel(const base::Value::Dict& data,
 
   rwh->ForwardWheelEvent(event);
 
-  last_pointer_.x = widget.x;
-  last_pointer_.y = widget.y;
-  last_pointer_.buttons_blink = held_buttons_blink_;
-  last_pointer_.at = event_time;
+  last_pointer_state_.Update(widget.x, widget.y, held_buttons_blink_,
+                             event_time);
 }
 
 void CbInputDispatchMouse::EnsureBroughtToFront(content::WebContents* wc) {

@@ -78,6 +78,7 @@
 
 #include "base/time/time.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
+#include "cloud-browser/capture/build-integration/cb_last_pointer.h"
 
 namespace content {
 class RenderWidgetHost;
@@ -107,27 +108,9 @@ class WebContentsResolver {
   virtual content::WebContents* GetActiveWebContents() = 0;
 };
 
-// Snapshot of the last-forwarded pointer event. Read by M4 R10
-// (cursor egress overlay) — R10 paints a remote-cursor overlay on the
-// captured frame so the operator can see where the controlling client
-// thinks the pointer is, independent of the page's own cursor.
-//
-// Coordinates are in widget-space DIPs (post device-scale-factor
-// conversion), matching the units chromium's compositor uses, so R10
-// can paint without re-applying DSF.
-struct CbLastPointerSnapshot {
-  // Widget-space DIPs.
-  float x = 0.f;
-  float y = 0.f;
-  // blink::WebInputEvent::Modifiers-format button-down bits
-  // (kLeftButtonDown / kRightButtonDown / kMiddleButtonDown /
-  // kBackButtonDown / kForwardButtonDown). NOT the protocol bitmask.
-  uint32_t buttons_blink = 0;
-  // Monotonic timestamp of the last successful forward. Default-
-  // constructed = "no events forwarded yet" (R10 should paint
-  // nothing in that case).
-  base::TimeTicks at;
-};
+// (CbLastPointerSnapshot is defined canonically in cb_last_pointer.h —
+// M4 R10. R3 delegates its inline snapshot storage to
+// CbLastPointerState; see member `last_pointer_state_` below.)
 
 class CbInputDispatchMouse : public CbInputDispatchDelegate {
  public:
@@ -168,11 +151,13 @@ class CbInputDispatchMouse : public CbInputDispatchDelegate {
     held_modifiers_blink_ = modifiers;
   }
 
-  // Snapshot consumed by M4 R10. Returns the LAST successfully
+  // Snapshot consumed by M4 R10 / M5 R3. Returns the LAST successfully
   // forwarded pointer; a forward that failed (no active WebContents,
   // dropped envelope) does not update this. R10 reads on the UI
-  // thread.
-  const CbLastPointerSnapshot& last_pointer() const { return last_pointer_; }
+  // thread. Delegates to the CbLastPointerState held by R3.
+  const CbLastPointerSnapshot& last_pointer() const {
+    return last_pointer_state_.last_pointer();
+  }
 
   // Test seam — flips the bring-to-front-once latch without an actual
   // dispatch. Used by cb_input_dispatch_mouse_test.cc to verify
@@ -288,12 +273,13 @@ class CbInputDispatchMouse : public CbInputDispatchDelegate {
   // (test-only seam above).
   bool brought_to_front_ = false;
 
-  // Last-forwarded pointer for R10. Updated only on a successful
-  // ForwardMouseEvent / ForwardWheelEvent — a dispatch that failed
-  // resolution (resolver returned null, RWH had no view) leaves this
-  // untouched so R10 doesn't paint a "ghost" cursor from a dropped
-  // envelope.
-  CbLastPointerSnapshot last_pointer_;
+  // Last-forwarded pointer for R10 / M5 R3. Updated only on a
+  // successful ForwardMouseEvent / ForwardWheelEvent — a dispatch
+  // that failed resolution (resolver returned null, RWH had no view)
+  // leaves this untouched so R10 doesn't paint a "ghost" cursor from
+  // a dropped envelope. Storage canonically lives in R10's
+  // CbLastPointerState (cb_last_pointer.h); R3 mutates via Update().
+  CbLastPointerState last_pointer_state_;
 
   // M4 R2 resolver. Caller-owned; can be null pre-R2.
   WebContentsResolver* const resolver_;

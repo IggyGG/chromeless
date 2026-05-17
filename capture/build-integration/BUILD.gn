@@ -351,6 +351,27 @@ source_set("input_dispatch") {
 }
 
 # ---------------------------------------------------------------------
+# M4 R10 (CV2-50) — last-pointer snapshot + pointer-leave disposition.
+#
+# Standalone state holder + envelope helpers consumed by R3 (mouse).
+# R3 delegates its inline last-pointer storage to this source_set
+# (see fold-in fixup below).
+# ---------------------------------------------------------------------
+source_set("pointer_state") {
+  sources = [
+    "cb_last_pointer.cc",
+    "cb_last_pointer.h",
+  ]
+  deps = [
+    # base::TimeTicks for the snapshot timestamp, base::Value::Dict
+    # for the envelope-shape helpers.
+    "//base",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # M4 R3 (CV2-43) — mouse + wheel native dispatch.
 #
 # Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
@@ -367,6 +388,9 @@ source_set("input_dispatch_mouse") {
     "//base",
     # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
     ":input_dispatch",
+    # R10's CbLastPointerState — R3 delegates its inline last-pointer
+    # storage to this source_set per the M4 fold-in plan.
+    ":pointer_state",
     # RenderWidgetHost::ForwardMouseEvent / ForwardWheelEvent,
     # RenderWidgetHostView::GetDeviceScaleFactor + Focus, WebContents::
     # WasShown + GetRenderViewHost + GetRenderWidgetHostView.
@@ -664,6 +688,29 @@ test("cloud_browser_pcf_unittests") {
     "//testing/gtest",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_test_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+}
+
+# ---------------------------------------------------------------------
+# M4 R10 (CV2-50) — pointer-state unit tests.
+#
+# Pure-C++ coverage for the four CbLastPointerState transitions
+# (default / Update / MarkLeft / re-Update or MarkEntered) plus the
+# envelope-shape helpers. No chromium browser-process boot needed —
+# the class has no thread affinity and no chromium dependencies
+# beyond //base.
+# ---------------------------------------------------------------------
+test("cloud_browser_pointer_state_unittests") {
+  sources = [ "cb_last_pointer_test.cc" ]
+  deps = [
+    ":pointer_state",
+    # base::TimeTicks::Now + base::Value::Dict.
+    "//base",
+    # See cloud_browser_encoder_unittests above — Wall #37. test_support
+    # provides TestSuite + helpers; run_all_unittests is what supplies main().
+    "//base/test:run_all_unittests",
+    "//testing/gtest",
   ]
   configs += [ ":cb_include_paths" ]               # T17.
 }
