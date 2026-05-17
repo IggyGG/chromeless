@@ -231,7 +231,11 @@ spec:
             - name: SCCACHE_DIR
               value: "/sccache"
             - name: CHROMELESS_BUILD_TARGETS
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+              # Build-czar 2026-05-17: add cloud_browser_pcf_unittests
+              # for full M-stack validation per team-lead goal on tip 57ee643.
+              # Build #9 v44h9 (M3 R7 last-green) used 3 targets; M4+M5+M5.5+M6
+              # ~24 commits since then warrant exercising pcf link too.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
             - name: NINJA_PARALLELISM
               # See build-job.yaml header — sized to the 40-CPU limit
               # minus headroom for sccache server + LTO linker.
