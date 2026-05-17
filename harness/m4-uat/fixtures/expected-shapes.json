@@ -1,0 +1,50 @@
+{
+  "$comment": "Reference shapes for what document.lastInputEvent looks like after each scenario step. Scenarios import their expected sub-shapes inline; this file is a human-readable index for operators eyeballing a FAIL.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": 1,
+
+  "mouse": {
+    "mouse_move":   { "type": "mousemove", "clientX": 320, "clientY": 240 },
+    "mouse_button_down": { "type": "mousedown", "button": 0, "clientX": 320, "clientY": 240 },
+    "mouse_button_up":   { "type": "mouseup",   "button": 0, "clientX": 320, "clientY": 240 },
+    "mouse_wheel":  { "type": "wheel", "deltaY": -120, "deltaMode": 0 }
+  },
+
+  "keyboard": {
+    "key_down_plain": { "type": "keydown", "code": "KeyA", "key": "a", "metaKey": false },
+    "key_up_plain":   { "type": "keyup",   "code": "KeyA", "key": "a", "metaKey": false },
+    "key_down_meta":  { "type": "keydown", "code": "KeyA", "key": "a", "metaKey": true  },
+    "key_up_meta":    { "type": "keyup",   "code": "KeyA", "key": "a", "metaKey": true  }
+  },
+
+  "ime": {
+    "compositionstart":  { "type": "compositionstart", "data": ""    },
+    "compositionupdate": { "type": "compositionupdate", "data": "ni hao" },
+    "compositionend":    { "type": "compositionend",   "data": "你好" },
+    "suppression_invariant": "window.__uat_keydown_count === 0 between compositionstart and compositionend"
+  },
+
+  "touch": {
+    "touchstart": { "type": "touchstart" },
+    "touchmove":  { "type": "touchmove"  },
+    "touchend":   { "type": "touchend"   },
+    "active_invariant": "window.__uat_touches_active.length === 0 after all fingers lift"
+  },
+
+  "drag": {
+    "happy_payload": "window.__uat_last_drop_text === 'hello world'",
+    "happy_active":  "window.__uat_drag_active === false after drag_end(success:true)",
+    "cancel_payload": "window.__uat_last_drop_text === null after drag_end(success:false)"
+  },
+
+  "clipboard": {
+    "copy_text_contains": "UAT-CLIPBOARD-CANARY",
+    "dom_event": "type === 'copy' OR (type === 'keydown' AND code === 'KeyC' AND ctrlKey === true)"
+  },
+
+  "pointer-leave": {
+    "after_move_1": { "x": 600, "y": 400, "in_widget": true  },
+    "after_leave":  { "x": 600, "y": 400, "in_widget": false },
+    "after_move_2": { "x": 700, "y": 500, "in_widget": true  }
+  }
+}
