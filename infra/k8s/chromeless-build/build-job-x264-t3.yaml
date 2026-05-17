@@ -208,6 +208,11 @@ spec:
               value: ""
             - name: STUB_MODE
               value: ""
+            - name: SKIP_CDP_VALIDATION
+              # "1" — debian:bookworm-slim build container has no
+              # kubectl. STEP 10's kubectl call would fail exit 127.
+              # Per build.sh's guard, "1" short-circuits and exits 0.
+              value: "1"
             - name: SCCACHE_IDLE_TIMEOUT
               value: "0"
             - name: SCCACHE_CACHE_SIZE
