@@ -260,7 +260,7 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              value: "cv2/m2-track-source-deps"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -368,7 +368,7 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              value: "cv2/m2-track-source-deps"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
@@ -382,7 +382,10 @@ spec:
             - name: NINJA_PARALLELISM
               value: "14"
             - name: SKIP_FETCH
-              value: "1"
+              # triform-5 has no chromium-src on hostPath — cold sync
+              # mandatory on first run. Flip to "1" after t5's tree is
+              # populated.
+              value: ""
             - name: STUB_MODE
               value: ""
             - name: SCCACHE_IDLE_TIMEOUT
