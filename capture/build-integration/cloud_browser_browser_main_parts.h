@@ -315,6 +315,27 @@ class CloudBrowserBrowserMainParts
   std::unique_ptr<cloud_browser::signaling::SignalingWsClient> ws_client_;
   std::unique_ptr<cloud_browser::signaling::CbOffererDriver> offerer_driver_;
   webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
+
+  // CV2-69 F7-skinny — answerer-facing DataChannels. Created by
+  // PreMainMessageLoopRun step 8 via pc->CreateDataChannelOrError;
+  // held as scoped_refptr to keep alive past the create call (the
+  // PC also holds a strong ref internally). The DC HANDLER BINDING
+  // (M4 R1 input dispatch / M5 R6 cursor / M6 R2 clipboard relay /
+  // M6 R3 file-upload relay) is deferred to a follow-up R#.
+  //
+  // Labels are wire-contract — must match the chromeless/client
+  // TypeScript answerer's hardcoded labels EXACTLY (Trap #1):
+  //   input_dc_      → channel label "input"
+  //   cursor_dc_     → channel label "cursor"
+  //   clipboard_dc_  → channel label "clipboard"
+  //   files_dc_      → channel label "files" (NOT "file-upload" —
+  //                    the FILE name is file-upload.ts but the
+  //                    CHANNEL is "files"; the trap was the
+  //                    file-name-vs-channel-name conflation)
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> input_dc_;
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> cursor_dc_;
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> clipboard_dc_;
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> files_dc_;
   // ============== END CV2-69 ==============
 
   bool devtools_http_handler_started_ = false;

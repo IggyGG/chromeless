@@ -547,7 +547,89 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
                    "OnRenegotiationNeeded → CreateOffer → wire emission.";
     }
   }
-  // ============== END CV2-69 F5 + F6 ==============
+
+  // F7-skinny step 8 — Create the four answerer-facing DataChannels.
+  // Phase A acceptance per the v3 narrative requires DC handshake
+  // (offer → ICE → DC opens). Each CreateDataChannel adds an m=
+  // application line to the offer SDP; the answerer-side client
+  // (chromeless/client/src/*.ts) listens for each via the canonical
+  // label strings:
+  //
+  //   "input"      — client/src/input.ts wraps "input" channel
+  //                  (RTCDataChannel for mouse/key/scroll/IME/touch).
+  //   "cursor"     — client/src/cursor.ts subscribes to "cursor"
+  //                  (cb_cursor_dc_emitter outbound feed).
+  //   "clipboard"  — client/src/clipboard.ts wraps "clipboard"
+  //                  (independent from "input"; copy/paste relay).
+  //   "files"      — client/src/file-upload.ts wraps "files"
+  //                  (NOT "file-upload" — the FILE is file-upload.ts
+  //                  but the CHANNEL is "files"; this is Trap #1 in
+  //                  the v3 narrative, hard-fixed here at source).
+  //
+  // The DC handler binding (M4 R1 input dispatch, M5 R6 cursor emit,
+  // M6 R2 clipboard relay, M6 R3 file-upload relay) is deferred to a
+  // follow-up R# — those classes need to be wired to the DataChannel
+  // observer interface and to the active WebContents resolver.
+  // Phase A only needs the DCs to OPEN; inbound data dispatch is
+  // Phase B/full-bring-up scope.
+  //
+  // We hold scoped_refptr<DataChannelInterface> for each one to keep
+  // the underlying libwebrtc data channel alive past this scope. The
+  // PC also holds a strong ref internally, but pin them here so a
+  // future handler-binding R# can grab them via main_parts accessors
+  // without re-resolving via pc->GetDataChannel.
+  if (offerer_driver_->pc()) {
+    auto* pc = offerer_driver_->pc();
+    webrtc::DataChannelInit dc_init;
+    dc_init.ordered = true;
+    // Per CreateDataChannelOrError return shape (libwebrtc v118+):
+    // returns RTCErrorOr<scoped_refptr<DataChannelInterface>>.
+    {
+      auto r = pc->CreateDataChannelOrError("input", &dc_init);
+      if (r.ok()) {
+        input_dc_ = r.MoveValue();
+        LOG(INFO) << "CV2-69 DC: created \"input\"";
+      } else {
+        LOG(ERROR) << "CV2-69 DC \"input\" creation failed: "
+                   << r.error().message();
+      }
+    }
+    {
+      auto r = pc->CreateDataChannelOrError("cursor", &dc_init);
+      if (r.ok()) {
+        cursor_dc_ = r.MoveValue();
+        LOG(INFO) << "CV2-69 DC: created \"cursor\"";
+      } else {
+        LOG(ERROR) << "CV2-69 DC \"cursor\" creation failed: "
+                   << r.error().message();
+      }
+    }
+    {
+      auto r = pc->CreateDataChannelOrError("clipboard", &dc_init);
+      if (r.ok()) {
+        clipboard_dc_ = r.MoveValue();
+        LOG(INFO) << "CV2-69 DC: created \"clipboard\"";
+      } else {
+        LOG(ERROR) << "CV2-69 DC \"clipboard\" creation failed: "
+                   << r.error().message();
+      }
+    }
+    {
+      // Trap #1 hard-fix: channel label is "files" (matches
+      // client/src/file-upload.ts:3 "Wraps the \"files\" RTCDataChannel"),
+      // NOT "file-upload". The emitter file is file-upload.ts; the
+      // channel itself is "files".
+      auto r = pc->CreateDataChannelOrError("files", &dc_init);
+      if (r.ok()) {
+        files_dc_ = r.MoveValue();
+        LOG(INFO) << "CV2-69 DC: created \"files\" (Trap #1 label-exact)";
+      } else {
+        LOG(ERROR) << "CV2-69 DC \"files\" creation failed: "
+                   << r.error().message();
+      }
+    }
+  }
+  // ============== END CV2-69 F5 + F6 + F7-skinny ==============
 
   return content::RESULT_CODE_NORMAL_EXIT;
 }
@@ -569,20 +651,27 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // Drop the runtime-wire chain BEFORE pcf_/threads/track_source so
   // their dtors don't walk into already-freed state. Order is the
   // reverse of construction in PreMainMessageLoopRun:
-  //   1. video_track_.reset() — releases the AddTransceiver binding
+  //   1. F7-skinny DCs (input/cursor/clipboard/files) — release the
+  //      embedder's scoped_refptr. The PC holds an internal strong
+  //      ref each one until it drops; this just releases OUR ref.
+  //   2. video_track_.reset() — releases the AddTransceiver binding
   //      before the PC drops.
-  //   2. offerer_driver_->Close("session ended") — fires R6 `bye`
+  //   3. offerer_driver_->Close("session ended") — fires R6 `bye`
   //      envelope to the broker (if ws is still connected). The
   //      offerer driver's dtor then drops pc_ on reset() below.
-  //   3. offerer_driver_.reset() — libwebrtc handles internal PC
+  //   4. offerer_driver_.reset() — libwebrtc handles internal PC
   //      teardown.
-  //   4. ws_client_->Disconnect() — clean close (code 1000); observer
+  //   5. ws_client_->Disconnect() — clean close (code 1000); observer
   //      eventually fires OnClosed(1000, "") via the inner client's
   //      round-trip.
-  //   5. ws_client_.reset() — drops the WS state machine.
+  //   6. ws_client_.reset() — drops the WS state machine.
   // Note: this teardown is observer-callback-safe because main_parts
   // is the SignalingClientObserver; its dtor runs strictly after
   // ws_client_'s dtor (member init reverse order at process exit).
+  files_dc_ = nullptr;
+  clipboard_dc_ = nullptr;
+  cursor_dc_ = nullptr;
+  input_dc_ = nullptr;
   video_track_ = nullptr;
   if (offerer_driver_) {
     offerer_driver_->Close("session ended");
