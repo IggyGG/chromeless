@@ -59,6 +59,13 @@ Targets re-exported:
     api/audio_codecs:builtin_audio_decoder_factory (CreateBuiltinAudioDecoder
                                                      Factory)
     api/audio:audio_device                         (webrtc::AudioDeviceModule)
+    modules/video_coding:codec_globals_headers     (h264_globals.h,
+                                                     video_error_codes.h —
+                                                     re-exported public so
+                                                     consumers can include
+                                                     them transitively)
+    modules/video_coding:video_codec_interface     (video_codec_interface.h
+                                                     — public, see above)
     modules/video_coding                           (CodecSpecificInfo, h264_globals,
                                                      video_codec_interface, error_codes)
     rtc_base:logging                               (RTC_LOG)
@@ -71,8 +78,8 @@ Touched file:
 
 Resolved against branch-heads/7727 (Chromium 147 stable).
 ---
- .../webrtc_overrides/cloud_browser/BUILD.gn   | 68 +++++++++++++++++++
- 1 file changed, 68 insertions(+)
+ .../webrtc_overrides/cloud_browser/BUILD.gn   | 70 +++++++++++++++++++++
+ 1 file changed, 70 insertions(+)
  create mode 100644 third_party/webrtc_overrides/cloud_browser/BUILD.gn
 
 diff --git a/third_party/webrtc_overrides/cloud_browser/BUILD.gn b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
@@ -80,7 +87,7 @@ new file mode 100644
 index 0000000000..f4503f144e
 --- /dev/null
 +++ b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,70 @@
 +# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 +#
 +# Use of this source code is governed by a BSD-style license that can be
@@ -132,6 +139,8 @@ index 0000000000..f4503f144e
 +    "//third_party/webrtc/api/video:video_frame",
 +    "//third_party/webrtc/api/video_codecs:builtin_video_decoder_factory",
 +    "//third_party/webrtc/api/video_codecs:video_codecs_api",
++    "//third_party/webrtc/modules/video_coding:codec_globals_headers",
++    "//third_party/webrtc/modules/video_coding:video_codec_interface",
 +    "//third_party/webrtc/modules/video_coding",
 +    "//third_party/webrtc/rtc_base:logging",
 +    "//third_party/webrtc/rtc_base:threading",
