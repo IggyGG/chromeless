@@ -96,6 +96,34 @@ source_set("cb_cursor_emit_policy") {
 }
 
 # ---------------------------------------------------------------------
+# R5 — custom CSS cursor image extractor.
+#
+# Pure C++ helper: reads a ui::Cursor, encodes its SkBitmap as PNG,
+# base64s the bytes, enforces the cursor-channel v1 64 KiB encoded
+# cap, and applies the result onto a R2 V1EnvelopeView.
+# ---------------------------------------------------------------------
+source_set("cb_custom_cursor_image") {
+  sources = [
+    "cb_custom_cursor_image.cc",
+    "cb_custom_cursor_image.h",
+  ]
+  deps = [
+    "//base",
+    "//skia",
+    "//ui/base/cursor",
+    "//ui/base/cursor/mojom:cursor_type_shared",
+    "//ui/gfx/codec",
+    "//ui/gfx/geometry",
+  ]
+  public_deps = [
+    ":cb_cursor_envelope",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # R2 unit tests — enum-to-shape round-trip + JSON shape + footgun
 # pins.
 #

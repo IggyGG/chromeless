@@ -93,14 +93,17 @@ CustomImageExtraction ExtractCustomImage(const ui::Cursor& cursor) {
   // string and let the vector free at scope exit. Cursor bitmaps
   // top out around 128x128 RGBA = 64 KiB raw → ~22 KiB PNG worst
   // case, so the allocation is bounded.
-  std::vector<uint8_t> png_bytes;
-  const bool encoded = gfx::PNGCodec::EncodeBGRASkBitmap(
-      bitmap, kKeepAlphaChannel, &png_bytes);
-  if (!encoded || png_bytes.empty()) {
+  // Modern chromium PNGCodec returns std::optional<std::vector<uint8_t>>;
+  // the legacy (bitmap, alpha, vector*) overload was removed. Convert to
+  // the optional API and treat empty/absent as encode failure.
+  auto encoded_opt =
+      gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, kKeepAlphaChannel);
+  if (!encoded_opt.has_value() || encoded_opt->empty()) {
     out.ok = false;
     out.skip = CustomImageExtraction::Skip::kEncodeFailed;
     return out;
   }
+  std::vector<uint8_t> png_bytes = std::move(*encoded_opt);
 
   // ---- Branch 4: base64 + cap check ----
   //
