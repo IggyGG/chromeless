@@ -174,6 +174,16 @@ IceConfig::Summary SummariseIceServers(
 // mode (e.g. strict env: refuse to boot without a configured
 // TURN server) — not used yet.
 //
+// CV2-69 RENAME (was `LoadConfigFromEnv`): renamed to
+// `LoadIceConfigFromEnv` to disambiguate from the same-namespace
+// `LoadConfigFromEnv()` declared in cb_signaling_ws_client.h which
+// returns `std::optional<WsClientConfig>`. Both functions live in
+// `cloud_browser::signaling`; return-type-only overloading is
+// not legal C++ and would break any TU that includes both headers
+// (i.e., the embedder runtime-wire). This rename preserves the
+// signaling-ws-client's original name (it's the primary signaling
+// config) and qualifies the ICE one with its domain.
+//
 // TODO(M3-R3-env-source): chromium's preferred env-reading idiom
 // in the browser process is base::Environment::Create() ->
 // GetVar(name, &value), not raw getenv(3). M3 R2 carries the same
@@ -184,7 +194,7 @@ IceConfig::Summary SummariseIceServers(
 // fetch behind a separate env (WEBRTC_TURN_REST_URL). Out of
 // scope for R3's static-credentials cut; the IceConfig struct
 // stays the same shape.
-std::optional<IceConfig> LoadConfigFromEnv();
+std::optional<IceConfig> LoadIceConfigFromEnv();
 
 }  // namespace cloud_browser::signaling
 

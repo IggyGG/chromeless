@@ -13,20 +13,28 @@
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
 #include "api/make_ref_counted.h"
+#include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtp_parameters.h"
+#include "api/rtp_transceiver_interface.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/task/sequenced_task_runner.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
 #include "capture/framesink-capturer/capturer.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
+#include "capture/signaling/cb_ice_config.h"      // CV2-69
+#include "capture/signaling/cb_offerer_driver.h"  // CV2-69
+#include "capture/signaling/cb_signaling_ws_client.h"  // CV2-69
+#include "capture/signaling/cb_wire_envelope.h"   // CV2-69
 #include "components/viz/host/host_frame_sink_manager.h"
+#include "content/public/browser/storage_partition.h"  // CV2-69
 #include "content/browser/compositor/surface_utils.h"  // nogncheck — same
                                                        // visibility caveat
                                                        // as cb_devtools_agent.cc;
@@ -412,6 +420,135 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
 
+  // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) F5 + F6 ==============
+  //
+  // Native WebRTC peer wiring — bootstraps the runtime peer that
+  // M3 R1-R7 + M2 R3 compile+link toward. Without this block the
+  // cb-chromium worker boots, builds PCF + track source, and idles
+  // in the main message loop with no peer (the cr7727-6276365
+  // baseline behavior, per functional-test verdict 2026-05-17).
+  //
+  // Subset scope per implementer judgment: ship the offer→ICE→DC
+  // handshake path (M3 R2 ws_client + M3 R4 offerer driver + M2 R3
+  // video sendonly transceiver to trigger OnRenegotiationNeeded).
+  // M3 R7 reconnect + M4/M5/M6 DataChannels + M5.5 audio deferred
+  // to a follow-up R# (a single AddDataChannel + observer.Bind call
+  // sequence after offerer_driver_->Start(), additive to this base).
+
+  // F5 step 1 — Load env-driven signaling config. Returns nullopt
+  // when WEBRTC_SIGNALING_HOST or WEBRTC_SIGNALING_SESSION_ID is
+  // unset; in that case skip the signaling subsystem (worker stays
+  // a CDP-only target, preserves pre-CV2-69 deployment-without-
+  // signaling-envs behavior).
+  std::optional<cloud_browser::signaling::WsClientConfig> ws_config =
+      cloud_browser::signaling::LoadConfigFromEnv();
+  if (!ws_config) {
+    LOG(WARNING) << "CV2-69: WEBRTC_SIGNALING_HOST / WEBRTC_SIGNALING_"
+                    "SESSION_ID unset — native signaling subsystem "
+                    "disabled. Worker runs as CDP-only target. To "
+                    "enable, set WEBRTC_SIGNALING_HOST=<host[:port]> "
+                    "+ WEBRTC_SIGNALING_SESSION_ID=<cb:elem:attempt> "
+                    "+ WEBRTC_SIGNALING_TLS=0 (for plain ws://).";
+    return content::RESULT_CODE_NORMAL_EXIT;
+  }
+  LOG(INFO) << "CV2-69 signaling: dialing host=" << ws_config->host
+            << " session=" << ws_config->session_id
+            << " tls=" << (ws_config->use_tls ? "wss" : "ws");
+
+  // F5 step 2 — NetworkContext for the WS dial. Standard chromium
+  // plumbing: browser_context_->StoragePartition->NetworkContext.
+  // Raw pointer; safe for worker lifetime (StoragePartition outlives
+  // main_parts; main_parts.PostMainMessageLoopRun tears it down
+  // last among the worker subsystems).
+  network::mojom::NetworkContext* network_context =
+      browser_context_->GetDefaultStoragePartition()->GetNetworkContext();
+  CHECK(network_context)
+      << "CV2-69: BrowserContext::GetDefaultStoragePartition()->"
+         "GetNetworkContext() returned null — chromium storage "
+         "partition setup is misconfigured.";
+
+  // F5 step 3 — Construct R2 SignalingWsClient. Observer is `this`
+  // (main_parts) — see header comment block on the construction-
+  // order rationale. The ctor does NOT dial; Connect() at step 6
+  // opens the wire after the offerer driver is ready.
+  ws_client_ = std::make_unique<cloud_browser::signaling::SignalingWsClient>(
+      network_context, std::move(*ws_config),
+      /*observer=*/this);
+
+  // F5 step 4 — Load ICE config (M3 R3). Defaults to a single
+  // stun:stun.l.google.com:19302 entry when WEBRTC_ICE_SERVERS is
+  // unset (mirrors streamer.js DEFAULT_ICE_SERVERS). Note: renamed
+  // from LoadConfigFromEnv to LoadIceConfigFromEnv as part of
+  // CV2-69 to disambiguate from the same-namespace function in
+  // cb_signaling_ws_client.h.
+  std::optional<cloud_browser::signaling::IceConfig> ice_cfg =
+      cloud_browser::signaling::LoadIceConfigFromEnv();
+  CHECK(ice_cfg)
+      << "CV2-69: LoadIceConfigFromEnv() returned nullopt — contract "
+         "violation (default-STUN fallback should never miss). Inspect "
+         "cb_ice_config.cc for env-parse regression.";
+  LOG(INFO) << "CV2-69 ICE: " << ice_cfg->summary.stun << " stun, "
+            << ice_cfg->summary.turn << " turn, "
+            << ice_cfg->summary.other << " other; transport_policy="
+            << (ice_cfg->transport_policy ==
+                        webrtc::PeerConnectionInterface::IceTransportsType::
+                            kRelay
+                    ? "relay"
+                    : "all");
+
+  webrtc::PeerConnectionInterface::RTCConfiguration rtc_config;
+  rtc_config.servers = std::move(ice_cfg->servers);
+  rtc_config.type = ice_cfg->transport_policy;
+
+  // F5 step 5 — Construct R4 CbOffererDriver. observer=this is
+  // OffererDriverObserver; main_parts forwards lifecycle events to
+  // LOG sinks (M5.5 R5 audio chain integration deferred). ui_runner
+  // is the sequenced task runner of the embedder's UI thread (this
+  // method runs on it).
+  offerer_driver_ = std::make_unique<cloud_browser::signaling::CbOffererDriver>(
+      pcf_, ws_client_.get(), std::move(rtc_config),
+      /*observer=*/this,
+      base::SequencedTaskRunner::GetCurrentDefault());
+
+  // F5 step 6 — Start the offerer + open the WS dial. Order:
+  // offerer_driver_->Start() first creates the PeerConnection
+  // (so AddTransceiver in step 7 has a target); ws_client_->Connect()
+  // opens the WS dial (so OnConnected eventually fires + the first
+  // outbound offer envelope from CreateOffer can be sent).
+  offerer_driver_->Start();
+  ws_client_->Connect();
+
+  // F6 step 7 — Add the M2 R3 video sendonly transceiver. THIS is
+  // what triggers OnRenegotiationNeeded → CreateOffer → first
+  // offer envelope onto the wire. Without this mutation, Start()
+  // alone leaves the PC idle. Note: actual frames don't flow until
+  // M2 R5 wires the FrameSinkCapturer's OnFrameCallback to the
+  // adapter's OnCapturerFrame ingress; Phase A signaling completes
+  // anyway (offer + ICE + DC handshake doesn't require frames).
+  video_track_ = pcf_->CreateVideoTrack(cb_track_source_, "cb-video-0");
+  if (!video_track_) {
+    LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — "
+                  "video transceiver will not be added; "
+                  "OnRenegotiationNeeded will not fire; no SDP offer "
+                  "will be emitted. Worker stays alive on CDP path.";
+  } else {
+    webrtc::RtpTransceiverInit video_init;
+    video_init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
+    auto tx_result = offerer_driver_->pc()->AddTransceiver(
+        video_track_, video_init);
+    if (!tx_result.ok()) {
+      LOG(ERROR) << "CV2-69: AddTransceiver(video, sendonly) failed: "
+                 << tx_result.error().message()
+                 << " — proceeding without video; OnRenegotiationNeeded "
+                    "may not fire and no SDP offer will emit. Worker "
+                    "stays alive on CDP path.";
+    } else {
+      LOG(INFO) << "CV2-69: video sendonly transceiver added; awaiting "
+                   "OnRenegotiationNeeded → CreateOffer → wire emission.";
+    }
+  }
+  // ============== END CV2-69 F5 + F6 ==============
+
   return content::RESULT_CODE_NORMAL_EXIT;
 }
 
@@ -426,6 +563,36 @@ void CloudBrowserBrowserMainParts::WillRunMainMessageLoop(
 
 void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   StopDevToolsHttpHandler();
+
+  // ============== CV2-69 TEARDOWN (LIFO) ==============
+  //
+  // Drop the runtime-wire chain BEFORE pcf_/threads/track_source so
+  // their dtors don't walk into already-freed state. Order is the
+  // reverse of construction in PreMainMessageLoopRun:
+  //   1. video_track_.reset() — releases the AddTransceiver binding
+  //      before the PC drops.
+  //   2. offerer_driver_->Close("session ended") — fires R6 `bye`
+  //      envelope to the broker (if ws is still connected). The
+  //      offerer driver's dtor then drops pc_ on reset() below.
+  //   3. offerer_driver_.reset() — libwebrtc handles internal PC
+  //      teardown.
+  //   4. ws_client_->Disconnect() — clean close (code 1000); observer
+  //      eventually fires OnClosed(1000, "") via the inner client's
+  //      round-trip.
+  //   5. ws_client_.reset() — drops the WS state machine.
+  // Note: this teardown is observer-callback-safe because main_parts
+  // is the SignalingClientObserver; its dtor runs strictly after
+  // ws_client_'s dtor (member init reverse order at process exit).
+  video_track_ = nullptr;
+  if (offerer_driver_) {
+    offerer_driver_->Close("session ended");
+    offerer_driver_.reset();
+  }
+  if (ws_client_) {
+    ws_client_->Disconnect();
+    ws_client_.reset();
+  }
+  // ============== END CV2-69 TEARDOWN ==============
 
   // ChromelessV2 M1 — drop the PCF + its 3 webrtc::Threads BEFORE
   // browser_context_/initial_web_contents_/aura_ (the M2+ wiring
@@ -512,5 +679,90 @@ void CloudBrowserBrowserMainParts::StopDevToolsHttpHandler() {
   content::DevToolsAgentHost::StopRemoteDebuggingServer();
   devtools_http_handler_started_ = false;
 }
+
+// ============== CV2-69 observer overrides ==============
+//
+// signaling::SignalingClientObserver — main_parts adapter forwarding
+// inbound envelopes to offerer_driver_->OnEnvelope. Resolves the
+// SignalingWsClient ↔ CbOffererDriver construction-order cycle
+// without requiring a SetObserver() method on either class. See
+// the header member-block comment for the full rationale.
+
+void CloudBrowserBrowserMainParts::OnConnected() {
+  LOG(INFO) << "CV2-69 ws_client: connected; ready to receive "
+               "inbound envelopes (offer/answer/ice/bye).";
+}
+
+void CloudBrowserBrowserMainParts::OnEnvelope(
+    const cloud_browser::signaling::Envelope& envelope) {
+  // Forward to the offerer driver. The driver dispatches on
+  // envelope.type (offer/answer/ice/bye/request_renegotiate/
+  // probe_result) per cb_offerer_driver.cc:162.
+  //
+  // Pre-driver envelopes (between ws_client_ ctor and offerer_driver_
+  // ctor) are LOGged and dropped — but in practice this window is
+  // sub-millisecond and the broker doesn't emit anything until the
+  // dial completes via Connect() at PreMainMessageLoopRun step 6.
+  if (!offerer_driver_) {
+    LOG(WARNING) << "CV2-69 OnEnvelope: dropping envelope before "
+                    "offerer_driver_ is constructed (this should be "
+                    "unreachable in practice; pre-Connect window).";
+    return;
+  }
+  offerer_driver_->OnEnvelope(envelope);
+}
+
+void CloudBrowserBrowserMainParts::OnClosed(uint16_t code,
+                                            std::string_view reason) {
+  // SignalingClientObserver path: WS close (RFC 6455 code + reason).
+  LOG(INFO) << "CV2-69 ws_client: closed code=" << code
+            << " reason=" << reason;
+}
+
+void CloudBrowserBrowserMainParts::OnError(std::string_view reason) {
+  LOG(ERROR) << "CV2-69 ws_client: transport/handshake/codec error: "
+             << reason
+             << " — client is half-broken; offerer driver should "
+                "Close() and a follow-up R# should add R7 reconnect "
+                "supervision.";
+}
+
+// signaling::OffererDriverObserver — telemetry-only LOGs for the
+// MVP scope. Production-grade lifecycle relay (M5.5 R5 audio chain,
+// M6 R1 stats relay) is deferred to a follow-up R#.
+
+void CloudBrowserBrowserMainParts::OnIceConnectionStateChanged(
+    webrtc::PeerConnectionInterface::IceConnectionState state) {
+  LOG(INFO) << "CV2-69 offerer_driver: ICE connection state -> "
+            << static_cast<int>(state);
+}
+
+void CloudBrowserBrowserMainParts::OnRenegotiationStarted(
+    std::string_view trigger) {
+  LOG(INFO) << "CV2-69 offerer_driver: renegotiation started, trigger="
+            << trigger;
+}
+
+void CloudBrowserBrowserMainParts::OnRenegotiationCompleted() {
+  LOG(INFO) << "CV2-69 offerer_driver: renegotiation completed";
+}
+
+void CloudBrowserBrowserMainParts::OnClosed(std::string_view reason) {
+  // OffererDriverObserver path: offerer-driven session-ended event
+  // (distinct from the WS-client OnClosed two-arg form above).
+  LOG(INFO) << "CV2-69 offerer_driver: session closed, reason="
+            << reason;
+}
+
+void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {
+  // Unrecoverable failure (e.g. CreateOffer rejected, SDP munging
+  // error, transport teardown not surfaced by ws_client OnError).
+  // R7 reconnect would handle transport-level failures in a follow-
+  // up R#; for CV2-69 we log and leave chromium alive on its CDP
+  // path. A future R# may add a Cb.shutdown CDP method here.
+  LOG(ERROR) << "CV2-69 offerer_driver: unrecoverable failure, reason="
+             << reason;
+}
+// ============== END CV2-69 observer overrides ==============
 
 }  // namespace cloud_browser

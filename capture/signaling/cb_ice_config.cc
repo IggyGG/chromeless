@@ -188,7 +188,8 @@ IceConfig::Summary SummariseIceServers(
   return out;
 }
 
-std::optional<IceConfig> LoadConfigFromEnv() {
+// CV2-69 RENAME (was `LoadConfigFromEnv`): see cb_ice_config.h for rationale.
+std::optional<IceConfig> LoadIceConfigFromEnv() {
   IceConfig config;
 
   // Servers: env JSON → parser → fallback.

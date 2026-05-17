@@ -55,6 +55,9 @@
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+#include "capture/signaling/cb_offerer_driver.h"
+#include "capture/signaling/cb_signaling_ws_client.h"
+#include "capture/signaling/cb_wire_envelope.h"
 #include "content/public/browser/browser_main_parts.h"
 #include "rtc_base/thread.h"
 
@@ -77,7 +80,20 @@ class CbAuraPlatformData;
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
 
-class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
+// CV2-69 (M55-R5-merge-with-m3-r4-r6) — inherits BOTH
+// SignalingClientObserver and OffererDriverObserver. As the
+// SignalingClientObserver, main_parts forwards inbound envelopes to
+// offerer_driver_->OnEnvelope (resolving the SignalingWsClient ↔
+// CbOffererDriver chicken-and-egg construction-order cycle — see
+// PreMainMessageLoopRun for the wiring rationale). As the
+// OffererDriverObserver, main_parts logs lifecycle transitions for
+// telemetry (full M5.5 R5 chain integration deferred to a follow-up
+// R# that resolves the R7 reconnect-vs-R4-pointer-staleness design
+// question Q2 surfaced during CV2-69 pre-implementation).
+class CloudBrowserBrowserMainParts
+    : public content::BrowserMainParts,
+      public cloud_browser::signaling::SignalingClientObserver,
+      public cloud_browser::signaling::OffererDriverObserver {
  public:
   CloudBrowserBrowserMainParts();
 
@@ -93,6 +109,33 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   void WillRunMainMessageLoop(
       std::unique_ptr<base::RunLoop>& run_loop) override;
   void PostMainMessageLoopRun() override;
+
+  // signaling::SignalingClientObserver (CV2-69) — adapter forwarding to
+  // offerer_driver_ so the embedder can serve as the WS client's
+  // observer at ctor time without depending on a not-yet-constructed
+  // driver. OnEnvelope + OnClosed(uint16_t,string_view) are pure-
+  // virtual on the base. OnConnected + OnError have default no-op;
+  // we override for diagnostic LOGs.
+  void OnConnected() override;
+  void OnEnvelope(const cloud_browser::signaling::Envelope& envelope) override;
+  void OnClosed(uint16_t code, std::string_view reason) override;  // ws path
+  void OnError(std::string_view reason) override;
+
+  // signaling::OffererDriverObserver (CV2-69) — telemetry-only LOG
+  // forwards. Production-grade lifecycle relay (M5.5 R5 audio chain,
+  // M6 R1 stats relay) is deferred to a follow-up R#.
+  //
+  // Note: OffererDriverObserver::OnClosed(string_view) has a different
+  // signature than SignalingClientObserver::OnClosed(uint16_t,string_view).
+  // The two-arg form is the WS-client one (RFC 6455 close code +
+  // reason); the one-arg form is the offerer driver's session-ended
+  // event. Both are explicit overrides to avoid C++ name-hiding.
+  void OnIceConnectionStateChanged(
+      webrtc::PeerConnectionInterface::IceConnectionState state) override;
+  void OnRenegotiationStarted(std::string_view trigger) override;
+  void OnRenegotiationCompleted() override;
+  void OnClosed(std::string_view reason) override;  // offerer-driver path
+  void OnFailed(std::string_view reason) override;
 
   // Public read-only accessor for the default BrowserContext. Returns
   // nullptr until PreMainMessageLoopRun has executed (the context is
@@ -226,6 +269,53 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // weak refs in the broadcaster's sink list. Same ordering rationale
   // as the pcf_-before-threads comment block above.
   webrtc::scoped_refptr<CloudBrowserFrameSinkVideoTrackSource> cb_track_source_;
+
+  // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) ==============
+  //
+  // Subset scope per implementer judgment call (CV2-69 §3.5 Option 1):
+  // ship M3 R2 + M3 R4 + M2 R3 video transceiver wiring as the
+  // signaling-only Phase A subset. M3 R7 reconnect + M5.5 R5 audio
+  // lifecycle + M4/M5/M6 DataChannel handler binding deferred to a
+  // follow-up R# (the latter group can be added by issuing the
+  // construction calls + observer binds AFTER offerer_driver_->Start()
+  // without touching the SignalingWsClient/CbOffererDriver wiring
+  // landed here).
+  //
+  // R2 ws_client construction order (resolves the ctor-observer
+  // chicken-and-egg cycle without requiring a SetObserver() method
+  // on either class):
+  //   1. Construct ws_client_ with `this` (main_parts) as
+  //      SignalingClientObserver. main_parts::OnEnvelope forwards
+  //      to offerer_driver_->OnEnvelope after offerer_driver_ is
+  //      constructed. Pre-driver envelopes are LOGged and dropped
+  //      (broker doesn't emit envelopes until the dial completes,
+  //      and offerer_driver_ is constructed before ws_client_->
+  //      Connect() fires the dial).
+  //   2. Construct offerer_driver_ with ws_client_.get() raw pointer.
+  //      The driver IS-A SignalingClientObserver too (it implements
+  //      OnEnvelope as the SDP/ICE dispatcher), but we keep main_parts
+  //      as the registered observer to preserve the adapter shape +
+  //      provide a single place for diagnostic logging.
+  //   3. offerer_driver_->Start() — creates the PeerConnection.
+  //   4. ws_client_->Connect() — opens the dial.
+  //   5. Construct video_track_ from cb_track_source_ + AddTransceiver
+  //      to offerer_driver_->pc() — this is the mutation that triggers
+  //      OnRenegotiationNeeded, which triggers CreateOffer, which
+  //      writes the first `offer` envelope onto the wire.
+  //
+  // Teardown in PostMainMessageLoopRun LIFO (BEFORE existing pcf_
+  // teardown):
+  //   * video_track_.reset() (scoped_refptr; releases transceiver
+  //     binding before the PC drops)
+  //   * offerer_driver_->Close("session ended") (R6 emits bye envelope
+  //     if connected)
+  //   * offerer_driver_.reset() (drops PC; libwebrtc handles teardown)
+  //   * ws_client_->Disconnect() (graceful close)
+  //   * ws_client_.reset()
+  std::unique_ptr<cloud_browser::signaling::SignalingWsClient> ws_client_;
+  std::unique_ptr<cloud_browser::signaling::CbOffererDriver> offerer_driver_;
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
+  // ============== END CV2-69 ==============
 
   bool devtools_http_handler_started_ = false;
 

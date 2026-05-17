@@ -419,8 +419,8 @@ source_set("cb_audio_lifecycle") {
   ]
   deps = [
     "//base",
-    # TODO(M55-R5-merge-with-m3-r4-r6) — :cb_offerer_driver is added
-    # by cv2/m3-r4-offerer-driver in capture/signaling/BUILD.gn.
+    # CV2-69 — TODO marker retired (M55-R5-merge-with-m3-r4-r6 commit
+    # landed). :cb_offerer_driver is the M3 R4 target.
     "//cloud-browser/capture/signaling:cb_offerer_driver",
     # libwebrtc public-API surfaces (AudioSourceInterface,
     # AudioTrackInterface, RtpTransceiverInterface,
@@ -866,6 +866,28 @@ source_set("embedder") {
     ":cloud_browser_pcf",
     ":encoder_factory",
     ":framesink_capture",
+    # CV2-69 (M55-R5-merge-with-m3-r4-r6) — native WebRTC peer runtime
+    # wire. cloud_browser_browser_main_parts.cc owns:
+    #   * SignalingWsClient (M3 R2) — wraps the embedder as the
+    #     SignalingClientObserver, dials the broker via
+    #     network::mojom::WebSocket on the browser-process network
+    #     thread, forwards inbound envelopes to offerer_driver_.
+    #   * CbOffererDriver (M3 R4) — owns the PeerConnection lifecycle,
+    #     consumes IceConfig (M3 R3), drives the SDP+ICE dance.
+    # cloud_browser_main.cc additionally calls into:
+    #   * ResourceBundle init (F1, components/crash/core/common for
+    #     crash keys F3, and content::InitializeMojoCore for F2) —
+    #     bootstrap inits that the worker was skipping prior to CV2-69.
+    ":cb_audio_lifecycle",
+    "//cloud-browser/capture/signaling:cb_ice_config",
+    "//cloud-browser/capture/signaling:cb_offerer_driver",
+    "//cloud-browser/capture/signaling:cb_signaling_ws_client",
+    "//cloud-browser/capture/signaling:cb_wire_envelope",
+    # CV2-69 F1 + F3 — chromium-subsystem bootstrap inits the embedder
+    # was skipping (gpu-test-lead audit /tmp/cv2-embedder-init-audit.md).
+    # F1 (ResourceBundle) lives in //ui/base already in this list;
+    # F3 (crash keys) is the only new dep.
+    "//components/crash/core/common:crash_key",
     "//base",
     # cloud_browser_browser_context.cc registers with the
     # BrowserContext / Simple keyed-service dependency managers (same
