@@ -6,22 +6,21 @@
 #
 #   R1 — capture/build-integration/cb_cursor_client.{h,cc}
 #        Embedder aura::client::CursorClient registered on
-#        host_->window(). Already shipped on cv2/m5-cursor-client-hook.
-#   R2 (this file's :cb_cursor_envelope) — pure assembler: maps
-#        ui::mojom::CursorType + visibility into the cursor-channel v1
-#        JSON envelope the existing capture/cursor-watcher/ Go sidecar
-#        emits today. No I/O, no threading. Linkable on its own so
-#        unit tests don't drag in aura / RWH.
-#   R3 — DataChannel emission (binds R2 onto M3 R5's DC host via the
-#        CbCursorClient::change_callback_ seam R1 prepared).
-#   R4 — pointer-position observer (aura mouse-move pre-target obs).
+#        host_->window(). Shipped on cv2/m5-cursor-client-hook.
+#   R2 — capture/cursor/cb_cursor_envelope.{h,cc}
+#        Pure assembler: ui::mojom::CursorType + visibility → JSON
+#        envelope on the cursor-channel v1 wire shape.
+#   R3 — capture/build-integration/cb_cursor_xy_join.{h,cc}
+#        Joins R1's type callback with M4 R3's last pointer
+#        snapshot into a JoinedCursorState.
+#   R4 (this file's :cb_cursor_emit_policy) — emission policy
+#        layer above R3: dedupe, debounce, per-channel monotonic
+#        seq, replay buffer for reconnect. No I/O, no threading,
+#        no JSON. Linkable on its own so unit tests don't drag in
+#        the DC host or the M3 R5 plumbing.
 #   R5 — custom-image plumbing (SkBitmap → PNG → base64, 64 KiB cap).
-#   R6 — physical removal of capture/cursor-watcher/ + the JS probe
-#        in capture/streamer-page/. Locked by the M0 gate harness
-#        assertion #2 (cursor-watcher absence in integration).
-#
-# Only R2 is in this commit; R3..R6 add more source_sets (R3) or
-# delete code from this BUILD.gn's scope (R6) as they land.
+#   R6 — DataChannel emission glue (binds R3's emit-callback → R4's
+#        Decide() → R2's AssembleAndEncode → M3 R5 DC host's Send).
 
 import("//testing/test.gni")  # provides test() template
 
@@ -58,33 +57,76 @@ source_set("cb_cursor_envelope") {
 }
 
 # ---------------------------------------------------------------------
+# R4 — Cursor-channel emission policy.
+#
+# Pure C++ policy: takes a R3 JoinedCursorState and returns an
+# EmitDecision (emit yes/no + reason). Owns the per-channel monotonic
+# seq counter that R2's wire encoder MUST be threaded with (see
+# header note "Seq divergence note (R2 seq vs R4 seq)"), and the
+# capacity-bounded replay buffer R6 reads on a fresh peer DC bind.
+#
+# Mirrors R2's :cb_cursor_envelope source_set shape — same isolation,
+# same include-paths config, same test() pattern. Lives in
+# capture/cursor/ (not capture/build-integration/) because R4 is pure
+# policy with no chromium-browser deps beyond //base + the cursor
+# mojom enum + R3's JoinedCursorState — it doesn't need to be in the
+# build-integration directory.
+# ---------------------------------------------------------------------
+source_set("cb_cursor_emit_policy") {
+  sources = [
+    "cb_cursor_emit_policy.cc",
+    "cb_cursor_emit_policy.h",
+  ]
+  deps = [
+    "//base",
+    # M5 R3 — JoinedCursorState struct. R3's :cursor_xy_join is the
+    # smallest source_set that exports the struct definition.
+    "//cloud-browser/capture/build-integration:cursor_xy_join",
+    # ui::mojom::CursorType — same mojom-shared variant R2 uses
+    # (keeps the dep cone tight; no full mojo type-mapper graph).
+    "//ui/base/cursor/mojom:cursor_type_shared",
+  ]
+  # Repo-root include path so "capture/cursor/cb_cursor_emit_policy.h"
+  # and "capture/build-integration/cb_cursor_xy_join.h" resolve the
+  # same way the encoder + signaling source_sets resolve their cross-
+  # directory cb_*.h includes (M3 R1 wall #-style note).
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # R2 unit tests — enum-to-shape round-trip + JSON shape + footgun
 # pins.
 #
 # RED-by-construction pre-T17 — exercises the assembler without
-# spinning up any aura/RWH scaffolding. The K8s chromeless-build Job
-# runs them after first-green. Test file will land in M5 R2 + tests
-# follow-up; commented out for the draft commit so we don't push a
-# BUILD.gn that references a non-existent .cc.
-#
-# TODO(M5-R2-tests): land cb_cursor_envelope_test.cc + uncomment the
-# block below. Fixtures must cover:
-#   * kPointer → "default"   (footgun #1 from the header)
-#   * kHand    → "pointer"   (footgun #1 from the header)
-#   * visible=false overrides shape to "none" regardless of type
-#   * kCustom emits shape="custom" with custom_image_b64 absent (R5
-#     gap, documented + accepted by the protocol)
-#   * seq strictly increases across consecutive Assemble calls on
-#     the same assembler instance
-#   * t pinning via the now_epoch_ms != 0 sentinel is deterministic
+# spinning up any aura/RWH scaffolding. Test file commented out for
+# the draft commit so we don't push a BUILD.gn that references a
+# non-existent .cc.
 #
 # test("cb_cursor_envelope_unittests") {
 #   sources = [ "cb_cursor_envelope_test.cc" ]
 #   deps = [
 #     ":cb_cursor_envelope",
-#     # test_support + run_all_unittests — same wiring as
-#     # cb_wire_envelope_unittests in
-#     # //cloud-browser/capture/signaling/BUILD.gn (M3 R1 Wall #37).
+#     "//base/test:test_support",
+#     "//base/test:run_all_unittests",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }
+
+# ---------------------------------------------------------------------
+# R4 unit tests — dedupe / debounce / seq / replay invariants.
+#
+# RED-by-construction pre-T17. Exercises EmitPolicy with hand-built
+# JoinedCursorState values — no aura, no R3 plumbing, no DC. Test file
+# commented out for the draft commit so we don't push a BUILD.gn that
+# references a non-existent .cc.
+#
+# test("cb_cursor_emit_policy_unittests") {
+#   sources = [ "cb_cursor_emit_policy_test.cc" ]
+#   deps = [
+#     ":cb_cursor_emit_policy",
 #     "//base/test:test_support",
 #     "//base/test:run_all_unittests",
 #     "//testing/gtest",
