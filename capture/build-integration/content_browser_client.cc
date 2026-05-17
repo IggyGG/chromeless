@@ -9,7 +9,6 @@
 
 #include "capture/build-integration/cb_devtools_agent.h"
 #include "capture/build-integration/cloud_browser_browser_main_parts.h"
-#include "capture/encoder/encoder_factory.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_main_parts.h"
@@ -37,19 +36,6 @@ CloudBrowserContentBrowserClient::CreateBrowserMainParts(
   // through Target.createBrowserContext as a workaround).
   main_parts_ = parts.get();
   return parts;
-}
-
-std::unique_ptr<webrtc::VideoEncoderFactory>
-CloudBrowserContentBrowserClient::GetWebRtcVideoEncoderFactory() {
-  // Phase-2 default config: software path on, all HW prefer flags off.
-  // The runtime probes inside nvenc/vaapi/svtav1 encoders are still
-  // honoured by CreateVideoEncoder, so the factory degrades gracefully
-  // when HW is unavailable. Wiring HW prefer flags to a CLI/env knob
-  // is tracked in T63 / T70 / T75 follow-ups; the embedder is
-  // intentionally minimal until the worker's launch path is plumbed
-  // through to here.
-  CloudBrowserVideoEncoderFactory::Config config;
-  return std::make_unique<CloudBrowserVideoEncoderFactory>(std::move(config));
 }
 
 std::unique_ptr<content::DevToolsManagerDelegate>

@@ -1,7 +1,7 @@
 // Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 //
 // CloudBrowserContentBrowserClient — content::ContentBrowserClient
-// subclass with three narrow overrides:
+// subclass with two narrow overrides:
 //
 //   1. CreateBrowserMainParts() — returns a CloudBrowserBrowserMainParts
 //      so the browser process actually creates a BrowserContext + an
@@ -10,22 +10,22 @@
 //      cleanly but never opens a TCP socket — see the file-header
 //      comment on cloud_browser_browser_main_parts.h for the smoke-test
 //      evidence.
-//   2. GetWebRtcVideoEncoderFactory() — installs our
-//      CloudBrowserVideoEncoderFactory (T19 / T35 / T36) on libwebrtc
-//      via the virtual added by
-//      patches/0001-expose-encoder-factory-injection.patch (T49).
-//   3. CreateDevToolsManagerDelegate() — returns a
+//   2. CreateDevToolsManagerDelegate() — returns a
 //      CbDevToolsManagerDelegate so the embedder-defined CDP method
 //      Cb.startFrameSinkCapture is reachable from Playwright (T55
 //      runtime-engagement, see cb_devtools_agent.h).
+//
+// The video-encoder-factory embedder hook was retired in M7-R6: the
+// native worker installs CloudBrowserVideoEncoderFactory directly via
+// deps.video_encoder_factory in cloud_browser_pcf.cc, and the Chromium
+// base virtual that this override relied on was removed with
+// patches/0001 + 0004.
 //
 // Everything else is the chromium default; we'll grow specific
 // overrides only when the worker's behaviour demands them.
 //
 // Cross-references:
-//   * capture/encoder/encoder_factory.h
 //   * capture/build-integration/cb_devtools_agent.h
-//   * patches/0001-expose-encoder-factory-injection.patch
 //   * docs/internal/encoder-factory-design.md
 
 #ifndef CAPTURE_BUILD_INTEGRATION_CONTENT_BROWSER_CLIENT_H_
@@ -40,10 +40,6 @@ namespace content {
 class BrowserMainParts;
 class DevToolsManagerDelegate;
 }  // namespace content
-
-namespace webrtc {
-class VideoEncoderFactory;
-}  // namespace webrtc
 
 namespace cloud_browser {
 
@@ -73,13 +69,6 @@ class CloudBrowserContentBrowserClient : public content::ContentBrowserClient {
   // either way).
   std::unique_ptr<content::BrowserMainParts> CreateBrowserMainParts(
       bool is_integration_test) override;
-
-  // Returns a freshly-constructed CloudBrowserVideoEncoderFactory. The
-  // base class stores the result in a unique_ptr held by the
-  // PeerConnectionFactory wiring on the renderer/browser process — see
-  // the patch description for the call site.
-  std::unique_ptr<webrtc::VideoEncoderFactory> GetWebRtcVideoEncoderFactory()
-      override;
 
   // Hands chromium our DevToolsManagerDelegate. The base implementation
   // returns nullptr (default chromium behaviour: no embedder-side CDP
