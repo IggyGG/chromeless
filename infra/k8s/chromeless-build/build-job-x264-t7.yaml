@@ -204,7 +204,16 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # integration/native-peer carries the M1 work that main
+              # doesn't have yet: webrtc namespace fix (bf3de29), Q3
+              # video_coding sub-headers (2a1b9f5), Path B webrtc deps
+              # (2829fe5), Path A drop (92e6eae), and the initial M1
+              # merge (87c2dfc). Build #2 on main got to autoninja
+              # 39495/39597 then failed on rtc::Thread errors; those
+              # are exactly what bf3de29 fixed on integration/native-peer.
+              # Flip back to "main" after integration/native-peer is
+              # fast-forward-merged to main post-validation.
+              value: "integration/native-peer"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
