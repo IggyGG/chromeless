@@ -20,8 +20,11 @@
 #   R6 (:cb_offerer_driver, ext.) — renegotiation + teardown amendments
 #       to R4's source_set; headers + sources changed in
 #       cb_offerer_driver.{h,cc}, BUILD.gn target unchanged.
+#   R7 (:cb_signaling_reconnect) — reconnect supervisor + idle-timeout
+#       keepalive substitute. Wraps R2 with exponential-backoff retry
+#       and a `ReconnectingClientObserver` consumer surface.
 #
-# R1..R5 are all present in this file.
+# R1..R7 are all present in this file.
 
 import("//testing/test.gni")  # provides test() template used below
 
@@ -337,3 +340,61 @@ source_set("cb_dc_host") {
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
 }
+
+# ---------------------------------------------------------------------
+# R7 — reconnect supervisor + idle-timeout keepalive substitute.
+#
+# Pure browser-process code. Depends on :cb_signaling_ws_client (R2)
+# for the inner client and :cb_wire_envelope (R1) for the Envelope
+# struct passed through the observer API. Adds //base/timer for
+# base::OneShotTimer and //base for base::TimeDelta. No new chromium
+# subsystem deps beyond what R2 already pulls in.
+# ---------------------------------------------------------------------
+source_set("cb_signaling_reconnect") {
+  sources = [
+    "cb_signaling_reconnect.cc",
+    "cb_signaling_reconnect.h",
+  ]
+  deps = [
+    ":cb_signaling_ws_client",
+    ":cb_wire_envelope",
+    "//base",
+    # //services/network/public/mojom for the NetworkContext* the
+    # wrapper threads through to the inner client on each
+    # reconnect attempt.
+    "//services/network/public/mojom",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R7 unit tests — backoff schedule, idle-timeout firing, give-up
+# behaviour, observer translation.
+#
+# TODO(M3-R7-tests): RED-by-construction pre-T17 — adds
+# cb_signaling_reconnect_test.cc in a follow-up commit. The fixture
+# will use a FakeSignalingWsClient (a SignalingClientObserver-callback-
+# driven double, not the real R2 client) so the tests don't need a
+# FakeNetworkContext. Drives the wrapper through:
+#
+#   * happy path: Connect → OnConnected → OnEnvelope → Disconnect →
+#     OnClosed(1000).
+#   * remote close → reconnect: OnConnected → OnClosed(1006) → wait
+#     initial_backoff → fresh inner constructed → OnConnected resets
+#     attempts_made_ to 0.
+#   * exponential backoff: 4 reconnect attempts, assert delays follow
+#     initial × multiplier^N up to max_backoff cap.
+#   * give-up: max_attempts=2 + persistent OnError → OnGaveUp(2) fires.
+#   * idle timeout: OnConnected → no envelopes for idle_timeout →
+#     OnIdleFired schedules a reconnect (counts toward max_attempts).
+#   * idle timeout disabled: idle_timeout=0 → timer never armed.
+#   * consumer Disconnect during backoff: backoff timer cancelled,
+#     no further reconnect fires, OnClosed(1000) delivered to
+#     consumer.
+#
+# The test uses base::test::TaskEnvironment::TimeSource::MOCK_TIME so
+# the FastForwardBy() helper can advance through the backoff schedule
+# deterministically without real sleeps.
+# ---------------------------------------------------------------------
