@@ -220,11 +220,14 @@ spec:
               # minus headroom for sccache server + LTO linker.
               value: "36"
             - name: SKIP_FETCH
-              # Empty = fresh gclient sync (first build on triform-7
-              # has no on-disk tree at /var/lib/longhorn/chromeless-build).
-              # Flip to "1" after sync succeeds to skip re-sync on
-              # subsequent runs.
-              value: ""
+              # "1" because build #2's first attempt already synced the
+              # tree to refs/branch-heads/7727 on triform-7's hostPath
+              # (37GB at /work/src/chromium/src). Subsequent build #2-retry
+              # attempts wedged in gclient sync (silent stall at 5+10 min
+              # marks, exit-127 wedge pattern from build #1). SKIP_FETCH
+              # bypasses Step 1 entirely; the existing tree is at the
+              # correct ref so re-fetching adds no value and hangs.
+              value: "1"
             - name: STUB_MODE
               value: ""
             - name: SCCACHE_IDLE_TIMEOUT
