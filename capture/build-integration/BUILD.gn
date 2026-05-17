@@ -330,6 +330,58 @@ source_set("cb_audio_device_module") {
 }
 
 # ---------------------------------------------------------------------
+# Media-grade AudioOptions seam (M5.5 R3 — CV2-30).
+#
+# Builds the webrtc::AudioOptions block attached to the AudioSource /
+# AudioTrack the cloud-browser worker constructs on top of M5.5 R1's
+# native ADM. All APM stages disabled — cb_capture.monitor carries
+# program audio, not a microphone. See capture/audio/cb_audio_options.h.
+# ---------------------------------------------------------------------
+source_set("cb_audio_options") {
+  sources = [
+    "../audio/cb_audio_options.cc",
+    "../audio/cb_audio_options.h",
+  ]
+  deps = [
+#
+# Builds the webrtc::AudioOptions block attached to the AudioSource /
+# AudioTrack the cloud-browser worker constructs on top of M5.5 R1's
+# native ADM (kPlatformDefaultAudio → built-in PulseAudio →
+# cb_capture.monitor). All APM stages (AEC, AGC, NS, HPF, typing-
+# detection) are disabled — the cb_capture.monitor source carries
+# program audio (music, video, game audio, UI), NOT a microphone, and
+# the voice-tuned default profile corrupts media content. See
+# capture/audio/cb_audio_options.h for the per-stage rationale.
+#
+# Kept in its own source_set so the file's rationale comment stays
+# co-located with the field set; future tuning revisions (R4 stereo,
+# R5 Opus bitrate cap, …) replace ONLY this source_set's body.
+#
+# TODO(M55-R3-build): when R1 (CV2-28 / cv2/m55-r1-native-adm) lands
+# on integration/native-peer first, this source_set sits adjacent to
+# :cb_audio_device_module and the audio dep on cloud_browser_pcf
+# expands from { :cb_audio_device_module } to
+# { :cb_audio_device_module, :cb_audio_options } once the
+# track-attachment site is wired (deferred — that wiring is a
+# follow-up R, not this R3).
+# ---------------------------------------------------------------------
+source_set("cb_audio_options") {
+  sources = [
+    "../audio/cb_audio_options.cc",
+    "../audio/cb_audio_options.h",
+  ]
+  deps = [
+    # api/audio_options.h (webrtc::AudioOptions struct) — re-exported
+    # through the cloud-browser webrtc-overrides passthrough. Same
+    # routing rule every other webrtc public-API dep follows on this
+    # branch (see :encoder_factory and :cb_audio_device_module).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Browser-process PeerConnectionFactory seam (M1 — CV2-26 / CV2-27).
 #
 # Extracted from cloud_browser_browser_main_parts.cc so the assembly,
