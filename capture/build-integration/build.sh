@@ -128,7 +128,34 @@ cmd_apply_patches() {
                 reset --hard "${lkgm_base}") >/dev/null 2>&1 || \
                 log "WARN: reset to ${lkgm_base} failed; continuing"
         else
-            log "WARN: LKGM base ${lkgm_base} not present; skipping reset"
+            # LKGM commit is not in the shallow clone that
+            # chromeless-build.sh STEP 1 creates (gclient sync runs
+            # with --no-history --shallow). Fall back to the
+            # fetched-branch ref that IS in the shallow clone:
+            # refs/remotes/branch-heads/<CHROMIUM_BRANCH_NUMBER>.
+            # Without this, SKIP_FETCH=1 retries on a previously
+            # patched tree fail at STEP 3 because LKGM-reset is
+            # skipped and apply-patches re-runs on top of HEAD that
+            # already advanced by 5 patch commits. Observed 2026-05-17
+            # on triform-7 after build #2-retry hit silent gclient
+            # stall and we flipped SKIP_FETCH=1.
+            log "WARN: LKGM base ${lkgm_base} not present; falling back to fetched branch ref"
+            local branch_ref
+            branch_ref="$(cd "${CHROMIUM_SRC}" && git for-each-ref \
+                --format='%(refname)' \
+                "refs/remotes/branch-heads/${CHROMIUM_BRANCH_NUMBER}" 2>/dev/null | head -1)"
+            if [[ -n "${branch_ref}" ]]; then
+                if (cd "${CHROMIUM_SRC}" && git \
+                        -c user.email=cb-build@triform.ai \
+                        -c user.name='cb-build' \
+                        reset --hard "${branch_ref}") >/dev/null 2>&1; then
+                    log "Reset to fallback ref ${branch_ref}"
+                else
+                    log "WARN: reset to ${branch_ref} failed; continuing"
+                fi
+            else
+                log "WARN: no fallback ref for branch-heads/${CHROMIUM_BRANCH_NUMBER}; tree may be dirty"
+            fi
         fi
     fi
 
