@@ -77,8 +77,9 @@ maximally contained without yet relying on a microVM.
   - `supervisor-log` (64Mi): /var/log/supervisor.
   - `home` (512Mi): /home/cbuser; chromium profile + caches.
   - `tmp` (64Mi): /tmp.
-  - `x11-socket`: /tmp/.X11-unix shared with the cursor-watcher and
-    clipboard-bridge sidecars.
+  - `x11-socket`: /tmp/.X11-unix shared with the clipboard-bridge
+    sidecar. M7 R4: cursor-watcher retired; native cursor egress
+    (M5) reads cursor state inside the browser process.
 
 ### `infra/seccomp/chromeless.json`
 

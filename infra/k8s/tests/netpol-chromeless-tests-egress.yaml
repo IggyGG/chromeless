@@ -12,9 +12,9 @@
 #                         secret mounts via TokenRequest)
 #   * external 80/443 — debian apt repos, npm registry, etc.
 #                       (test-driver does `apt-get install ffmpeg`,
-#                       `npm install` for the wire scenarios; the
-#                       build-input-bridge initContainer fetches Go
-#                       modules)
+#                       `npm install` for the wire scenarios)
+#                       M7 R4: build-input-bridge initContainer
+#                       removed; native peer (M4) replaced it.
 #
 # Without this, Calico's default-deny-egress (enforced via
 # GlobalNetworkPolicy + the per-namespace baseline) blocks every
@@ -56,10 +56,9 @@ spec:
             cidr: 10.96.0.10/32
 
     # Cluster-internal forgejo HTTP — runtime git clone of the
-    # chromeless repo for bootstrap-tests + build-input-bridge
-    # initContainers. Companion ingress rule in
-    # netpol-forgejo-allow-chromeless-tests.yaml allows the receiving
-    # forgejo pod to accept this.
+    # chromeless repo for bootstrap-tests initContainer. Companion
+    # ingress rule in netpol-forgejo-allow-chromeless-tests.yaml
+    # allows the receiving forgejo pod to accept this.
     - ports:
         - port: 3000
           protocol: TCP
@@ -89,9 +88,8 @@ spec:
 
     # External HTTP/HTTPS — debian apt repos (ffmpeg + ca-certificates
     # in the test-driver), npm registry (npm install for the wire
-    # scenarios), Go module proxy (build-input-bridge). Excludes
-    # RFC1918 + link-local because intra-cluster + intra-VPC traffic
-    # should match the more specific rules above.
+    # scenarios). Excludes RFC1918 + link-local because intra-cluster
+    # + intra-VPC traffic should match the more specific rules above.
     - ports:
         - port: 80
           protocol: TCP

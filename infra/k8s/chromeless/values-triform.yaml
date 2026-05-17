@@ -75,8 +75,8 @@ images:
   controller:      { repository: chromeless-controller, tag: "" }
   turnIssuer:      { repository: chromeless-turn-issuer,         tag: "" }
   metricsSidecar:  { repository: chromeless-metrics-sidecar,     tag: "" }
-  inputBridge:     { repository: chromeless-input-bridge,        tag: "" }
-  cursorWatcher:   { repository: chromeless-cursor-watcher,      tag: "" }
+  # M7 R4: inputBridge + cursorWatcher repository entries removed.
+  # Native peer (M4 input DC, M5 cursor egress) replaces them.
   clipboardBridge: { repository: chromeless-clipboard-bridge,    tag: "" }
 
 # ---------------------------------------------------------------------

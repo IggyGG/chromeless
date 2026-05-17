@@ -6,22 +6,15 @@
 # is a standalone Pod manifest that's hand-applicable for testing —
 # `kubectl apply -f cloud-browser-session.yaml` brings up one session.
 #
-# A session Pod runs five cooperating containers in a shared network
-# and PID namespace:
+# A session Pod runs three cooperating containers in a shared network
+# and PID namespace (M7 R4 retired input-bridge + cursor-watcher in
+# favour of the native peer):
 #
-#   chromeless         the T7 + T28 + T31 image without the metrics
-#                       sidecar binary; runs Xvfb + PulseAudio +
-#                       streamer-static + Chromium under supervisord.
-#                       DevTools on :9222, streamer-static on :9000.
+#   chromeless         the runtime image; runs Xvfb + PulseAudio +
+#                       Chromium under supervisord. DevTools on :9222.
 #   chromeless-metrics-sidecar  T38 sidecar exposing /metrics on :9100. Uses
 #                       /proc to aggregate Chromium CPU/RSS, hence the
 #                       Pod-wide shareProcessNamespace below.
-#   input-bridge        T22 server-side input dispatch; relays the
-#                       streamer's "input" data channel into Chromium
-#                       DevTools Input.dispatchMouseEvent / KeyEvent.
-#   cursor-watcher      T26 sidecar that polls Chromium for cursor
-#                       shape/position metadata and forwards to the
-#                       data channel.
 #   clipboard-bridge    T32 sidecar that wires X11 clipboard into the
 #                       client via a data channel.
 #
@@ -287,68 +280,9 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
 
-    # -------------------------------------------------------------------
-    # input-bridge (T22) — relays input events from the streamer page's
-    # data channel into Chromium DevTools.
-    #
-    # Default ws-addr is 9100, which collides with chromeless-metrics-sidecar
-    # in the shared pod network namespace. We override to :9200 here.
-    # Follow-up: bake the override into the input-bridge default once
-    # T38 + T22 ship together in the same image.
-    # -------------------------------------------------------------------
-    - name: input-bridge
-      image: ghcr.io/iggy/chromeless/input-bridge:dev
-      imagePullPolicy: IfNotPresent
-      args:
-        - "--ws-addr=:9200"
-        - "--metrics-addr=:9101"
-        - "--cdp-url=http://127.0.0.1:9222"
-      ports:
-        - name: input-ws
-          containerPort: 9200
-        - name: input-metrics
-          containerPort: 9101
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "300m"
-          memory: "256Mi"
-      securityContext:
-        readOnlyRootFilesystem: true
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop: ["ALL"]
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-
-    # -------------------------------------------------------------------
-    # cursor-watcher (T26) — polls Chromium for cursor metadata and
-    # pushes events to the input-bridge ws sink.
-    # -------------------------------------------------------------------
-    - name: cursor-watcher
-      image: ghcr.io/iggy/chromeless/cursor-watcher:dev
-      imagePullPolicy: IfNotPresent
-      args:
-        - "--cdp-url=http://127.0.0.1:9222"
-        - "--sink-url=ws://127.0.0.1:9200/cursor"
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "300m"
-          memory: "256Mi"
-      securityContext:
-        readOnlyRootFilesystem: true
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop: ["ALL"]
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
+    # M7 R4: input-bridge (T22) and cursor-watcher (T26) sidecars
+    # removed. Native peer (M4 input DataChannel, M5 cursor egress)
+    # delivers their function from inside the browser process.
 
     # -------------------------------------------------------------------
     # clipboard-bridge (T32) — wires X11 clipboard <-> client clipboard

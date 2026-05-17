@@ -12,7 +12,7 @@
 | `namespace.yaml` | The `chromeless` namespace with Pod Security Standards labels. |
 | `signaling-deployment.yaml` | Stateless signaling tier: Deployment + Service + Ingress + HPA + ServiceAccount. |
 | `turn-deployment.yaml` | coturn StatefulSet with TURN-REST credentials Secret + ConfigMap + headless Service. **Production should prefer a managed TURN service** (Cloudflare TURN, metered.ca, Twilio) — see comments in that file. |
-| `cloud-browser-session.yaml` | Pod template for one session — five containers (chromeless, chromeless-metrics-sidecar, input-bridge, cursor-watcher, clipboard-bridge) sharing a network and PID namespace. The session controller (designed in `session-controller-design.md`, not yet built) materialises these. |
+| `cloud-browser-session.yaml` | Pod template for one session — three containers (chromeless, chromeless-metrics-sidecar, clipboard-bridge) sharing a network and PID namespace. M7 R4: input-bridge + cursor-watcher sidecars retired; the native peer (M4+M5) delivers their function from inside the browser process. |
 | `session-controller-design.md` | Design doc for the warm-pool / assignment / eviction operator. **Read this** before touching the manifests in anger. |
 | `kustomization.yaml` | `kubectl apply -k .` entry point. |
 
