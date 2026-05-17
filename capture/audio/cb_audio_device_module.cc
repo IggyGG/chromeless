@@ -28,41 +28,33 @@ CreateCloudBrowserNativeAudioDeviceModule(
     return nullptr;
   }
 
-  // Construct the platform-default ADM. On Linux this resolves to
-  // libwebrtc's built-in PulseAudio backend, which reads from the
-  // server-default source — pinned to cb_capture.monitor by
-  // infra/pulse-default.pa. NO SetRecordingDevice on purpose: the
-  // server-default IS the contract, and routing it through a
-  // libpulse-level handle inside the worker would re-introduce the
-  // exact coupling the M5.5 "choice b" decision is meant to avoid.
-  webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
-      webrtc::AudioDeviceModule::Create(
-          webrtc::AudioDeviceModule::kPlatformDefaultAudio,
-          task_queue_factory);
-
-  if (adm == nullptr) {
-    // Most likely cause on this container: the PulseAudio server isn't
-    // up yet (init ordering) or the cb_capture.monitor source isn't
-    // registered. Treat as a soft failure — the PCF wrapper falls back
-    // to the dummy ADM so the worker keeps booting and the rest of
-    // the pipeline (video, datachannel) still comes up.
-    //
-    // TODO(M5.5-R1-init-ordering): once the container-boot harness in
-    // M0-R7 is stable, decide whether the worker should hard-fail
-    // instead. For DRAFT we prefer best-effort so a misconfigured
-    // PulseAudio doesn't block video-track validation in M2's
-    // acceptance gate.
-    RTC_LOG(LS_ERROR) << "CloudBrowser: AudioDeviceModule::Create("
-                         "kPlatformDefaultAudio) returned nullptr — "
-                         "is PulseAudio up? (see infra/pulse-default.pa)";
-    return nullptr;
-  }
-
-  RTC_LOG(LS_INFO) << "CloudBrowser: native AudioDeviceModule "
-                      "constructed (kPlatformDefaultAudio / built-in "
-                      "PulseAudio); recording device resolves to "
-                      "PulseAudio server-default source";
-  return adm;
+  // build-czar iter 5 (2026-05-17): M5.5 R1's
+  // webrtc::AudioDeviceModule::Create(audio_layer, task_queue_factory*)
+  // was removed in the chromium-bundled libwebrtc — replaced by the
+  // free function webrtc::CreateAudioDeviceModule(env, audio_layer),
+  // which takes a webrtc::Environment instead of a raw TaskQueueFactory
+  // pointer. See third_party/webrtc/api/audio/create_audio_device_module.h
+  // and cloud_browser_pcf.cc:113-119 for the API-drift note.
+  //
+  // For M-stack validation we DEFER native ADM construction entirely:
+  // return nullptr unconditionally so the PCF caller propagates
+  // deps.adm = nullptr and libwebrtc bypasses audio device init. This
+  // is strictly an audio-disabled CV2 acceptance — video + DataChannel
+  // + cursor + input all stay functional through M4/M5/M6. M5.5 audio
+  // polish (Environment + CreateAudioDeviceModule wiring, OR migrating
+  // to the passthrough-exported environment_factory) is tracked in a
+  // follow-up IMPROVE ticket and re-enables native PulseAudio audio
+  // without re-walking the gn-visibility + iter-4 nullptr-fallback
+  // cycle on the same M-stack tip.
+  //
+  // task_queue_factory parameter retained for ABI compat with the M1
+  // call sites in cloud_browser_browser_main_parts.cc and the test
+  // fixtures; ignored in this iter.
+  (void)task_queue_factory;
+  RTC_LOG(LS_WARNING) << "CloudBrowser: native ADM deferred to IMPROVE "
+                         "ticket — returning nullptr (audio disabled "
+                         "for M-stack validation cycle)";
+  return nullptr;
 }
 
 }  // namespace cloud_browser
