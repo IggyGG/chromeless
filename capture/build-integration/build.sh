@@ -157,6 +157,19 @@ cmd_apply_patches() {
                 log "WARN: no fallback ref for branch-heads/${CHROMIUM_BRANCH_NUMBER}; tree may be dirty"
             fi
         fi
+        # `git reset --hard` only undoes TRACKED file changes; untracked
+        # files persist. `git am` then refuses to apply a patch that
+        # CREATES one of those files: "untracked working tree files
+        # would be overwritten by merge". Observed 2026-05-17 on build
+        # #6 v2: patches/0003 failed because
+        # third_party/webrtc_overrides/cloud_browser/BUILD.gn was
+        # untracked in the tree (residue from prior partial apply).
+        # `git clean -fdx` removes them: -f actually delete, -d recurse
+        # into untracked directories, -x ignore .gitignore (the
+        # chromium .gitignore would protect out/ etc. but those don't
+        # exist at this point; patch-created files can be anywhere).
+        (cd "${CHROMIUM_SRC}" && git clean -fdx) >/dev/null 2>&1 || \
+            log "WARN: git clean -fdx failed; untracked files may persist"
     fi
 
     log "Applying ${#patches[@]} patch(es) to ${CHROMIUM_SRC}..."
