@@ -72,7 +72,18 @@ set -euo pipefail
 # workdir hostPath — safe for both S3 mode and any future local mode.
 # An explicit SCCACHE_DIR env (if ever re-added to the manifest) still
 # overrides this default.
-: "${SCCACHE_DIR:=/work/sccache}"
+#
+# build-czar 2026-05-17 iter9: /work/sccache also fails — the workdir
+# hostPath root (/work) is owned by root; the init container only
+# `chown 1000:1000`s the specific subdirs /work/src|/work/artifacts|
+# /work/logs (Phase 5), NOT /work itself, so the uid-1000 build
+# container cannot mkdir a fresh /work/sccache under it (Build #25
+# vhgtc STEP 4: mkdir /work/sccache Permission denied, restart=1).
+# /tmp is always world-writable in the container and sccache's local
+# dir in S3 mode is pure ephemeral daemon scratch (real cache = the
+# Hetzner bucket, persistence not needed), so /tmp/sccache is the
+# robust choice — no dependency on init-container chown coverage.
+: "${SCCACHE_DIR:=/tmp/sccache}"
 : "${SKIP_FETCH:=}"
 : "${STUB_MODE:=}"
 
