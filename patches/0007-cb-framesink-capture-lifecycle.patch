@@ -1,0 +1,455 @@
+From 0000000000000000000000000000000000000007 Mon Sep 17 00:00:00 2001
+From: Iggy <iggy@triform.ai>
+Date: Sun, 17 May 2026 12:00:00 +0200
+Subject: [PATCH] cloud-browser: sink-attachment-driven capture lifecycle
+ (M2-R5 / CV2-40)
+
+Wires the lifecycle of `viz::FrameSinkVideoCapturer` (the producer half
+that R2 created `mojo::Remote`s for and R3 owns inside its track source)
+to the WebRTC sink-attachment lifecycle of
+`CbFrameSinkVideoTrackSource`. Result: the viz capturer only runs while
+at least one webrtc `VideoSinkInterface` is attached, and frames stop
+flowing as soon as the last sink detaches.
+
+Why this patch exists:
+- M2-R3 ("CV2-38 — CloudBrowserFrameSinkVideoTrackSource adapter")
+  introduces a track source that wraps a viz `FrameSinkVideoCapturer`
+  and re-emits captured frames as `webrtc::VideoFrame`s through the
+  inherited `rtc::AdaptedVideoTrackSource::OnFrame()` channel. R3 left
+  open the question "when does the producer actually start?" — the
+  obvious answer ("at construction") wastes CPU/GPU whenever the
+  cloud-browser tab is constructed but no peer has subscribed yet.
+- The standard libwebrtc shape for a lazily-started source is the
+  pattern used by `webrtc::VideoTrackSource` and many embedder sources
+  (e.g. Chromium's `MediaStreamVideoSource` in blink/): override
+  `AddOrUpdateSink` / `RemoveSink`, count sinks, and Start/Stop the
+  underlying producer on the 0->1 and 1->0 transitions. This makes
+  capture implicitly peer-driven — once M3-R5's track-add fires in the
+  WebRTC offer/answer, the peer's `RtpReceiver` attaches its decoder
+  sink, sink_count_ flips from 0 to 1, and the viz producer starts;
+  on `PeerConnection::Close` the sink detaches and the producer stops.
+- The capturer mojo `Remote` is sequence-affine (it was bound on a
+  specific `SequencedTaskRunner` by R3), but
+  `AddOrUpdateSink`/`RemoveSink` are called from arbitrary WebRTC
+  threads (worker and signaling). All sink-count mutations and
+  producer calls are therefore bounced onto R3's capturer task runner,
+  guarded by a `SEQUENCE_CHECKER`, and made idempotent so that
+  spurious double-Start/double-Stop after a transient 0->1->0 race
+  cannot deadlock or leak viz pool buffers.
+
+The buffer-pool drain on Stop is required by the
+`viz::mojom::FrameSinkVideoConsumer` contract: every
+`OnFrameCaptured(..., callbacks)` hands the consumer a pending Remote
+to `FrameSinkVideoConsumerFrameCallbacks` whose `Done()` method MUST
+fire before the underlying shared-image is recycled. Dropping the
+`mojo::Receiver` on Stop without firing `Done()` for in-flight buffers
+leaks viz pool slots until the renderer is torn down. R5 walks the
+`in_flight_done_callbacks_` map that R3 already maintains keyed on
+buffer_id and Run()s each callback, then clears the map.
+
+R5 deliberately does NOT touch FrameSinkId resolution (still M2-R4)
+or any CDP-method removal (deferred to the M6 ledger). The diagnostic
+`Cb.startFrameSinkCapture` CDP path that R4 keeps remains live; once
+a peer has attached a sink, R5's first-sink Start() races with R4's
+explicit Start() and the idempotency guard (`capturer_running_`)
+serializes them.
+
+If M3 Refinement determines that the capturer must pre-warm BEFORE any
+peer offer (e.g. so the first frame after offer/answer is recent
+rather than stale), the policy flips: R5's lazy Start becomes a
+boot-driven Start and the sink-attach hook becomes a no-op. Re-derive
+when M3 lands; the FLAG in CV2-40 covers this.
+
+Touched files (NOTE — applies on top of M2-R3 patch / branch
+cv2/m2-track-source-adapter; the cb_framesink_video_track_source.{h,cc}
+and its unittest target are introduced by R3):
+
+  cloud-browser/capture/build-integration/
+    cb_framesink_video_track_source.h            (+ ~25 lines)
+    cb_framesink_video_track_source.cc           (+ ~110 lines)
+    cb_framesink_video_track_source_unittest.cc  (+ ~180 lines)
+
+Resolved against branch-heads/7727 (Chromium 147 stable) on top of
+R3's expected adapter shape. Symbol names marked `TODO(M2-R5-*)`
+below are the R3 anchor points that must be confirmed during the
+R5/R3 fold-in commit; see CV2-40 thread.
+
+---
+ .../cb_framesink_video_track_source.h         |  27 +++
+ .../cb_framesink_video_track_source.cc        | 119 +++++++++++++
+ ...framesink_video_track_source_unittest.cc   | 186 ++++++++++++++++++
+ 3 files changed, 332 insertions(+)
+
+diff --git a/cloud-browser/capture/build-integration/cb_framesink_video_track_source.h b/cloud-browser/capture/build-integration/cb_framesink_video_track_source.h
+--- a/cloud-browser/capture/build-integration/cb_framesink_video_track_source.h
++++ b/cloud-browser/capture/build-integration/cb_framesink_video_track_source.h
+@@
+ // Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+ //
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+
+ // TODO(M2-R5-class-name): assumes R3 names the class
+ // `CbFrameSinkVideoTrackSource` and derives it from
+ // `rtc::AdaptedVideoTrackSource` (so AddOrUpdateSink/RemoveSink come
+ // from the base). If R3 wraps `webrtc::VideoTrackSource` instead, the
+ // overrides below shift to the inner `rtc::VideoSourceInterface`
+ // implementation R3 exposes.
+
+ class CbFrameSinkVideoTrackSource
+     : public rtc::AdaptedVideoTrackSource,
+       public viz::mojom::FrameSinkVideoConsumer {
+  public:
+   // ... R3 members ...
+
++  // webrtc::VideoTrackSourceInterface (via AdaptedVideoTrackSource).
++  // R5: counted overrides so the underlying viz capturer only runs
++  // while at least one sink is attached.
++  void AddOrUpdateSink(rtc::VideoSinkInterface<webrtc::VideoFrame>* sink,
++                       const rtc::VideoSinkWants& wants) override;
++  void RemoveSink(rtc::VideoSinkInterface<webrtc::VideoFrame>* sink) override;
++
++ private:
++  // R5: lifecycle hooks; both run on capturer_task_runner_.
++  void OnFirstSinkAddedOnCapturerSequence();
++  void OnLastSinkRemovedOnCapturerSequence();
++
++  // R5: sink/producer bookkeeping. Touched only on capturer_task_runner_.
++  size_t sink_count_ GUARDED_BY_CONTEXT(capturer_sequence_checker_) = 0;
++  bool capturer_running_ GUARDED_BY_CONTEXT(capturer_sequence_checker_) =
++      false;
++
++  // TODO(M2-R5-member-deps): the members below are introduced by R3 and
++  // referenced from the .cc additions. Listed here so a reviewer can
++  // spot if R3's chosen names differ:
++  //   mojo::Remote<viz::mojom::FrameSinkVideoCapturer> producer_;
++  //   mojo::Receiver<viz::mojom::FrameSinkVideoConsumer> consumer_receiver_;
++  //   scoped_refptr<base::SequencedTaskRunner> capturer_task_runner_;
++  //   SEQUENCE_CHECKER(capturer_sequence_checker_);
++  //   base::flat_map<int64_t,
++  //       mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>>
++  //         in_flight_done_callbacks_;
++  //   base::WeakPtrFactory<CbFrameSinkVideoTrackSource> weak_factory_{this};
+ };
+diff --git a/cloud-browser/capture/build-integration/cb_framesink_video_track_source.cc b/cloud-browser/capture/build-integration/cb_framesink_video_track_source.cc
+--- a/cloud-browser/capture/build-integration/cb_framesink_video_track_source.cc
++++ b/cloud-browser/capture/build-integration/cb_framesink_video_track_source.cc
+@@
+ // Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+ //
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+
++#include "base/check_op.h"
++#include "base/functional/bind.h"
++#include "base/task/sequenced_task_runner.h"
++#include "services/viz/public/mojom/compositing/frame_sink_video_capture.mojom.h"
++
+ // ... R3 includes + ctor/dtor + OnFrameCaptured impl ...
+
++// M2-R5 — sink-attachment-driven capture lifecycle.
++//
++// AddOrUpdateSink / RemoveSink are called from arbitrary webrtc threads
++// (worker, signaling). We forward to the base immediately so the frame
++// fan-out keeps working, then bounce the lifecycle decision onto the
++// capturer sequence so producer_'s mojo Remote and sink_count_ are
++// only ever touched on one sequence.
++
++void CbFrameSinkVideoTrackSource::AddOrUpdateSink(
++    rtc::VideoSinkInterface<webrtc::VideoFrame>* sink,
++    const rtc::VideoSinkWants& wants) {
++  rtc::AdaptedVideoTrackSource::AddOrUpdateSink(sink, wants);
++
++  capturer_task_runner_->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<CbFrameSinkVideoTrackSource> self) {
++            if (!self) {
++              return;
++            }
++            DCHECK_CALLED_ON_VALID_SEQUENCE(
++                self->capturer_sequence_checker_);
++            ++self->sink_count_;
++            if (self->sink_count_ == 1u && !self->capturer_running_) {
++              self->OnFirstSinkAddedOnCapturerSequence();
++            }
++          },
++          weak_factory_.GetWeakPtr()));
++}
++
++void CbFrameSinkVideoTrackSource::RemoveSink(
++    rtc::VideoSinkInterface<webrtc::VideoFrame>* sink) {
++  rtc::AdaptedVideoTrackSource::RemoveSink(sink);
++
++  capturer_task_runner_->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<CbFrameSinkVideoTrackSource> self) {
++            if (!self) {
++              return;
++            }
++            DCHECK_CALLED_ON_VALID_SEQUENCE(
++                self->capturer_sequence_checker_);
++            DCHECK_GT(self->sink_count_, 0u);
++            --self->sink_count_;
++            if (self->sink_count_ == 0u && self->capturer_running_) {
++              self->OnLastSinkRemovedOnCapturerSequence();
++            }
++          },
++          weak_factory_.GetWeakPtr()));
++}
++
++void CbFrameSinkVideoTrackSource::OnFirstSinkAddedOnCapturerSequence() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(capturer_sequence_checker_);
++  DCHECK(!capturer_running_);
++  DCHECK(producer_.is_bound());
++
++  // Bind ourselves as the FrameSinkVideoConsumer for the upcoming session.
++  // The Receiver lives on capturer_task_runner_, so OnFrameCaptured()
++  // dispatches there and we never cross-thread the frame pump.
++  //
++  // TODO(M2-R5-consumer-binding): if R3 binds consumer_receiver_ in its
++  // ctor (rather than per-session), drop the Bind() call here and just
++  // pass `consumer_receiver_.BindNewPipeAndPassRemote()` once at ctor
++  // time. Per-session binding (current shape) is preferable because
++  // Stop()+reset() guarantees no stale OnFrameCaptured arrives during
++  // the idle window.
++  mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumer> consumer_remote;
++  consumer_receiver_.Bind(
++      consumer_remote.InitWithNewPipeAndPassReceiver(),
++      capturer_task_runner_);
++
++  producer_->Start(std::move(consumer_remote),
++                   viz::mojom::BufferFormatPreference::kDefault);
++  capturer_running_ = true;
++}
++
++void CbFrameSinkVideoTrackSource::OnLastSinkRemovedOnCapturerSequence() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(capturer_sequence_checker_);
++  DCHECK(capturer_running_);
++
++  // Stop the producer FIRST so no further OnFrameCaptured calls land
++  // after we drain the in-flight map. The viz capturer treats Stop()
++  // as a hint that more frames may already be in flight on the consumer
++  // side; closing consumer_receiver_ below converts that into a hard
++  // EOF for the consumer pipe.
++  producer_->Stop();
++  capturer_running_ = false;
++  consumer_receiver_.reset();
++
++  // Drain in-flight Done() callbacks so the viz pool can recycle every
++  // shared-image we ever held. Without this the pool leaks one slot
++  // per in-flight frame at Stop time and the renderer eventually
++  // refuses to allocate new buffers.
++  //
++  // TODO(M2-R5-callbacks-map): assumes R3 stores Done callbacks as
++  // `mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>`
++  // keyed by buffer_id. If R3 keeps them as `mojo::PendingRemote`s
++  // bound only at consume time, this loop becomes a `Bind()+->Done()`
++  // pair instead.
++  for (auto& entry : in_flight_done_callbacks_) {
++    if (entry.second.is_bound() && entry.second.is_connected()) {
++      entry.second->Done();
++    }
++  }
++  in_flight_done_callbacks_.clear();
++}
+diff --git a/cloud-browser/capture/build-integration/cb_framesink_video_track_source_unittest.cc b/cloud-browser/capture/build-integration/cb_framesink_video_track_source_unittest.cc
+--- a/cloud-browser/capture/build-integration/cb_framesink_video_track_source_unittest.cc
++++ b/cloud-browser/capture/build-integration/cb_framesink_video_track_source_unittest.cc
+@@
+ // Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+ //
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+
++// M2-R5 — capture lifecycle tests.
++//
++// These extend the unittest target that R3 introduces; the fixture,
++// fake capturer, fake sink, and helper builders below are R5
++// contributions to that target. If R3 already provides any of them
++// under a different name, the duplicate definitions are dropped during
++// the R5/R3 fold-in (TODO(M2-R5-test-helpers)).
++
++namespace cloud_browser {
++namespace {
++
++// Minimal viz FrameSinkVideoCapturer fake; counts Start/Stop, never
++// drives the consumer on its own (tests drive OnFrameCaptured directly
++// via the receiver Remote returned from BindNewPipeAndPassReceiver()).
++class FakeFrameSinkVideoCapturer : public viz::mojom::FrameSinkVideoCapturer {
++ public:
++  FakeFrameSinkVideoCapturer() = default;
++  ~FakeFrameSinkVideoCapturer() override = default;
++
++  size_t start_count() const { return start_count_; }
++  size_t stop_count() const { return stop_count_; }
++
++  // viz::mojom::FrameSinkVideoCapturer:
++  void Start(mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumer> consumer,
++             viz::mojom::BufferFormatPreference /*format*/) override {
++    ++start_count_;
++    consumer_.Bind(std::move(consumer));
++  }
++  void Stop() override {
++    ++stop_count_;
++    consumer_.reset();
++  }
++  // ... boilerplate no-ops for the rest of the mojom (set_resolution,
++  // set_format, set_animation_fps, ...). TODO(M2-R5-fake-impl): cribbed
++  // from viz's own test_frame_sink_video_capturer in the chromium tree.
++
++ private:
++  size_t start_count_ = 0u;
++  size_t stop_count_ = 0u;
++  mojo::Remote<viz::mojom::FrameSinkVideoConsumer> consumer_;
++};
++
++class FakeVideoSink : public rtc::VideoSinkInterface<webrtc::VideoFrame> {
++ public:
++  void OnFrame(const webrtc::VideoFrame& /*frame*/) override {
++    ++frame_count_;
++  }
++  size_t frame_count() const { return frame_count_; }
++
++ private:
++  size_t frame_count_ = 0u;
++};
++
++}  // namespace
++
++class CbFrameSinkVideoTrackSourceLifecycleTest
++    : public CbFrameSinkVideoTrackSourceTest /* R3 base fixture */ {
++ protected:
++  // Accessors plumbed via friend declaration on the source class
++  // (R3 already declares CbFrameSinkVideoTrackSourceTest a friend so
++  // we can poke at producer_ / consumer_receiver_ from tests).
++  FakeFrameSinkVideoCapturer& fake_capturer() { return fake_capturer_; }
++
++ private:
++  FakeFrameSinkVideoCapturer fake_capturer_;
++};
++
++// Acceptance #1: producer_->Start NOT called and no frame reaches a
++// sink until first sink attaches.
++TEST_F(CbFrameSinkVideoTrackSourceLifecycleTest,
++       ProducerNotStartedWithoutSink) {
++  auto source = MakeSource();
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().start_count(), 0u);
++  EXPECT_EQ(fake_capturer().stop_count(), 0u);
++}
++
++TEST_F(CbFrameSinkVideoTrackSourceLifecycleTest,
++       FirstSinkStartsProducer) {
++  auto source = MakeSource();
++  FakeVideoSink sink;
++
++  source->AddOrUpdateSink(&sink, rtc::VideoSinkWants());
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().start_count(), 1u);
++  EXPECT_EQ(fake_capturer().stop_count(), 0u);
++}
++
++TEST_F(CbFrameSinkVideoTrackSourceLifecycleTest,
++       SecondSinkDoesNotRestartProducer) {
++  auto source = MakeSource();
++  FakeVideoSink sink_a;
++  FakeVideoSink sink_b;
++
++  source->AddOrUpdateSink(&sink_a, rtc::VideoSinkWants());
++  source->AddOrUpdateSink(&sink_b, rtc::VideoSinkWants());
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().start_count(), 1u);
++  EXPECT_EQ(fake_capturer().stop_count(), 0u);
++}
++
++TEST_F(CbFrameSinkVideoTrackSourceLifecycleTest,
++       LastSinkRemovalStopsProducer) {
++  auto source = MakeSource();
++  FakeVideoSink sink_a;
++  FakeVideoSink sink_b;
++
++  source->AddOrUpdateSink(&sink_a, rtc::VideoSinkWants());
++  source->AddOrUpdateSink(&sink_b, rtc::VideoSinkWants());
++  RunAllPendingCapturerTasks();
++  source->RemoveSink(&sink_a);
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().stop_count(), 0u);  // sink_b still attached.
++
++  source->RemoveSink(&sink_b);
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().stop_count(), 1u);
++}
++
++// Acceptance #2: after last detach, producer_->Stop called and Done()
++// fired for every in-flight buffer (no pool leak).
++TEST_F(CbFrameSinkVideoTrackSourceLifecycleTest,
++       StopFiresDoneForInFlightBuffers) {
++  auto source = MakeSource();
++  FakeVideoSink sink;
++
++  source->AddOrUpdateSink(&sink, rtc::VideoSinkWants());
++  RunAllPendingCapturerTasks();
++
++  // Deliver two frames via the source's FrameSinkVideoConsumer impl,
++  // each carrying a Done-callback Remote we keep so we can assert
++  // Done() was fired. RegisterInFlightCallback() is a R3 testing helper
++  // that pushes onto in_flight_done_callbacks_ keyed by buffer_id.
++  // TODO(M2-R5-done-fakes): if R3 doesn't expose that helper, replace
++  // with a direct mojo::AssociatedReceiver wired to a FakeFrameCallbacks
++  // implementing FrameSinkVideoConsumerFrameCallbacks::Done.
++  auto callbacks_a = RegisterInFlightCallback(source.get(), /*buffer_id=*/1);
++  auto callbacks_b = RegisterInFlightCallback(source.get(), /*buffer_id=*/2);
++  RunAllPendingCapturerTasks();
++
++  source->RemoveSink(&sink);
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().stop_count(), 1u);
++  EXPECT_TRUE(callbacks_a.done_was_called());
++  EXPECT_TRUE(callbacks_b.done_was_called());
++}
++
++// Idempotency: 0->1->0->1 must result in Start(2) / Stop(1), not
++// blow up an internal DCHECK on capturer_running_.
++TEST_F(CbFrameSinkVideoTrackSourceLifecycleTest,
++       RestartAfterStopIsIdempotent) {
++  auto source = MakeSource();
++  FakeVideoSink sink;
++
++  source->AddOrUpdateSink(&sink, rtc::VideoSinkWants());
++  source->RemoveSink(&sink);
++  source->AddOrUpdateSink(&sink, rtc::VideoSinkWants());
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().start_count(), 2u);
++  EXPECT_EQ(fake_capturer().stop_count(), 1u);
++}
++
++// Race-safety: rapid 0->1->0->1->0 on the WebRTC worker thread must
++// serialize cleanly on the capturer sequence — Start/Stop counters
++// reflect the *posted* order, not a per-thread interleaving.
++TEST_F(CbFrameSinkVideoTrackSourceLifecycleTest,
++       RapidToggleSerializedOnCapturerSequence) {
++  auto source = MakeSource();
++  FakeVideoSink sink;
++
++  source->AddOrUpdateSink(&sink, rtc::VideoSinkWants());
++  source->RemoveSink(&sink);
++  source->AddOrUpdateSink(&sink, rtc::VideoSinkWants());
++  source->RemoveSink(&sink);
++  RunAllPendingCapturerTasks();
++
++  EXPECT_EQ(fake_capturer().start_count(), 2u);
++  EXPECT_EQ(fake_capturer().stop_count(), 2u);
++}
++
++}  // namespace cloud_browser
+--
+2.43.0
