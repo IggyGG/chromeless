@@ -137,18 +137,28 @@ CreateCloudBrowserDefaultAudioDeviceModule() {
   if (adm != nullptr) {
     return adm;
   }
-  // build-czar iter 4 (2026-05-17): the chromium-bundled libwebrtc has
-  // removed the static webrtc::AudioDeviceModule::Create(kDummyAudio,
-  // task_queue_factory*) factory that this fallback used to call. The
-  // dummy-ADM no-audio path is no longer reachable via a one-liner;
-  // returning nullptr is the chromium-canonical "skip audio entirely"
-  // signal — PCF caller sets deps.adm = nullptr, libwebrtc then bypasses
-  // audio device init. M5.5 R1's CreateCloudBrowserNativeAudioDeviceModule
-  // is the only supported audio path in CV2; a hard nullptr here is
-  // strictly better than a silent dummy that masks native-ADM failures.
+  // build-czar iter 6 (2026-05-17): restore the dummy-ADM fallback now
+  // that the canonical chromium-bundled libwebrtc API has been wired in.
+  // webrtc::AudioDeviceModule::Create(audio_layer, task_queue_factory*)
+  // was removed; replaced by the free function
+  // webrtc::CreateAudioDeviceModule(env, audio_layer) which takes a
+  // webrtc::Environment. patches/0003 line 145 already re-exports
+  // //third_party/webrtc/api/audio:create_audio_device_module through
+  // webrtc_api_passthrough's public_deps, and api/environment provides
+  // the Environment factory.
+  //
+  // Why dummy here (not nullptr): the dummy-ADM keeps the PCF audio
+  // pipeline structurally complete even when native PulseAudio fails,
+  // which preserves the M0 R5/R6 acceptance gate shape — video +
+  // datachannel come up regardless and the M2/M3/M4 pipeline keeps
+  // running. A null ADM here would propagate into deps.adm = nullptr
+  // and libwebrtc would skip audio device init entirely, which is
+  // strictly more "off" than the original M5.5 R1 contract intended.
   RTC_LOG(LS_WARNING) << "CloudBrowser: native ADM unavailable — "
-                         "no-audio path (deps.adm = nullptr)";
-  return nullptr;
+                         "falling back to kDummyAudio (no-audio path)";
+  webrtc::Environment env = webrtc::CreateEnvironment();
+  return webrtc::CreateAudioDeviceModule(
+      env, webrtc::AudioDeviceModule::kDummyAudio);
 }
 
 std::string FormatPcfVideoCodecLogLine(
