@@ -28,9 +28,11 @@ Why this patch exists:
   step fails with an unresolved-symbol error for content::GetHostFrame
   SinkManager.
 - A CONTENT_EXPORT free function in content/public/browser/ is the
-  same shape patch 0001 used for GetEmbedderWebRtcVideoEncoderFactory
-  — a stable, exported call site for embedders that funnels into the
-  content-internal symbol.
+  same shape the (now-retired) M7-R6 patch 0001 used for
+  GetEmbedderWebRtcVideoEncoderFactory — a stable, exported call site
+  for embedders that funnels into the content-internal symbol. NOTE:
+  this is a *shape* precedent only; 0005 has no code dependency on any
+  symbol 0001 introduced (it calls only content::GetHostFrameSinkManager).
 
 Touched files:
 - content/public/browser/content_browser_client.h  (forward decl,
@@ -43,7 +45,16 @@ Touched files:
 Resolved against branch-heads/7727 (Chromium 147 stable). Re-rebased
 2026-05-02 against the actual upstream content_browser_client.{h,cc}
 (initial shape-only context lines failed `git am` against the real
-chromium tree on first build attempt).
+chromium tree on first build attempt). Re-anchored 2026-05-17 against
+the post-M7-R6 base: patch 0001 (expose-encoder-factory-injection) was
+deleted in R6, so the .cc/.h hunk context + line numbers that 0005
+previously inherited from the 0001-applied tree were stale and broke
+STEP-3 `git am --3way` ("sha1 information is lacking or useless ...
+could not build fake ancestor"). The added content is byte-identical;
+only hunk context/line-numbers were rebased to the pristine
+(0001-less) tree, recovered verbatim from 0001's own verified
+pre-image context. 0005 does NOT reintroduce 0001's encoder-factory
+hook.
 ---
  content/public/browser/content_browser_client.cc | 14 ++++++++++++++
  content/public/browser/content_browser_client.h  | 14 ++++++++++++++
@@ -62,8 +73,8 @@ diff --git a/content/public/browser/content_browser_client.cc b/content/public/b
  #include "content/browser/cpu_performance/cpu_performance.h"
  #include "content/browser/renderer_host/render_frame_host_impl.h"
  #include "content/browser/webauth/default_authenticator_request_client_delegate.h"
-@@ -973,6 +975,18 @@ GetEmbedderWebRtcVideoEncoderFactory() {
-   return browser_client->GetWebRtcVideoEncoderFactory();
+@@ -953,6 +953,18 @@ std::optional<base::FilePath> ContentBrowserClient::GetLocalTracesDirectory() {
+   return std::nullopt;
  }
 
 +viz::HostFrameSinkManager* GetEmbedderHostFrameSinkManager() {
@@ -84,9 +95,9 @@ diff --git a/content/public/browser/content_browser_client.cc b/content/public/b
 diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
 --- a/content/public/browser/content_browser_client.h
 +++ b/content/public/browser/content_browser_client.h
-@@ -181,6 +181,10 @@ namespace webrtc {
- class VideoEncoderFactory;
- }  // namespace webrtc
+@@ -177,6 +177,10 @@ class URLLoaderClient;
+ }  // namespace mojom
+ }  // namespace network
 
 +namespace viz {
 +class HostFrameSinkManager;
@@ -95,9 +106,9 @@ diff --git a/content/public/browser/content_browser_client.h b/content/public/br
  namespace optimization_guide {
  class ModelBrokerClient;
  }  // namespace optimization_guide
-@@ -3466,6 +3470,16 @@ class CONTENT_EXPORT ContentBrowserClient {
- CONTENT_EXPORT std::unique_ptr<webrtc::VideoEncoderFactory>
- GetEmbedderWebRtcVideoEncoderFactory();
+@@ -3450,6 +3450,16 @@ class CONTENT_EXPORT ContentBrowserClient {
+       const url::Origin& origin);
+ };
 
 +// Returns the active viz::HostFrameSinkManager*, or nullptr if none is
 +// available (e.g. between BrowserMainLoop teardown and process exit).
