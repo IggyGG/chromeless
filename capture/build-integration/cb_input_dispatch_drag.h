@@ -262,12 +262,12 @@ class CbInputDispatchDrag : public CbInputDispatchDelegate {
   // race-free in chromium's drag pipeline. The CDP path doesn't model
   // this explicitly (CDP synthesises the leave inside dispatchDragEvent
   // when the next dragEnter arrives with no intervening leave).
-  void DispatchDragStart(const base::Value::Dict& data,
+  void DispatchDragStart(const base::DictValue& data,
                          base::TimeTicks event_time);
 
   // drag_over: dispatches DragTargetDragOver at (x, y) if kActive;
   // logs + no-op otherwise (spec compliance).
-  void DispatchDragOver(const base::Value::Dict& data,
+  void DispatchDragOver(const base::DictValue& data,
                         base::TimeTicks event_time);
 
   // drop: re-asserts items + types (drop carries the full payload per
@@ -290,7 +290,7 @@ class CbInputDispatchDrag : public CbInputDispatchDelegate {
   // confirmation against chromium HEAD — the Aura path almost
   // certainly rejects it as a no-op, but the synthetic-RWH path may
   // surface a DCHECK in debug.
-  void DispatchDrop(const base::Value::Dict& data,
+  void DispatchDrop(const base::DictValue& data,
                     base::TimeTicks event_time);
 
   // drag_end: terminal transition. Four paths:
@@ -314,7 +314,7 @@ class CbInputDispatchDrag : public CbInputDispatchDelegate {
   // phase + envelope.success) and pick one of five behaviours. Bug-
   // surface here is high; the unit-test plan must enumerate all five
   // transitions explicitly.
-  void DispatchDragEnd(const base::Value::Dict& data,
+  void DispatchDragEnd(const base::DictValue& data,
                        base::TimeTicks event_time);
 
   // ── Helpers ───────────────────────────────────────────────────────

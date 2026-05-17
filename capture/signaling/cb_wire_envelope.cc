@@ -70,7 +70,7 @@ std::string_view RoleToString(PeerRole role) {
 // Encode
 // ---------------------------------------------------------------------
 //
-// Each per-tag branch builds the `data` field's base::Value::Dict (or
+// Each per-tag branch builds the `data` field's base::DictValue (or
 // returns the omit-data / null-data marker), then we splice into the
 // outer envelope and JSONWriter::Write.
 
@@ -95,7 +95,7 @@ EncodedData EncodeData(EnvelopeType type, const EnvelopeData& data) {
     case EnvelopeType::kAnswer: {
       const auto* sdp = std::get_if<SdpPayload>(&data);
       if (!sdp) return out;  // ok=false
-      base::Value::Dict d;
+      base::DictValue d;
       d.Set("type", sdp->sdp_type);
       d.Set("sdp", sdp->sdp);
       out.ok = true;
@@ -112,7 +112,7 @@ EncodedData EncodeData(EnvelopeType type, const EnvelopeData& data) {
         out.value = base::Value();  // NONE -> null on the wire.
         return out;
       }
-      base::Value::Dict d;
+      base::DictValue d;
       d.Set("candidate", ice->candidate);
       if (ice->sdp_mid) d.Set("sdpMid", *ice->sdp_mid);
       if (ice->sdp_m_line_index) {
@@ -165,7 +165,7 @@ std::optional<std::string> Encode(const Envelope& env) {
     return std::nullopt;
   }
 
-  base::Value::Dict envelope;
+  base::DictValue envelope;
   envelope.Set("type", TagToString(env.type));
   envelope.Set("from", RoleToString(env.from));
   if (!ed.omit_field) {
@@ -200,7 +200,7 @@ std::optional<EnvelopeData> DecodeData(EnvelopeType type,
     case EnvelopeType::kOffer:
     case EnvelopeType::kAnswer: {
       if (!data || !data->is_dict()) return std::nullopt;
-      const base::Value::Dict& d = data->GetDict();
+      const base::DictValue& d = data->GetDict();
       const std::string* sdp_type = d.FindString("type");
       const std::string* sdp = d.FindString("sdp");
       if (!sdp_type || !sdp) return std::nullopt;
@@ -220,7 +220,7 @@ std::optional<EnvelopeData> DecodeData(EnvelopeType type,
         return EnvelopeData{std::move(eoc)};
       }
       if (!data->is_dict()) return std::nullopt;
-      const base::Value::Dict& d = data->GetDict();
+      const base::DictValue& d = data->GetDict();
       IceCandidatePayload p;
       p.is_end_of_candidates = false;
       // RTCIceCandidate.toJSON() guarantees `candidate` is always a
@@ -268,7 +268,7 @@ std::optional<EnvelopeData> DecodeData(EnvelopeType type,
 std::optional<Envelope> Decode(std::string_view json) {
   std::optional<base::Value> parsed = base::JSONReader::Read(json);
   if (!parsed || !parsed->is_dict()) return std::nullopt;
-  const base::Value::Dict& dict = parsed->GetDict();
+  const base::DictValue& dict = parsed->GetDict();
 
   const std::string* type_str = dict.FindString("type");
   if (!type_str) return std::nullopt;

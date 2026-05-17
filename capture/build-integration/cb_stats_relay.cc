@@ -323,7 +323,7 @@ void CbWebrtcEventEmitter::SetSignalingSessionId(std::string id) {
 }
 
 void CbWebrtcEventEmitter::EmitSessionCreated(std::string reason) {
-  base::Value::Dict attrs;
+  base::DictValue attrs;
   {
     base::AutoLock lock(mu_);
     if (session_created_) return;  // latched
@@ -340,7 +340,7 @@ void CbWebrtcEventEmitter::EmitSessionCreated(std::string reason) {
 }
 
 void CbWebrtcEventEmitter::EmitSessionClosed(std::string reason) {
-  base::Value::Dict attrs;
+  base::DictValue attrs;
   {
     base::AutoLock lock(mu_);
     if (!session_created_) return;  // never opened → never closes
@@ -362,7 +362,7 @@ void CbWebrtcEventEmitter::EmitSessionClosed(std::string reason) {
 }
 
 void CbWebrtcEventEmitter::EmitIceConnected(std::string ice_state) {
-  base::Value::Dict attrs;
+  base::DictValue attrs;
   {
     base::AutoLock lock(mu_);
     // Cancel any pending ice.failed debounce; ICE recovered.
@@ -391,7 +391,7 @@ void CbWebrtcEventEmitter::FireIceFailed(
     ice_failed_debounce_.reset();
     return;
   }
-  base::Value::Dict attrs;
+  base::DictValue attrs;
   {
     base::AutoLock lock(mu_);
     attrs.Set("session_id", session_id_);
@@ -456,7 +456,7 @@ void CbWebrtcEventEmitter::EmitIceFailed(
 }
 
 void CbWebrtcEventEmitter::EmitDcOpened(std::string label) {
-  base::Value::Dict attrs;
+  base::DictValue attrs;
   {
     base::AutoLock lock(mu_);
     attrs.Set("label", std::move(label));
@@ -506,10 +506,10 @@ std::string CbWebrtcEventEmitter::session_id_for_testing() const {
 }
 
 void CbWebrtcEventEmitter::EmitInternal(const std::string& event,
-                                        base::Value::Dict attrs) {
+                                        base::DictValue attrs) {
   if (client_->disabled()) return;
 
-  base::Value::Dict envelope;
+  base::DictValue envelope;
   envelope.Set("event", event);
   envelope.Set("attrs", std::move(attrs));
   std::string body;

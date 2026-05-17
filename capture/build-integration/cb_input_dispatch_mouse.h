@@ -167,11 +167,11 @@ class CbInputDispatchMouse : public CbInputDispatchDelegate {
  private:
   // Per-type dispatch handlers. Each pulls fields out of `data` per
   // the protocol shape in docs/protocols/input-channel.md.
-  void DispatchMouseMove(const base::Value::Dict& data,
+  void DispatchMouseMove(const base::DictValue& data,
                          base::TimeTicks event_time);
-  void DispatchMouseButton(const base::Value::Dict& data,
+  void DispatchMouseButton(const base::DictValue& data,
                            base::TimeTicks event_time);
-  void DispatchMouseWheel(const base::Value::Dict& data,
+  void DispatchMouseWheel(const base::DictValue& data,
                           base::TimeTicks event_time);
 
   // Once-per-instance activation analogue (Page.bringToFront). Called

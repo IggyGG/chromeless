@@ -153,7 +153,7 @@ struct IceCandidatePayload {
 // so we can pass it through verbatim without locking in a numeric
 // schema that physics may evolve.
 struct ProbeResultPayload {
-  base::Value::Dict raw;
+  base::DictValue raw;
 };
 
 // Discriminated union over the per-tag payloads. The active

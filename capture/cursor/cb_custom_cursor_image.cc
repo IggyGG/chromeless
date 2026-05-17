@@ -162,7 +162,7 @@ bool ApplyExtractionToEnvelope(const CustomImageExtraction& extraction,
   view->hotspot_y = extraction.hotspot_y;
   // V1EnvelopeView::image_format is a string_view; the extraction's
   // std::string lifetime must outlive the encoder call. The encoder
-  // copies the value into base::Value::Dict on EncodeJson, so a
+  // copies the value into base::DictValue on EncodeJson, so a
   // string_view bound to the extraction's std::string is safe for
   // any caller that holds the CustomImageExtraction across the
   // immediately-following EncodeJson() call. Tests pin this.

@@ -66,7 +66,7 @@ std::string AsciiLower(std::string_view s) {
 //   (empty std::string). webrtc treats empty username/credential as
 //   "no credentials"; this is the same semantics as streamer.js's
 //   conditional copy.
-void TryAppendServer(const base::Value::Dict& entry,
+void TryAppendServer(const base::DictValue& entry,
                      std::vector<webrtc::PeerConnectionInterface::IceServer>*
                          out) {
   webrtc::PeerConnectionInterface::IceServer server;
@@ -139,7 +139,7 @@ ParseIceServersJson(std::string_view raw_json) {
   std::vector<webrtc::PeerConnectionInterface::IceServer> servers;
   servers.reserve(candidate->size());
   for (const auto& entry : *candidate) {
-    const base::Value::Dict* dict = entry.GetIfDict();
+    const base::DictValue* dict = entry.GetIfDict();
     if (dict == nullptr) {
       continue;
     }

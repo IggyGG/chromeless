@@ -53,18 +53,18 @@ int RadiusOrDefault(int raw) {
   return raw > 0 ? raw : 1;
 }
 
-// Pull an int field from a base::Value::Dict with a fallback default.
+// Pull an int field from a base::DictValue with a fallback default.
 // FindInt returns std::optional; we collapse it to the value or the
 // default. Used for optional protocol fields (radius_x / radius_y /
 // twist) where a missing key is normal.
-int FindIntOr(const base::Value::Dict& d, std::string_view key, int fallback) {
+int FindIntOr(const base::DictValue& d, std::string_view key, int fallback) {
   std::optional<int> v = d.FindInt(key);
   return v.value_or(fallback);
 }
 
 // Pull a double field with fallback; same shape as FindIntOr above.
 // Used for `force` (spec is 0.0–1.0).
-double FindDoubleOr(const base::Value::Dict& d,
+double FindDoubleOr(const base::DictValue& d,
                     std::string_view key,
                     double fallback) {
   std::optional<double> v = d.FindDouble(key);
@@ -77,7 +77,7 @@ double FindDoubleOr(const base::Value::Dict& d,
 // already (it gates the active-points map lookup). If x/y are missing
 // returns std::nullopt and the caller logs + drops the envelope.
 std::optional<CbActiveTouchPoint> ParseTouchPointData(
-    const base::Value::Dict& data,
+    const base::DictValue& data,
     base::TimeTicks event_time) {
   std::optional<int> id = data.FindInt("identifier");
   std::optional<int> x = data.FindInt("x");
@@ -99,7 +99,7 @@ std::optional<CbActiveTouchPoint> ParseTouchPointData(
 
 // touch_end / touch_cancel carries only `identifier`. Extracted here
 // so the dispatch handler stays focused on state transitions.
-std::optional<int> ParseTouchEndIdentifier(const base::Value::Dict& data) {
+std::optional<int> ParseTouchEndIdentifier(const base::DictValue& data) {
   return data.FindInt("identifier");
 }
 
@@ -140,7 +140,7 @@ void CbInputDispatchTouch::OnInputEvent(InputEnvelope envelope) {
 // touch_start
 // ---------------------------------------------------------------------
 
-void CbInputDispatchTouch::DispatchTouchStart(const base::Value::Dict& data,
+void CbInputDispatchTouch::DispatchTouchStart(const base::DictValue& data,
                                               base::TimeTicks event_time) {
   std::optional<CbActiveTouchPoint> parsed = ParseTouchPointData(data,
                                                                  event_time);
@@ -212,7 +212,7 @@ void CbInputDispatchTouch::DispatchTouchStart(const base::Value::Dict& data,
 // touch_move
 // ---------------------------------------------------------------------
 
-void CbInputDispatchTouch::DispatchTouchMove(const base::Value::Dict& data,
+void CbInputDispatchTouch::DispatchTouchMove(const base::DictValue& data,
                                              base::TimeTicks event_time) {
   std::optional<CbActiveTouchPoint> parsed = ParseTouchPointData(data,
                                                                  event_time);
@@ -263,7 +263,7 @@ void CbInputDispatchTouch::DispatchTouchMove(const base::Value::Dict& data,
 // touch_end / touch_cancel
 // ---------------------------------------------------------------------
 
-void CbInputDispatchTouch::DispatchTouchEnd(const base::Value::Dict& data,
+void CbInputDispatchTouch::DispatchTouchEnd(const base::DictValue& data,
                                             base::TimeTicks event_time,
                                             bool cancel) {
   std::optional<int> id_opt = ParseTouchEndIdentifier(data);

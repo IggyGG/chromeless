@@ -302,7 +302,7 @@ class CbWebrtcEventEmitter {
   // Build the {event, attrs} envelope and hand it to client_.
   // Always callable from any thread; client_ handles the hop.
   void EmitInternal(const std::string& event,
-                    base::Value::Dict attrs);
+                    base::DictValue attrs);
 
   // Real fire path for ice.failed — invoked synchronously when the
   // debounce timer expires, or directly when debounce_now=true /

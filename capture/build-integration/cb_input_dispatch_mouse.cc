@@ -156,7 +156,7 @@ void CbInputDispatchMouse::OnInputEvent(InputEnvelope envelope) {
   // else: silently ignore; not R3's type.
 }
 
-void CbInputDispatchMouse::DispatchMouseMove(const base::Value::Dict& data,
+void CbInputDispatchMouse::DispatchMouseMove(const base::DictValue& data,
                                              base::TimeTicks event_time) {
   if (!resolver_) {
     LOG(WARNING) << "CbInputDispatchMouse: mouse_move dropped — no "
@@ -207,7 +207,7 @@ void CbInputDispatchMouse::DispatchMouseMove(const base::Value::Dict& data,
                              event_time);
 }
 
-void CbInputDispatchMouse::DispatchMouseButton(const base::Value::Dict& data,
+void CbInputDispatchMouse::DispatchMouseButton(const base::DictValue& data,
                                                base::TimeTicks event_time) {
   if (!resolver_) {
     LOG(WARNING) << "CbInputDispatchMouse: mouse_button dropped — no "
@@ -299,7 +299,7 @@ void CbInputDispatchMouse::DispatchMouseButton(const base::Value::Dict& data,
                              event_time);
 }
 
-void CbInputDispatchMouse::DispatchMouseWheel(const base::Value::Dict& data,
+void CbInputDispatchMouse::DispatchMouseWheel(const base::DictValue& data,
                                               base::TimeTicks event_time) {
   if (!resolver_) {
     LOG(WARNING) << "CbInputDispatchMouse: mouse_wheel dropped — no "

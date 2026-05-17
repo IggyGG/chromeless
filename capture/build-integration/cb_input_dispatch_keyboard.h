@@ -171,7 +171,7 @@ class CbInputDispatchKeyboard : public CbInputDispatchDelegate {
   // kKeyUp event type; both share the modifier-state mutation path
   // (down sets, up clears) and the text-synthesis branch (kChar
   // fires only after kRawKeyDown).
-  void DispatchKey(const base::Value::Dict& data,
+  void DispatchKey(const base::DictValue& data,
                    bool is_down,
                    base::TimeTicks event_time);
 

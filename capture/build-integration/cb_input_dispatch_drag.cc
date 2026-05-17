@@ -58,7 +58,7 @@ std::vector<CbDragItem> ParseItems(const base::Value::List* items_list) {
   }
   out.reserve(items_list->size());
   for (const base::Value& item_v : *items_list) {
-    const base::Value::Dict* item_d = item_v.GetIfDict();
+    const base::DictValue* item_d = item_v.GetIfDict();
     if (!item_d) {
       LOG(WARNING) << "CbInputDispatchDrag: drag item not a dict; skipping";
       continue;
@@ -151,7 +151,7 @@ void CbInputDispatchDrag::OnInputEvent(InputEnvelope envelope) {
 // drag_start
 // ---------------------------------------------------------------------
 
-void CbInputDispatchDrag::DispatchDragStart(const base::Value::Dict& data,
+void CbInputDispatchDrag::DispatchDragStart(const base::DictValue& data,
                                             base::TimeTicks event_time) {
   if (!resolver_) {
     LOG(WARNING) << "CbInputDispatchDrag: drag_start dropped — no "
@@ -273,7 +273,7 @@ void CbInputDispatchDrag::DispatchDragStart(const base::Value::Dict& data,
 // drag_over
 // ---------------------------------------------------------------------
 
-void CbInputDispatchDrag::DispatchDragOver(const base::Value::Dict& data,
+void CbInputDispatchDrag::DispatchDragOver(const base::DictValue& data,
                                            base::TimeTicks event_time) {
   // ── Spec compliance: stray drag_over outside active drag is no-op ──
   if (phase_ != CbDragPhase::kActive) {
@@ -318,7 +318,7 @@ void CbInputDispatchDrag::DispatchDragOver(const base::Value::Dict& data,
 // drop
 // ---------------------------------------------------------------------
 
-void CbInputDispatchDrag::DispatchDrop(const base::Value::Dict& data,
+void CbInputDispatchDrag::DispatchDrop(const base::DictValue& data,
                                        base::TimeTicks event_time) {
   // ── PRINCIPAL-RISK: drop while kIdle ──
   //
@@ -402,7 +402,7 @@ void CbInputDispatchDrag::DispatchDrop(const base::Value::Dict& data,
 // drag_end — PRINCIPAL-RISK: five distinct transitions
 // ---------------------------------------------------------------------
 
-void CbInputDispatchDrag::DispatchDragEnd(const base::Value::Dict& data,
+void CbInputDispatchDrag::DispatchDragEnd(const base::DictValue& data,
                                           base::TimeTicks event_time) {
   const std::optional<bool> success_opt = data.FindBool("success");
   if (!success_opt) {

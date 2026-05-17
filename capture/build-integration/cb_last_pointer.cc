@@ -46,7 +46,7 @@ void CbLastPointerState::MarkEntered() {
   snap_.in_widget = true;
 }
 
-bool HandlePointerLeaveEnvelope(const base::Value::Dict& /*data*/,
+bool HandlePointerLeaveEnvelope(const base::DictValue& /*data*/,
                                 CbLastPointerState* state) {
   if (!state) {
     return false;
@@ -59,7 +59,7 @@ bool HandlePointerLeaveEnvelope(const base::Value::Dict& /*data*/,
   return true;
 }
 
-bool HandlePointerEnterEnvelope(const base::Value::Dict& /*data*/,
+bool HandlePointerEnterEnvelope(const base::DictValue& /*data*/,
                                 CbLastPointerState* state) {
   if (!state) {
     return false;

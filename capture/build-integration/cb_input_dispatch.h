@@ -48,7 +48,7 @@ namespace cloud_browser {
 // Decoded v1 envelope. Mirrors the Go inputEnvelope in capture/input-
 // bridge/main.go so anything that round-trips through the existing
 // input-channel.md spec keeps the same field names + types. The
-// payload stays as base::Value::Dict so the typed handlers can pull
+// payload stays as base::DictValue so the typed handlers can pull
 // out their per-type fields with the chromium-standard accessor API
 // instead of re-parsing.
 struct InputEnvelope {
@@ -66,7 +66,7 @@ struct InputEnvelope {
   int64_t seq = 0;
   // Per-type payload. Always a dict for the v1 types we know about;
   // R1 doesn't reach into it.
-  base::Value::Dict data;
+  base::DictValue data;
 };
 
 // Delegate that receives the typed, already-on-UI-thread dispatch

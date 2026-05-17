@@ -216,14 +216,14 @@ class CbLastPointerState {
 // to call state->Update(...) for the coord half BEFORE flipping
 // in_widget, so consumers that paint the cursor see it slide to the
 // boundary then disappear instead of freezing in place mid-widget.
-bool HandlePointerLeaveEnvelope(const base::Value::Dict& data,
+bool HandlePointerLeaveEnvelope(const base::DictValue& data,
                                 CbLastPointerState* state);
 
 // Symmetric helper for a v1.1 `mouse_enter` envelope. Same return
 // semantics as HandlePointerLeaveEnvelope. Currently a thin wrapper
 // around state->MarkEntered() — exists so the composite delegate can
 // route `mouse_enter` through a uniform Handle* helper shape.
-bool HandlePointerEnterEnvelope(const base::Value::Dict& data,
+bool HandlePointerEnterEnvelope(const base::DictValue& data,
                                 CbLastPointerState* state);
 
 }  // namespace cloud_browser

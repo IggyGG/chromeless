@@ -107,14 +107,14 @@ TEST(CbLastPointerStateTest, MarkLeftIsIdempotent) {
 }
 
 TEST(HandlePointerLeaveEnvelopeTest, NullStateReturnsFalse) {
-  base::Value::Dict data;
+  base::DictValue data;
   EXPECT_FALSE(HandlePointerLeaveEnvelope(data, nullptr));
 }
 
 TEST(HandlePointerLeaveEnvelopeTest, FlipsInWidgetAndReturnsTrue) {
   CbLastPointerState state;
   state.Update(5.f, 6.f, 0u, base::TimeTicks::Now());
-  base::Value::Dict data;
+  base::DictValue data;
   EXPECT_TRUE(HandlePointerLeaveEnvelope(data, &state));
   EXPECT_FALSE(state.last_pointer().in_widget);
   // Coords preserved per the freeze-on-leave invariant.
@@ -123,7 +123,7 @@ TEST(HandlePointerLeaveEnvelopeTest, FlipsInWidgetAndReturnsTrue) {
 }
 
 TEST(HandlePointerEnterEnvelopeTest, NullStateReturnsFalse) {
-  base::Value::Dict data;
+  base::DictValue data;
   EXPECT_FALSE(HandlePointerEnterEnvelope(data, nullptr));
 }
 
@@ -132,7 +132,7 @@ TEST(HandlePointerEnterEnvelopeTest, FlipsInWidgetTrueAndReturnsTrue) {
   state.Update(9.f, 13.f, 0u, base::TimeTicks::Now());
   state.MarkLeft();
   ASSERT_FALSE(state.last_pointer().in_widget);
-  base::Value::Dict data;
+  base::DictValue data;
   EXPECT_TRUE(HandlePointerEnterEnvelope(data, &state));
   EXPECT_TRUE(state.last_pointer().in_widget);
 }

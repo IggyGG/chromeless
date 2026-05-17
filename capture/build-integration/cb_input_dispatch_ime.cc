@@ -67,7 +67,7 @@ std::vector<ui::ImeTextSpan> BuildDefaultCompositionSpans(
 // to UTF-16 because blink's IME APIs take std::u16string. Returns empty
 // on a missing / non-string value — composition_start with empty data
 // is valid per the protocol.
-std::u16string ReadDataAsU16(const base::Value::Dict& dict) {
+std::u16string ReadDataAsU16(const base::DictValue& dict) {
   const std::string* s = dict.FindString("data");
   if (!s || s->empty()) {
     return std::u16string();
@@ -85,7 +85,7 @@ int ClampInt(int value, int lo, int hi) {
 // Reads an optional integer field. Returns true + populates |out| if
 // the field is present AND is an int; returns false if missing or
 // non-int (the caller falls back to the "caret at end" default).
-bool ReadOptionalInt(const base::Value::Dict& dict,
+bool ReadOptionalInt(const base::DictValue& dict,
                      const char* key,
                      int* out) {
   const auto opt = dict.FindInt(key);
@@ -131,7 +131,7 @@ void CbInputDispatchIme::OnInputEvent(InputEnvelope envelope) {
 }
 
 void CbInputDispatchIme::DispatchCompositionStart(
-    const base::Value::Dict& data,
+    const base::DictValue& data,
     base::TimeTicks /*event_time*/) {
   content::RenderWidgetHost* rwh = ResolveFocusedRenderWidgetHost();
   if (!rwh) {
@@ -170,7 +170,7 @@ void CbInputDispatchIme::DispatchCompositionStart(
 }
 
 void CbInputDispatchIme::DispatchCompositionUpdate(
-    const base::Value::Dict& data,
+    const base::DictValue& data,
     base::TimeTicks /*event_time*/) {
   content::RenderWidgetHost* rwh = ResolveFocusedRenderWidgetHost();
   if (!rwh) {
@@ -212,7 +212,7 @@ void CbInputDispatchIme::DispatchCompositionUpdate(
 }
 
 void CbInputDispatchIme::DispatchCompositionEnd(
-    const base::Value::Dict& data,
+    const base::DictValue& data,
     base::TimeTicks event_time) {
   content::RenderWidgetHost* rwh = ResolveFocusedRenderWidgetHost();
   if (!rwh) {

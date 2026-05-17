@@ -205,10 +205,10 @@ V1EnvelopeView EnvelopeAssembler::Assemble(ui::mojom::CursorType type,
 
 std::optional<std::string> EnvelopeAssembler::EncodeJson(
     const V1EnvelopeView& view) {
-  // base::Value::Dict mirrors the cursor-channel.md envelope shape
+  // base::DictValue mirrors the cursor-channel.md envelope shape
   // exactly. We build `data` first, splice into the outer dict, then
   // JSONWriter::Write.
-  base::Value::Dict data;
+  base::DictValue data;
   data.Set("x", view.x);
   data.Set("y", view.y);
   data.Set("visible", view.visible);
@@ -218,7 +218,7 @@ std::optional<std::string> EnvelopeAssembler::EncodeJson(
   // cursor-watcher legacy emitter (cursorData's `,omitempty` Go tags
   // in capture/cursor-watcher/main.go:63-66).
   if (view.hotspot_x.has_value() && view.hotspot_y.has_value()) {
-    base::Value::Dict hotspot;
+    base::DictValue hotspot;
     hotspot.Set("x", *view.hotspot_x);
     hotspot.Set("y", *view.hotspot_y);
     data.Set("hotspot", std::move(hotspot));
@@ -233,10 +233,10 @@ std::optional<std::string> EnvelopeAssembler::EncodeJson(
                                        : std::string(view.image_format));
   }
 
-  base::Value::Dict envelope;
+  base::DictValue envelope;
   envelope.Set("v", view.v);
   envelope.Set("type", std::string(view.type_tag));
-  // int64 → double: base::Value::Dict::Set has no int64 overload; the
+  // int64 → double: base::DictValue::Set has no int64 overload; the
   // (int) overload is 32-bit and would silently truncate `t` past
   // 2038, so we cast to double. The double precision (53-bit mantissa)
   // safely holds epoch-ms through year ~285,000 and a 1-per-cursor-

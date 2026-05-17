@@ -192,11 +192,11 @@ class CbInputDispatchIme : public CbInputDispatchDelegate {
  private:
   // Per-type dispatch handlers. Each pulls fields out of `data` per
   // the protocol shape in docs/protocols/input-channel.md.
-  void DispatchCompositionStart(const base::Value::Dict& data,
+  void DispatchCompositionStart(const base::DictValue& data,
                                 base::TimeTicks event_time);
-  void DispatchCompositionUpdate(const base::Value::Dict& data,
+  void DispatchCompositionUpdate(const base::DictValue& data,
                                  base::TimeTicks event_time);
-  void DispatchCompositionEnd(const base::Value::Dict& data,
+  void DispatchCompositionEnd(const base::DictValue& data,
                               base::TimeTicks event_time);
   void DispatchCompositionCancel(base::TimeTicks event_time);
 

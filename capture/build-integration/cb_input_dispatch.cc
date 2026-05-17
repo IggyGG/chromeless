@@ -126,7 +126,7 @@ bool DecodeEnvelope(const std::string& raw,
     return false;
   }
 
-  base::Value::Dict envelope = std::move(*parsed).TakeDict();
+  base::DictValue envelope = std::move(*parsed).TakeDict();
 
   std::optional<int> v = envelope.FindInt("v");
   if (!v.has_value()) {
@@ -152,7 +152,7 @@ bool DecodeEnvelope(const std::string& raw,
   // and the client wouldn't send them. v2 will widen this to int64.
   //
   // TODO(M4-R1-int64-timestamps): switch to FindDouble + range check
-  // before v=2 of the wire protocol, or define a base::Value::Dict
+  // before v=2 of the wire protocol, or define a base::DictValue
   // int64 accessor upstream.
   std::optional<int> t = envelope.FindInt("t");
   if (!t.has_value()) {
@@ -168,7 +168,7 @@ bool DecodeEnvelope(const std::string& raw,
   }
   out->seq = *seq;
 
-  base::Value::Dict* data = envelope.FindDict("data");
+  base::DictValue* data = envelope.FindDict("data");
   if (!data) {
     *out_reason = "missing or non-object 'data'";
     return false;

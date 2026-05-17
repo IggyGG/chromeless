@@ -190,11 +190,11 @@ class CbInputDispatchTouch : public CbInputDispatchDelegate {
   // Per-type dispatch handlers. Each pulls fields out of `data` per
   // the protocol shape in docs/protocols/input-channel.md §
   // "touch_start / touch_move / touch_end / touch_cancel".
-  void DispatchTouchStart(const base::Value::Dict& data,
+  void DispatchTouchStart(const base::DictValue& data,
                           base::TimeTicks event_time);
-  void DispatchTouchMove(const base::Value::Dict& data,
+  void DispatchTouchMove(const base::DictValue& data,
                          base::TimeTicks event_time);
-  void DispatchTouchEnd(const base::Value::Dict& data,
+  void DispatchTouchEnd(const base::DictValue& data,
                         base::TimeTicks event_time,
                         bool cancel);
 

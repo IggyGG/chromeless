@@ -60,7 +60,7 @@ void CbInputDispatchKeyboard::OnInputEvent(InputEnvelope envelope) {
   // else: silently ignore; not R4's type.
 }
 
-void CbInputDispatchKeyboard::DispatchKey(const base::Value::Dict& data,
+void CbInputDispatchKeyboard::DispatchKey(const base::DictValue& data,
                                           bool is_down,
                                           base::TimeTicks event_time) {
   if (!resolver_) {
