@@ -259,6 +259,39 @@ source_set("framesink_capture") {
 }
 
 # ---------------------------------------------------------------------
+# M4 R2 (CV2-42) — active streamed-WebContents resolver.
+#
+# Concrete implementation of the WebContentsResolver interface coined
+# by M4 R3 (cb_input_dispatch_mouse.h:104-108). Owned by main_parts;
+# notified by CbDevToolsManagerDelegate on every successful
+# Cb.startFrameSinkCapture; queried by M4's input dispatchers
+# (R3..R7) on every dispatch.
+#
+# Kept in its own source_set so the input-dispatch source_sets (which
+# are small and want a tight dep graph) can depend on `:active_
+# webcontents_resolver` directly without pulling in the full
+# `:embedder` set. The embedder set picks it up in turn via
+# composition-root wiring.
+# ---------------------------------------------------------------------
+source_set("active_webcontents_resolver") {
+  sources = [
+    "cb_active_webcontents_resolver.cc",
+    "cb_active_webcontents_resolver.h",
+  ]
+  deps = [
+    "//base",
+    # WebContents, WebContentsObserver, RenderFrameHost,
+    # RenderViewHost, RenderWidgetHost, RenderWidgetHostView.
+    "//content/public/browser",
+    # viz::FrameSinkId — stored in the resolver for diagnostics + the
+    # capture-vs-current FSID mismatch warning.
+    "//components/viz/common",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # Browser-process PeerConnectionFactory seam (M1 — CV2-26 / CV2-27).
 #
 # Extracted from cloud_browser_browser_main_parts.cc so the assembly,
@@ -347,6 +380,12 @@ source_set("embedder") {
     "content_browser_client.h",
   ]
   deps = [
+    # M4-R2 — active streamed-WebContents resolver. main_parts owns
+    # the unique_ptr and threads the raw pointer through both
+    # CbDevToolsManagerDelegate (so Cb.startFrameSinkCapture can call
+    # SetActiveCapture) and the M4 input dispatchers (R3..R7 take it
+    # at construction).
+    ":active_webcontents_resolver",
     # M1-R2 — browser-process PCF construction seam. cloud_browser_
     # browser_main_parts.cc owns 3 rtc::Threads + the pcf_ member and
     # calls CreateCloudBrowserPcf() from PreMainMessageLoopRun.
