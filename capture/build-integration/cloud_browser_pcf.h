@@ -14,7 +14,7 @@
 // The seam has four pieces:
 //
 //   1. BuildCloudBrowserPcfDependencies(...)
-//      Pure assembly. 3 dedicated rtc::Threads (network / worker /
+//      Pure assembly. 3 dedicated webrtc::Threads (network / worker /
 //      signaling — see CV2-26 R-thread DECISION) + a webrtc::
 //      Environment + an AudioDeviceModule are slotted into a
 //      webrtc::PeerConnectionFactoryDependencies struct alongside our
@@ -75,7 +75,7 @@ namespace cloud_browser {
 //
 // |network_thread|, |worker_thread|, |signaling_thread|: the three
 // dedicated webrtc threads. Per CV2-26 R-thread DECISION, the
-// browser-process embedder owns these as bare rtc::Thread members
+// browser-process embedder owns these as bare webrtc::Thread members
 // (not ThreadWrappers around chromium task runners) — simpler
 // lifetime ordering for the mandated PCF-teardown-before-
 // browser_context_ ordering.
@@ -102,11 +102,11 @@ namespace cloud_browser {
 // hand the deps off to CreateModularPeerConnectionFactory(). The
 // CreateCloudBrowserPcf wrapper below does both of these in one shot.
 webrtc::PeerConnectionFactoryDependencies BuildCloudBrowserPcfDependencies(
-    rtc::Thread* network_thread,
-    rtc::Thread* worker_thread,
-    rtc::Thread* signaling_thread,
+    webrtc::Thread* network_thread,
+    webrtc::Thread* worker_thread,
+    webrtc::Thread* signaling_thread,
     const webrtc::Environment& env,
-    rtc::scoped_refptr<webrtc::AudioDeviceModule> adm);
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm);
 
 // Construct the browser-process PeerConnectionFactory.
 //
@@ -117,13 +117,13 @@ webrtc::PeerConnectionFactoryDependencies BuildCloudBrowserPcfDependencies(
 //   3. Call webrtc::CreateModularPeerConnectionFactory(std::move(deps)).
 //
 // Returns the constructed PCF, or nullptr if PCF construction failed.
-rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
+webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
 CreateCloudBrowserPcf(
-    rtc::Thread* network_thread,
-    rtc::Thread* worker_thread,
-    rtc::Thread* signaling_thread,
+    webrtc::Thread* network_thread,
+    webrtc::Thread* worker_thread,
+    webrtc::Thread* signaling_thread,
     const webrtc::Environment& env,
-    rtc::scoped_refptr<webrtc::AudioDeviceModule> adm);
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm);
 
 // M1's default AudioDeviceModule — the dummy / no-audio path.
 //
@@ -139,7 +139,7 @@ CreateCloudBrowserPcf(
 //
 // TODO(M5.5): replace the kDummyAudio body with the real cb-audio
 // ADM construction.
-rtc::scoped_refptr<webrtc::AudioDeviceModule>
+webrtc::scoped_refptr<webrtc::AudioDeviceModule>
 CreateCloudBrowserDefaultAudioDeviceModule();
 
 // Format the deterministic codec-cap probe log line that M0 R5's

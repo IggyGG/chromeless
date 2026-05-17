@@ -28,14 +28,14 @@
 namespace cloud_browser {
 
 webrtc::PeerConnectionFactoryDependencies BuildCloudBrowserPcfDependencies(
-    rtc::Thread* network_thread,
-    rtc::Thread* worker_thread,
-    rtc::Thread* signaling_thread,
+    webrtc::Thread* network_thread,
+    webrtc::Thread* worker_thread,
+    webrtc::Thread* signaling_thread,
     const webrtc::Environment& env,
-    rtc::scoped_refptr<webrtc::AudioDeviceModule> adm) {
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm) {
   webrtc::PeerConnectionFactoryDependencies deps;
 
-  // Three dedicated rtc::Threads — owned by the caller. The CV2-26
+  // Three dedicated webrtc::Threads — owned by the caller. The CV2-26
   // R-thread DECISION rationale: simpler lifetime ordering for the
   // mandated PCF-teardown-before-browser_context_ ordering vs.
   // ThreadWrapper around chromium task runners.
@@ -78,13 +78,13 @@ webrtc::PeerConnectionFactoryDependencies BuildCloudBrowserPcfDependencies(
   return deps;
 }
 
-rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
+webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
 CreateCloudBrowserPcf(
-    rtc::Thread* network_thread,
-    rtc::Thread* worker_thread,
-    rtc::Thread* signaling_thread,
+    webrtc::Thread* network_thread,
+    webrtc::Thread* worker_thread,
+    webrtc::Thread* signaling_thread,
     const webrtc::Environment& env,
-    rtc::scoped_refptr<webrtc::AudioDeviceModule> adm) {
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm) {
   webrtc::PeerConnectionFactoryDependencies deps =
       BuildCloudBrowserPcfDependencies(network_thread, worker_thread,
                                        signaling_thread, env,
@@ -98,7 +98,7 @@ CreateCloudBrowserPcf(
   return webrtc::CreateModularPeerConnectionFactory(std::move(deps));
 }
 
-rtc::scoped_refptr<webrtc::AudioDeviceModule>
+webrtc::scoped_refptr<webrtc::AudioDeviceModule>
 CreateCloudBrowserDefaultAudioDeviceModule() {
   // M1's default ADM is the kDummyAudio path — satisfies libwebrtc's
   // non-null ADM expectation but emits no real audio frames.

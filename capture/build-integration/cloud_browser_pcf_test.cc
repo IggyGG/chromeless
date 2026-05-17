@@ -39,16 +39,16 @@ namespace {
 using ::testing::IsSupersetOf;
 using ::testing::UnorderedElementsAre;
 
-// Owns 3 dedicated rtc::Threads matching the embedder shape — network,
+// Owns 3 dedicated webrtc::Threads matching the embedder shape — network,
 // worker, signaling — Start()ed in the ctor and Stop()ped in the dtor.
 // Mirrors the per-test lifetime CloudBrowserBrowserMainParts holds for
 // real.
 class ScopedPcfThreads {
  public:
   ScopedPcfThreads()
-      : network_(rtc::Thread::CreateWithSocketServer()),
-        worker_(rtc::Thread::Create()),
-        signaling_(rtc::Thread::Create()) {
+      : network_(webrtc::Thread::CreateWithSocketServer()),
+        worker_(webrtc::Thread::Create()),
+        signaling_(webrtc::Thread::Create()) {
     network_->SetName("cb-test-net", nullptr);
     worker_->SetName("cb-test-worker", nullptr);
     signaling_->SetName("cb-test-signaling", nullptr);
@@ -63,14 +63,14 @@ class ScopedPcfThreads {
     network_->Stop();
   }
 
-  rtc::Thread* network() { return network_.get(); }
-  rtc::Thread* worker() { return worker_.get(); }
-  rtc::Thread* signaling() { return signaling_.get(); }
+  webrtc::Thread* network() { return network_.get(); }
+  webrtc::Thread* worker() { return worker_.get(); }
+  webrtc::Thread* signaling() { return signaling_.get(); }
 
  private:
-  std::unique_ptr<rtc::Thread> network_;
-  std::unique_ptr<rtc::Thread> worker_;
-  std::unique_ptr<rtc::Thread> signaling_;
+  std::unique_ptr<webrtc::Thread> network_;
+  std::unique_ptr<webrtc::Thread> worker_;
+  std::unique_ptr<webrtc::Thread> signaling_;
 };
 
 // Extract uppercase codec names from a RtpCapabilities.codecs vector,
@@ -91,7 +91,7 @@ TEST(CloudBrowserPcfTest, DepsCarryInjectedEncoderFactory) {
   ScopedPcfThreads threads;
   webrtc::Environment env = webrtc::CreateEnvironment();
 
-  rtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
       CreateCloudBrowserDefaultAudioDeviceModule();
 
   webrtc::PeerConnectionFactoryDependencies deps =
@@ -124,7 +124,7 @@ TEST(CloudBrowserPcfTest, DepsAudioDeviceModuleSlotHonoursInjection) {
   // must hold exactly that ADM (identity, not "any non-null ADM").
   // This is the M5.5 cross-module contract: M5.5 passes its real ADM
   // here and expects it to survive PCF construction unchanged.
-  rtc::scoped_refptr<webrtc::AudioDeviceModule> injected =
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> injected =
       webrtc::TestAudioDeviceModule::CreateTestAudioDeviceModule(
           webrtc::TestAudioDeviceModule::CreatePulsedNoiseCapturer(
               /*max_amplitude=*/0, /*sampling_frequency_in_hz=*/48000),
@@ -151,10 +151,10 @@ TEST(CloudBrowserPcfTest, DepsAudioDeviceModuleSlotHonoursInjection) {
 TEST(CloudBrowserPcfTest, PcfVideoSenderCapsMatchFactoryFormats) {
   ScopedPcfThreads threads;
   webrtc::Environment env = webrtc::CreateEnvironment();
-  rtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
       CreateCloudBrowserDefaultAudioDeviceModule();
 
-  rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf =
+  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf =
       CreateCloudBrowserPcf(threads.network(), threads.worker(),
                             threads.signaling(), env, adm);
   ASSERT_NE(pcf, nullptr);

@@ -194,10 +194,10 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   //     last because they hold raw pointers that the PCF doesn't,
   //     so dropping the PCF first is purely additive). Mirrors the
   //     aura_.release() ordering rationale at cc:303-328.
-  std::unique_ptr<rtc::Thread> network_thread_;
-  std::unique_ptr<rtc::Thread> worker_thread_;
-  std::unique_ptr<rtc::Thread> signaling_thread_;
-  rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
+  std::unique_ptr<webrtc::Thread> network_thread_;
+  std::unique_ptr<webrtc::Thread> worker_thread_;
+  std::unique_ptr<webrtc::Thread> signaling_thread_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
 
   bool devtools_http_handler_started_ = false;
 

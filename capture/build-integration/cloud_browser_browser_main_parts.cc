@@ -297,7 +297,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // 5. Browser-process PeerConnectionFactory (ChromelessV2 M1 —
   //    CV2-26 / CV2-27).
   //
-  //    Construct 3 dedicated rtc::Threads (network / worker /
+  //    Construct 3 dedicated webrtc::Threads (network / worker /
   //    signaling), build a webrtc::Environment, and hand them to
   //    CreateCloudBrowserPcf() which injects CloudBrowserVideoEncoder
   //    Factory under default Config{} (VP9 + H264 + AV1) and the M1
@@ -313,9 +313,9 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   //    Thread setup: network thread MUST be CreateWithSocketServer
   //    (it owns libwebrtc's net socket dispatch); worker + signaling
   //    are plain Threads. Names are diagnostic-only.
-  network_thread_ = rtc::Thread::CreateWithSocketServer();
-  worker_thread_ = rtc::Thread::Create();
-  signaling_thread_ = rtc::Thread::Create();
+  network_thread_ = webrtc::Thread::CreateWithSocketServer();
+  worker_thread_ = webrtc::Thread::Create();
+  signaling_thread_ = webrtc::Thread::Create();
   network_thread_->SetName("cb-pcf-net", nullptr);
   worker_thread_->SetName("cb-pcf-worker", nullptr);
   signaling_thread_->SetName("cb-pcf-signaling", nullptr);
@@ -354,7 +354,7 @@ void CloudBrowserBrowserMainParts::WillRunMainMessageLoop(
 void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   StopDevToolsHttpHandler();
 
-  // ChromelessV2 M1 — drop the PCF + its 3 rtc::Threads BEFORE
+  // ChromelessV2 M1 — drop the PCF + its 3 webrtc::Threads BEFORE
   // browser_context_/initial_web_contents_/aura_ (the M2+ wiring
   // doesn't add raw pointers from PCF→context, so this is purely
   // additive ordering — but the discipline mirrors the aura_.release()
