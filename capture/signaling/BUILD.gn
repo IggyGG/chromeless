@@ -11,12 +11,13 @@
 #   R2 (:cb_signaling_ws_client) — native WebSocket client (rides on
 #       //services/network's NetworkContext::CreateWebSocket Mojo
 #       interface).
-#   R3 (:cb_ice_config) — env-driven ICE-server loader (this commit).
-#   R4  — PeerConnection wire-up on M1's PCF.
+#   R3 (:cb_ice_config) — env-driven ICE-server loader.
+#   R4 (:cb_offerer_driver) — offerer handshake driver (SDP+ICE dance,
+#       this commit's new entry).
 #   R5  — DataChannel host (input, cursor, ancillary).
 #
-# R1, R2, and R3 are all present in this file; R4..R5 add more
-# source_sets as they land.
+# R1..R4 are all present in this file; R5 adds more source_sets as
+# it lands.
 
 import("//testing/test.gni")  # provides test() template used below
 
@@ -206,3 +207,63 @@ source_set("cb_ice_config") {
 #   ]
 #   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
 # }
+
+# ---------------------------------------------------------------------
+# R4 — offerer handshake driver.
+#
+# Drives the SDP offer/answer + trickle-ICE dance from the cb-chromium
+# side as the sole offerer. Bridges:
+#   * M1's PeerConnectionFactory (//cloud-browser/capture/build-
+#     integration:cloud_browser_pcf) for CreatePeerConnection.
+#   * M3 R1's :cb_wire_envelope for Envelope encode/decode.
+#   * M3 R2's :cb_signaling_ws_client for the duplex wire transport.
+#   * M3 R3's :cb_ice_config for the RTCConfiguration.servers list
+#     fed into CreatePeerConnection.
+#
+# The webrtc/api deps below pull in the libwebrtc public API surface
+# (PeerConnectionInterface, SessionDescriptionInterface,
+# IceCandidateInterface, RtcError, scoped_refptr). These ride on the
+# chromium-bundled webrtc passthrough config from
+# patches/0003-add-cloud-browser-webrtc-overrides.patch — confirm at
+# first-build that //third_party/webrtc visibility is propagating
+# through :cloud_browser_pcf's public_deps so we don't have to
+# re-declare it here.
+# ---------------------------------------------------------------------
+source_set("cb_offerer_driver") {
+  sources = [
+    "cb_offerer_driver.cc",
+    "cb_offerer_driver.h",
+  ]
+  deps = [
+    ":cb_signaling_ws_client",  # M3 R2
+    ":cb_wire_envelope",        # M3 R1
+    "//cloud-browser/capture/build-integration:cloud_browser_pcf",  # M1
+    "//base",
+    "//third_party/webrtc/api:libjingle_peerconnection_api",
+    "//third_party/webrtc/api:rtc_error",
+    "//third_party/webrtc/api:scoped_refptr",
+    "//third_party/webrtc/api:set_local_description_observer_interface",
+    "//third_party/webrtc/api:set_remote_description_observer_interface",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R4 unit tests.
+#
+# TODO(M3-R4-tests): RED-by-construction pre-T17 — adds
+# cb_offerer_driver_test.cc in a follow-up commit. Fixture mirrors
+# libwebrtc's pc_test_fixture pattern (FakePeerConnection if libwebrtc
+# bundles it, else gmock'd PeerConnectionInterface) + FakeSignalingWs
+# Client (gmock'd around SignalingClientObserver). Coverage:
+#   * Start() → CreatePeerConnection → first OnRenegotiationNeeded →
+#     CreateOffer → SetLocalDescription → `offer` envelope emitted.
+#   * Inbound `answer` → SetRemoteDescription → kIceInFlight.
+#   * OnIceCandidate × N + OnIceGatheringChange(complete) →
+#     `ice` envelopes + end-of-candidates marker.
+#   * Inbound `ice` candidates / end-of-candidates → AddIceCandidate.
+#   * Inbound `request_renegotiate` (R4 only) → FailWithReason.
+#   * Inbound `offer` → FailWithReason (broker-misroute negative).
+# ---------------------------------------------------------------------
