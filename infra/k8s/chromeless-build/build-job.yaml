@@ -304,11 +304,15 @@ spec:
               value: "80G"
           resources:
             requests:
-              # Burstable QoS — see build-job.yaml header. Request 12
-              # fits triform-8's scheduler headroom (~7 free CPU after
-              # peers' reservations); limit 40 bursts into the ~30 CPU
-              # peers actually leave idle.
-              cpu: "12"
+              # Burstable QoS — see build-job.yaml header. Request was
+              # 12 CPU; observed 2026-05-17 that triform-8 had only
+              # ~6.7 free CPU (triform-tf workspace 16.5 + 3×
+              # isolation-builders 12 + longhorn instance-manager 5.8
+              # + misc absorbed most of the 48 capacity). 12 → OutOfcpu.
+              # Reduce request to 6 so the pod schedules; the limit of
+              # 40 keeps the actual compute envelope identical — autoninja
+              # bursts into idle CPU when peers leave it.
+              cpu: "6"
               memory: "96Gi"
             limits:
               cpu: "40"
