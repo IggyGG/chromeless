@@ -88,7 +88,13 @@ spec:
         app.kubernetes.io/variant: ${KANIKO_VARIANT_LABEL}
         chromeless.triform.cloud/tag: ${CHROMELESS_KANIKO_TAG}
     spec:
-      restartPolicy: OnFailure
+      # Never (not OnFailure) — backoffLimit:1 + Never means at most
+      # 2 pod attempts total, with no in-place container restarts. An
+      # OnFailure pod can churn its container before the Job gives up,
+      # which masks the failure mode in the logs and confuses the
+      # post-mortem. Kaniko push is short and either works or doesn't —
+      # we want the failure mode preserved cleanly.
+      restartPolicy: Never
       # Pin to the node that holds the build artifacts on its
       # hostPath. T7/T8 only — operator hard-constraint.
       nodeName: ${KANIKO_NODE}
