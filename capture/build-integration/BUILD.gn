@@ -455,6 +455,11 @@ source_set("embedder") {
     # necessary but not sufficient on their own.
     "cb_aura_platform_data.cc",
     "cb_aura_platform_data.h",
+    # M5 R1 (CV2-19) — browser-process cursor observer. Registered
+    # on host_->window() in CbAuraPlatformData; foundation for the
+    # native cursor egress path that replaces capture/cursor-watcher/.
+    "cb_cursor_client.cc",
+    "cb_cursor_client.h",
     "cb_devtools_agent.cc",
     "cb_devtools_agent.h",
     "cb_focus_client.cc",

@@ -29,6 +29,13 @@
 //      created without an explicit parent (including the windows
 //      WebContentsViewAura makes for each WebContents) gets parented
 //      under host->window().
+//   8. CbCursorClient on host->window() — observes every renderer-
+//      driven cursor change (CV2-19 / M5 R1). Foundation for the
+//      native cursor egress path that replaces the JS+CDP polling
+//      sidecar in capture/cursor-watcher/. Without it,
+//      GetCursorClient(window) returns nullptr and SetCursor() is a
+//      silent no-op — the browser process never learns about CSS
+//      cursor changes under the pointer.
 //
 // Lifetime is tied to CloudBrowserBrowserMainParts: constructed in
 // PreMainMessageLoopRun, destroyed in PostMainMessageLoopRun. WebContents
@@ -64,6 +71,7 @@ class DefaultCaptureClient;
 
 namespace cloud_browser {
 
+class CbCursorClient;
 class CbFocusClient;
 class CbWindowParentingClient;
 
@@ -103,6 +111,11 @@ class CbAuraPlatformData {
   std::unique_ptr<CbFocusClient> focus_client_;
   std::unique_ptr<aura::client::DefaultCaptureClient> capture_client_;
   std::unique_ptr<CbWindowParentingClient> window_parenting_client_;
+  // M5 R1 (CV2-19) — cursor observer. Registered via
+  // aura::client::SetCursorClient on host_->window() in the ctor,
+  // explicitly deregistered in the dtor before host_ goes away (same
+  // shape as focus_client_).
+  std::unique_ptr<CbCursorClient> cursor_client_;
 };
 
 }  // namespace cloud_browser
