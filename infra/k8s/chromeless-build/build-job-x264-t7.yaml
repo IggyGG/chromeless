@@ -165,8 +165,6 @@ spec:
           volumeMounts:
             - name: workdir
               mountPath: /work
-            - name: sccache
-              mountPath: /sccache
             - name: workspace
               mountPath: /workspace
       containers:
@@ -228,8 +226,33 @@ spec:
               value: "/workspace"
             - name: CHROMELESS_WORK_ROOT
               value: "/work"
-            - name: SCCACHE_DIR
-              value: "/sccache"
+            # ---- sccache S3 backend (Hetzner Object Storage) ----
+            # Replaces the per-node hostPath /sccache. The hostPath
+            # could never share TUs across pods because sccache's
+            # compiler-input hash folds in pod-instance identity
+            # (PATH/env/wrapper) — confirmed cold across Builds #15-#23.
+            # A shared S3 bucket keyed by the real compiler-input hash
+            # gives true cross-pod / cross-node cache reuse.
+            - name: SCCACHE_BUCKET
+              value: "triform-cv2-sccache"
+            - name: SCCACHE_ENDPOINT
+              value: "https://hel1.your-objectstorage.com"
+            - name: SCCACHE_REGION
+              value: "auto"
+            - name: SCCACHE_S3_USE_SSL
+              value: "true"
+            - name: SCCACHE_S3_KEY_PREFIX
+              value: "cv2/sccache/"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sccache-s3-creds
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sccache-s3-creds
+                  key: AWS_SECRET_ACCESS_KEY
             - name: CHROMELESS_BUILD_TARGETS
               # Build-czar 2026-05-17: add cloud_browser_pcf_unittests
               # for full M-stack validation per team-lead goal on tip 57ee643.
@@ -282,8 +305,6 @@ spec:
           volumeMounts:
             - name: workdir
               mountPath: /work
-            - name: sccache
-              mountPath: /sccache
             - name: workspace
               mountPath: /workspace
               readOnly: true
@@ -306,10 +327,9 @@ spec:
           hostPath:
             path: /var/lib/longhorn/chromeless-build/chromium-src
             type: DirectoryOrCreate
-        - name: sccache
-          hostPath:
-            path: /var/lib/longhorn/chromeless-build/sccache
-            type: DirectoryOrCreate
+        # sccache hostPath removed — replaced by shared Hetzner S3
+        # backend (SCCACHE_BUCKET=triform-cv2-sccache). The hostPath
+        # never shared TUs cross-pod (pod-instance hash); S3 does.
         - name: workspace
           emptyDir:
             sizeLimit: 1Gi
