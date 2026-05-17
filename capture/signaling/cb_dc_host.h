@@ -124,7 +124,7 @@
 //   * Outbound message *construction* — same: M5 R2 owns the cursor
 //     JSON envelope shape, M6 R2 owns the clipboard envelope, etc.
 //     The host's Send() takes an already-built std::string text
-//     payload (or rtc::CopyOnWriteBuffer for binary).
+//     payload (or webrtc::CopyOnWriteBuffer for binary).
 //   * SCTP reliability / retransmit tuning — `{ordered: true}` is the
 //     v1 contract; if a future channel needs unordered/lossy, the
 //     factory grows a new entrypoint, the existing five do not change.
@@ -341,7 +341,7 @@ class CbDataChannelHost {
   // text Send; calls dc->Send(buf, is_binary=true). The binary path
   // is reserved for future use (M6 R3 file-upload's reverse-direction
   // ACKs may want it); none of the v1 channels uses it.
-  SendResult SendBinary(CbDcLabel label, rtc::CopyOnWriteBuffer buffer);
+  SendResult SendBinary(CbDcLabel label, webrtc::CopyOnWriteBuffer buffer);
 
   // Drop all channel refs + unregister observers. Called by the
   // dtor; exposed publicly so the embedder can tear the host down

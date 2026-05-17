@@ -298,7 +298,7 @@ SendResult CbDataChannelHost::Send(CbDcLabel label,
         }
         // DataBuffer with is_binary=false.
         webrtc::DataBuffer buf(
-            rtc::CopyOnWriteBuffer(body.data(), body.size()),
+            webrtc::CopyOnWriteBuffer(body.data(), body.size()),
             /*binary=*/false);
         *out = dc->SendAsync(std::move(buf), /*on_complete=*/{});
         // SendAsync is the libwebrtc-current entrypoint; the older
@@ -315,12 +315,12 @@ SendResult CbDataChannelHost::Send(CbDcLabel label,
 }
 
 SendResult CbDataChannelHost::SendBinary(CbDcLabel label,
-                                         rtc::CopyOnWriteBuffer buffer) {
+                                         webrtc::CopyOnWriteBuffer buffer) {
   webrtc::RTCError result;
 
   RunOnSignalingSync(base::BindOnce(
       [](CbDataChannelHost* self, CbDcLabel label,
-         rtc::CopyOnWriteBuffer body, webrtc::RTCError* out) {
+         webrtc::CopyOnWriteBuffer body, webrtc::RTCError* out) {
         webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
         {
           base::AutoLock lock(self->slots_lock_);

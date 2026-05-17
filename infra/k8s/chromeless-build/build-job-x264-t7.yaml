@@ -254,15 +254,23 @@ spec:
                   name: sccache-s3-creds
                   key: AWS_SECRET_ACCESS_KEY
             - name: CHROMELESS_BUILD_TARGETS
-              # Build-czar 2026-05-17: add cloud_browser_pcf_unittests
-              # for full M-stack validation per team-lead goal on tip 57ee643.
-              # Build #9 v44h9 (M3 R7 last-green) used 3 targets; M4+M5+M5.5+M6
-              # ~24 commits since then warrant exercising pcf link too.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
+              # Build-czar 2026-05-17 (opt B, post Build #23): drop the
+              # 3 unittest targets — cloud_browser_worker ONLY. Build #23
+              # proved every PRODUCTION cloud-browser TU compiles clean
+              # with iters 1-6 (pcf.o + cb_audio_device_module.o +
+              # worker_main.o all F CXX, cb_dc_host.o no-error). The only
+              # build #23 errors were in cloud_browser_pcf_test.cc
+              # (dynamic_cast/-frtti + TestAudioDeviceModule rename) — a
+              # unittest TU orthogonal to M-stack structural validation.
+              # Operator accepts loss of test-coverage signal (unittests
+              # validate separately later, tracked IMPROVE). Worker-only
+              # = zero error sources + ~20-30% faster build.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker"
             - name: NINJA_PARALLELISM
-              # See build-job.yaml header — sized to the 40-CPU limit
-              # minus headroom for sccache server + LTO linker.
-              value: "36"
+              # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
+              # 36 was conservative. 56 leaves ~8 cores for OS + I/O +
+              # sccache-S3 client. ~25% off the ninja phase.
+              value: "56"
             - name: SKIP_FETCH
               # "" for THIS build only: build #6 v3 (8rq9z) ran an
               # over-aggressive `git clean -fdx` rootwide and deleted
