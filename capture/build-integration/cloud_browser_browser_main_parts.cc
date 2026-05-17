@@ -17,12 +17,14 @@
 #include "api/rtp_parameters.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
+#include "capture/framesink-capturer/capturer.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "components/viz/host/host_frame_sink_manager.h"
 #include "content/browser/compositor/surface_utils.h"  // nogncheck — same
@@ -386,14 +388,24 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "FrameSinkVideoCapturer producer remote failed to bind during "
       << "browser-process video track source construction.";
 
-  // R3's canonical construction pattern is webrtc::make_ref_counted
-  // (see cb_framesink_video_track_source.h:175). Drafter wrote
-  // CreateCloudBrowserFrameSinkVideoTrackSource expecting a free
-  // factory; R3 doesn't ship one. Call the public ctor via
-  // make_ref_counted directly.
+  // R3 takes std::unique_ptr<CloudBrowserFrameSinkCapturer>, not the
+  // raw mojo::Remote. Wrap the producer + a no-op OnFrameCallback
+  // into a capturer first. Note: per R3's docstring at
+  // cb_framesink_video_track_source.cc:38-72, R3 cannot rebind the
+  // capturer's OnFrameCallback to its own OnCapturerFrame ingress
+  // (capturer.h has no SetOnFrameCallback hook today). For the
+  // current M2 R1-R4 landing, we pass base::DoNothing as the callback
+  // — capture won't actually flow until M2 R5 (CV2-40) re-arch ships
+  // either (A) a capturer SetOnFrameCallback hook or (B) a factory
+  // that builds capturer+R3 atomically with the right binding. Build
+  // structurally complete; M2 R5 is the runtime-correctness gate.
+  auto capturer = std::make_unique<CloudBrowserFrameSinkCapturer>(
+      std::move(producer),
+      base::DoNothing());
+
   cb_track_source_ =
       webrtc::make_ref_counted<CloudBrowserFrameSinkVideoTrackSource>(
-          std::move(producer));
+          std::move(capturer));
   CHECK(cb_track_source_)
       << "make_ref_counted<CloudBrowserFrameSinkVideoTrackSource> "
       << "returned null — Cb.startFrameSinkCapture would fail with "
