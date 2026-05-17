@@ -103,7 +103,13 @@ source_set("cb_cursor_dc_emitter") {
     ":cb_cursor_emit_policy",
     "//cloud-browser/capture/build-integration:cursor_xy_join",
     "//cloud-browser/capture/signaling:cb_dc_host",
-    "//third_party/webrtc/api:libjingle_peerconnection_api",
+    # build-czar M-stack fix (2026-05-17): //third_party/webrtc/api:*
+    # visibility blocks external consumers — use the cloud-browser
+    # passthrough that re-exports DataChannelInterface +
+    # PeerConnectionInterface for the cursor DC emitter. Pattern
+    # mirrors capture/signaling/BUILD.gn cb_dc_host + cb_offerer_driver
+    # and capture/build-integration/BUILD.gn input_dispatch + stats_relay.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =

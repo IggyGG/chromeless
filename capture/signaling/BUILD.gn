@@ -246,11 +246,16 @@ source_set("cb_offerer_driver") {
     ":cb_wire_envelope",        # M3 R1
     "//cloud-browser/capture/build-integration:cloud_browser_pcf",  # M1
     "//base",
-    "//third_party/webrtc/api:libjingle_peerconnection_api",
-    "//third_party/webrtc/api:rtc_error",
-    "//third_party/webrtc/api:scoped_refptr",
-    "//third_party/webrtc/api:set_local_description_observer_interface",
-    "//third_party/webrtc/api:set_remote_description_observer_interface",
+    # build-czar M-stack fix (2026-05-17): //third_party/webrtc/api:*
+    # targets have visibility restricted to //third_party/webrtc/* and
+    # //third_party/webrtc_overrides/* — external consumers must go
+    # through the cloud-browser passthrough, which re-exports the api/
+    # surface (PeerConnectionInterface, SessionDescriptionInterface,
+    # IceCandidateInterface, RtcError, scoped_refptr, and the SDP
+    # observer interfaces) per patches/0003 + M1-R1 widening. This is
+    # the documented pattern used by :cloud_browser_pcf, :input_dispatch,
+    # and :stats_relay in capture/build-integration/BUILD.gn.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
@@ -327,10 +332,15 @@ source_set("cb_dc_host") {
   deps = [
     "//base",
     # libwebrtc — DataChannelInterface, PeerConnectionInterface,
-    # rtc::CopyOnWriteBuffer. The patches/0003 webrtc deps wired in
-    # M1 Path B (commit 2829fe5) are the upstream of these labels.
-    "//third_party/webrtc/api:libjingle_peerconnection_api",
-    "//third_party/webrtc/api:scoped_refptr",
+    # rtc::CopyOnWriteBuffer. build-czar M-stack fix (2026-05-17):
+    # //third_party/webrtc/api:* has visibility restricted to webrtc/*
+    # and webrtc_overrides/* — go through the cloud-browser passthrough
+    # which re-exports the api/ surface (DataChannelInterface,
+    # PeerConnectionInterface, scoped_refptr) per patches/0003 + M1-R1
+    # widening. copy_on_write_buffer lives outside api/ and keeps its
+    # own (likely-open) visibility; tentatively retained — if its own
+    # visibility check fires next, fold it under the passthrough too.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
     "//third_party/webrtc/rtc_base:copy_on_write_buffer",
   ]
   # Repo-root include-path config — propagated transitively so the
