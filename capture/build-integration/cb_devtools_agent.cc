@@ -48,6 +48,7 @@
 #include "ui/base/page_transition_types.h"
 #include "url/gurl.h"
 
+#include "base/functional/callback.h"
 #include "base/logging.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
@@ -110,17 +111,27 @@ std::vector<uint8_t> EncodeStartResponse(const std::string& frame_sink_id_str) {
 CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     content::BrowserContext* default_browser_context,
     aura::Window* aura_context_window,
-    CloudBrowserFrameSinkVideoTrackSource* track_source)
-    : track_source_(track_source),
+    base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
+        track_source_getter)
+    : track_source_getter_(std::move(track_source_getter)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
-  if (track_source_) {
-    LOG(INFO) << "CbDevToolsManagerDelegate: constructed with track source "
-                 "ptr=" << track_source_.get()
-              << " — Cb.startFrameSinkCapture will route into the browser-"
-                 "process video track source (ChromelessV2 M2 R4).";
+  // NOTE: we deliberately do NOT Run() the getter here. CV2-69
+  // close-out: this ctor fires from PreMainMessageLoopRun step 3
+  // (DevToolsAgentHost::GetOrCreateFor, cloud_browser_browser_main_
+  // parts.cc:320) which is BEFORE step 5b (main_parts.cc:414)
+  // constructs cb_track_source_ — resolving now would always yield
+  // nullptr (the original ServerError bug). Resolution is deferred to
+  // HandleStartFrameSinkCapture (CDP dispatch time), by which point
+  // cb_track_source_ is populated. We only report whether a getter
+  // was wired at all.
+  if (track_source_getter_) {
+    LOG(INFO) << "CbDevToolsManagerDelegate: constructed with a lazy track-"
+                 "source getter — Cb.startFrameSinkCapture resolves the "
+                 "browser-process video track source at dispatch time "
+                 "(ChromelessV2 M2 R4; CV2-69 construction-order fix).";
   } else {
-    LOG(WARNING) << "CbDevToolsManagerDelegate: no video track source "
+    LOG(WARNING) << "CbDevToolsManagerDelegate: no track-source getter "
                     "supplied — Cb.startFrameSinkCapture will fail with a "
                     "ServerError. Check CloudBrowserContentBrowserClient::"
                     "CreateDevToolsManagerDelegate wiring against "
@@ -197,17 +208,24 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
     std::string* out_error) {
   DCHECK(out_error);
 
-  // 0. Refuse early if the browser-process video track source isn't
-  //    wired (ChromelessV2 M2 R4 — CV2-39). main_parts is responsible
-  //    for instantiating it next to the PeerConnectionFactory; if
-  //    that wiring is broken we want a structured error envelope on
-  //    the wire, not a UAF in step 4.
-  if (!track_source_) {
+  // 0. LAZILY resolve the browser-process video track source
+  //    (ChromelessV2 M2 R4 — CV2-39; CV2-69 construction-order fix).
+  //    The delegate ctor fires from PreMainMessageLoopRun step 3, before
+  //    step 5b builds cb_track_source_ — so we MUST resolve here at
+  //    dispatch time (CDP-invoked, long after PreMainMessageLoopRun
+  //    returned), not from a ctor snapshot. main_parts owns the
+  //    scoped_refptr; the getter hands us the bare pointer. Null getter
+  //    or null result → structured ServerError on the wire, not a UAF
+  //    in step 4.
+  CloudBrowserFrameSinkVideoTrackSource* track_source =
+      track_source_getter_ ? track_source_getter_.Run() : nullptr;
+  if (!track_source) {
     *out_error =
         "Cb.startFrameSinkCapture: no CloudBrowserFrameSinkVideoTrackSource "
-        "wired into the DevTools delegate (check "
-        "CloudBrowserBrowserMainParts::cb_track_source() at delegate-ctor "
-        "time)";
+        "resolved at dispatch (check CloudBrowserBrowserMainParts::"
+        "cb_track_source() — it must be non-null by PreMainMessageLoopRun "
+        "step 5b; getter wired via CloudBrowserContentBrowserClient::"
+        "CreateDevToolsManagerDelegate)";
     return {};
   }
 
@@ -261,7 +279,7 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
   // the multi-tab story belongs to a later R# under CV2-39's
   // "auto-start policy (R5)" non-goal carve-out (which already names
   // R5 as the lifecycle owner).
-  track_source_->StartCapture(viz::VideoCaptureTarget(frame_sink_id));
+  track_source->StartCapture(viz::VideoCaptureTarget(frame_sink_id));
 
   LOG(INFO) << "Cb.startFrameSinkCapture: track-source pass-through started "
             << "capture on " << frame_sink_id.ToString();

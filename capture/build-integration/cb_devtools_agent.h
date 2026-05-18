@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "base/containers/span.h"
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "content/public/browser/devtools_manager_delegate.h"
@@ -96,16 +97,37 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // exhibit the original BUGS-529 symptom (input drops) but the
   // delegate itself stays functional.
   //
-  // |track_source| is the browser-process-owned video track source
-  // (ChromelessV2 M2 R3/R4 — CV2-38/CV2-39). main_parts holds the
-  // scoped_refptr; we hold a raw_ptr because the delegate is destroyed
-  // before main_parts tears the track source down. nullptr is tolerated
-  // for safety; Cb.startFrameSinkCapture returns a ServerError envelope
-  // when track_source_ is null instead of dispatching the capturer dance.
+  // |track_source_getter| LAZILY resolves the browser-process-owned
+  // video track source (ChromelessV2 M2 R3/R4 — CV2-38/CV2-39) at
+  // Cb.startFrameSinkCapture DISPATCH time, NOT at construction.
+  //
+  // Why lazy (CV2-69 close-out, 2026-05-18): the delegate is built by
+  // CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate,
+  // which fires lazily on the FIRST DevToolsAgentHost::GetOrCreateFor —
+  // that is PreMainMessageLoopRun *step 3* (cloud_browser_browser_main_
+  // parts.cc:320). But cb_track_source_ is not constructed until *step
+  // 5b* (main_parts.cc:414), ~4 setup steps later. A raw-pointer
+  // snapshot taken in this ctor is therefore ALWAYS nullptr, which is
+  // why every CV2-69 functional re-test logged "no video track source
+  // supplied" + returned ServerError on Cb.startFrameSinkCapture even
+  // though the ctor arg was wired. Resolving through a getter at
+  // dispatch time (CDP-invoked, long after PreMainMessageLoopRun has
+  // fully returned and cb_track_source_ is populated) is correct
+  // regardless of delegate-construction order.
+  //
+  // The getter is base::BindRepeating(&CloudBrowserBrowserMainParts::
+  // cb_track_source, base::Unretained(main_parts_)). main_parts
+  // out-lives the delegate's useful window (the getter is only Run()
+  // inside an active CDP session — never at teardown), matching the
+  // same lifetime assumption the default_browser_context_ /
+  // aura_context_window_ raw snapshots already rely on. A null/empty
+  // getter, or a getter that returns nullptr, yields a ServerError
+  // envelope rather than a UAF.
   explicit CbDevToolsManagerDelegate(
       content::BrowserContext* default_browser_context = nullptr,
       aura::Window* aura_context_window = nullptr,
-      CloudBrowserFrameSinkVideoTrackSource* track_source = nullptr);
+      base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
+          track_source_getter = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -198,18 +220,20 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       content::DevToolsAgentHostClientChannel* channel,
       std::string* out_error);
 
-  // Browser-process video track source (ChromelessV2 M2 R3/R4).
-  // NOT owned — main_parts holds the scoped_refptr next to the
-  // PeerConnectionFactory; we hold a raw_ptr for the
-  // HandleStartFrameSinkCapture call site. May be nullptr; null is
-  // treated as a ServerError on the wire.
+  // Lazy resolver for the browser-process video track source
+  // (ChromelessV2 M2 R3/R4). Run() at Cb.startFrameSinkCapture dispatch
+  // time — NOT snapshotted at construction (see the ctor doc for the
+  // step-3-vs-step-5b construction-order rationale; CV2-69 close-out).
+  // An empty callback, or one returning nullptr, is treated as a
+  // ServerError on the wire.
   //
   // Ownership move rationale (CV2-39 §"Ownership recommendation"):
   // active_capturer_ used to live here; it now lives inside the track
   // source (along with the ingest callback that feeds the broadcaster),
   // so the delegate is reduced to a thin "resolve FrameSinkId +
   // forward the producer remote" trampoline.
-  raw_ptr<CloudBrowserFrameSinkVideoTrackSource> track_source_ = nullptr;
+  base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
+      track_source_getter_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser
