@@ -372,6 +372,16 @@ class CbOffererDriver
 
   // SignalingClientObserver — inbound from the ws client. Already on
   // the UI thread per the M3 R2 contract.
+  //
+  // NOTE: main_parts is the *registered* ws observer; it forwards
+  // these to the driver (resolves the SignalingWsClient ↔ driver
+  // construction-order cycle — see the header member-block in
+  // cloud_browser_browser_main_parts.h). OnConnected is forwarded the
+  // same way: CV2-69 re-test#4 found the offer could be produced
+  // before the WS handshake completes, so the driver now defers offer
+  // emission until OnConnected (see EmitOfferAndSetLocal +
+  // pending_local_offer_).
+  void OnConnected() override;
   void OnEnvelope(const Envelope& env) override;
   void OnClosed(uint16_t code, std::string_view reason) override;
   void OnError(std::string_view reason) override;
@@ -437,6 +447,17 @@ class CbOffererDriver
   void HopHandleSetLocalDescriptionComplete(bool ok, std::string reason);
   void HopHandleSetRemoteDescriptionComplete(bool ok, std::string reason);
 
+  // CV2-69 re-test#4 (Finding A): emit the `offer` envelope onto the
+  // wire and issue SetLocalDescription. Split out of
+  // HopHandleCreateOfferSuccess so it can be invoked either inline
+  // (WS already connected) or deferred to OnConnected (WS not yet
+  // connected — the offer is stashed in pending_local_offer_ and this
+  // runs when the handshake completes). |local| is the freshly
+  // CreateOffer'd SDP; ownership moves in. Caller guarantees
+  // state_ == kCreatingOffer.
+  void EmitOfferAndSetLocal(
+      std::unique_ptr<webrtc::SessionDescriptionInterface> local);
+
   // Envelope emit helpers.
   void SendOfferEnvelope(const webrtc::SessionDescriptionInterface& desc);
   void SendIceCandidateEnvelope(
@@ -474,6 +495,22 @@ class CbOffererDriver
   // Terminal failure helper. Drops the PC, transitions to kFailed,
   // fires observer_->OnFailed.
   void FailWithReason(std::string_view reason);
+
+  // CV2-69 re-test#4 (Finding B): terminate pc_ from FailWithReason /
+  // CloseInternal — both posted-task-reachable, where chromium's
+  // per-task DisallowBaseSyncPrimitives is installed. A naive
+  // `pc_ = nullptr` here would (1) call PeerConnection::Close() — a
+  // proxy method → blocking hop — and (2) run the proxy destructor,
+  // which also blocking-hops to the signaling thread (the re-test #4
+  // FATAL site). This helper instead marshals Close() onto the
+  // signaling thread and RETAINS the pc_ ref: the PeerConnection
+  // holds the driver as its PeerConnectionObserver, so it must not
+  // outlive the driver. pc_ is destroyed synchronously by
+  // ~CbOffererDriver — that runs in the embedder's non-task
+  // PostMainMessageLoopRun context where the proxy dtor's blocking
+  // hop is allowed, and the dtor drops pc_ before weak_factory_ so
+  // the PC is fully gone before the driver.
+  void ClosePcOnSignalingThread();
 
   // Construction-time inputs.
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
@@ -524,6 +561,18 @@ class CbOffererDriver
   // renegotiation, which fires OnRenegotiationCompleted on the
   // observer. We don't reset it on teardown — once true, always true.
   bool was_in_ice_flight_once_ = false;
+
+  // CV2-69 re-test#4 (Finding A): WS-connected gate for offer
+  // emission. ws_connected_ flips true on OnConnected (forwarded by
+  // main_parts). If CreateOffer completes before the WS handshake
+  // does, HopHandleCreateOfferSuccess stashes the SDP in
+  // pending_local_offer_ instead of Send()ing it (which would fail —
+  // the socket is not up); OnConnected then drains it via
+  // EmitOfferAndSetLocal. SetLocalDescription + ICE gathering are
+  // deferred along with the offer, so no ICE candidate is produced
+  // before the wire is live.
+  bool ws_connected_ = false;
+  std::unique_ptr<webrtc::SessionDescriptionInterface> pending_local_offer_;
 
   SEQUENCE_CHECKER(sequence_checker_);
   base::WeakPtrFactory<CbOffererDriver> weak_factory_{this};

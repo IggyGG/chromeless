@@ -803,6 +803,19 @@ void CloudBrowserBrowserMainParts::StopDevToolsHttpHandler() {
 void CloudBrowserBrowserMainParts::OnConnected() {
   LOG(INFO) << "CV2-69 ws_client: connected; ready to receive "
                "inbound envelopes (offer/answer/ice/bye).";
+  // CV2-69 re-test#4 (Finding A): forward the connected edge to the
+  // offerer driver. main_parts is the registered SignalingClient
+  // Observer; the driver needs OnConnected to drain any offer that
+  // CreateOffer produced before the WS handshake finished (without
+  // this, the offer is Send()-attempted into a not-yet-open socket
+  // and fails). Same forward pattern as OnEnvelope below.
+  if (!offerer_driver_) {
+    LOG(WARNING) << "CV2-69 OnConnected: offerer_driver_ not yet "
+                    "constructed (unreachable in practice — Connect() "
+                    "is called after the driver ctor in step 6).";
+    return;
+  }
+  offerer_driver_->OnConnected();
 }
 
 void CloudBrowserBrowserMainParts::OnEnvelope(

@@ -190,6 +190,31 @@ webrtc::PeerConnectionInterface* CbOffererDriver::pc() const {
 // SignalingClientObserver (inbound from ws client, already on UI thread)
 // ---------------------------------------------------------------------
 
+void CbOffererDriver::OnConnected() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // CV2-69 re-test#4 (Finding A): the WS handshake completed — the
+  // signaling channel is now duplex and Send() will succeed. If
+  // CreateOffer finished before this point, HopHandleCreateOfferSuccess
+  // stashed the SDP in pending_local_offer_ rather than Send()ing it
+  // into a not-yet-open socket; drain it now.
+  ws_connected_ = true;
+  VLOG(1) << kLogPrefix << "WS connected; signaling channel is duplex";
+  if (pending_local_offer_) {
+    // Guard on kCreatingOffer: if a teardown/failure raced in while the
+    // offer sat buffered, do NOT resurrect the dance — just drop the
+    // stale SDP (the std::move below / the reset both null it).
+    if (state_ == OffererState::kCreatingOffer) {
+      VLOG(1) << kLogPrefix << "draining buffered offer post-connect";
+      EmitOfferAndSetLocal(std::move(pending_local_offer_));
+    } else {
+      VLOG(1) << kLogPrefix
+              << "buffered offer dropped post-connect, state="
+              << StateName(state_);
+      pending_local_offer_ = nullptr;
+    }
+  }
+}
+
 void CbOffererDriver::OnEnvelope(const Envelope& env) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (state_ == OffererState::kFailed || state_ == OffererState::kClosed) {
@@ -539,6 +564,27 @@ void CbOffererDriver::HopHandleCreateOfferSuccess(std::string sdp_type,
         "error or unsupported type)");
     return;
   }
+  // CV2-69 re-test#4 (Finding A): the offer may be ready before the
+  // WS handshake completes — in re-test #4 CreateOffer finished ~19ms
+  // after ws_client_->Connect(), and SendOfferEnvelope failed because
+  // the socket was not up yet. If the WS is not connected, stash the
+  // SDP; OnConnected drains it via EmitOfferAndSetLocal. state_ stays
+  // kCreatingOffer while buffered — SetLocalDescription + ICE
+  // gathering are deferred along with the offer, so no ICE candidate
+  // is produced before the wire is live.
+  if (!ws_connected_) {
+    VLOG(1) << kLogPrefix
+            << "offer ready but WS not connected — buffering, "
+               "awaiting OnConnected";
+    pending_local_offer_ = std::move(local);
+    return;
+  }
+  EmitOfferAndSetLocal(std::move(local));
+}
+
+void CbOffererDriver::EmitOfferAndSetLocal(
+    std::unique_ptr<webrtc::SessionDescriptionInterface> local) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // Ordering: emit the `offer` envelope FIRST, then call
   // SetLocalDescription. SetLocalDescription is what unblocks ICE
   // gathering inside libwebrtc; emitting the offer envelope first
@@ -548,11 +594,18 @@ void CbOffererDriver::HopHandleCreateOfferSuccess(std::string sdp_type,
   // enforces this server-side, but doing it client-side is cheaper
   // than relying on the broker to re-order.
   SendOfferEnvelope(*local);
+  // SendOfferEnvelope routes a failed ws Send to FailWithReason; if
+  // that fired, state_ is kFailed and pc_ is gone — do NOT proceed to
+  // SetLocalDescription (it would overwrite kFailed and post onto a
+  // null pc_).
+  if (state_ != OffererState::kCreatingOffer) {
+    return;
+  }
   state_ = OffererState::kSettingLocal;
   // CV2-69 #176: transient refcounted SetLocalDescObserver adapter.
   // CV2-69 re-test#3: marshal SetLocalDescription onto the signaling
-  // thread (header Threading section) — this runs as a posted task on
-  // ui_runner_. The local SDP unique_ptr is moved into the task.
+  // thread (header Threading section). The local SDP unique_ptr is
+  // moved into the task.
   auto sld_observer = webrtc::make_ref_counted<SetLocalDescObserver>(
       weak_factory_.GetWeakPtr(), ui_runner_);
   signaling_thread_->PostTask(
@@ -922,7 +975,12 @@ void CbOffererDriver::CloseInternal(std::string_view reason,
   }
   state_ = OffererState::kClosed;
   teardown_emitted_ = true;
-  pc_ = nullptr;
+  // CV2-69 re-test#4 (Finding B): marshalled PC Close() — see
+  // ClosePcOnSignalingThread. CloseInternal is reachable from the
+  // posted-task OnEnvelope path (inbound `bye`), so a direct
+  // pc_ = nullptr here would FATAL on the proxy's blocking-hop dtor.
+  // The ref is retained; ~CbOffererDriver destroys it.
+  ClosePcOnSignalingThread();
   if (observer_) {
     observer_->OnClosed(reason);
   }
@@ -941,15 +999,46 @@ bool CbOffererDriver::SendByeEnvelope() {
 }
 
 // ---------------------------------------------------------------------
-// Terminal failure
+// PC teardown + terminal failure
 // ---------------------------------------------------------------------
+
+void CbOffererDriver::ClosePcOnSignalingThread() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!pc_) {
+    return;
+  }
+  // CV2-69 re-test#4 (Finding B): terminate the PeerConnection from
+  // FailWithReason / CloseInternal — both reachable from posted-task
+  // contexts (every Hop*/envelope handler), where chromium's per-task
+  // DisallowBaseSyncPrimitives is installed.
+  //
+  // Two operations a naive `pc_ = nullptr` would do here, BOTH unsafe
+  // from a posted task:
+  //   1. PeerConnection::Close() — a proxy method → blocking hop.
+  //   2. proxy destruction — the proxy dtor blocking-hops to the
+  //      signaling thread (this is the re-test #4 FATAL site).
+  //
+  // Fix: marshal Close() onto the signaling thread, and DO NOT drop
+  // the ref here. Close() halts ICE/media + drives the
+  // iceConnectionState=closed transition; it runs inline on the
+  // signaling thread (no blocking hop). The pc_ ref is deliberately
+  // RETAINED — the PeerConnection holds the driver as its
+  // PeerConnectionObserver, so the PC must NOT outlive the driver
+  // (an async ref-drop would open a window where a PC callback
+  // dereferences a freed driver). pc_ is destroyed synchronously by
+  // ~CbOffererDriver, which runs in the embedder's non-task
+  // PostMainMessageLoopRun context where the proxy dtor's blocking
+  // hop IS allowed (no per-task disallow) — and the dtor drops pc_
+  // before weak_factory_, so the PC is fully gone before the driver.
+  signaling_thread_->PostTask([pc = pc_]() { pc->Close(); });
+}
 
 void CbOffererDriver::FailWithReason(std::string_view reason) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   LOG(ERROR) << kLogPrefix << "FAIL state=" << StateName(state_)
              << " reason=" << reason;
   state_ = OffererState::kFailed;
-  pc_ = nullptr;
+  ClosePcOnSignalingThread();
   if (observer_) {
     observer_->OnFailed(reason);
   }
