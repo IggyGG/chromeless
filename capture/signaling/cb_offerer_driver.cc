@@ -33,6 +33,7 @@
 #include "base/logging.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
+#include "rtc_base/thread.h"  // CV2-69 re-test#3: signaling-thread PostTask
 
 namespace cloud_browser::signaling {
 
@@ -73,16 +74,19 @@ const char* StateName(OffererState s) {
 
 CbOffererDriver::CbOffererDriver(
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
+    webrtc::Thread* signaling_thread,
     SignalingWsClient* ws_client,
     webrtc::PeerConnectionInterface::RTCConfiguration ice_config,
     OffererDriverObserver* observer,
     scoped_refptr<base::SequencedTaskRunner> ui_runner)
     : pcf_(std::move(pcf)),
+      signaling_thread_(signaling_thread),
       ws_client_(ws_client),
       ice_config_(std::move(ice_config)),
       observer_(observer),
       ui_runner_(std::move(ui_runner)) {
   DCHECK(pcf_);
+  DCHECK(signaling_thread_);
   DCHECK(ws_client_);
   DCHECK(ui_runner_);
 }
@@ -108,6 +112,20 @@ void CbOffererDriver::Start() {
   }
   state_ = OffererState::kCreatingPc;
 
+  // CV2-69 re-test#3 threading note: CreatePeerConnectionOrError below
+  // is called synchronously on the embedder/UI thread and is NOT
+  // marshalled onto the signaling thread (unlike CreateOffer /
+  // SetLocal/RemoteDescription / AddIceCandidate — see the header
+  // Threading section). Two reasons it is safe + must stay synchronous:
+  //   (a) Start() runs in the embedder's PreMainMessageLoopRun, which
+  //       is NOT a sequenced-task context — chromium's per-task
+  //       DisallowBaseSyncPrimitives is not installed there, so the
+  //       proxy's blocking thread-hop does not trip the DCHECK.
+  //   (b) the embedder calls pc() on the very next lines to
+  //       AddTransceiver / CreateDataChannel; making PC construction
+  //       async would hand back a null pc(). The synchronous contract
+  //       is load-bearing.
+  //
   // chromium-7727 API drift (CV2-69 cleanup, #176): the legacy
   // four-arg CreatePeerConnection(config, allocator, cert_generator,
   // observer) overload is REMOVED from PeerConnectionFactoryInterface.
@@ -464,16 +482,21 @@ void CbOffererDriver::HopHandleRenegotiationNeeded() {
     }
     state_ = OffererState::kCreatingOffer;
     webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
-    // CV2-69 #176: pass a transient refcounted CreateOfferObserver
-  // adapter (not `this` — see the adapter block above). The temporary
-  // scoped_refptr lives to end-of-statement; CreateOffer AddRefs the
-  // observer internally, so it survives until libwebrtc releases it
-  // after the OnSuccess/OnFailure callback.
-  pc_->CreateOffer(
-      webrtc::make_ref_counted<CreateOfferObserver>(
-          weak_factory_.GetWeakPtr(), ui_runner_)
-          .get(),
-      opts);
+    // CV2-69 #176: transient refcounted CreateOfferObserver adapter
+    // (not `this` — see the adapter block above); CreateOffer AddRefs
+    // the observer internally so it survives until libwebrtc releases
+    // it after the OnSuccess/OnFailure callback.
+    // CV2-69 re-test#3: this runs as a posted task on ui_runner_, so
+    // CreateOffer is marshalled onto the signaling thread (header
+    // Threading section) — a direct call would trip the //base sync-
+    // primitive DCHECK. The PC + adapter scoped_refptrs are copied
+    // into the task.
+    auto offer_observer = webrtc::make_ref_counted<CreateOfferObserver>(
+        weak_factory_.GetWeakPtr(), ui_runner_);
+    signaling_thread_->PostTask(
+        [pc = pc_, offer_observer, opts]() {
+          pc->CreateOffer(offer_observer.get(), opts);
+        });
     return;
   }
   // R6: subsequent fires — libwebrtc tells us SDP needs refresh
@@ -526,11 +549,16 @@ void CbOffererDriver::HopHandleCreateOfferSuccess(std::string sdp_type,
   // than relying on the broker to re-order.
   SendOfferEnvelope(*local);
   state_ = OffererState::kSettingLocal;
-  pc_->SetLocalDescription(
-      std::move(local),
-      // CV2-69 #176: transient refcounted SetLocalDescObserver adapter.
-      webrtc::make_ref_counted<SetLocalDescObserver>(
-          weak_factory_.GetWeakPtr(), ui_runner_));
+  // CV2-69 #176: transient refcounted SetLocalDescObserver adapter.
+  // CV2-69 re-test#3: marshal SetLocalDescription onto the signaling
+  // thread (header Threading section) — this runs as a posted task on
+  // ui_runner_. The local SDP unique_ptr is moved into the task.
+  auto sld_observer = webrtc::make_ref_counted<SetLocalDescObserver>(
+      weak_factory_.GetWeakPtr(), ui_runner_);
+  signaling_thread_->PostTask(
+      [pc = pc_, local = std::move(local), sld_observer]() mutable {
+        pc->SetLocalDescription(std::move(local), sld_observer);
+      });
 }
 
 void CbOffererDriver::HopHandleCreateOfferFailure(std::string reason) {
@@ -677,11 +705,16 @@ void CbOffererDriver::HandleAnswerEnvelope(const Envelope& env) {
     return;
   }
   state_ = OffererState::kSettingRemote;
-  pc_->SetRemoteDescription(
-      std::move(remote),
-      // CV2-69 #176: transient refcounted SetRemoteDescObserver adapter.
-      webrtc::make_ref_counted<SetRemoteDescObserver>(
-          weak_factory_.GetWeakPtr(), ui_runner_));
+  // CV2-69 #176: transient refcounted SetRemoteDescObserver adapter.
+  // CV2-69 re-test#3: marshal SetRemoteDescription onto the signaling
+  // thread (header Threading section) — OnEnvelope runs as a posted
+  // task. The remote SDP unique_ptr is moved into the task.
+  auto srd_observer = webrtc::make_ref_counted<SetRemoteDescObserver>(
+      weak_factory_.GetWeakPtr(), ui_runner_);
+  signaling_thread_->PostTask(
+      [pc = pc_, remote = std::move(remote), srd_observer]() mutable {
+        pc->SetRemoteDescription(std::move(remote), srd_observer);
+      });
 }
 
 void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
@@ -706,7 +739,10 @@ void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
   }
   if (payload->is_end_of_candidates) {
     // libwebrtc accepts a null candidate to mean end-of-remote-pool.
-    pc_->AddIceCandidate(nullptr);
+    // CV2-69 re-test#3: marshal onto the signaling thread (header
+    // Threading section) — OnEnvelope runs as a posted task.
+    signaling_thread_->PostTask(
+        [pc = pc_]() { pc->AddIceCandidate(nullptr); });
     return;
   }
   webrtc::SdpParseError err;
@@ -725,11 +761,21 @@ void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
   // form. The async form surfaces add-side failures verbatim and is
   // preferred; confirm chromium-bundled libwebrtc revision exposes
   // it during first-build and swap.
-  if (!pc_->AddIceCandidate(cand.get())) {
-    VLOG(1) << kLogPrefix
-            << "AddIceCandidate returned false; ignoring "
-               "(libwebrtc treats this as a soft error)";
-  }
+  //
+  // CV2-69 re-test#3: marshal AddIceCandidate onto the signaling
+  // thread (header Threading section) — OnEnvelope runs as a posted
+  // task. The candidate unique_ptr is moved into the task to keep it
+  // alive for the duration of the synchronous AddIceCandidate call;
+  // its bool return is consumed inside the task (false is a soft
+  // error libwebrtc also logs internally).
+  signaling_thread_->PostTask(
+      [pc = pc_, cand = std::move(cand)]() {
+        if (!pc->AddIceCandidate(cand.get())) {
+          VLOG(1) << kLogPrefix
+                  << "AddIceCandidate returned false; ignoring "
+                     "(libwebrtc treats this as a soft error)";
+        }
+      });
 }
 
 void CbOffererDriver::HandleByeEnvelope() {
@@ -824,16 +870,21 @@ void CbOffererDriver::BeginRenegotiation(std::string_view trigger) {
   // explicitly opts in. The OnRenegotiationNeeded()-driven trigger
   // never sets ice_restart.
   webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
-  // CV2-69 #176: pass a transient refcounted CreateOfferObserver
-  // adapter (not `this` — see the adapter block above). The temporary
-  // scoped_refptr lives to end-of-statement; CreateOffer AddRefs the
-  // observer internally, so it survives until libwebrtc releases it
-  // after the OnSuccess/OnFailure callback.
-  pc_->CreateOffer(
-      webrtc::make_ref_counted<CreateOfferObserver>(
-          weak_factory_.GetWeakPtr(), ui_runner_)
-          .get(),
-      opts);
+  // CV2-69 #176: transient refcounted CreateOfferObserver adapter
+  // (not `this` — see the adapter block above); CreateOffer AddRefs
+  // the observer internally so it survives until libwebrtc releases
+  // it after the OnSuccess/OnFailure callback.
+  // CV2-69 re-test#3: BeginRenegotiation runs from posted-task
+  // contexts (HopHandleRenegotiationNeeded, the coalesced-pending
+  // drain, the inbound request_renegotiate handler), so CreateOffer
+  // is marshalled onto the signaling thread — header Threading
+  // section. The PC + adapter scoped_refptrs are copied into the task.
+  auto offer_observer = webrtc::make_ref_counted<CreateOfferObserver>(
+      weak_factory_.GetWeakPtr(), ui_runner_);
+  signaling_thread_->PostTask(
+      [pc = pc_, offer_observer, opts]() {
+        pc->CreateOffer(offer_observer.get(), opts);
+      });
 }
 
 void CbOffererDriver::CloseInternal(std::string_view reason,

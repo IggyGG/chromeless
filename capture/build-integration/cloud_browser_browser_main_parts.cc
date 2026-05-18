@@ -510,9 +510,21 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // its 3 refcounted webrtc SDP-observer callbacks are delivered via
   // transient adapter objects it constructs internally — see
   // cb_offerer_driver.cc, CV2-69 #176).
+  //
+  // CV2-69 re-test#3 fix: the driver also takes signaling_thread_ —
+  // the libwebrtc signaling thread the PCF was built on (step 5
+  // above). PeerConnection proxy methods (CreateOffer / SetLocal /
+  // SetRemoteDescription / AddIceCandidate) issued from the driver's
+  // posted-task contexts MUST originate on that thread, or the
+  // proxy's blocking thread-hop trips chromium's per-task
+  // DisallowBaseSyncPrimitives DCHECK and FATALs the worker (the
+  // re-test#3 CreateOffer crash). signaling_thread_ is torn down
+  // strictly after offerer_driver_ in PostMainMessageLoopRun, so the
+  // raw pointer the driver holds stays valid for the driver's life.
   offerer_driver_ =
       std::make_unique<cloud_browser::signaling::CbOffererDriver>(
-          pcf_, ws_client_.get(), std::move(rtc_config),
+          pcf_, signaling_thread_.get(), ws_client_.get(),
+          std::move(rtc_config),
           /*observer=*/this,
           base::SequencedTaskRunner::GetCurrentDefault());
 

@@ -26,12 +26,14 @@
 //   1. Construct CbOffererDriver(pcf, ws_client, ice_config, observer,
 //      ui_runner). The driver wires itself onto ws_client as the
 //      SignalingClientObserver in Start().
-//   2. Start() calls pcf->CreatePeerConnection(ice_config, this) on the
-//      signaling thread; the returned PeerConnectionInterface fans
+//   2. Start() calls pcf->CreatePeerConnectionOrError(ice_config, deps)
+//      synchronously on the embedder/UI thread (safe — Start() runs in
+//      the embedder's non-task PreMainMessageLoopRun context; see the
+//      Threading section). The returned PeerConnectionInterface fans
 //      observer callbacks (OnIceCandidate / OnRenegotiationNeeded /
 //      OnIceConnectionChange / ...) back to us on libwebrtc's
-//      signaling thread — we PostTask onto signaling_task_runner_
-//      before touching state.
+//      signaling thread — we PostTask onto ui_runner_ before touching
+//      state.
 //   3. The embedder then adds M2's video transceiver + M4 input DC +
 //      M5 cursor DC onto pc(). The first OnRenegotiationNeeded()
 //      callback fires when those adds settle; we respond by calling
@@ -70,6 +72,39 @@
 // thread; same hop applies. SignalingClientObserver callbacks already
 // arrive on the UI thread (the ws client's contract), so no hop is
 // needed for inbound envelopes.
+//
+// ## Invocation hop — PeerConnection ops onto the signaling thread
+//   (CV2-69 functional re-test #3, 2026-05-18)
+//
+// The PeerConnection returned by libwebrtc is a *proxy*: every method
+// is generated to run on the signaling thread. Called from any OTHER
+// thread, the proxy performs a synchronous *blocking* thread-hop
+// (Thread::BlockingCall) that waits on a //base sync primitive.
+//
+// The driver's hop-landing points (HopHandle*) and inbound-envelope
+// handlers run as posted tasks on ui_runner_. chromium installs
+// DisallowBaseSyncPrimitives + DisallowBlocking for the duration of
+// every sequenced task — so a blocking proxy hop from inside one of
+// those tasks trips base/threading/thread_restrictions.cc's DCHECK
+// and FATALs the process (this is exactly what killed CreateOffer in
+// re-test #3 — the embedder's own AddTransceiver/CreateDataChannel
+// survived only because they run in the non-task PreMainMessageLoopRun
+// context where the per-task disallow is NOT active).
+//
+// Fix: every PeerConnection mutation issued from a posted-task context
+// — CreateOffer, SetLocalDescription, SetRemoteDescription,
+// AddIceCandidate — is wrapped in signaling_thread_->PostTask(). On the
+// signaling thread the proxy sees current==signaling and runs the call
+// inline: no BlockingCall, no sync-primitive wait, no DCHECK. The SDP-
+// observer adapters already hop the *return* path (signaling→ui_runner_);
+// this is the symmetric *invocation* hop (ui→signaling).
+//
+// Start()'s CreatePeerConnectionOrError is deliberately NOT marshalled:
+// it runs synchronously in the embedder's non-task PreMainMessageLoopRun
+// context (no per-task disallow), and the embedder calls pc() on the
+// very next line to AddTransceiver — making PC creation async would
+// break that synchronous contract. Same reasoning covers the embedder's
+// own AddTransceiver + CreateDataChannel calls.
 //
 // # Lifetime
 //
@@ -151,6 +186,14 @@
 #include "base/task/sequenced_task_runner.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
+
+namespace webrtc {
+// Forward-declared — the driver holds a raw_ptr<webrtc::Thread> to the
+// PCF's signaling thread and posts PeerConnection invocations onto it
+// (CV2-69 re-test #3 fix). The full rtc_base/thread.h is pulled in by
+// the .cc only; header consumers don't need it.
+class Thread;
+}  // namespace webrtc
 
 namespace cloud_browser::signaling {
 
@@ -239,6 +282,14 @@ class CbOffererDriver
  public:
   // |pcf|:        from M1's CreateCloudBrowserPcf; the driver takes a
   //               scoped_refptr to keep it alive across its own lifetime.
+  // |signaling_thread|: the libwebrtc signaling thread that |pcf| was
+  //               built on (main_parts owns it as signaling_thread_).
+  //               PeerConnection proxy methods (CreateOffer /
+  //               SetLocal/RemoteDescription / AddIceCandidate) MUST
+  //               originate on this thread — see the Threading section
+  //               above. The driver does NOT own it; it must outlive
+  //               the driver (main_parts tears it down strictly after
+  //               offerer_driver_ in PostMainMessageLoopRun).
   // |ws_client|:  from M3 R2; driver registers itself as the observer
   //               on Start(); ws_client must outlive the driver.
   // |ice_config|: from M3 R3's loader output — full RTCConfiguration
@@ -255,6 +306,7 @@ class CbOffererDriver
   //               GetCurrentDefault() captured at construction.
   CbOffererDriver(
       webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
+      webrtc::Thread* signaling_thread,
       SignalingWsClient* ws_client,
       webrtc::PeerConnectionInterface::RTCConfiguration ice_config,
       OffererDriverObserver* observer,
@@ -425,6 +477,11 @@ class CbOffererDriver
 
   // Construction-time inputs.
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
+  // The libwebrtc signaling thread |pcf_| was built on. PeerConnection
+  // proxy invocations are PostTask()ed onto this thread so they
+  // originate same-thread and the proxy runs them inline (no blocking
+  // BlockingCall hop). Not owned — main_parts owns + outlives it.
+  raw_ptr<webrtc::Thread> signaling_thread_;
   raw_ptr<SignalingWsClient> ws_client_;
   webrtc::PeerConnectionInterface::RTCConfiguration ice_config_;
   raw_ptr<OffererDriverObserver> observer_;
