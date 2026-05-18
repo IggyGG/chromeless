@@ -18,6 +18,7 @@
 #include "net/base/network_anonymization_key.h"
 #include "net/cookies/site_for_cookies.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
+#include "services/network/public/cpp/originating_process_id.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -104,7 +105,14 @@ std::string PercentEncodeQueryValue(std::string_view in) {
 // triform-8 build runs. The format below mirrors the one used by
 // content_shell's CDP WebSocket client.
 constexpr net::NetworkTrafficAnnotationTag kSignalingTrafficAnnotation =
-    net::DefineNetworkTrafficAnnotation("cb_signaling_ws_client", R"(
+    // Raw-string delimiter MUST be non-empty: the proto body below
+    // contains the sequence )" inside `(in-cluster, configurable)"`,
+    // and an empty-delimiter R"(...)" terminates early there —
+    // derailing the parser (the :127/:137 expected-')'/';'+ the
+    // ReadEnv-undeclared cascade). The CBANNOT delimiter never appears
+    // in the content. Pre-existing latent bug, surfaced by the cold
+    // recompile-from-source (sccache-lied-as-green class).
+    net::DefineNetworkTrafficAnnotation("cb_signaling_ws_client", R"CBANNOT(
       semantics {
         sender: "Cloud Browser Signaling Client"
         description:
@@ -134,16 +142,15 @@ constexpr net::NetworkTrafficAnnotationTag kSignalingTrafficAnnotation =
         policy_exception_justification:
           "This is core infrastructure; the entire cb-chromium pod is "
           "useless without it."
-      })");
+      })CBANNOT");
 
 // Small wrapper that reads an env var via base::Environment. Returns
 // empty string when the var is unset or empty.
 std::string ReadEnv(base::Environment* env, const char* name) {
-  std::string value;
-  if (env->GetVar(name, &value)) {
-    return value;
-  }
-  return {};
+  // chromium 7727: base::Environment::GetVar dropped the
+  // bool GetVar(name, std::string* result) form; it now returns
+  // std::optional<std::string> GetVar(cstring_view name).
+  return env->GetVar(name).value_or(std::string());
 }
 
 }  // namespace
@@ -261,25 +268,38 @@ void SignalingWsClient::Connect() {
   // the cheapest correct value is fine.
   const url::Origin browser_origin = url::Origin::Create(dial_url);
   const std::vector<std::string> requested_protocols;
-  const net::SiteForCookies site_for_cookies =
-      net::SiteForCookies::FromOrigin(browser_origin);
-  net::IsolationInfo isolation_info = net::IsolationInfo::CreateTransient();
+  // chromium 7727: NetworkContext::CreateWebSocket dropped the
+  // site_for_cookies parameter entirely (slot is now
+  // storage_access_api_status directly) — the SiteForCookies local is
+  // no longer constructed. IsolationInfo::CreateTransient now requires
+  // an explicit nonce argument; std::nullopt = no nonce (signaling has
+  // no third-party-cookies surface, so transient + no-nonce is correct).
+  net::IsolationInfo isolation_info =
+      net::IsolationInfo::CreateTransient(/*nonce=*/std::nullopt);
 
   std::vector<network::mojom::HttpHeaderPtr> additional_headers;
   // No additional headers — the JWT travels in the URL query param,
   // not as Authorization: Bearer ..., to match the streamer.js wire
   // shape physics already accepts.
 
+  // chromium 7727 NetworkContext::CreateWebSocket signature drift:
+  //  - site_for_cookies parameter removed (slot 3 is now
+  //    storage_access_api_status directly)
+  //  - new client_security_state parameter after `origin` —
+  //    nullptr is correct for a browser-process infrastructure
+  //    client (no special renderer security state)
+  //  - process_id is now network::OriginatingProcessId (was the
+  //    mojom int constant); ::browser() is the canonical factory
   network_context_->CreateWebSocket(
       dial_url,
       requested_protocols,
-      site_for_cookies,
       /*storage_access_api_status=*/
       net::StorageAccessApiStatus::kNone,
       isolation_info,
       std::move(additional_headers),
-      /*process_id=*/network::mojom::kBrowserProcessId,
+      /*process_id=*/network::OriginatingProcessId::browser(),
       browser_origin,
+      /*client_security_state=*/nullptr,
       network::mojom::kWebSocketOptionNone,
       net::MutableNetworkTrafficAnnotationTag(kSignalingTrafficAnnotation),
       handshake_client_receiver_.BindNewPipeAndPassRemote(),
@@ -439,7 +459,7 @@ void SignalingWsClient::OnDataFrame(
   // |fin| signals "this is the last fragment". When we've also
   // drained all announced bytes, decode + dispatch.
   if (fin && inbound_remaining_ == 0) {
-    std::optional<WireEnvelope> env = Decode(inbound_buffer_);
+    std::optional<Envelope> env = Decode(inbound_buffer_);
     if (!env.has_value()) {
       FailWithError("R1 Decode() rejected inbound frame");
       return;

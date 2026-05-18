@@ -29,6 +29,7 @@
 
 #include <utility>
 
+#include "absl/strings/str_cat.h"
 #include "api/audio/audio_device.h"
 #include "api/rtc_error.h"
 #include "base/logging.h"
@@ -132,8 +133,12 @@ void CbAudioLifecycle::AdoptBindings(
           << (transceiver_->mid().has_value() ? *transceiver_->mid()
                                               : "(unset)")
           << " direction="
-          << webrtc::RtpTransceiverDirectionToString(
-                 transceiver_->direction());
+          // chromium 7727: webrtc::RtpTransceiverDirectionToString was
+          // removed from the api/ surface (survives only as an internal
+          // helper under webrtc/pc/). api/rtp_transceiver_direction.h now
+          // provides AbslStringify for RtpTransceiverDirection — the
+          // canonical stringification path is absl::StrCat.
+          << absl::StrCat(transceiver_->direction());
 }
 
 void CbAudioLifecycle::PrepareForTeardown(std::string_view reason) {

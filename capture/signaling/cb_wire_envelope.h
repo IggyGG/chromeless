@@ -154,6 +154,23 @@ struct IceCandidatePayload {
 // schema that physics may evolve.
 struct ProbeResultPayload {
   base::DictValue raw;
+
+  // chromium 7727: base::DictValue (formerly base::Value::Dict) is
+  // move-only — no implicit copy. Without an explicit deep-copy ctor
+  // here, ProbeResultPayload → EnvelopeData variant → Envelope all
+  // become non-copyable, which breaks value-semantics callers like
+  // cb_signaling_ws_client.cc Send() (copies an Envelope to rewrite
+  // `from`). DictValue::Clone() gives the deep copy.
+  ProbeResultPayload() = default;
+  explicit ProbeResultPayload(base::DictValue r) : raw(std::move(r)) {}
+  ProbeResultPayload(ProbeResultPayload&&) = default;
+  ProbeResultPayload& operator=(ProbeResultPayload&&) = default;
+  ProbeResultPayload(const ProbeResultPayload& other)
+      : raw(other.raw.Clone()) {}
+  ProbeResultPayload& operator=(const ProbeResultPayload& other) {
+    raw = other.raw.Clone();
+    return *this;
+  }
 };
 
 // Discriminated union over the per-tag payloads. The active
