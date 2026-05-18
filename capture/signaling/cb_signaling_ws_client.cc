@@ -21,6 +21,7 @@
 #include "net/cookies/site_for_cookies.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/cpp/originating_process_id.h"
+#include "services/network/public/mojom/client_security_state.mojom.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -290,9 +291,22 @@ void SignalingWsClient::Connect() {
   // chromium 7727 NetworkContext::CreateWebSocket signature drift:
   //  - site_for_cookies parameter removed (slot 3 is now
   //    storage_access_api_status directly)
-  //  - new client_security_state parameter after `origin` —
-  //    nullptr is correct for a browser-process infrastructure
-  //    client (no special renderer security state)
+  //  - new client_security_state parameter after `origin` — MUST be
+  //    non-null. chromium 7727 marks this field runtime-non-nullable:
+  //    a nullptr is compile-valid (mojo pointer accepts it) but the
+  //    outgoing-message validator FATALs with
+  //    VALIDATION_ERROR_UNEXPECTED_NULL_POINTER. A default-constructed
+  //    ClientSecurityState::New() is the correct value for a
+  //    browser-process infrastructure client dialling loopback: every
+  //    field defaults to the permissive value (ip_address_space=
+  //    kUnknown, local_network_access_request_policy=kAllow,
+  //    is_web_secure_context=false). This mirrors how the network
+  //    service itself (network_context.cc) and the worker hosts
+  //    (shared/dedicated/embedded worker) populate the field — none of
+  //    those infrastructure callers set explicit fields; only
+  //    renderer-origin web requests (render_frame_host,
+  //    navigation_request) do, because those are subject to real LNA
+  //    enforcement. Signaling is not a web-origin request.
   //  - process_id is now network::OriginatingProcessId (was the
   //    mojom int constant); ::browser() is the canonical factory
   network_context_->CreateWebSocket(
@@ -304,7 +318,7 @@ void SignalingWsClient::Connect() {
       std::move(additional_headers),
       /*process_id=*/network::OriginatingProcessId::browser(),
       browser_origin,
-      /*client_security_state=*/nullptr,
+      /*client_security_state=*/network::mojom::ClientSecurityState::New(),
       network::mojom::kWebSocketOptionNone,
       net::MutableNetworkTrafficAnnotationTag(kSignalingTrafficAnnotation),
       handshake_client_receiver_.BindNewPipeAndPassRemote(),
