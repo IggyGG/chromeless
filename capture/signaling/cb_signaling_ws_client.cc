@@ -8,8 +8,10 @@
 #include <cstdlib>
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/environment.h"
 #include "base/logging.h"
+#include "base/strings/cstring_view.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
@@ -146,10 +148,13 @@ constexpr net::NetworkTrafficAnnotationTag kSignalingTrafficAnnotation =
 
 // Small wrapper that reads an env var via base::Environment. Returns
 // empty string when the var is unset or empty.
-std::string ReadEnv(base::Environment* env, const char* name) {
+std::string ReadEnv(base::Environment* env, base::cstring_view name) {
   // chromium 7727: base::Environment::GetVar dropped the
   // bool GetVar(name, std::string* result) form; it now returns
-  // std::optional<std::string> GetVar(cstring_view name).
+  // std::optional<std::string> GetVar(cstring_view name). The `name`
+  // param is base::cstring_view (not const char*) so it converts
+  // directly — const char* has no viable conversion to cstring_view,
+  // but the kEnv* char[] literal constants do (literal-array ctor).
   return env->GetVar(name).value_or(std::string());
 }
 
@@ -524,10 +529,12 @@ void SignalingWsClient::OnReadable(MojoResult /*result*/) {
   // chromium's WebSocket frame size limit (configured at the
   // network service); good enough for first-compile.
   while (inbound_remaining_ > 0) {
-    const void* buffer = nullptr;
-    uint32_t num_bytes = 0;
-    MojoResult res = readable_->BeginReadData(&buffer, &num_bytes,
-                                              MOJO_READ_DATA_FLAG_NONE);
+    // chromium 7727 Mojo: BeginReadData is now
+    // (MojoBeginReadDataFlags flags, base::span<const uint8_t>& buffer)
+    // — the old (void**, uint32_t*, flags) form is gone.
+    base::span<const uint8_t> buffer;
+    MojoResult res =
+        readable_->BeginReadData(MOJO_READ_DATA_FLAG_NONE, buffer);
     if (res == MOJO_RESULT_SHOULD_WAIT) {
       // No more bytes right now — chromium will re-fire OnDataFrame
       // / the pipe-readable watcher when more arrive.
@@ -537,9 +544,10 @@ void SignalingWsClient::OnReadable(MojoResult /*result*/) {
       FailWithError("readable pipe error during BeginReadData");
       return;
     }
-    const uint32_t take = static_cast<uint32_t>(std::min<uint64_t>(
-        num_bytes, inbound_remaining_));
-    inbound_buffer_.append(static_cast<const char*>(buffer), take);
+    const size_t take =
+        std::min<uint64_t>(buffer.size(), inbound_remaining_);
+    inbound_buffer_.append(
+        reinterpret_cast<const char*>(buffer.data()), take);
     inbound_remaining_ -= take;
     readable_->EndReadData(take);
   }
@@ -567,9 +575,14 @@ bool SignalingWsClient::WriteTextFrame(std::string_view payload) {
   // TODO(M3-R2-write-watch): add a SimpleWatcher on |writable_| +
   // a small outbound queue for short-write recovery once the first
   // compile passes. Not needed for the CV2-52 acceptance probe.
-  uint32_t written = static_cast<uint32_t>(payload.size());
-  MojoResult res = writable_->WriteData(payload.data(), &written,
-                                        MOJO_WRITE_DATA_FLAG_ALL_OR_NONE);
+  // chromium 7727 Mojo: WriteData is now
+  // (base::span<const uint8_t> data, MojoWriteDataFlags flags,
+  //  size_t& bytes_written) — the old (void*, uint32_t*, flags) form
+  // is gone. base::as_byte_span adapts the string_view payload.
+  size_t written = 0;
+  MojoResult res = writable_->WriteData(base::as_byte_span(payload),
+                                        MOJO_WRITE_DATA_FLAG_ALL_OR_NONE,
+                                        written);
   if (res != MOJO_RESULT_OK || written != payload.size()) {
     FailWithError("writable pipe error during WriteData");
     return false;
