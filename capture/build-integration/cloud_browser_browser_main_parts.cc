@@ -505,16 +505,13 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // LOG sinks (M5.5 R5 audio chain integration deferred). ui_runner
   // is the sequenced task runner of the embedder's UI thread (this
   // method runs on it).
-  // webrtc::make_ref_counted (NOT std::make_unique): CbOffererDriver
-  // is abstract on its own (inherits refcounted webrtc observer
-  // interfaces' pure-virtual AddRef/Release without implementing
-  // them); make_ref_counted wraps it in RefCountedObject<> which
-  // provides the refcounting. See the offerer_driver_ member-decl
-  // comment in the header for the full rationale (#176 chromium-7727
-  // cleanup — abstractness was latent until CV2-69 first instantiated
-  // the driver).
+  // std::make_unique — CbOffererDriver is a plain embedder-owned
+  // object (inherits only the 2 non-refcounted observer interfaces;
+  // its 3 refcounted webrtc SDP-observer callbacks are delivered via
+  // transient adapter objects it constructs internally — see
+  // cb_offerer_driver.cc, CV2-69 #176).
   offerer_driver_ =
-      webrtc::make_ref_counted<cloud_browser::signaling::CbOffererDriver>(
+      std::make_unique<cloud_browser::signaling::CbOffererDriver>(
           pcf_, ws_client_.get(), std::move(rtc_config),
           /*observer=*/this,
           base::SequencedTaskRunner::GetCurrentDefault());
@@ -684,11 +681,12 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   video_track_ = nullptr;
   if (offerer_driver_) {
     offerer_driver_->Close("session ended");
-    // scoped_refptr (not unique_ptr) — assign nullptr to drop the
-    // embedder's ref. If libwebrtc still holds a transient ref from
-    // an in-flight SetLocal/RemoteDescription callback the object
-    // survives until that drops; teardown is callback-safe.
-    offerer_driver_ = nullptr;
+    // unique_ptr — reset() drops the driver. The transient SDP-observer
+    // adapters are independently refcounted; if libwebrtc still holds
+    // one for an in-flight callback, that adapter survives the driver
+    // and its posted task is dropped via the driver's invalidated
+    // WeakPtr — teardown is callback-safe.
+    offerer_driver_.reset();
   }
   if (ws_client_) {
     ws_client_->Disconnect();

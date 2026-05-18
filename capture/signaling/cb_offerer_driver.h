@@ -215,12 +215,27 @@ class OffererDriverObserver {
   virtual void OnFailed(std::string_view reason) {}
 };
 
+// chromium-7727 / CV2-69 cleanup (#176): CbOffererDriver inherits ONLY
+// the two NON-refcounted observer interfaces (SignalingClientObserver +
+// PeerConnectionObserver). It deliberately does NOT inherit the three
+// refcounted webrtc SDP-observer interfaces (CreateSessionDescription
+// Observer, SetLocal/RemoteDescriptionObserverInterface) — each of
+// those non-virtually derives webrtc::RefCountInterface, so inheriting
+// all three would give CbOffererDriver three distinct RefCountInterface
+// base subobjects and an ambiguous Release()/AddRef() (the
+// scoped_refptr<CbOffererDriver> diamond surfaced by CV2-69's first-
+// ever instantiation of the driver). Instead, the three SDP-observer
+// callbacks are delivered via three small dedicated refcounted adapter
+// objects (nested classes below) — each implements exactly ONE
+// observer interface (hence exactly one RefCountInterface), is
+// make_ref_counted individually, and forwards to the driver's
+// HopHandle* landing points via a UI-thread-safe WeakPtr post. This is
+// the libwebrtc-idiomatic pattern: a long-lived embedder-owned driver
+// is NOT itself a refcounted SDP observer; transient per-operation
+// adapters are.
 class CbOffererDriver
     : public SignalingClientObserver,
-      public webrtc::PeerConnectionObserver,
-      public webrtc::CreateSessionDescriptionObserver,
-      public webrtc::SetLocalDescriptionObserverInterface,
-      public webrtc::SetRemoteDescriptionObserverInterface {
+      public webrtc::PeerConnectionObserver {
  public:
   // |pcf|:        from M1's CreateCloudBrowserPcf; the driver takes a
   //               scoped_refptr to keep it alive across its own lifetime.
@@ -332,19 +347,20 @@ class CbOffererDriver
       webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver)
       override;
 
-  // webrtc::CreateSessionDescriptionObserver — CreateOffer completion.
-  // Fires on libwebrtc's signaling thread; we hop to ui_runner_
-  // before touching state.
-  void OnSuccess(webrtc::SessionDescriptionInterface* desc) override;
-  void OnFailure(webrtc::RTCError error) override;
-
-  // SetLocalDescriptionObserverInterface +
-  // SetRemoteDescriptionObserverInterface — completion of the two
-  // descriptor setters. Disambiguated by state_ on the UI hop.
-  void OnSetLocalDescriptionComplete(webrtc::RTCError error) override;
-  void OnSetRemoteDescriptionComplete(webrtc::RTCError error) override;
-
  private:
+  // chromium-7727 / CV2-69 (#176) — refcounted SDP-observer adapters.
+  // Each implements exactly ONE webrtc SDP-observer interface, is
+  // constructed via webrtc::make_ref_counted at the CreateOffer /
+  // SetLocalDescription / SetRemoteDescription call site, and forwards
+  // the libwebrtc-signaling-thread callback to the driver's HopHandle*
+  // landing points via a ui_runner_ post bound to a
+  // base::WeakPtr<CbOffererDriver> (UI-thread-safe; the WeakPtr is
+  // dereferenced only inside the posted task, on ui_runner_'s
+  // sequence). Nested classes so they retain private access to the
+  // driver's HopHandle* members; defined out-of-line in the .cc.
+  class CreateOfferObserver;
+  class SetLocalDescObserver;
+  class SetRemoteDescObserver;
   // Inbound dispatch helpers. Routes |env| based on env.type with
   // state-guard enforcement; protocol violations route to
   // FailWithReason.

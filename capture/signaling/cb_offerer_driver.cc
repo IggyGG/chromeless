@@ -22,12 +22,17 @@
 
 #include "api/jsep.h"
 #include "api/jsep_ice_candidate.h"
+#include "api/make_ref_counted.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtc_error.h"
+#include "api/set_local_description_observer_interface.h"
+#include "api/set_remote_description_observer_interface.h"
 #include "base/check.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/memory/weak_ptr.h"
+#include "base/task/sequenced_task_runner.h"
 
 namespace cloud_browser::signaling {
 
@@ -308,54 +313,96 @@ void CbOffererDriver::OnTrack(
 }
 
 // ---------------------------------------------------------------------
-// CreateSessionDescriptionObserver (CreateOffer completion)
+// Refcounted SDP-observer adapters (chromium-7727 / CV2-69 #176)
 // ---------------------------------------------------------------------
+//
+// CbOffererDriver used to inherit CreateSessionDescriptionObserver +
+// SetLocal/RemoteDescriptionObserverInterface directly and pass `this`
+// to CreateOffer / SetLocalDescription / SetRemoteDescription. That
+// gave the driver three distinct (non-virtual) webrtc::RefCountInterface
+// base subobjects and an ambiguous Release()/AddRef() — the
+// scoped_refptr<CbOffererDriver> diamond. The fix: three small
+// dedicated adapter classes, each implementing exactly ONE observer
+// interface (hence exactly one RefCountInterface), each constructed via
+// webrtc::make_ref_counted at the call site. Each adapter forwards the
+// libwebrtc-signaling-thread callback to the driver's HopHandle*
+// landing point via a ui_runner_ post bound to a
+// base::WeakPtr<CbOffererDriver>. The WeakPtr is dereferenced ONLY
+// inside the posted task, on ui_runner_'s sequence — the adapter
+// itself never touches the driver on the signaling thread, so the
+// driver may be torn down concurrently without UAF (the posted task
+// is simply dropped if the WeakPtr is invalid). This is the same
+// hop-and-weak-guard discipline the driver's PeerConnectionObserver
+// callbacks already use.
 
-void CbOffererDriver::OnSuccess(
-    webrtc::SessionDescriptionInterface* desc) {
-  // Fires on libwebrtc's signaling thread. Stringify before hopping;
-  // libwebrtc retains ownership of |desc| only for the duration of
-  // this callback.
-  std::string sdp_string;
-  desc->ToString(&sdp_string);
-  std::string sdp_type = desc->type();  // "offer" — we requested one.
-  ui_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(&CbOffererDriver::HopHandleCreateOfferSuccess,
-                     weak_factory_.GetWeakPtr(),
-                     std::move(sdp_type),
-                     std::move(sdp_string)));
-}
+class CbOffererDriver::CreateOfferObserver
+    : public webrtc::CreateSessionDescriptionObserver {
+ public:
+  CreateOfferObserver(base::WeakPtr<CbOffererDriver> driver,
+                      scoped_refptr<base::SequencedTaskRunner> ui_runner)
+      : driver_(std::move(driver)), ui_runner_(std::move(ui_runner)) {}
 
-void CbOffererDriver::OnFailure(webrtc::RTCError error) {
-  ui_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(&CbOffererDriver::HopHandleCreateOfferFailure,
-                     weak_factory_.GetWeakPtr(),
-                     std::string(error.message())));
-}
+  void OnSuccess(webrtc::SessionDescriptionInterface* desc) override {
+    // Fires on libwebrtc's signaling thread. Stringify before hopping;
+    // libwebrtc retains ownership of |desc| only for this callback.
+    std::string sdp_string;
+    desc->ToString(&sdp_string);
+    std::string sdp_type = desc->type();  // "offer" — we requested one.
+    ui_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CbOffererDriver::HopHandleCreateOfferSuccess, driver_,
+                       std::move(sdp_type), std::move(sdp_string)));
+  }
 
-// ---------------------------------------------------------------------
-// SetLocal / SetRemote completion (libwebrtc signaling thread → UI hop)
-// ---------------------------------------------------------------------
+  void OnFailure(webrtc::RTCError error) override {
+    ui_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CbOffererDriver::HopHandleCreateOfferFailure, driver_,
+                       std::string(error.message())));
+  }
 
-void CbOffererDriver::OnSetLocalDescriptionComplete(webrtc::RTCError error) {
-  ui_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(&CbOffererDriver::HopHandleSetLocalDescriptionComplete,
-                     weak_factory_.GetWeakPtr(),
-                     error.ok(),
-                     std::string(error.message())));
-}
+ private:
+  const base::WeakPtr<CbOffererDriver> driver_;
+  const scoped_refptr<base::SequencedTaskRunner> ui_runner_;
+};
 
-void CbOffererDriver::OnSetRemoteDescriptionComplete(webrtc::RTCError error) {
-  ui_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(&CbOffererDriver::HopHandleSetRemoteDescriptionComplete,
-                     weak_factory_.GetWeakPtr(),
-                     error.ok(),
-                     std::string(error.message())));
-}
+class CbOffererDriver::SetLocalDescObserver
+    : public webrtc::SetLocalDescriptionObserverInterface {
+ public:
+  SetLocalDescObserver(base::WeakPtr<CbOffererDriver> driver,
+                       scoped_refptr<base::SequencedTaskRunner> ui_runner)
+      : driver_(std::move(driver)), ui_runner_(std::move(ui_runner)) {}
+
+  void OnSetLocalDescriptionComplete(webrtc::RTCError error) override {
+    ui_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CbOffererDriver::HopHandleSetLocalDescriptionComplete,
+                       driver_, error.ok(), std::string(error.message())));
+  }
+
+ private:
+  const base::WeakPtr<CbOffererDriver> driver_;
+  const scoped_refptr<base::SequencedTaskRunner> ui_runner_;
+};
+
+class CbOffererDriver::SetRemoteDescObserver
+    : public webrtc::SetRemoteDescriptionObserverInterface {
+ public:
+  SetRemoteDescObserver(base::WeakPtr<CbOffererDriver> driver,
+                        scoped_refptr<base::SequencedTaskRunner> ui_runner)
+      : driver_(std::move(driver)), ui_runner_(std::move(ui_runner)) {}
+
+  void OnSetRemoteDescriptionComplete(webrtc::RTCError error) override {
+    ui_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CbOffererDriver::HopHandleSetRemoteDescriptionComplete,
+                       driver_, error.ok(), std::string(error.message())));
+  }
+
+ private:
+  const base::WeakPtr<CbOffererDriver> driver_;
+  const scoped_refptr<base::SequencedTaskRunner> ui_runner_;
+};
 
 // ---------------------------------------------------------------------
 // Hop landing points (UI thread)
@@ -417,7 +464,16 @@ void CbOffererDriver::HopHandleRenegotiationNeeded() {
     }
     state_ = OffererState::kCreatingOffer;
     webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
-    pc_->CreateOffer(this, opts);
+    // CV2-69 #176: pass a transient refcounted CreateOfferObserver
+  // adapter (not `this` — see the adapter block above). The temporary
+  // scoped_refptr lives to end-of-statement; CreateOffer AddRefs the
+  // observer internally, so it survives until libwebrtc releases it
+  // after the OnSuccess/OnFailure callback.
+  pc_->CreateOffer(
+      webrtc::make_ref_counted<CreateOfferObserver>(
+          weak_factory_.GetWeakPtr(), ui_runner_)
+          .get(),
+      opts);
     return;
   }
   // R6: subsequent fires — libwebrtc tells us SDP needs refresh
@@ -472,8 +528,9 @@ void CbOffererDriver::HopHandleCreateOfferSuccess(std::string sdp_type,
   state_ = OffererState::kSettingLocal;
   pc_->SetLocalDescription(
       std::move(local),
-      webrtc::scoped_refptr<webrtc::SetLocalDescriptionObserverInterface>(
-          this));
+      // CV2-69 #176: transient refcounted SetLocalDescObserver adapter.
+      webrtc::make_ref_counted<SetLocalDescObserver>(
+          weak_factory_.GetWeakPtr(), ui_runner_));
 }
 
 void CbOffererDriver::HopHandleCreateOfferFailure(std::string reason) {
@@ -622,8 +679,9 @@ void CbOffererDriver::HandleAnswerEnvelope(const Envelope& env) {
   state_ = OffererState::kSettingRemote;
   pc_->SetRemoteDescription(
       std::move(remote),
-      webrtc::scoped_refptr<webrtc::SetRemoteDescriptionObserverInterface>(
-          this));
+      // CV2-69 #176: transient refcounted SetRemoteDescObserver adapter.
+      webrtc::make_ref_counted<SetRemoteDescObserver>(
+          weak_factory_.GetWeakPtr(), ui_runner_));
 }
 
 void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
@@ -766,7 +824,16 @@ void CbOffererDriver::BeginRenegotiation(std::string_view trigger) {
   // explicitly opts in. The OnRenegotiationNeeded()-driven trigger
   // never sets ice_restart.
   webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
-  pc_->CreateOffer(this, opts);
+  // CV2-69 #176: pass a transient refcounted CreateOfferObserver
+  // adapter (not `this` — see the adapter block above). The temporary
+  // scoped_refptr lives to end-of-statement; CreateOffer AddRefs the
+  // observer internally, so it survives until libwebrtc releases it
+  // after the OnSuccess/OnFailure callback.
+  pc_->CreateOffer(
+      webrtc::make_ref_counted<CreateOfferObserver>(
+          weak_factory_.GetWeakPtr(), ui_runner_)
+          .get(),
+      opts);
 }
 
 void CbOffererDriver::CloseInternal(std::string_view reason,
