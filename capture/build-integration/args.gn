@@ -58,32 +58,6 @@ use_ozone                = true
 ozone_platform_headless  = true
 ozone_platform_x11       = true    # Phase 1 still uses Xvfb.
 ozone_platform_wayland   = false
-ozone_platform_drm       = true    # Phase B GPU frame-tap: real
-                                    # DRM/GBM SCANOUT buffer allocation
-                                    # via /dev/dri/renderD128.
-                                    # ozone-x11+Xvfb has no DRI3, so
-                                    # gbm_support_x11 can't get a device
-                                    # fd; ozone-drm opens the render
-                                    # node directly. ADDITIVE: compiles
-                                    # the DRM backend in but does NOT
-                                    # change the default platform —
-                                    # runtime-selected via
-                                    # --ozone-platform=drm; the
-                                    # x11/headless defaults are
-                                    # unchanged. No companion gn args:
-                                    # the //ui/ozone/platform/drm target
-                                    # pulls BUNDLED libdrm + minigbm
-                                    # automatically because this build
-                                    # leaves use_system_libdrm /
-                                    # use_system_minigbm at their
-                                    # chromium defaults (false =
-                                    # bundled). Explicitly NOT adding
-                                    # use_system_* is the correct choice
-                                    # for a self-contained server-worker
-                                    # container — system libdrm/minigbm
-                                    # may be absent or version-skewed in
-                                    # the runtime image; bundled is
-                                    # hermetic and load-bearing here.
 
 # ---- V8 snapshot -----------------------------------------------------
 # Embed the V8 startup snapshot in the binary instead of loading
