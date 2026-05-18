@@ -16,6 +16,7 @@
 #include "capture/signaling/cb_offerer_driver.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -102,21 +103,28 @@ void CbOffererDriver::Start() {
   }
   state_ = OffererState::kCreatingPc;
 
-  // TODO(M3-R4-pcf-signature): the chromium-bundled libwebrtc revision
-  // we're building against may prefer the
-  // CreatePeerConnectionOrError(RTCConfiguration,
-  // PeerConnectionDependencies) form over the four-arg overload below.
-  // The error form is preferable since it surfaces the failure reason
-  // verbatim instead of nullptr. Confirm during first-build on
-  // triform-8 and swap if so — the overload check is in
-  // third_party/webrtc/api/peer_connection_interface.h on the
-  // chromium-bundled tree.
-  pc_ = pcf_->CreatePeerConnection(ice_config_,
-                                   /*allocator=*/nullptr,
-                                   /*cert_generator=*/nullptr,
-                                   /*observer=*/this);
+  // chromium-7727 API drift (CV2-69 cleanup, #176): the legacy
+  // four-arg CreatePeerConnection(config, allocator, cert_generator,
+  // observer) overload is REMOVED from PeerConnectionFactoryInterface.
+  // The modern API is CreatePeerConnectionOrError(RTCConfiguration,
+  // PeerConnectionDependencies) returning
+  // RTCErrorOr<scoped_refptr<PeerConnectionInterface>> — the error
+  // form surfaces the failure reason verbatim instead of a bare
+  // nullptr. PeerConnectionDependencies is the deps-struct that
+  // bundles the PeerConnectionObserver (and optional allocator /
+  // cert_generator / async-resolver, all left at defaults here).
+  webrtc::PeerConnectionDependencies pc_dependencies(/*observer=*/this);
+  webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::PeerConnectionInterface>>
+      pc_or_error = pcf_->CreatePeerConnectionOrError(
+          ice_config_, std::move(pc_dependencies));
+  if (!pc_or_error.ok()) {
+    FailWithReason(std::string("CreatePeerConnectionOrError failed: ") +
+                   std::string(pc_or_error.error().message()));
+    return;
+  }
+  pc_ = pc_or_error.MoveValue();
   if (!pc_) {
-    FailWithReason("CreatePeerConnection returned null");
+    FailWithReason("CreatePeerConnectionOrError returned ok() but a null PC");
     return;
   }
 
@@ -428,13 +436,28 @@ void CbOffererDriver::HopHandleCreateOfferSuccess(std::string sdp_type,
   }
   // Reconstruct the SessionDescriptionInterface so we can hand it
   // back to SetLocalDescription.
-  webrtc::SdpParseError err;
+  //
+  // chromium-7727 API drift (CV2-69 cleanup, #176): the legacy
+  // CreateSessionDescription(const std::string& type, const
+  // std::string& sdp, SdpParseError* error) 3-arg form is REMOVED.
+  // Modern API is CreateSessionDescription(SdpType, absl::string_view)
+  // returning unique_ptr<SessionDescriptionInterface> (nullptr on
+  // parse failure; no out-param). Convert the string type via
+  // SdpTypeFromString (returns std::optional<SdpType>).
+  std::optional<webrtc::SdpType> parsed_type =
+      webrtc::SdpTypeFromString(sdp_type);
+  if (!parsed_type) {
+    FailWithReason(
+        std::string("CreateSessionDescription: unparseable sdp_type '") +
+        sdp_type + "' for local offer");
+    return;
+  }
   std::unique_ptr<webrtc::SessionDescriptionInterface> local(
-      webrtc::CreateSessionDescription(sdp_type, sdp, &err));
+      webrtc::CreateSessionDescription(*parsed_type, sdp));
   if (!local) {
     FailWithReason(
-        std::string("CreateSessionDescription failed for local offer: ") +
-        err.description);
+        "CreateSessionDescription failed for local offer (SDP parse "
+        "error or unsupported type)");
     return;
   }
   // Ordering: emit the `offer` envelope FIRST, then call
@@ -583,14 +606,17 @@ void CbOffererDriver::HandleAnswerEnvelope(const Envelope& env) {
     FailWithReason("`answer` envelope missing SDP payload");
     return;
   }
-  webrtc::SdpParseError err;
+  // chromium-7727 API drift (CV2-69 cleanup, #176): see
+  // HopHandleCreateOfferSuccess above. The remote SDP type is the
+  // literal "answer" — use webrtc::SdpType::kAnswer directly rather
+  // than round-tripping through SdpTypeFromString.
   std::unique_ptr<webrtc::SessionDescriptionInterface> remote(
-      webrtc::CreateSessionDescription("answer", payload->sdp, &err));
+      webrtc::CreateSessionDescription(webrtc::SdpType::kAnswer,
+                                       payload->sdp));
   if (!remote) {
     FailWithReason(
-        std::string(
-            "CreateSessionDescription failed for remote answer: ") +
-        err.description);
+        "CreateSessionDescription failed for remote answer (SDP parse "
+        "error)");
     return;
   }
   state_ = OffererState::kSettingRemote;

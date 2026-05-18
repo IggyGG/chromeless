@@ -313,7 +313,23 @@ class CloudBrowserBrowserMainParts
   //   * ws_client_->Disconnect() (graceful close)
   //   * ws_client_.reset()
   std::unique_ptr<cloud_browser::signaling::SignalingWsClient> ws_client_;
-  std::unique_ptr<cloud_browser::signaling::CbOffererDriver> offerer_driver_;
+  // CbOffererDriver is held by webrtc::scoped_refptr, NOT unique_ptr:
+  // the class inherits three refcounted webrtc observer interfaces
+  // (CreateSessionDescriptionObserver + SetLocal/RemoteDescription
+  // ObserverInterface, all extending webrtc::RefCountInterface with
+  // pure-virtual AddRef/Release). It supplies no AddRef/Release of
+  // its own, so it is an abstract type — webrtc::make_ref_counted
+  // wraps it in RefCountedObject<CbOffererDriver> which provides the
+  // refcounting and makes the concrete type instantiable. (This
+  // abstractness was latent until CV2-69 became the first code to
+  // instantiate the driver — see #176 chromium-7727 cleanup.)
+  // libwebrtc takes transient scoped_refptrs to the driver during
+  // SetLocal/RemoteDescription + CreateOffer async ops, so refcounted
+  // ownership is also strictly safer than unique_ptr here: teardown
+  // dropping the embedder's ref cannot free the object out from
+  // under an in-flight libwebrtc callback.
+  webrtc::scoped_refptr<cloud_browser::signaling::CbOffererDriver>
+      offerer_driver_;
   webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
 
   // CV2-69 F7-skinny — answerer-facing DataChannels. Created by

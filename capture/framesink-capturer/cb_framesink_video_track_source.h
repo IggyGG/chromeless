@@ -226,6 +226,22 @@ class CloudBrowserFrameSinkVideoTrackSource : public webrtc::VideoTrackSource {
   // TODO(M2-R3-m3-coupling): see is_screencast above; same M3 hook.
   std::optional<bool> needs_denoising() const override;
 
+  // chromium-7727 API drift (CV2-69 cleanup, #176): the custom
+  // diagnostics accessor below is named GetStats() — a 0-param
+  // method returning our own CloudBrowserFrameSinkVideoTrackSource
+  // Stats struct. It collides by name with the inherited
+  // webrtc::VideoTrackSource::GetStats(Stats*) (1-param, out-param,
+  // bool return) and would HIDE it, tripping -Woverloaded-virtual
+  // (now -Werror on the chromium-7727 build config). This using-
+  // declaration un-hides the base overload so both coexist: callers
+  // of the libwebrtc-facing GetStats(Stats*) and callers of our
+  // 0-param diagnostics accessor each resolve unambiguously. Zero
+  // behaviour change — VideoTrackSource's GetStats(Stats*) keeps its
+  // default (returns false; we surface real diagnostics via the
+  // custom accessor + the metrics sidecar, not via the libwebrtc
+  // Stats struct).
+  using webrtc::VideoTrackSource::GetStats;
+
   // Diagnostics. Snapshot of the running counters. Safe to call from
   // any thread (atomic reads — implementation copies under no lock
   // for performance; counters are monotonic so a torn read is harmless

@@ -505,10 +505,19 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // LOG sinks (M5.5 R5 audio chain integration deferred). ui_runner
   // is the sequenced task runner of the embedder's UI thread (this
   // method runs on it).
-  offerer_driver_ = std::make_unique<cloud_browser::signaling::CbOffererDriver>(
-      pcf_, ws_client_.get(), std::move(rtc_config),
-      /*observer=*/this,
-      base::SequencedTaskRunner::GetCurrentDefault());
+  // webrtc::make_ref_counted (NOT std::make_unique): CbOffererDriver
+  // is abstract on its own (inherits refcounted webrtc observer
+  // interfaces' pure-virtual AddRef/Release without implementing
+  // them); make_ref_counted wraps it in RefCountedObject<> which
+  // provides the refcounting. See the offerer_driver_ member-decl
+  // comment in the header for the full rationale (#176 chromium-7727
+  // cleanup — abstractness was latent until CV2-69 first instantiated
+  // the driver).
+  offerer_driver_ =
+      webrtc::make_ref_counted<cloud_browser::signaling::CbOffererDriver>(
+          pcf_, ws_client_.get(), std::move(rtc_config),
+          /*observer=*/this,
+          base::SequencedTaskRunner::GetCurrentDefault());
 
   // F5 step 6 — Start the offerer + open the WS dial. Order:
   // offerer_driver_->Start() first creates the PeerConnection
@@ -675,7 +684,11 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   video_track_ = nullptr;
   if (offerer_driver_) {
     offerer_driver_->Close("session ended");
-    offerer_driver_.reset();
+    // scoped_refptr (not unique_ptr) — assign nullptr to drop the
+    // embedder's ref. If libwebrtc still holds a transient ref from
+    // an in-flight SetLocal/RemoteDescription callback the object
+    // survives until that drops; teardown is callback-safe.
+    offerer_driver_ = nullptr;
   }
   if (ws_client_) {
     ws_client_->Disconnect();
