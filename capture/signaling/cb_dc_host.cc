@@ -300,14 +300,16 @@ SendResult CbDataChannelHost::Send(CbDcLabel label,
         webrtc::DataBuffer buf(
             webrtc::CopyOnWriteBuffer(body.data(), body.size()),
             /*binary=*/false);
-        *out = dc->SendAsync(std::move(buf), /*on_complete=*/{});
-        // SendAsync is the libwebrtc-current entrypoint; the older
-        // synchronous Send() returns bool and is being phased out.
-        // If the chromium-pinned libwebrtc revision is too old for
-        // SendAsync, swap to dc->Send(buf) here — the success
-        // contract is the same (queued, not delivered).
-        // TODO(M3-R5-sendasync-fallback): pin the libwebrtc rev in
-        // patches/0003 + remove this comment once verified.
+        // CV2-75 fix-forward (resolves M3-R5-sendasync-fallback TODO):
+        // chromium-pinned libwebrtc's DataChannelInterface::SendAsync
+        // returns void (not RTCError); the on_complete callback is
+        // the out-of-band signal. For fire-and-forget queueing, the
+        // empty {} callback is correct, and the synchronous-return
+        // contract collapses to "POSTed to queue". The M3 R5 design
+        // documents the success contract as "queued, not delivered" —
+        // we synthesize the OK result on the synchronous path.
+        dc->SendAsync(std::move(buf), /*on_complete=*/{});
+        *out = webrtc::RTCError::OK();
       },
       this, label, std::move(owned), &result));
 
@@ -338,7 +340,12 @@ SendResult CbDataChannelHost::SendBinary(CbDcLabel label,
           return;
         }
         webrtc::DataBuffer buf(std::move(body), /*binary=*/true);
-        *out = dc->SendAsync(std::move(buf), /*on_complete=*/{});
+        // CV2-75 fix-forward: same SendAsync void-return resolution as
+        // the text Send() above. Binary path is currently unused (v1
+        // channels are text-only); kept symmetric for the future
+        // binary file-upload-ack path (M6 R3 follow-up).
+        dc->SendAsync(std::move(buf), /*on_complete=*/{});
+        *out = webrtc::RTCError::OK();
       },
       this, label, std::move(buffer), &result));
 

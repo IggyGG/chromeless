@@ -37,6 +37,7 @@
 #include <memory>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
@@ -179,8 +180,12 @@ class CbInputDispatch : public webrtc::DataChannelObserver {
 
   // Both members are immutable after construction; safe to touch
   // from the signaling thread without a lock.
+  // CV2-75 fix-forward: delegate_ wrapped in raw_ptr<T> per chromium-
+  // rawptr lint (chromium hardening for use-after-free detection on
+  // heap-allocated objects with raw pointer fields). Caller-owned
+  // semantics unchanged — the delegate still must outlive this object.
   const scoped_refptr<base::SequencedTaskRunner> ui_task_runner_;
-  CbInputDispatchDelegate* const delegate_;
+  const raw_ptr<CbInputDispatchDelegate> delegate_;
 };
 
 // LoggingDelegate is the R1 production stand-in. Emits an INFO log

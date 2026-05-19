@@ -116,7 +116,13 @@ bool DecodeEnvelope(const std::string& raw,
   DCHECK(out);
   DCHECK(out_reason);
 
-  auto parsed = base::JSONReader::ReadAndReturnValueWithError(raw);
+  // CV2-75 fix-forward: chromium 7727's ReadAndReturnValueWithError
+  // now requires an explicit JSONParserOptions arg. base::JSON_PARSE_RFC
+  // is the strict-RFC default matching the M4 R1 v=1 envelope spec (no
+  // comments, no trailing commas) and what the functional-test harness
+  // pre-emits.
+  auto parsed = base::JSONReader::ReadAndReturnValueWithError(
+      raw, base::JSON_PARSE_RFC);
   if (!parsed.has_value()) {
     *out_reason = "invalid JSON: " + parsed.error().message;
     return false;

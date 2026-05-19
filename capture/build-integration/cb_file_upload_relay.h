@@ -181,6 +181,7 @@
 #include <string>
 #include <string_view>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
@@ -393,7 +394,10 @@ class CbFileUploadRelay : public webrtc::DataChannelObserver {
   const std::unique_ptr<CbFileUploadBridgeWsClient> client_;
   // raw_ptr because dc_host_ is caller-owned and must outlive us.
   // May be nullptr — see ctor docs.
-  signaling::CbDataChannelHost* const dc_host_;
+  // CV2-75 fix-forward: wrapped in raw_ptr<T> wrapper per chromium-
+  // rawptr lint (author comment already declared raw_ptr intent;
+  // form was raw `*` instead of wrapped template).
+  const raw_ptr<signaling::CbDataChannelHost> dc_host_;
 
   // Outbound DC send counters — touched only on the io_task_runner_
   // sequence where OnBridgeReplyFrame fires.

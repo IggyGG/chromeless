@@ -133,6 +133,7 @@
 #include <string>
 #include <string_view>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/synchronization/lock.h"
@@ -372,7 +373,9 @@ class CbClipboardOutboundServer {
   bool FrameWithinCap(const std::string& frame) const;
 
   // raw_ptr because dc_host_ is caller-owned and must outlive us.
-  signaling::CbDataChannelHost* const dc_host_;
+  // CV2-75 fix-forward: wrapped in raw_ptr<T> wrapper per chromium-
+  // rawptr lint (author comment already declared raw_ptr intent).
+  const raw_ptr<signaling::CbDataChannelHost> dc_host_;
   const std::string listen_addr_;
   const std::string listen_path_;
   const bool disabled_;
