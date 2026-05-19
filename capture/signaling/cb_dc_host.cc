@@ -12,6 +12,7 @@
 #include "base/check.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/no_destructor.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/task/bind_post_task.h"
 
@@ -41,6 +42,24 @@ std::optional<CbDcLabel> LabelFromString(std::string_view s) {
     }
   }
   return std::nullopt;
+}
+
+const base::flat_set<CbDcLabel>& DefaultOutboundLabels() {
+  // Function-local static — initialized on first call, no static-init
+  // order trap. Contains every canonical label so the no-arg
+  // CreateOutboundChannels() default matches the historical v1
+  // hard-coded-loop behavior. Wave 1.5 (CV2-77 adoption) will pass a
+  // narrower set; this default remains the safe fallback for tests
+  // and any future caller that wants the full five-channel shape.
+  static const base::NoDestructor<base::flat_set<CbDcLabel>> kSet(
+      base::flat_set<CbDcLabel>{
+          CbDcLabel::kInput,
+          CbDcLabel::kStats,
+          CbDcLabel::kCursor,
+          CbDcLabel::kClipboard,
+          CbDcLabel::kFileUpload,
+      });
+  return *kSet;
 }
 
 // ---------------------------------------------------------------------
@@ -181,7 +200,8 @@ void CbDataChannelHost::RunOnSignalingSync(base::OnceClosure fn) {
   done.Wait();
 }
 
-webrtc::RTCError CbDataChannelHost::CreateOutboundChannels() {
+webrtc::RTCError CbDataChannelHost::CreateOutboundChannels(
+    const base::flat_set<CbDcLabel>& labels) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(public_api_sequence_);
 
   if (create_called_) {
@@ -205,7 +225,8 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels() {
   // TODO(M3-R5-async-create): see header — synchronous is fine for
   // R1 given the 5-channel cost.
   RunOnSignalingSync(base::BindOnce(
-      [](CbDataChannelHost* self, webrtc::RTCError* err) {
+      [](CbDataChannelHost* self, const base::flat_set<CbDcLabel>* labels,
+         webrtc::RTCError* err) {
         webrtc::DataChannelInit init;
         init.ordered = true;
         // All other DataChannelInit fields default — `maxRetransmits`
@@ -217,6 +238,19 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels() {
         base::AutoLock lock(self->slots_lock_);
         for (size_t i = 0; i < kNumChannels; ++i) {
           const auto label = static_cast<CbDcLabel>(i);
+          if (!labels->contains(label)) {
+            // Caller opted out of this label — leave the slot empty.
+            // IsOpen() returns false; Send() returns kInvalidState
+            // (channel not created); the bound_observers_ slot can
+            // still be set via BindObserver but no inbound traffic
+            // will ever arrive because the libwebrtc DC doesn't
+            // exist on the PC. This is the intentional Wave 1.5
+            // shape: omit kFileUpload (and possibly kClipboard)
+            // until the M6 R2/R3 consumers land.
+            VLOG(1) << "[M3-R5] skipped `" << LabelToString(label)
+                    << "` per caller opt-out";
+            continue;
+          }
           const std::string label_str = LabelToString(label);
 
           auto dc_or_err = self->pc_->CreateDataChannelOrError(
@@ -239,7 +273,7 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels() {
                   << label_str << "` (sctp id=" << slot.dc->id() << ")";
         }
       },
-      this, &first_error));
+      this, &labels, &first_error));
 
   return first_error;
 }
