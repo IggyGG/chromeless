@@ -51,7 +51,7 @@
 //   "clipboard"    — bidirectional (M6 R2 / not in R1). One observer
 //                    when M6 R2 lands; until then, an
 //                    unbound-default trampoline drops inbound.
-//   "file-upload"  — one-way RECEIVE from the portal (M6 R3 / not in
+//   "files"        — one-way RECEIVE from the portal (M6 R3 / not in
 //                    R1). Same unbound-default behaviour as
 //                    clipboard pre-R2.
 //
@@ -163,7 +163,7 @@ enum class CbDcLabel : uint8_t {
   kStats = 1,
   kCursor = 2,
   kClipboard = 3,
-  kFileUpload = 4,
+  kFiles = 4,
 };
 
 // Total number of DCs the host creates. The array<,kNumChannels>

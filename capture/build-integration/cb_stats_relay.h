@@ -279,7 +279,7 @@ class CbWebrtcEventEmitter {
   // dc.opened — per-DC `open` event. The FIRST dc.opened in a session
   // carries handshake_ms (Now() - session_started_at_); subsequent
   // ones omit it. Caller passes the DC label
-  // ("input"|"stats"|"cursor"|"clipboard"|"file-upload").
+  // ("input"|"stats"|"cursor"|"clipboard"|"files").
   void EmitDcOpened(std::string label);
 
   // Mint a fresh session_id + clear all per-session latches. Called

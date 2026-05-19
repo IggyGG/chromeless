@@ -591,7 +591,7 @@ source_set("clipboard_relay") {
 # streamer.js's file-upload wiring (deleted in M7).
 #
 # Inbound (DC→bridge): CbFileUploadRelay is a DataChannelObserver
-# bound onto the kFileUpload channel via M3 R5's BindObserver. Each
+# bound onto the kFiles channel via M3 R5's BindObserver. Each
 # DC text frame (file_upload_start / file_upload_chunk / file_upload
 # _end / file_upload_cancel — see docs/protocols/file-upload.md) is
 # forwarded verbatim to the bridge's WS endpoint (default
@@ -600,7 +600,7 @@ source_set("clipboard_relay") {
 # Outbound (bridge→DC): the same CbFileUploadBridgeWsClient owns the
 # WS read-loop. Each reply frame from the bridge (file_upload_progress
 # / file_upload_complete / file_upload_error) is forwarded via
-# dc_host->Send(kFileUpload, text).
+# dc_host->Send(kFiles, text).
 #
 # One duplex WS (not two unidirectional like clipboard) because the
 # file-bridge protocol is fundamentally request/response correlated

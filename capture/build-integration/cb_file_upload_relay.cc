@@ -333,7 +333,7 @@ void CbFileUploadRelay::OnBridgeReplyFrame(std::string frame) {
   // dc_host_->Send is thread-safe by contract (M3 R5 header); it
   // PostTasks onto its own signaling runner before touching
   // DataChannelInterface::Send. We pass through.
-  auto result = dc_host_->Send(signaling::CbDcLabel::kFileUpload, frame);
+  auto result = dc_host_->Send(signaling::CbDcLabel::kFiles, frame);
   if (!result.ok()) {
     ++consecutive_outbound_send_failures_;
     if (ShouldLogFailure(consecutive_outbound_send_failures_)) {

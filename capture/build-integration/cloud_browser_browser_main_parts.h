@@ -378,9 +378,9 @@ class CloudBrowserBrowserMainParts
   // unconditionally, which would scope-creep the 5th-DC wire-contract
   // change beyond CV2-75. Both are deferred to follow-up tickets:
   //   * cv2/m6-r1-stats-dc — 5th DC + CbStatsRelay + portal-spec
-  //   * cv2/m3-r5-dc-host-adoption — kFileUpload → kFiles rename +
-  //     5-DC vs parameterized CreateOutboundChannels decision +
-  //     enables CbCursorDcEmitter M5 R6 (which already takes
+  //   * cv2/m3-r5-dc-host-adoption — kFiles rename DONE (CV2-77 sub-
+  //     fix 4); 5-DC vs parameterized CreateOutboundChannels decision
+  //     remains + enables CbCursorDcEmitter M5 R6 (which already takes
   //     `signaling::CbDataChannelHost*`)
   //
   // The 3 consumers attached here:
