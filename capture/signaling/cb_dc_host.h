@@ -144,6 +144,7 @@
 #include "api/peer_connection_interface.h"
 #include "api/rtc_error.h"
 #include "api/scoped_refptr.h"
+#include "base/containers/flat_set.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
@@ -170,6 +171,24 @@ enum class CbDcLabel : uint8_t {
 // fields below all use this as their fixed size — adding a new
 // channel grows the enum + this constant in lockstep.
 inline constexpr size_t kNumChannels = 5;
+
+// Default subset of labels opened by CreateOutboundChannels() when the
+// caller doesn't pass an explicit set. Mirrors the historical v1
+// behavior — open all five channels — so existing callers (the brief
+// confirms there are none in production today, but tests and future
+// code paths get the same shape) see no behavioral change.
+//
+// Wave 1.5 (CV2-77 cb_dc_host adoption) will pass a narrower set that
+// omits kFileUpload (and possibly kClipboard) until the M6 R2/R3
+// consumers ship. That call site is the first production caller; the
+// default here keeps the no-arg invocation identical to the prior
+// hard-coded loop.
+//
+// Returned by const-ref to a function-local static so the constant has
+// a stable address + no static-init-order trap (base::flat_set has a
+// non-trivial constructor — declaring as a namespace-scope global
+// const is unsafe across TU init order).
+const base::flat_set<CbDcLabel>& DefaultOutboundLabels();
 
 // Exact label string emitted on the wire. Locked against
 // streamer.js:1858 + :1866-1868. The portal answerer routes on these
@@ -274,13 +293,23 @@ class CbDataChannelHost {
 
   ~CbDataChannelHost();
 
-  // Create all five outbound channels on the PC. Must be called
-  // exactly once, BEFORE the offerer driver fires CreateOffer.
-  // Returns kNone on success; on failure returns the first
-  // DataChannelOrError error and the host stays in a half-constructed
-  // state (channels created so far are kept; the embedder must tear
-  // the entire session down — partial-DC sessions are not a supported
-  // mode in v1).
+  // Create outbound channels on the PC for the labels in |labels|.
+  // Must be called exactly once, BEFORE the offerer driver fires
+  // CreateOffer. Returns kNone on success; on failure returns the
+  // first DataChannelOrError error and the host stays in a half-
+  // constructed state (channels created so far are kept; the embedder
+  // must tear the entire session down — partial-DC sessions are not a
+  // supported mode in v1).
+  //
+  // |labels| selects which of the five canonical labels get opened.
+  // Default (DefaultOutboundLabels()) is all five — preserves the
+  // historical v1 behavior. Wave 1.5 will pass a narrower set so the
+  // M6 R2/R3 channels (clipboard / file-upload) stay closed until
+  // their consumer modules ship. Labels NOT in |labels| are left as
+  // empty slots in slots_ — IsOpen() returns false, Send() returns
+  // kInvalidState (channel not created), BindObserver() still
+  // succeeds slot-side but no traffic ever flows because the
+  // libwebrtc DC doesn't exist.
   //
   // Thread: caller's thread; internally posts onto signaling_task_-
   // runner_ for the actual CreateDataChannelOrError calls because
@@ -290,7 +319,8 @@ class CbDataChannelHost {
   // wait is too long (>10ms for 5 channels), split into a
   // CreateOutboundChannelsAsync() with a completion callback. R1
   // measurement says <1ms typical, so synchronous is fine for now.
-  webrtc::RTCError CreateOutboundChannels();
+  webrtc::RTCError CreateOutboundChannels(
+      const base::flat_set<CbDcLabel>& labels = DefaultOutboundLabels());
 
   // Bind |observer| as the inbound observer for |label|. Replaces
   // any prior binding (test seam — production binds once).
