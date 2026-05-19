@@ -109,7 +109,7 @@
 //
 // CbFileUploadBridgeWsClient's WS read frames arrive on the io_-
 // task_runner_ sequence; the client PostTasks onto signaling_task_-
-// runner_ before invoking dc_host_->Send(kFileUpload, text) because
+// runner_ before invoking dc_host_->Send(kFiles, text) because
 // DataChannelInterface::Send is signaling-only.
 //
 // # Backpressure note
@@ -128,7 +128,7 @@
 //   * inbound: forward "files" DC text frames to the bridge's WS
 //     endpoint (default ws://127.0.0.1:9400/files)
 //   * outbound: read the bridge's WS reply frames and forward each
-//     via dc_host_->Send(kFileUpload, ...)
+//     via dc_host_->Send(kFiles, ...)
 //   * defence-in-depth cap on per-frame size (kMaxFileUploadFrame
 //     Bytes); oversize drop + WARN
 //   * binary-frame drop on either direction (the v1 wire is JSON
@@ -248,7 +248,7 @@ class CbFileUploadBridgeWsClient {
  public:
   // Callback fired on each text frame received from the bridge.
   // The relay's outbound dispatch wires this to dc_host_->Send(
-  // kFileUpload, frame). The callback runs on io_task_runner_; the
+  // kFiles, frame). The callback runs on io_task_runner_; the
   // host's Send handles its own thread hop.
   using OnFrameReceivedCallback =
       base::RepeatingCallback<void(std::string frame)>;
@@ -340,13 +340,13 @@ class CbFileUploadBridgeWsClient {
 // "files" DC. On each inbound text message, forwards the raw body
 // to the file-bridge WS endpoint via CbFileUploadBridgeWsClient. On
 // outbound reply frames from the bridge (received via the client's
-// read-loop callback), forwards each via dc_host_->Send(kFileUpload,
+// read-loop callback), forwards each via dc_host_->Send(kFiles,
 // text).
 //
 // Ownership: the M3 PCF host constructs this and calls
-// dc_host_->BindObserver(CbDcLabel::kFileUpload, this). The host's
+// dc_host_->BindObserver(CbDcLabel::kFiles, this). The host's
 // per-channel trampoline keeps a raw pointer back via BindObserver;
-// callers MUST BindObserver(kFileUpload, nullptr) (or destroy the
+// callers MUST BindObserver(kFiles, nullptr) (or destroy the
 // host) before destroying this relay.
 //
 // Unlike CbClipboardRelay (which delegates the outbound direction
@@ -358,7 +358,7 @@ class CbFileUploadRelay : public webrtc::DataChannelObserver {
  public:
   // |client|: owns the duplex WS to the bridge. Must not be null.
   // |dc_host|: M3 R5's CbDataChannelHost. Must outlive this relay.
-  //     Outbound frames are forwarded via dc_host->Send(kFileUpload,
+  //     Outbound frames are forwarded via dc_host->Send(kFiles,
   //     text); the host handles the signaling-thread hop internally.
   //     Pass nullptr to disable the outbound direction entirely (the
   //     read-loop still drains the WS but drops frames; useful when
@@ -382,7 +382,7 @@ class CbFileUploadRelay : public webrtc::DataChannelObserver {
  private:
   // Called from the WS read-loop (io_task_runner_) for every text
   // frame the bridge sends back. Validates + forwards via dc_host_
-  // ->Send(kFileUpload, text). Static-bound on construction via
+  // ->Send(kFiles, text). Static-bound on construction via
   // client_->SetOnFrameReceived.
   void OnBridgeReplyFrame(std::string frame);
 

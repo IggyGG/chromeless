@@ -24,7 +24,7 @@ namespace {
 // :1858 + :1866-1868. Index alignment with CbDcLabel enum is
 // load-bearing — see kLabelStrings access in LabelToString().
 constexpr std::array<const char*, kNumChannels> kLabelStrings = {
-    "input", "stats", "cursor", "clipboard", "file-upload",
+    "input", "stats", "cursor", "clipboard", "files",
 };
 
 }  // namespace
