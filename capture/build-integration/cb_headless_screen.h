@@ -92,7 +92,17 @@
 
 #include "ui/display/screen_base.h"
 #include "ui/gfx/geometry/point.h"
-#include "ui/gfx/native_widget_types.h"
+// CV2-78 Wave 1 first-compile-link fix-forward: chromium-7727 renamed
+// ui/gfx/native_widget_types.h → ui/gfx/native_ui_types.h (same file,
+// still declares gfx::NativeWindow + gfx::NativeView et al). The
+// drafter used the historical header name without source-verifying;
+// exactly the MEDIUM-confidence first-compile-link risk the CV2-78
+// brief flagged. Verified by direct grep of chromium-src on T7: the
+// `using NativeWindow = ...` declaration lives in native_ui_types.h.
+// Same methodology lesson class as CV2-75 Ring 3 v2's
+// rtc_use_pulse_audio → rtc_include_pulse_audio rename: propositional
+// reference must be source-verified before action.
+#include "ui/gfx/native_ui_types.h"
 
 namespace cloud_browser {
 
