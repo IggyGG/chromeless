@@ -364,9 +364,50 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   signaling_thread_->Start();
 
   webrtc::Environment env = webrtc::CreateEnvironment();
+
+  // CV2-75 Ring N+1 fix-forward — surgical thread-marshal for AudioDevice
+  // construction (mirrors the CV2-69 re-test #3 signaling-thread marshal
+  // for PC ops; same pattern, different webrtc subsystem).
+  //
+  // Background: with rtc_include_pulse_audio=true (Ring 3 v2 / f0f2782),
+  // webrtc::CreateAudioDeviceModule(env, kPlatformDefaultAudio) now
+  // returns an AudioDeviceLinuxPulse instance instead of a dummy ADM.
+  // AudioDeviceLinuxPulse has a SequenceChecker thread_checker_ (header
+  // audio_device_pulse_linux.h:285-288), and EVERY method on the class
+  // calls RTC_DCHECK(thread_checker_.IsCurrent()): the ctor at :51, dtor
+  // at :108, AttachAudioBuffer at :130, Init at :154, Terminate at :200,
+  // Initialized at :238, InitSpeaker at :243, InitMicrophone at :281,
+  // and so on. The SequenceChecker binds on first .IsCurrent() call;
+  // every subsequent call must be from the same sequence.
+  //
+  // Per the header doc comment (line 285): "We can then use
+  // RTC_DCHECK_RUN_ON(&worker_thread_checker_) to ensure that other
+  // methods are called from the same thread." — the expected thread is
+  // the worker thread (the PCF will subsequently invoke Init() and
+  // friends from there).
+  //
+  // Without the marshal: ctor runs on UI thread (PreMainMessageLoopRun)
+  // ⇒ thread_checker_ binds UI. Then PCF moves the ADM into the worker
+  // thread for Init(). audio_device_pulse_linux.cc:154 fires
+  // RTC_DCHECK_FATAL on rv3 (verified empirically). The dummy ADM never
+  // hit this code path because its construction is trivial and the
+  // dummy ADM has no SequenceChecker.
+  //
+  // Fix: invoke CreateCloudBrowserDefaultAudioDeviceModule on the
+  // worker thread via BlockingCall (thread.h:328 — synchronous-blocking
+  // pattern matching the CV2-69 RunOnSignalingSync template, just with
+  // libwebrtc's built-in helper instead of a hand-rolled WaitableEvent).
+  // The ADM is constructed on worker thread; thread_checker_ binds
+  // worker; subsequent PCF Init() on the same worker thread passes.
+  // BlockingCall returns the scoped_refptr to UI thread for the PCF
+  // construction call — UI thread thread-safety on scoped_refptr move
+  // is the same as any cross-thread refptr handoff (well-defined).
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
+      worker_thread_->BlockingCall(
+          [] { return CreateCloudBrowserDefaultAudioDeviceModule(); });
   pcf_ = CreateCloudBrowserPcf(network_thread_.get(), worker_thread_.get(),
                                signaling_thread_.get(), env,
-                               CreateCloudBrowserDefaultAudioDeviceModule());
+                               std::move(adm));
   CHECK(pcf_) << "CreateCloudBrowserPcf returned null — the browser-process "
               << "PeerConnectionFactory failed to construct. ChromelessV2 M1 "
               << "requires a non-null PCF for the M2+ pipeline.";
