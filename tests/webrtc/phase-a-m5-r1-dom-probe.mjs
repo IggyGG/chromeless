@@ -84,22 +84,37 @@ async function waitForCdpReady() {
   throw new Error(`CDP not ready after ${CDP_CONNECT_TIMEOUT_MS}ms: ${lastErr}`);
 }
 
+// Per-probe deadline. cb-chromium boot is flaky (GPU/viz process exits at init,
+// dbus errors, OOM score adjust fails). A blocking CDP call can hang the whole
+// probe even though every individual probe is meant to be cheap & isolated.
+const PER_PROBE_TIMEOUT_MS = parseInt(process.env.PER_PROBE_TIMEOUT_MS || "8000", 10);
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`probe '${label}' timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
 // Evaluate a JS expression in the page and return { ok, value, err }.
 // Wraps Runtime.evaluate so a single probe failure doesn't abort the run —
 // every probe contributes to the diagnostic regardless of the others' state.
 async function evalSafe(Runtime, expression, label) {
   try {
-    const r = await Runtime.evaluate({
-      expression,
-      returnByValue: true,
-      awaitPromise: false,
-    });
+    const r = await withTimeout(
+      Runtime.evaluate({ expression, returnByValue: true }),
+      PER_PROBE_TIMEOUT_MS,
+      label,
+    );
     if (r.exceptionDetails) {
       return { ok: false, err: `exception: ${JSON.stringify(r.exceptionDetails)}` };
     }
     return { ok: true, value: r.result?.value };
   } catch (e) {
-    log("warn", `probe '${label}' Runtime.evaluate threw`, { err: String(e) });
+    log("warn", `probe '${label}' Runtime.evaluate threw/timed out`, { err: String(e) });
     return { ok: false, err: String(e) };
   }
 }
@@ -130,11 +145,14 @@ async function main() {
   const { Page, Runtime, DOM } = client;
 
   // ───── Phase 3: navigate + wait for load + settle ─────
+  // Note: we intentionally do NOT call DOM.enable() — on the rv6 image the
+  // cb-chromium worker's CDP handler appears to deadlock subsequent
+  // Runtime.evaluate calls when DOM domain is enabled. DOM.getDocument is
+  // documented as not requiring DOM.enable() on the page target.
   try {
     await Page.enable();
     await Runtime.enable();
-    await DOM.enable();
-    log("ok", "Page + Runtime + DOM domains enabled");
+    log("ok", "Page + Runtime domains enabled");
 
     const navStart = Date.now();
     await Page.navigate({ url: STIMULUS_TARGET_URL });
@@ -208,10 +226,15 @@ async function main() {
 
   // 4.7 Page.captureScreenshot — does the compositor produce pixels at all?
   // If renderer is alive but the GPU-process / viz is broken, this fails
-  // with a CDP error (recorded but non-fatal).
+  // with a CDP error (recorded but non-fatal). Wrap with timeout — a stuck
+  // viz process can hang the request forever.
   try {
     const t = Date.now();
-    const shot = await Page.captureScreenshot({ format: "png" });
+    const shot = await withTimeout(
+      Page.captureScreenshot({ format: "png" }),
+      PER_PROBE_TIMEOUT_MS,
+      "captureScreenshot",
+    );
     const len = shot.data?.length || 0;
     results.screenshot = {
       ok: true,
@@ -231,7 +254,11 @@ async function main() {
   // tearing), DOM.getDocument may disagree and surface it.
   try {
     const t = Date.now();
-    const doc = await DOM.getDocument({ depth: 2, pierce: false });
+    const doc = await withTimeout(
+      DOM.getDocument({ depth: 2, pierce: false }),
+      PER_PROBE_TIMEOUT_MS,
+      "DOM.getDocument",
+    );
     const root = doc.root;
     results.domGetDocument = {
       ok: true,
