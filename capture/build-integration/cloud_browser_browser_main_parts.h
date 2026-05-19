@@ -80,13 +80,10 @@ namespace aura {
 class Window;
 }  // namespace aura
 
-namespace display {
-class ScreenBase;
-}  // namespace display
-
 namespace cloud_browser {
 
 class CbAuraPlatformData;
+class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
 
@@ -203,10 +200,17 @@ class CloudBrowserBrowserMainParts
   // DisplayObserver against a null Screen — the worker hits this even
   // though it never paints to a real surface, because internal
   // subsystems (audio, prefetch, ...) attach observers as part of
-  // their startup. Constructed in PreMainMessageLoopRun before the
+  // their startup. Constructed in PreEarlyInitialization before the
   // BrowserContext + initial WebContents so the registration order is
   // safe.
-  std::unique_ptr<display::ScreenBase> screen_;
+  //
+  // CV2-78 (M5 R1 cursor-routing gate) — type bumped from
+  // display::ScreenBase to CbHeadlessScreen so aura's pre-SetCursor
+  // gate (IsWindowUnderCursor) returns true and cursor routing
+  // reaches CbCursorClient::SetCursor instead of short-circuiting on
+  // the upstream ScreenBase stub. See cb_headless_screen.h for the
+  // full rationale.
+  std::unique_ptr<CbHeadlessScreen> screen_;
 
   // Aura subsystem (root WindowTreeHost + focus / parenting / capture
   // / activation clients + fill layout). Constructed in PreMain

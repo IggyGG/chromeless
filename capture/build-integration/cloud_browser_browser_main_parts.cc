@@ -25,6 +25,7 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
+#include "capture/build-integration/cb_headless_screen.h"  // CV2-78
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
 #include "capture/framesink-capturer/capturer.h"
@@ -62,7 +63,6 @@
 #include "ui/base/page_transition_types.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
-#include "ui/display/screen_base.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
 #include "url/gurl.h"
@@ -210,11 +210,22 @@ int CloudBrowserBrowserMainParts::PreEarlyInitialization() {
   // PreEarlyInitialization is the embedder's first chance to run code
   // before any of that, so the Screen lands here.
   //
-  // A bare ScreenBase with a single 1280x720 display matches the Xvfb
+  // A CbHeadlessScreen with a single 1280x720 display matches the Xvfb
   // resolution the cb-chromium pod brings up and gives chromium's
   // DisplayObservers something to attach to.
+  //
+  // CV2-78 (M5 R1 cursor-routing gate): CbHeadlessScreen overrides the
+  // two upstream ScreenBase stubs (IsWindowUnderCursor returning false,
+  // GetCursorScreenPoint returning gfx::Point() via
+  // NOTIMPLEMENTED_LOG_ONCE) that closed the gate sitting UPSTREAM of
+  // CbCursorClient::SetCursor. With the gate open, aura's renderer-
+  // driven cursor-style changes (hover over `cursor: pointer`) reach
+  // the CursorClient registered by CbAuraPlatformData and the M5 R6
+  // emit chain can fire. See cb_headless_screen.h for the full
+  // rationale; the display-list construction is unchanged from the
+  // bare-ScreenBase predecessor.
   if (!display::Screen::HasScreen()) {
-    screen_ = std::make_unique<display::ScreenBase>();
+    screen_ = std::make_unique<CbHeadlessScreen>();
     display::Display default_display(
         kDefaultDisplayId,
         gfx::Rect(0, 0, kDefaultDisplayWidth, kDefaultDisplayHeight));
