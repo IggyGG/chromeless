@@ -57,7 +57,7 @@ const base::flat_set<CbDcLabel>& DefaultOutboundLabels() {
           CbDcLabel::kStats,
           CbDcLabel::kCursor,
           CbDcLabel::kClipboard,
-          CbDcLabel::kFileUpload,
+          CbDcLabel::kFiles,
       });
   return *kSet;
 }
@@ -245,7 +245,7 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels(
             // still be set via BindObserver but no inbound traffic
             // will ever arrive because the libwebrtc DC doesn't
             // exist on the PC. This is the intentional Wave 1.5
-            // shape: omit kFileUpload (and possibly kClipboard)
+            // shape: omit kFiles (and possibly kClipboard)
             // until the M6 R2/R3 consumers land.
             VLOG(1) << "[M3-R5] skipped `" << LabelToString(label)
                     << "` per caller opt-out";

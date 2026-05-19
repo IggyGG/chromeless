@@ -179,7 +179,7 @@ inline constexpr size_t kNumChannels = 5;
 // code paths get the same shape) see no behavioral change.
 //
 // Wave 1.5 (CV2-77 cb_dc_host adoption) will pass a narrower set that
-// omits kFileUpload (and possibly kClipboard) until the M6 R2/R3
+// omits kFiles (and possibly kClipboard) until the M6 R2/R3
 // consumers ship. That call site is the first production caller; the
 // default here keeps the no-arg invocation identical to the prior
 // hard-coded loop.
