@@ -46,4 +46,35 @@ gfx::Point CbHeadlessScreen::GetCursorScreenPoint() {
   return gfx::Point();
 }
 
+display::Display CbHeadlessScreen::GetDisplayNearestWindow(
+    gfx::NativeWindow /*window*/) const {
+  // Single-display embedder collapse of headless_screen.cc's
+  // GetDisplayFromScreenRect lookup. The cb-chromium worker seeds
+  // exactly one Display into ScreenBase::display_list() at
+  // construction (cloud_browser_browser_main_parts.cc
+  // PreEarlyInitialization sets up the 1280x720 default), so the
+  // "nearest" question has a single trivially-correct answer
+  // regardless of the `window` argument: that one display.
+  //
+  // GetPrimaryDisplay() is ScreenBase's public const accessor for
+  // exactly that — display_list().GetPrimaryDisplayIterator() with
+  // the end()-check folded in (returns Display() on miss, which only
+  // happens when display_list_ is empty; main_parts seeds it before
+  // any code that reaches us can run, so the miss path is unreachable
+  // in normal operation).
+  //
+  // This delegate intentionally ignores the `window` parameter. In a
+  // multi-display embedder the canonical pattern would be
+  // GetDisplayFromScreenRect(display_list().displays(),
+  //                          window->GetBoundsInScreen())
+  // with a primary-display fallback (see chromium upstream
+  // headless/lib/browser/headless_screen.cc GetDisplayNearestWindow);
+  // for the single-display worker that collapses to the same return
+  // value the fallback would produce, so we skip the lookup entirely.
+  // A future multi-display revision (no current ticket — the worker
+  // is single-window/display by design) would restore the upstream
+  // pattern here.
+  return GetPrimaryDisplay();
+}
+
 }  // namespace cloud_browser
