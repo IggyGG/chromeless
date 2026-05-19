@@ -24,6 +24,39 @@
 
 namespace cloud_browser {
 
+// ---------------------------------------------------------------------
+// CV2-81 NON-GOAL — R7 DragTarget* call resolution is deferred.
+//
+// CV2-81 closed the M4 typed-dispatcher runtime-wire frontier: R7 is
+// now instantiated by CbInputDispatchCompositeDelegate, receives
+// envelopes from CbInputDispatch via the M4 R1 input DC, and runs its
+// full state machine end-to-end (phase transitions, payload caching,
+// coord-mapping, EnsureBroughtToFront, modifier reads from R3). What
+// remains is the SIX commented-out `rwh->DragTarget*` chromium-side
+// dispatch calls below, which await chromium-7727 API verification
+// of:
+//   * The cast pattern (RenderWidgetHostImpl::From(rwh) — mirroring
+//     M4 R6 touch's precedent at cb_input_dispatch_touch.cc:429),
+//   * Exact signatures for DragTargetDragEnter (drop_data, client_pt,
+//     screen_pt, drag_operations_mask, modifiers, callback),
+//     DragTargetDragOver, DragTargetDrop, DragTargetDragLeave
+//     (post-CDP refactor — see https://codereview.chromium.org/2505113002/
+//     for the historical "Target drag messages to specific
+//     RenderWidgets" rework that moved these from RenderViewHost),
+//   * Whether RenderWidgetHostImpl::DragTarget* visibility from
+//     //cloud-browser/* needs the same content/browser:cb_friends
+//     allowlist that the M4 R3/R6 mouse+touch impl-casts already
+//     established.
+//
+// Per CV2-81 lesson-(j) wiring-frontier discipline: ONE frontier per
+// ticket. The composite-delegate wire-up is the CV2-81 frontier; the
+// DragTarget* call resolution is a separate frontier owed its own
+// ticket (CV2-82 follow-up). R7 dispatches today log "drag_* dispatched"
+// at each call site without the chromium-side injection — the renderer
+// will not see synthetic drag events until the follow-up lands, but
+// the full plumbing depth above the chromium API line is exercised.
+// ---------------------------------------------------------------------
+
 namespace {
 
 // Spec MIME constants. Kept anonymous-namespace local so the public
