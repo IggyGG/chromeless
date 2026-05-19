@@ -151,7 +151,14 @@ async function main() {
   const synthetic = {
     v: 1,
     type: "key_down",  // snake_case per kKnownInputTypes in cb_input_dispatch.cc:55
-    t: Date.now(),
+    // Worker's wire-decoder reads `t` as int32 (cb_input_dispatch.cc:160 — uses
+    // envelope.FindInt which is int32-only on chromium base::DictValue).
+    // Date.now() returns 13-digit epoch-ms which overflows int32_t and trips
+    // `decode error: missing or non-integer 't'` (cb_input_dispatch.cc:319).
+    // Source has TODO(M4-R1-int64-timestamps) acknowledging the limit; v2 wire
+    // protocol will widen this. For R1 functional verify we just need any
+    // in-range int — `t` is carried through but unused in R1 dispatch.
+    t: 1,
     seq: 1,
     data: { code: "KeyA", modifiers: 0 },
   };
