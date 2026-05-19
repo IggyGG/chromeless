@@ -55,6 +55,16 @@
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+// CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
+// that hold the runtime-wire consumer instances. CbCursorClient (M5
+// R1) is NOT included here — it's owned by CbAuraPlatformData
+// (cb_aura_platform_data.cc:152-153 already constructs it + calls
+// aura::client::SetCursorClient on aura_'s ctor), so the M5 R1
+// runtime-wire is satisfied at the aura platform layer without any
+// main_parts plumbing.
+#include "capture/build-integration/cb_clipboard_relay.h"
+#include "capture/build-integration/cb_file_upload_relay.h"
+#include "capture/build-integration/cb_input_dispatch.h"
 #include "capture/signaling/cb_offerer_driver.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
@@ -349,6 +359,78 @@ class CloudBrowserBrowserMainParts
   webrtc::scoped_refptr<webrtc::DataChannelInterface> clipboard_dc_;
   webrtc::scoped_refptr<webrtc::DataChannelInterface> files_dc_;
   // ============== END CV2-69 ==============
+
+  // ============== CV2-75 RUNTIME-WIRE (Ring 2) ==============
+  //
+  // M4/M5/M6 consumer attachment — the gap that surfaced as the
+  // architectural Phase-A failure: CV2-69 created the 4 DCs but never
+  // bound observers, so inbound SCTP frames sat in libwebrtc's read
+  // buffer with no handler (silent no-op for any functional test).
+  // CV2-75 closes that gap by instantiating one consumer per DC +
+  // calling RegisterObserver in the PreMainMessageLoopRun DC-creation
+  // blocks.
+  //
+  // PATH A choice (vs Path B via CbDataChannelHost): cb_dc_host
+  // hardcodes the wire label "file-upload" in its enum but the
+  // portal answerer routes on "files" (Trap #1, hard-fixed by CV2-69
+  // at the four direct CreateDataChannelOrError call sites above);
+  // additionally cb_dc_host creates all 5 channels including "stats"
+  // unconditionally, which would scope-creep the 5th-DC wire-contract
+  // change beyond CV2-75. Both are deferred to follow-up tickets:
+  //   * cv2/m6-r1-stats-dc — 5th DC + CbStatsRelay + portal-spec
+  //   * cv2/m3-r5-dc-host-adoption — kFileUpload → kFiles rename +
+  //     5-DC vs parameterized CreateOutboundChannels decision +
+  //     enables CbCursorDcEmitter M5 R6 (which already takes
+  //     `signaling::CbDataChannelHost*`)
+  //
+  // The 3 consumers attached here:
+  //   * CbInputDispatch        → input_dc_     (M4 R1, CV2-41)
+  //   * CbClipboardRelay       → clipboard_dc_ (M6 R2, CV2-34)
+  //   * CbFileUploadRelay      → files_dc_     (M6 R3, CV2-35)
+  //
+  // Not-here-because-already-wired-elsewhere:
+  //   * CbCursorClient (M5 R1, CV2-19) — owned by CbAuraPlatformData
+  //     (cb_aura_platform_data.cc:152-153 constructs + registers via
+  //     aura::client::SetCursorClient in aura_'s ctor). The brief's
+  //     "compiled but not instantiated" claim was off-by-one for this
+  //     class — true at the main_parts layer but false at aura_'s
+  //     layer. Re-instantiating at main_parts would double-register.
+  //
+  // Deferred to follow-up tickets:
+  //   * CbStatsRelay (M6 R1, CV2-33) — needs a 5th "stats" DC not in
+  //     the current F7-skinny set (see cv2/m6-r1-stats-dc).
+  //   * CbCursorDcEmitter (M5 R6, CV2-24) — needs cb_dc_host adoption
+  //     (see cv2/m3-r5-dc-host-adoption).
+  //
+  // Construction-arg notes (read the consumer headers for full
+  // contracts):
+  //   * CbInputDispatch wants a UI task runner + a delegate. We pass
+  //     content::GetUIThreadTaskRunner({}) + the R1 production
+  //     stand-in CbInputLoggingDelegate (cb_input_dispatch.h:194).
+  //     R3+ replaces the logging delegate with a real injector.
+  //   * CbClipboardBridgeWsClient + CbFileUploadBridgeWsClient take
+  //     a `label`/`url` + io_task_runner. We pass url="off" which
+  //     keeps both clients in `disabled()` mode (see
+  //     cb_clipboard_relay.h:207 + cb_file_upload_relay.h:267) —
+  //     the WS production backend has a TODO(M6-R2-ws-backend) and
+  //     the v1 production-WS choice isn't locked yet. The relay
+  //     OnMessage path still fires + logs; bridge POST is
+  //     short-circuited. This satisfies the observer-binding
+  //     architectural requirement without forcing a premature
+  //     production-WS decision.
+  //
+  // Teardown ordering: explicit LIFO in PostMainMessageLoopRun
+  // BEFORE the F7-skinny DC ref drops. UnregisterObserver each DC
+  // first (must outlive the DC ref drop to avoid use-after-free in
+  // libwebrtc's late callbacks); then drop the consumer state; then
+  // the existing CV2-69 LIFO drops the DCs themselves.
+  std::unique_ptr<CbInputLoggingDelegate> input_delegate_;
+  std::unique_ptr<CbInputDispatch> input_dispatch_;
+  std::unique_ptr<CbClipboardBridgeWsClient> clipboard_ws_;
+  std::unique_ptr<CbClipboardRelay> clipboard_relay_;
+  std::unique_ptr<CbFileUploadBridgeWsClient> file_upload_ws_;
+  std::unique_ptr<CbFileUploadRelay> file_upload_relay_;
+  // ============== END CV2-75 ==============
 
   bool devtools_http_handler_started_ = false;
 

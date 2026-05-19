@@ -53,6 +53,27 @@ enable_dav1d_decoder     = true
 # that path also uses webrtc::AudioDeviceModuleImpl under the hood.
 rtc_include_internal_audio_device = true
 
+# CV2-75 Ring 3 — activate the PulseAudio backend in WebRTC's Linux ADM
+# factory. The above flag registers AudioDeviceModuleImpl generically;
+# this flag is the gn gate that actually wires up the Pulse-specific
+# backend in third_party/webrtc/modules/audio_device/linux/. Without
+# it, the factory falls through to the ALSA backend, which then fails
+# on a server pod with no /dev/snd devices:
+#
+#   WARNING: audio_device_impl.cc:205 PulseAudio is disabled using build flag.
+#   ERROR:   audio_device_alsa_linux.cc:618 device index is out of range [0,-1]
+#   ERROR:   adm_helpers.cc:44 Unable to set playout device.
+#
+# (Empirical evidence from baseline-rv1 cb-chromium logs, surfaced by
+# functional-test-lead via cheap-preview log grep, 2026-05-19.)
+#
+# This is a runtime-only gate — symbols compile fine without the flag;
+# the failure only manifests when an audio-track is requested. PipeWire
+# (rtc_use_pipewire) and the dummy-audio path
+# (rtc_use_dummy_audio_file_devices) default to false in WebRTC's
+# build conventions, so no sibling disable is needed.
+rtc_use_pulse_audio = true
+
 # ---- Headless / server-shaped ---------------------------------------
 use_ozone                = true
 ozone_platform_headless  = true

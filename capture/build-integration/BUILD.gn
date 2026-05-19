@@ -883,6 +883,15 @@ source_set("embedder") {
     "//cloud-browser/capture/signaling:cb_offerer_driver",
     "//cloud-browser/capture/signaling:cb_signaling_ws_client",
     "//cloud-browser/capture/signaling:cb_wire_envelope",
+    # CV2-75 (M4/M5/M6 runtime-wire) — main_parts owns the unique_ptrs
+    # for the 4 consumer classes that bind to the F7-skinny DCs.
+    # CbCursorClient is part of the embedder source_set itself
+    # (cb_cursor_client.cc is in this target's `sources`), so no new
+    # dep needed for it. Stats relay (M6 R1) is deferred — needs a
+    # 5th "stats" DC that doesn't exist in current F7-skinny.
+    ":clipboard_relay",
+    ":file_upload_relay",
+    ":input_dispatch",
     # CV2-69 F1 + F3 — chromium-subsystem bootstrap inits the embedder
     # was skipping (gpu-test-lead audit /tmp/cv2-embedder-init-audit.md).
     # F1 (ResourceBundle) lives in //ui/base already in this list;

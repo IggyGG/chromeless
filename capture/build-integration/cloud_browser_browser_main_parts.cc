@@ -34,6 +34,7 @@
 #include "capture/signaling/cb_signaling_ws_client.h"  // CV2-69
 #include "capture/signaling/cb_wire_envelope.h"   // CV2-69
 #include "components/viz/host/host_frame_sink_manager.h"
+#include "content/public/browser/browser_thread.h"     // CV2-75
 #include "content/public/browser/storage_partition.h"  // CV2-69
 #include "content/browser/compositor/surface_utils.h"  // nogncheck — same
                                                        // visibility caveat
@@ -249,6 +250,16 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   //     beyond this via the standard renderer-side viewport machinery;
   //     this is just the host window's initial bounds.
   aura_ = std::make_unique<CbAuraPlatformData>(gfx::Size(1280, 720));
+
+  // Note for CV2-75 (M5 R1 / CbCursorClient): the cursor-client is
+  // ALREADY constructed + registered by CbAuraPlatformData's ctor
+  // (cb_aura_platform_data.cc:152-153). main_parts MUST NOT re-create
+  // or re-register here — that would either crash via double-Observe
+  // on the aura ObservationManager or orphan the original registration.
+  // M5 R1 runtime-wire is therefore satisfied at the aura platform
+  // layer; the deferred piece is M5 R6 / CbCursorDcEmitter (the DC
+  // emit binder), which requires cb_dc_host adoption and is tracked
+  // in follow-up cv2/m3-r5-dc-host-adoption.
 
   // 2. Initial WebContents on about:blank — this is what hangs off the
   //    BrowserContext and gives DevToolsAgentHost a target to publish
@@ -607,6 +618,22 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       if (r.ok()) {
         input_dc_ = r.MoveValue();
         LOG(INFO) << "CV2-69 DC: created \"input\"";
+        // CV2-75 (M4 R1) — bind CbInputDispatch as the DC observer.
+        // Delegate = CbInputLoggingDelegate (R1 production stand-in
+        // per cb_input_dispatch.h:194); R3+ swaps in a real injector
+        // (RWHV / Input.imeSetComposition / touch / drag adapters).
+        // CbInputDispatch hops to UI via the injected runner before
+        // touching delegate state — thread discipline matches the
+        // CV2-69 lessons (no BlockingCall from network thread; no
+        // raw-ptr capture-at-construction for capture-lifecycle
+        // objects, which CbInputDispatch's delegate isn't).
+        input_delegate_ = std::make_unique<CbInputLoggingDelegate>();
+        input_dispatch_ = std::make_unique<CbInputDispatch>(
+            content::GetUIThreadTaskRunner({}),
+            input_delegate_.get());
+        input_dc_->RegisterObserver(input_dispatch_.get());
+        LOG(INFO) << "CV2-75: \"input\" DC observer = CbInputDispatch "
+                     "(R1 logging delegate)";
       } else {
         LOG(ERROR) << "CV2-69 DC \"input\" creation failed: "
                    << r.error().message();
@@ -617,6 +644,21 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       if (r.ok()) {
         cursor_dc_ = r.MoveValue();
         LOG(INFO) << "CV2-69 DC: created \"cursor\"";
+        // CV2-75: cursor DC observer NOT bound at this layer. The DC
+        // emit side is M5 R6 (CbCursorDcEmitter, CV2-24) which takes
+        // a `signaling::CbDataChannelHost*` and is therefore deferred
+        // along with the cb_dc_host adoption (see follow-up
+        // cv2/m3-r5-dc-host-adoption). The aura cursor-client side
+        // (M5 R1 / CbCursorClient) is ALREADY wired by
+        // CbAuraPlatformData (cb_aura_platform_data.cc:152-153) — not
+        // a CV2-75 deliverable.
+        // In the interim, inbound frames on "cursor" are dropped by
+        // libwebrtc's default (no-observer) path — which is fine for
+        // CV2-75 scope because the v1 "cursor" channel is one-way EMIT
+        // from browser to portal (no inbound traffic by contract per
+        // cb_dc_host.h:46-50).
+        LOG(INFO) << "CV2-75: \"cursor\" DC observer DEFERRED to M5 R6 "
+                     "(needs cb_dc_host adoption — out of scope here)";
       } else {
         LOG(ERROR) << "CV2-69 DC \"cursor\" creation failed: "
                    << r.error().message();
@@ -627,6 +669,21 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       if (r.ok()) {
         clipboard_dc_ = r.MoveValue();
         LOG(INFO) << "CV2-69 DC: created \"clipboard\"";
+        // CV2-75 (M6 R2) — bind CbClipboardRelay as the DC observer.
+        // WS client is constructed in `disabled()` mode (url="off")
+        // per cb_clipboard_relay.h:207 — the WS production backend
+        // has a TODO(M6-R2-ws-backend) and the v1 production-WS
+        // choice isn't locked yet. The relay OnMessage path still
+        // fires + logs; bridge POST is short-circuited.
+        clipboard_ws_ = std::make_unique<CbClipboardBridgeWsClient>(
+            /*label=*/"inbound",
+            /*url=*/"off",
+            content::GetIOThreadTaskRunner({}));
+        clipboard_relay_ = std::make_unique<CbClipboardRelay>(
+            std::move(clipboard_ws_));
+        clipboard_dc_->RegisterObserver(clipboard_relay_.get());
+        LOG(INFO) << "CV2-75: \"clipboard\" DC observer = "
+                     "CbClipboardRelay (WS disabled / url=off)";
       } else {
         LOG(ERROR) << "CV2-69 DC \"clipboard\" creation failed: "
                    << r.error().message();
@@ -641,6 +698,28 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       if (r.ok()) {
         files_dc_ = r.MoveValue();
         LOG(INFO) << "CV2-69 DC: created \"files\" (Trap #1 label-exact)";
+        // CV2-75 (M6 R3) — bind CbFileUploadRelay as the DC observer.
+        // Same "off"-URL pattern as clipboard above; the WS production
+        // backend has a TODO(M6-R3-ws-backend). Observer-binding
+        // proves the architectural runtime wire; functional WS path
+        // lands in a follow-up.
+        file_upload_ws_ = std::make_unique<CbFileUploadBridgeWsClient>(
+            /*url=*/"off",
+            content::GetIOThreadTaskRunner({}));
+        // dc_host=nullptr: CV2-75 doesn't adopt cb_dc_host (see header
+        // comment). cb_file_upload_relay.h:362-364 explicitly supports
+        // nullptr — the inbound direction (DC → bridge) still works;
+        // the outbound (bridge reply → DC) drops frames silently. With
+        // WS in "off" mode no replies will arrive anyway, so the
+        // dropped-no-host counter stays at 0. cb_dc_host adoption is
+        // the cv2/m3-r5-dc-host-adoption follow-up.
+        file_upload_relay_ = std::make_unique<CbFileUploadRelay>(
+            std::move(file_upload_ws_),
+            /*dc_host=*/nullptr);
+        files_dc_->RegisterObserver(file_upload_relay_.get());
+        LOG(INFO) << "CV2-75: \"files\" DC observer = "
+                     "CbFileUploadRelay (WS disabled / url=off, "
+                     "outbound dc_host=null — M5R6/cb_dc_host deferred)";
       } else {
         LOG(ERROR) << "CV2-69 DC \"files\" creation failed: "
                    << r.error().message();
@@ -686,6 +765,41 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // Note: this teardown is observer-callback-safe because main_parts
   // is the SignalingClientObserver; its dtor runs strictly after
   // ws_client_'s dtor (member init reverse order at process exit).
+
+  // ============== CV2-75 TEARDOWN (LIFO, RUNS FIRST) ==============
+  //
+  // Unregister DC observers + drop consumer state BEFORE the F7-skinny
+  // DC scoped_refptr drops below. Same drop-the-observer-before-its-
+  // producer discipline as the existing CV2-69 ordering comment.
+  //
+  // libwebrtc's DataChannel keeps a raw pointer back via
+  // RegisterObserver/UnregisterObserver; if we drop the consumer
+  // unique_ptr BEFORE calling UnregisterObserver, the next late
+  // OnStateChange / OnMessage callback that races libwebrtc's
+  // internal teardown lands on freed memory. UnregisterObserver MUST
+  // outlive the consumer dtor.
+  if (files_dc_ && file_upload_relay_) {
+    files_dc_->UnregisterObserver();
+  }
+  file_upload_relay_.reset();
+  file_upload_ws_.reset();
+  if (clipboard_dc_ && clipboard_relay_) {
+    clipboard_dc_->UnregisterObserver();
+  }
+  clipboard_relay_.reset();
+  clipboard_ws_.reset();
+  // No cursor DC observer registered (M5 R6 deferred); nothing to
+  // UnregisterObserver on cursor_dc_. CbCursorClient is owned by
+  // CbAuraPlatformData (aura_); its dtor handles
+  // SetCursorClient(window, nullptr) + cursor_client_.reset() on
+  // aura_'s teardown later in this function.
+  if (input_dc_ && input_dispatch_) {
+    input_dc_->UnregisterObserver();
+  }
+  input_dispatch_.reset();
+  input_delegate_.reset();
+  // ============== END CV2-75 TEARDOWN ==============
+
   files_dc_ = nullptr;
   clipboard_dc_ = nullptr;
   cursor_dc_ = nullptr;
