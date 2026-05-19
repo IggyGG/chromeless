@@ -842,6 +842,13 @@ source_set("embedder") {
     "cb_devtools_agent.h",
     "cb_focus_client.cc",
     "cb_focus_client.h",
+    # CV2-78 (M5 R1 — cursor-routing gate). Single-window display::Screen
+    # subclass that overrides IsWindowUnderCursor / GetCursorScreenPoint
+    # so aura's cursor routing reaches CbCursorClient::SetCursor instead
+    # of short-circuiting on the upstream ScreenBase stubs. Replaces
+    # the bare ScreenBase that PreEarlyInitialization was constructing.
+    "cb_headless_screen.cc",
+    "cb_headless_screen.h",
     "cb_window_parenting_client.cc",
     "cb_window_parenting_client.h",
     "cloud_browser_browser_context.cc",
@@ -934,8 +941,10 @@ source_set("embedder") {
     # the headless versions.
     "//ui/aura",
     "//ui/base",
-    # cloud_browser_browser_main_parts.cc creates a default
-    # display::ScreenBase so chromium's Screen::Get() returns non-null.
+    # cloud_browser_browser_main_parts.cc creates a CbHeadlessScreen
+    # (display::ScreenBase subclass) so chromium's Screen::Get() returns
+    # non-null AND aura's pre-SetCursor gate (IsWindowUnderCursor) does
+    # not short-circuit cursor routing — see cb_headless_screen.h.
     "//ui/display",
     "//ui/gfx/geometry",
     # PlatformWindowInitProperties — passed to aura::WindowTreeHost::
