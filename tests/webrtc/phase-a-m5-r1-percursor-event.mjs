@@ -104,9 +104,16 @@ async function main() {
   log("info", "cdp ready", { wait_ms: Date.now() - t0 });
 
   // ───── Phase 2: attach to first available target ─────
+  // `local: true` forces chrome-remote-interface to use its bundled protocol
+  // descriptor instead of GET /json/protocol against cb-chromium. cb-chromium
+  // does not wire up the DevTools protocol resource; the default fetch hits
+  // CHECK-FATAL at devtools_http_handler.cc:724 (SIGABRT on the worker).
+  // See CV2-78 verification re-fire — pre-existing latent path, not a Wave 1
+  // regression. Production-side fix (ContentClient + protocol resource) is
+  // deferred to a follow-up ticket.
   let client;
   try {
-    client = await CDP({ host: CDP_HOST, port: CDP_PORT });
+    client = await CDP({ host: CDP_HOST, port: CDP_PORT, local: true });
     log("ok", "cdp client attached");
   } catch (e) {
     log("err", "VERDICT: CDP ATTACH FAIL", { err: String(e) });
