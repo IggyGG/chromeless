@@ -133,6 +133,17 @@ RUN groupadd --gid 1000 cbuser \
 COPY infra/pulse-default.pa /etc/pulse/default.pa
 COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
 
+# CV2-82 — M5.5 R2/R4 known-stimulus tone WAV. 10 s of 1 kHz sine @ 48 kHz
+# stereo, -12 dBFS. Used by harness/m5.5/run_red_test.sh (paplay-driven
+# audio into cb_audio for the MonitorSourceDeliversToneRms iron-test) AND
+# by cv2-82-real-pulse pod variant when verifying R4 outbound-rtp.audioLevel
+# > 0. Baked into the image at build time so the harness side does not need
+# to ship audio-tools (sox / ffmpeg) at runtime — pulseaudio-utils already
+# provides paplay. See infra/k8s/cv2/cv2-82-test-pod.yaml for the lifecycle
+# postStart that loads module-sine in the supervisord path (paplay tone is
+# the alternative for the unittest-binary path).
+COPY infra/m5.5-tone.wav /usr/share/cloud-browser/m5.5-tone.wav
+
 # Streamer page (T23 product) and its launch wrapper (T28). The static
 # server in supervisord serves /opt/cloud-browser, so the URL path
 # /streamer/index.html resolves to the page chromium-dev shipped.

@@ -1,0 +1,415 @@
+# infra/k8s/cv2/cv2-82-test-pod.yaml — CV2-82 M5.5 R1-R5 test pod variants
+#
+# Three single-Pod manifests for the M5.5 R1-R5 verification campaign:
+#
+#   - cv2-82-stub        no Pulse; cb-chromium direct binary invocation.
+#                        Verifies fd020fa defensive-fallback path
+#                        (M5.5 R0 regression check — the WARNING-and-recover
+#                        shape from cv2-75 Ring N+2 must continue to fire).
+#
+#   - cv2-82-dummy       cb-chromium under production supervisord; default
+#                        infra/pulse-default.pa (cb_audio + cb_capture
+#                        null-sinks + module-loopback, no virtual source
+#                        producing tone). Verifies ADM Init() succeeds against
+#                        a Pulse server that exists but has no active stimulus.
+#
+#   - cv2-82-real-pulse  cb-chromium under production supervisord; Pulse loads
+#                        infra/pulse-default.pa AND module-sine driving cb_audio
+#                        at 1 kHz so the loopback to cb_capture.monitor carries
+#                        a real frame. Verifies M5.5 R1+R2+R3+R5 against the
+#                        production-shape image.
+#
+# ARCHITECTURAL CHOICE — Option B (production-shape supervisord)
+#
+# The CV2-82 ticket body proposed Option A (sidecar PulseAudio container).
+# cv2-82-scout's production audit (Phase 2.1 of /tmp/cv2-82-pulse-env-design.md)
+# revealed the production cb-chromium image already runs PulseAudio under
+# supervisord (priority=20, infra/supervisord.conf), and the only reason test
+# pods see no Pulse is that the campaign convention invokes the cb_chromium
+# binary directly via `kubectl run --command -- cloud_browser`, bypassing
+# supervisord.
+#
+# Option B is therefore the minimum-noise fix: stop stripping what production
+# already runs. The `stub` variant preserves the direct-invocation path for
+# defensive-fallback regression coverage; `dummy` and `real-pulse` use the
+# image's normal ENTRYPOINT chain (dumb-init -> entrypoint.sh -> supervisord).
+#
+# Option A (sidecar) remains a documented fallback in
+# /tmp/cv2-82-pulse-env-design.md Phase 2.1 for cases where resource-isolation
+# tests require Pulse and cb-chromium in separate containers (e.g. cgroup-level
+# audio device denial testing). The R5 teardown-parity verdict may need
+# Option A or an out-of-pod `kubectl exec pactl` probe — see harness/m5.5/
+# run_r5_teardown_parity.sh for the production-shape (kubectl-exec) approach.
+#
+# T7/T8 nodeSelector
+#
+# Campaign standing constraint: chromeless test pods land on triform-7 or
+# triform-8 only (NVENC/x264 build node affinity for the cb-chromium image;
+# same constraint applies to test-pod consumers). Encoded via
+# nodeSelector.kubernetes.io/hostname.
+#
+# Image
+#
+# Pinned to cr7727-fd020fad6e97 (rv5 — fd020fa "fix(cv2-75 Ring N+2):
+# defensive ADM Init()") so M5.5 R0 regression coverage and R1-R5 success-side
+# verification both target the same rv5 binary the campaign baselined.
+# Bump this tag when a newer rv# integrates additional fixes in scope.
+#
+# Apply
+#
+#   kubectl apply -f infra/k8s/cv2/cv2-82-test-pod.yaml -l cv2-82.variant=stub
+#   kubectl apply -f infra/k8s/cv2/cv2-82-test-pod.yaml -l cv2-82.variant=dummy
+#   kubectl apply -f infra/k8s/cv2/cv2-82-test-pod.yaml -l cv2-82.variant=real-pulse
+#
+# Verification harness
+#
+#   tests/webrtc/phase-a-m5.5-r1-pulse-init.mjs        (R1, R3 piggyback)
+#   harness/m5.5/run_r2_default_source.sh              (R2)
+#   harness/m5.5/run_r5_teardown_parity.sh             (R5)
+#   tests/webrtc/phase-a-m5.5-r4-audio-track.mjs       NOT YET — see brief
+#
+# Wave 2.5 follow-up
+#
+# Pre-fire grep checklist (per cv2-82-scout Phase 4.3, lesson-l axis-c)
+# revealed that on cv2/wave-1-integration @ 83f21af:
+#   - no `AddTrack` consumer in capture/build-integration (audio AddTrack
+#     wiring missing)
+#   - no `cb_audio_options` instantiation (BUILD.gn declares the source_set
+#     but no callsite instantiates CbAudioOptions)
+#   - no `audio_source_` ctor invocation anywhere
+# R3 retains a stderr-piggyback verdict surface (APM-absent gate against the
+# same stream R1 observes), but R4 (outbound-rtp.audio in getStats()) has no
+# behavioral surface to ground against and is split off to Wave 2.5 per
+# lesson-(j) wiring-frontier (one ring per commit; can't bundle audio-track
+# wiring with infrastructure setup).
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cv2-82-stub
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: cv2-82-test-pod
+    app.kubernetes.io/component: m5.5-verification
+    app.kubernetes.io/part-of: chromeless
+    cv2-82.variant: stub
+  annotations:
+    cv2-82.purpose: >-
+      M5.5 R0 defensive-fallback regression check. cb-chromium runs without
+      supervisord and without PulseAudio so the fd020fa defensive Init() path
+      must fire (LS_WARNING line-110 PRESENT, PCF fallback PRESENT, ADM = dummy).
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  shareProcessNamespace: true
+  nodeSelector:
+    kubernetes.io/hostname: triform-7
+  imagePullSecrets:
+    - name: registry-pull
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+    - name: run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 64Mi
+    - name: supervisor-log
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: home
+      emptyDir:
+        sizeLimit: 512Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: x11-socket
+      emptyDir:
+        sizeLimit: 16Mi
+  containers:
+    - name: cb-chromium
+      image: registry.triform.cloud/chromeless/chromeless:cr7727-fd020fad6e97
+      imagePullPolicy: Always
+      # stub variant overrides the image ENTRYPOINT (dumb-init -> entrypoint.sh
+      # -> supervisord) and invokes the cb_chromium binary directly so no
+      # PulseAudio is in the pod. Mirrors the campaign convention preceding
+      # CV2-82 — keep it explicit here for defensive-fallback regression
+      # coverage.
+      command:
+        - /usr/bin/dumb-init
+        - --
+        - /usr/local/bin/launch-chromeless.sh
+      env:
+        - name: SESSION_ID
+          value: cv2-82-stub
+        - name: CHROMELESS_USE_FAKE_MEDIA
+          value: "0"
+        - name: CHROMELESS_REGION
+          value: triform-eu
+        - name: CV2_82_VARIANT
+          value: stub
+      ports:
+        - name: cdp
+          containerPort: 9222
+      volumeMounts:
+        - { name: dshm, mountPath: /dev/shm }
+        - { name: run, mountPath: /run }
+        - { name: supervisor-log, mountPath: /var/log/supervisor }
+        - { name: home, mountPath: /home/cbuser }
+        - { name: tmp, mountPath: /tmp }
+        - { name: x11-socket, mountPath: /tmp/.X11-unix }
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral-storage: 2Gi
+      startupProbe:
+        httpGet: { path: /json/version, port: cdp }
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 36
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cv2-82-dummy
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: cv2-82-test-pod
+    app.kubernetes.io/component: m5.5-verification
+    app.kubernetes.io/part-of: chromeless
+    cv2-82.variant: dummy
+  annotations:
+    cv2-82.purpose: >-
+      Basic Pulse-equipped variant. cb-chromium under production supervisord;
+      infra/pulse-default.pa loaded (cb_audio + cb_capture + module-loopback +
+      virtual_mic). No active stimulus driving cb_audio — loopback carries
+      silence. Verifies ADM Init() reaches PASS against a Pulse server that
+      exists but has nothing playing.
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  shareProcessNamespace: true
+  nodeSelector:
+    kubernetes.io/hostname: triform-7
+  imagePullSecrets:
+    - name: registry-pull
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+    - name: run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 64Mi
+    - name: supervisor-log
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: home
+      emptyDir:
+        sizeLimit: 512Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: x11-socket
+      emptyDir:
+        sizeLimit: 16Mi
+  containers:
+    - name: cb-chromium
+      image: registry.triform.cloud/chromeless/chromeless:cr7727-fd020fad6e97
+      imagePullPolicy: Always
+      # dummy + real-pulse use the image ENTRYPOINT chain (dumb-init ->
+      # entrypoint.sh -> supervisord). No command override.
+      env:
+        - name: SESSION_ID
+          value: cv2-82-dummy
+        - name: CHROMELESS_USE_FAKE_MEDIA
+          value: "0"
+        - name: CHROMELESS_REGION
+          value: triform-eu
+        - name: CV2_82_VARIANT
+          value: dummy
+      ports:
+        - name: cdp
+          containerPort: 9222
+      volumeMounts:
+        - { name: dshm, mountPath: /dev/shm }
+        - { name: run, mountPath: /run }
+        - { name: supervisor-log, mountPath: /var/log/supervisor }
+        - { name: home, mountPath: /home/cbuser }
+        - { name: tmp, mountPath: /tmp }
+        - { name: x11-socket, mountPath: /tmp/.X11-unix }
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral-storage: 2Gi
+      startupProbe:
+        httpGet: { path: /json/version, port: cdp }
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 36
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cv2-82-real-pulse
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: cv2-82-test-pod
+    app.kubernetes.io/component: m5.5-verification
+    app.kubernetes.io/part-of: chromeless
+    cv2-82.variant: real-pulse
+  annotations:
+    cv2-82.purpose: >-
+      Full-stimulus Pulse-equipped variant. cb-chromium under production
+      supervisord. After supervisord brings Pulse up,
+      lifecycle/cv2-82-real-pulse-stimulus.sh (a postStart sidecar-script that
+      lives inside the container image) loads `module-sine sink=cb_audio
+      frequency=1000 rate=48000` so the loopback to cb_capture.monitor carries
+      a real 1 kHz frame. Verifies M5.5 R1+R2 + R3 stderr-piggyback (R4 is
+      Wave 2.5 — audio AddTrack consumer not yet wired on cv2/wave-1-integration
+      per pre-fire grep checklist).
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  shareProcessNamespace: true
+  nodeSelector:
+    kubernetes.io/hostname: triform-7
+  imagePullSecrets:
+    - name: registry-pull
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+    - name: run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 64Mi
+    - name: supervisor-log
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: home
+      emptyDir:
+        sizeLimit: 512Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: x11-socket
+      emptyDir:
+        sizeLimit: 16Mi
+  containers:
+    - name: cb-chromium
+      image: registry.triform.cloud/chromeless/chromeless:cr7727-fd020fad6e97
+      imagePullPolicy: Always
+      env:
+        - name: SESSION_ID
+          value: cv2-82-real-pulse
+        - name: CHROMELESS_USE_FAKE_MEDIA
+          value: "0"
+        - name: CHROMELESS_REGION
+          value: triform-eu
+        - name: CV2_82_VARIANT
+          value: real-pulse
+      ports:
+        - name: cdp
+          containerPort: 9222
+      volumeMounts:
+        - { name: dshm, mountPath: /dev/shm }
+        - { name: run, mountPath: /run }
+        - { name: supervisor-log, mountPath: /var/log/supervisor }
+        - { name: home, mountPath: /home/cbuser }
+        - { name: tmp, mountPath: /tmp }
+        - { name: x11-socket, mountPath: /tmp/.X11-unix }
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral-storage: 2Gi
+      startupProbe:
+        httpGet: { path: /json/version, port: cdp }
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 36
+      # postStart loads module-sine after Pulse is up so cb_audio carries a
+      # 1 kHz tone. Uses pactl which is already in the image (pulseaudio-utils
+      # package, see infra/Dockerfile). Loop on PULSE_SERVER socket existence
+      # because supervisord priority=20 (Pulse) may finish startsecs=2 after
+      # the postStart fires; retries are bounded to ~10s.
+      lifecycle:
+        postStart:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - >-
+                set -eu;
+                for i in $(seq 1 20); do
+                  if pactl info >/dev/null 2>&1; then
+                    pactl load-module module-sine sink=cb_audio frequency=1000 rate=48000 || true;
+                    exit 0;
+                  fi;
+                  sleep 0.5;
+                done;
+                echo "cv2-82-real-pulse postStart: Pulse unreachable after 10s" >&2;
+                exit 1
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
