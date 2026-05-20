@@ -81,15 +81,24 @@ spec:
     # WebSocket on :8080 to exchange SDP/ICE. Added 2026-05-20
     # (verification-lead, Wave 2 rv8): the broker Deployment did not exist
     # when this policy was first written, so the worker→broker egress path
-    # was never exercised — the worker's dial silently hit Calico
-    # default-deny-egress (ERR_CONNECTION_TIMED_OUT after ~135s). Scoped to
-    # the signaling-labelled pods in this namespace only (a bare podSelector
-    # `to` entry matches same-namespace pods).
+    # was never exercised — the worker's dial silently hit default-deny-egress
+    # (ERR_CONNECTION_TIMED_OUT after ~135s).
+    #
+    # Scoped to the signaling-labelled pods in this namespace. The `to` peer
+    # uses an explicit namespaceSelector + podSelector pair: an A/B probe
+    # showed this Calico install does NOT honour a *bare* podSelector egress
+    # peer (worker→broker stayed timed-out), while the namespaceSelector form
+    # used by the forgejo/registry rules above works. The pair below is the
+    # same effective scope as a bare podSelector (signaling pods, this
+    # namespace) expressed in the form Calico enforces.
     - ports:
         - port: 8080
           protocol: TCP
       to:
-        - podSelector:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: chromeless-tests
+          podSelector:
             matchLabels:
               app.kubernetes.io/component: signaling
 
