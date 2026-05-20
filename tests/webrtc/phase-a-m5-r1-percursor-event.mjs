@@ -41,10 +41,26 @@
 //   - NOTIMPLEMENTED for display::ScreenBase::IsWindowUnderCursor still
 //     PRESENT → CbHeadlessScreen subclass not installed (Screen registration
 //     regression — route to build-czar).
+//   - NOTIMPLEMENTED for display::ScreenBase::GetCursorScreenPoint still
+//     PRESENT → CV2-78 ring-2 stub not overridden.
+//   - NOTIMPLEMENTED for display::ScreenBase::GetDisplayNearestWindow still
+//     PRESENT → CV2-88 ring-8 override regressed (added Wave 2.5 audit
+//     cleanup — was missing from Wave 1 era harness; covers d7bc3c0
+//     stub-replacement family).
 //   - Above absent BUT no SetCursor LOG → Aura routes past the screen gate
 //     but doesn't reach CbCursorClient → downstream wiring regression.
 //   - Worker crash post-stimulus → thread-discipline bug at CbCursorClient
 //     boundary (route to build-czar).
+//
+// HALT classes (image-level regression, not CV2-78/88 defect):
+//   H3   renderer-DOM not laid out (link element absent OR zero-area
+//        bounding box) → CV2-89 packaging regression (SwANGLE/Vulkan ICD
+//        JSON missing) OR deeper-ring renderer-DOM gate. Pre-CV2-89, this
+//        was the Wave 1 Axis 2 gate; on rv7+ this should produce link
+//        with non-zero bounding box. The renderer-DOM probe IS now
+//        load-bearing (added Wave 2.5 audit cleanup — was non-fatal log
+//        in Wave 1 era). Mirrors phase-a-m4-typed-dispatch.mjs HALT H3
+//        diagnostic shape.
 //
 // Environment:
 //   CDP_HOST                    — default localhost
@@ -136,18 +152,43 @@ async function main() {
     // Briefly settle the renderer (layout/style pass).
     await new Promise((r) => setTimeout(r, 200));
 
-    // Sanity-check: the link is visible at (10,10)? Query its bounding box
-    // via JS, log it. This isn't a verdict assertion (orchestrator greps
-    // cb-chromium logs), but it surfaces "link wasn't where we thought"
-    // FAIL classes early.
+    // HALT H3 check: renderer-DOM laid out? Query link bounding box via JS.
+    // Pre-CV2-89, the renderer-DOM was blocked by SwANGLE/Vulkan ICD JSON
+    // missing → link was either absent OR present-but-zero-area → stimulus
+    // mouseMoved at (10,10) couldn't trigger cursor-style change → SetCursor
+    // would never fire even with CV2-78 + CV2-88 wired correctly.
+    //
+    // On rv7+ (CV2-89 packaging fix bundled), the renderer DOES layout, so
+    // the link should be present with non-zero area. This check distinguishes
+    // HALT H3 (renderer-DOM regression) from FAIL F2 (renderer-DOM present
+    // but cursor-routing wiring regressed) — same shape as M4 typed-dispatch
+    // harness's ensureRendererPresent() (phase-a-m4-typed-dispatch.mjs:256+).
+    //
+    // Promoted from "non-fatal log" to "load-bearing HALT" as part of Wave 2.5
+    // audit cleanup (was non-fatal in Wave 1 era when Axis 2 was the sole
+    // gate and we couldn't distinguish; rv7's CV2-89 bundling enables the
+    // tighter diagnostic).
+    let domProbe;
     try {
       const rectResult = await Runtime.evaluate({
         expression: "(() => { const a = document.querySelector('a'); if (!a) return null; const r = a.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; })()",
         returnByValue: true,
       });
-      log("info", "link bounding box", { rect: rectResult.result?.value });
+      domProbe = rectResult.result?.value;
+      log("info", "link bounding box probe", { rect: domProbe });
     } catch (e) {
-      log("warn", "could not query link rect (non-fatal)", { err: String(e) });
+      log("err", "VERDICT: HALT H3 — renderer-DOM probe threw", { err: String(e) });
+      try { await client.close(); } catch {}
+      process.exit(5);
+    }
+    if (!domProbe || domProbe.w === 0 || domProbe.h === 0) {
+      log("err", "VERDICT: HALT H3 — renderer-DOM not laid out", {
+        rect: domProbe,
+        reason: domProbe ? "link present but zero-area bounding box" : "link element absent",
+        likely_cause: "CV2-89 packaging regression (SwANGLE/Vulkan ICD JSON missing) OR deeper renderer-DOM gate",
+      });
+      try { await client.close(); } catch {}
+      process.exit(5);
     }
 
     // ───── Phase 4: STIMULUS — mouseMoved over the link ─────
@@ -174,12 +215,17 @@ async function main() {
     log("ok", "WIRE VERDICT: STIMULUS COMPLETE; verdict derived externally from cb-chromium stderr", {
       grep_for_pass:
         "CbCursorClient::SetCursor.*new_type=2",
-      grep_for_screen_gate_still_closed:
+      grep_for_screen_gate_still_closed_ring_1:
         "NOTIMPLEMENTED.*display::ScreenBase::IsWindowUnderCursor",
-      grep_for_screen_gate_partial:
+      grep_for_screen_gate_partial_ring_2:
         "NOTIMPLEMENTED.*display::ScreenBase::GetCursorScreenPoint",
+      grep_for_screen_gate_ring_8:
+        "NOTIMPLEMENTED.*display::ScreenBase::GetDisplayNearestWindow",
       stimulus_ts_ms: stimulusTs,
       wait_window_ms: POST_STIMULUS_WAIT_MS,
+      halt_classes_pre_stimulus: {
+        H3: "renderer-DOM not laid out (link absent or zero-area) — exit 5 pre-stimulus",
+      },
     });
   } catch (e) {
     log("err", "VERDICT: STIMULUS FAIL", { err: String(e), stack: e?.stack });
