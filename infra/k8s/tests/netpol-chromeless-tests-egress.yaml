@@ -76,6 +76,23 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: registry
 
+    # Cluster-internal CV2 signaling broker — the native CV2 worker pods
+    # (cb-chromium) dial the in-namespace `signaling` Deployment over
+    # WebSocket on :8080 to exchange SDP/ICE. Added 2026-05-20
+    # (verification-lead, Wave 2 rv8): the broker Deployment did not exist
+    # when this policy was first written, so the worker→broker egress path
+    # was never exercised — the worker's dial silently hit Calico
+    # default-deny-egress (ERR_CONNECTION_TIMED_OUT after ~135s). Scoped to
+    # the signaling-labelled pods in this namespace only (a bare podSelector
+    # `to` entry matches same-namespace pods).
+    - ports:
+        - port: 8080
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: signaling
+
     # kube-apiserver on the host network. Same shape as chromeless-build.
     - ports:
         - port: 6443
