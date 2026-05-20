@@ -1,0 +1,111 @@
+# infra/k8s/cv2/cv2-signaling-broker.yaml — CV2 Wave 2 in-namespace signaling broker
+#
+# verification-lead 2026-05-20. Stands the chromeless signaling server up
+# INSIDE chromeless-tests so the M4 typed-dispatch verification (and the
+# CV2-82 audio path) rendezvous entirely within the test namespace — never
+# through triform.wtf physics.
+#
+# The native cb-chromium worker (cb_signaling_ws_client.cc) dials
+#   ws://<WEBRTC_SIGNALING_HOST>/api/webrtc/signaling/<session>
+# The stock signaling server served only /ws/<session>; commit (this branch)
+# adds an /api/webrtc/signaling/ route-alias to the same wsHandler, so this
+# one broker serves both the native worker and the /ws/-dialing harnesses.
+#
+# REQUIRES the route-alias image:
+#   registry.triform.cloud/chromeless/signaling:cv2-route-alias
+# built by build-czar from signaling/Dockerfile at this branch's tip. Until
+# that image exists this Deployment will ImagePullBackOff — apply it only
+# after build-czar confirms the tag is pushed.
+#
+# Service DNS: signaling.chromeless-tests.svc.cluster.local:8080
+#   — matches WEBRTC_SIGNALING_HOST in cv2-82-real-pulse.yaml and the M4
+#     worker pod.
+#
+# No Ingress, no HPA, no TLS, no auth (CHROMELESS_AUTH_PUBKEY unset →
+# authEnabled()=false): a single-replica in-cluster test broker.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signaling
+  namespace: chromeless-tests
+  labels:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: signaling
+    app.kubernetes.io/part-of: chromeless
+    cv2.campaign/phase: a
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: signaling
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signaling
+  namespace: chromeless-tests
+  labels:
+    app.kubernetes.io/name: chromeless
+    app.kubernetes.io/component: signaling
+    app.kubernetes.io/part-of: chromeless
+    cv2.campaign/phase: a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chromeless
+      app.kubernetes.io/component: signaling
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless
+        app.kubernetes.io/component: signaling
+        app.kubernetes.io/part-of: chromeless
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: registry-pull
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: ["triform-7", "triform-8"]
+      containers:
+        - name: signaling
+          image: registry.triform.cloud/chromeless/signaling:cv2-route-alias
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SIGNALING_PORT
+              value: "8080"
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "250m", memory: "128Mi" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: { type: RuntimeDefault }
