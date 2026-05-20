@@ -62,9 +62,11 @@
 // aura::client::SetCursorClient on aura_'s ctor), so the M5 R1
 // runtime-wire is satisfied at the aura platform layer without any
 // main_parts plumbing.
+#include "capture/build-integration/cb_active_webcontents_resolver.h"
 #include "capture/build-integration/cb_clipboard_relay.h"
 #include "capture/build-integration/cb_file_upload_relay.h"
 #include "capture/build-integration/cb_input_dispatch.h"
+#include "capture/build-integration/cb_input_dispatch_composite.h"
 #include "capture/signaling/cb_offerer_driver.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
@@ -409,9 +411,15 @@ class CloudBrowserBrowserMainParts
   // Construction-arg notes (read the consumer headers for full
   // contracts):
   //   * CbInputDispatch wants a UI task runner + a delegate. We pass
-  //     content::GetUIThreadTaskRunner({}) + the R1 production
-  //     stand-in CbInputLoggingDelegate (cb_input_dispatch.h:194).
-  //     R3+ replaces the logging delegate with a real injector.
+  //     content::GetUIThreadTaskRunner({}) + the M4 typed-pipeline
+  //     delegate CbInputDispatchCompositeDelegate (CV2-81), which
+  //     fans the envelope into R3..R8. The composite is constructed
+  //     with a pointer to active_webcontents_resolver_ (M4 R2) which
+  //     CbDevToolsManagerDelegate also reaches into on each
+  //     Cb.startFrameSinkCapture (single resolver instance per
+  //     browser process — see cb_active_webcontents_resolver.h).
+  //     CV2-75 R1 wired CbInputLoggingDelegate as a transitional
+  //     stand-in; CV2-81 retired it once R2..R10 source landed.
   //   * CbClipboardBridgeWsClient + CbFileUploadBridgeWsClient take
   //     a `label`/`url` + io_task_runner. We pass url="off" which
   //     keeps both clients in `disabled()` mode (see
@@ -428,7 +436,17 @@ class CloudBrowserBrowserMainParts
   // first (must outlive the DC ref drop to avoid use-after-free in
   // libwebrtc's late callbacks); then drop the consumer state; then
   // the existing CV2-69 LIFO drops the DCs themselves.
-  std::unique_ptr<CbInputLoggingDelegate> input_delegate_;
+  // CV2-81 — M4 R2 active-WebContents resolver. Single instance per
+  // browser process; held as a value member so the address is stable
+  // across the lifetime of `this`. Threaded into the composite delegate
+  // (R3..R8) at construction + into CbDevToolsManagerDelegate's
+  // SetActiveCapture call path. Must outlive both consumers; declaration
+  // order here puts it BEFORE input_delegate_ so destruction is reverse
+  // (delegate -> resolver), matching the "resolver_lifetime >
+  // dispatcher_lifetime" contract documented on
+  // cb_active_webcontents_resolver.h:123.
+  CbActiveWebContentsResolver active_webcontents_resolver_;
+  std::unique_ptr<CbInputDispatchCompositeDelegate> input_delegate_;
   std::unique_ptr<CbInputDispatch> input_dispatch_;
   std::unique_ptr<CbClipboardBridgeWsClient> clipboard_ws_;
   std::unique_ptr<CbClipboardRelay> clipboard_relay_;

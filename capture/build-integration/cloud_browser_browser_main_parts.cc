@@ -670,22 +670,32 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       if (r.ok()) {
         input_dc_ = r.MoveValue();
         LOG(INFO) << "CV2-69 DC: created \"input\"";
-        // CV2-75 (M4 R1) — bind CbInputDispatch as the DC observer.
-        // Delegate = CbInputLoggingDelegate (R1 production stand-in
-        // per cb_input_dispatch.h:194); R3+ swaps in a real injector
-        // (RWHV / Input.imeSetComposition / touch / drag adapters).
+        // CV2-81 (M4 typed-dispatcher runtime-wire) — bind
+        // CbInputDispatch as the DC observer. Delegate is the
+        // M4 typed-pipeline CbInputDispatchCompositeDelegate which
+        // fans the envelope into R3 (mouse) / R4 (keyboard) / R5
+        // (IME) / R6 (touch) / R7 (drag) / R8 (clipboard). Closes
+        // the 24h+ gap where CV2-75 R1's CbInputLoggingDelegate
+        // stand-in was the production runtime while R2..R10 lived
+        // as deadweight source. The composite holds a raw pointer
+        // to active_webcontents_resolver_ (M4 R2); the resolver is
+        // a value member of this class so its address is stable
+        // for the composite's lifetime.
+        //
         // CbInputDispatch hops to UI via the injected runner before
         // touching delegate state — thread discipline matches the
         // CV2-69 lessons (no BlockingCall from network thread; no
         // raw-ptr capture-at-construction for capture-lifecycle
-        // objects, which CbInputDispatch's delegate isn't).
-        input_delegate_ = std::make_unique<CbInputLoggingDelegate>();
+        // objects, which the composite delegate isn't).
+        input_delegate_ =
+            std::make_unique<CbInputDispatchCompositeDelegate>(
+                &active_webcontents_resolver_);
         input_dispatch_ = std::make_unique<CbInputDispatch>(
             content::GetUIThreadTaskRunner({}),
             input_delegate_.get());
         input_dc_->RegisterObserver(input_dispatch_.get());
-        LOG(INFO) << "CV2-75: \"input\" DC observer = CbInputDispatch "
-                     "(R1 logging delegate)";
+        LOG(INFO) << "CV2-81: \"input\" DC observer = CbInputDispatch "
+                     "(composite delegate = R3..R8 typed pipeline)";
       } else {
         LOG(ERROR) << "CV2-69 DC \"input\" creation failed: "
                    << r.error().message();
@@ -849,8 +859,14 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
     input_dc_->UnregisterObserver();
   }
   input_dispatch_.reset();
+  // CV2-81: input_delegate_ is now CbInputDispatchCompositeDelegate
+  // (was CbInputLoggingDelegate). Its dtor drops the six typed-
+  // dispatcher unique_ptrs in reverse declaration order. The
+  // active_webcontents_resolver_ value member outlives this reset()
+  // (destroyed in main_parts field-destruction order), satisfying
+  // the "resolver_lifetime > dispatcher_lifetime" contract.
   input_delegate_.reset();
-  // ============== END CV2-75 TEARDOWN ==============
+  // ============== END CV2-75/CV2-81 TEARDOWN ==============
 
   files_dc_ = nullptr;
   clipboard_dc_ = nullptr;

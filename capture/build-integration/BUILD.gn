@@ -790,6 +790,140 @@ source_set("input_dispatch_keyboard") {
 }
 
 # ---------------------------------------------------------------------
+# M4 R5 (CV2-45) — IME native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderFrameHost::GetTextInputClient() / ImeText* APIs for the focused
+# frame. Source files (cb_input_dispatch_ime.{h,cc}) landed in the M4
+# R5 wave; the source_set declaration is added by CV2-81 alongside the
+# composite-delegate wiring so the dispatcher is reachable from the
+# :embedder target (input_dispatch_drag / _touch / _ime each had source
+# but no source_set prior to CV2-81 — the deadweight phase the composite
+# wiring closes out).
+# ---------------------------------------------------------------------
+source_set("input_dispatch_ime") {
+  sources = [
+    "cb_input_dispatch_ime.cc",
+    "cb_input_dispatch_ime.h",
+  ]
+  deps = [
+    "//base",
+    # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
+    ":input_dispatch",
+    # R3's WebContentsResolver forward-declared interface (R5 depends
+    # on the same interface R4/R6/R7/R8 do — see header doc on the
+    # ODR contract).
+    ":input_dispatch_mouse",
+    # RenderFrameHost::GetTextInputClient + ImeText* APIs, RenderWidgetHost,
+    # RenderWidgetHostView. Same content-public re-export path used by
+    # the rest of M4 (blink::WebInputEvent visibility wall).
+    "//content/public/browser",
+    # ui::ImeTextSpan + gfx::Range — referenced from the .cc only;
+    # listed here so a future ime header that surfaces them stays
+    # gn-check clean.
+    "//ui/base/ime",
+    "//ui/gfx/range",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R6 (CV2-46) — touch native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderWidgetHostImpl::ForwardTouchEventWithLatencyInfo for synthetic
+# multi-touch sequences. Mirrors the cast precedent set by M4 R3
+# (mouse) for the impl-only Forward* method. Source files landed in
+# the M4 R6 wave; source_set added by CV2-81.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_touch") {
+  sources = [
+    "cb_input_dispatch_touch.cc",
+    "cb_input_dispatch_touch.h",
+  ]
+  deps = [
+    "//base",
+    ":input_dispatch",
+    ":input_dispatch_mouse",
+    # RenderWidgetHostImpl::ForwardTouchEventWithLatencyInfo,
+    # blink::WebTouchEvent / WebTouchPoint via content-public re-export.
+    "//content/public/browser",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R7 (CV2-47) — drag native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderWidgetHostImpl::DragTargetDragEnter / Over / Drop / Leave for
+# the synthetic drag-into-renderer pipeline. R7 holds a const pointer
+# to R3 (mouse) to read the shared held-modifier state for the
+# `modifiers` field on each DragTarget* call (TODO(M4-R7-shared-modifier-
+# extraction) consolidates this into CbHeldModifierState at fold-in).
+# Source files landed in the M4 R7 wave; source_set added by CV2-81
+# alongside the DragTarget* call resolution.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_drag") {
+  sources = [
+    "cb_input_dispatch_drag.cc",
+    "cb_input_dispatch_drag.h",
+  ]
+  deps = [
+    "//base",
+    ":input_dispatch",
+    # R3's WebContentsResolver forward-declared interface + the
+    # CbInputDispatchMouse pointer for held-modifier read access.
+    ":input_dispatch_mouse",
+    # RenderWidgetHostImpl::DragTarget* (cast from public
+    # RenderWidgetHost, same pattern as M4 R3 mouse + R6 touch),
+    # content::DropData, blink::WebDragOperation* via the
+    # content-public re-export path.
+    "//content/public/browser",
+    # blink::mojom::DragOperation enum for kDragOperationCopyV1.
+    "//third_party/blink/public/mojom:mojom_platform",
+    "//url",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 (CV2-81) — composite typed-dispatcher delegate.
+#
+# Fan-out wrapper that holds all six M4 typed dispatchers (R3 mouse,
+# R4 keyboard, R5 IME, R6 touch, R7 drag, R8 clipboard) and forwards
+# CbInputDispatchDelegate::OnInputEvent to each in sequence. Owns the
+# shared CbHeldModifierState injected into R4 + R8 (R3 + R7 keep their
+# existing modifier paths until the TODO(M4-R*-shared-modifier-
+# extraction) consolidations land).
+#
+# Replaces the CV2-75 R1 production stand-in CbInputLoggingDelegate as
+# the input DC observer the embedder constructs. See the header for
+# the full transition rationale.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_composite") {
+  sources = [
+    "cb_input_dispatch_composite.cc",
+    "cb_input_dispatch_composite.h",
+  ]
+  deps = [
+    "//base",
+    ":input_dispatch",
+    ":input_dispatch_clipboard",
+    ":input_dispatch_drag",
+    ":input_dispatch_ime",
+    ":input_dispatch_keyboard",
+    ":input_dispatch_mouse",
+    ":input_dispatch_touch",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # M5 R3 (CV2-21) — cursor x,y join.
 #
 # Tiny coordinator that subscribes to M5 R1's CbCursorClient::
@@ -899,6 +1033,12 @@ source_set("embedder") {
     ":clipboard_relay",
     ":file_upload_relay",
     ":input_dispatch",
+    # CV2-81 — M4 typed-dispatcher composite delegate. Transitively
+    # pulls all 6 typed dispatchers (R3 mouse / R4 keyboard / R5 IME /
+    # R6 touch / R7 drag / R8 clipboard) + the M4 R2 active-WebContents
+    # resolver (declared via :active_webcontents_resolver above).
+    # main_parts owns the unique_ptr; ctor takes the resolver pointer.
+    ":input_dispatch_composite",
     # CV2-69 F1 + F3 — chromium-subsystem bootstrap inits the embedder
     # was skipping (gpu-test-lead audit /tmp/cv2-embedder-init-audit.md).
     # F1 (ResourceBundle) lives in //ui/base already in this list;
