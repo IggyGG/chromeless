@@ -105,12 +105,12 @@ RUN chmod +x /usr/local/bin/chromeless && \
 # to the binary's directory. Without it the worker exits at startup
 # with `Check failed: result. ` from base/i18n/icu_util.cc:306.
 #
-# libEGL.so / libGLESv2.so / libvk_swiftshader.so ship the Angle +
-# SwiftShader bits the worker uses for `--use-gl=angle
+# libEGL.so / libGLESv2.so / libvk_swiftshader.so / libvulkan.so.1
+# ship the Angle + SwiftShader bits the worker uses for `--use-gl=angle
 # --use-angle=swiftshader-webgl`; without them the GL backend can't
 # load and the renderer crashes during compositor init.
 #
-# All four files are staged into the build context by chromeless-build.sh
+# All of these are staged into the build context by chromeless-build.sh
 # Step 9 alongside cloud_browser_worker. They live next to the
 # binary in /usr/local/bin/ so chromium's default PathService
 # resolution finds them without an extra `--icu-data-dir` flag.
@@ -118,6 +118,33 @@ COPY icudtl.dat            /usr/local/bin/icudtl.dat
 COPY libEGL.so             /usr/local/bin/libEGL.so
 COPY libGLESv2.so          /usr/local/bin/libGLESv2.so
 COPY libvk_swiftshader.so  /usr/local/bin/libvk_swiftshader.so
+
+# rv8: chromium's bundled Vulkan loader. LOAD-BEARING and must sit in
+# /usr/local/bin/ next to the ANGLE libs.
+#
+# chromium's ANGLE is built with ANGLE_USE_CUSTOM_LIBVULKAN
+# (third_party/angle/src/common/vulkan/BUILD.gn) + angle_shared_libvulkan
+# (true on Linux). At GPU-process init, ANGLE's vk::Renderer::initialize
+# calls angle::vk::OpenLibVulkan() (vk_renderer.cpp:2431). OpenLibVulkan
+# (third_party/angle/src/common/vulkan/libvulkan_loader.cpp) — under
+# ANGLE_USE_CUSTOM_LIBVULKAN — searches ONLY SearchType::ModuleDir for
+# `libvulkan.so` / `libvulkan.so.1`; it does NOT fall back to the system
+# library path. The module dir is wherever libGLESv2.so loaded from —
+# /usr/local/bin/ here. If libvulkan.so.1 is not there, OpenLibVulkan
+# returns NULL and vk_renderer.cpp:2432 ANGLE_VK_CHECK fails with
+# VK_ERROR_INITIALIZATION_FAILED (-3) BEFORE any ICD scan — surfacing as
+# `ANGLE Display::initialize error: Internal Vulkan error (-3)` →
+# `eglInitialize SwANGLE failed` → `Exiting GPU process`.
+#
+# The Debian libvulkan1 package's loader at /usr/lib/x86_64-linux-gnu/
+# is NOT consulted (ANGLE_USE_CUSTOM_LIBVULKAN disables the SystemDir
+# search). chromium's build emits its own loader at
+# ${OUT_DIR}/libvulkan.so.1; chromeless-build.sh Step 8 stages it.
+#
+# rv7/rv8-attempt-1 missed this: CV2-89 + rv8-attempt-1 fixed the ICD
+# descriptor (registration + path), but that ring is downstream of
+# OpenLibVulkan — never reached while the loader itself is absent.
+COPY libvulkan.so.1        /usr/local/bin/libvulkan.so.1
 
 # CV2-89 + rv8: SwANGLE Vulkan ICD descriptor JSON — co-located
 # with the ANGLE libraries.

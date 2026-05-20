@@ -46,7 +46,7 @@ require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/pulse-default.pa"' build/chromeles
 require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/devtools-proxy.sh"' build/chromeless-build.sh
 require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/streamer-static-server.py"' build/chromeless-build.sh
 require_grep 'cp -R "\$\{CHROMELESS_REPO\}/infra/lifecycle"' build/chromeless-build.sh
-require_grep 'for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so' build/chromeless-build.sh
+require_grep 'for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1' build/chromeless-build.sh
 
 require_grep 'COPY[[:space:]]+streamer/[[:space:]]+/opt/cloud-browser/streamer/' build/Dockerfile.runtime
 require_grep 'COPY[[:space:]]+pulse-default.pa[[:space:]]+/etc/pulse/default.pa' build/Dockerfile.runtime
