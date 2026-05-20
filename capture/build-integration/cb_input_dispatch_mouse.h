@@ -78,6 +78,13 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
+// CV2-81 attempt-5 fix-forward (lesson-(i.discipline) ODR migration debt):
+// M4 R2 has landed (cb_active_webcontents_resolver.h provides the canonical
+// WebContentsResolver class); resolves the TODO(M4-R3-r2-interface)
+// marker below by switching from inline forward-decl to the canonical
+// include. Prevents the ODR redefinition error that surfaces when
+// CV2-81's typed-dispatcher composite pulls both files into the same TU.
+#include "cloud-browser/capture/build-integration/cb_active_webcontents_resolver.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 #include "cloud-browser/capture/build-integration/cb_last_pointer.h"
 
@@ -88,26 +95,23 @@ class WebContents;
 
 namespace cloud_browser {
 
-// WebContentsResolver — M4 R2 interface. R3 forward-declares it here
-// so the .cc can compile without R2 sources. The real interface lives
-// in capture/build-integration/cb_active_webcontents_resolver.h (M4
-// R2 will land that file alongside the resolver implementation).
+// WebContentsResolver — M4 R2 interface. Canonical definition lives in
+// capture/build-integration/cb_active_webcontents_resolver.h, included
+// above. The inline forward-decl that used to live here was deleted as
+// part of CV2-81 attempt-5 fix-forward (R2-r2-interface migration debt
+// resolution): once Wave 2's typed-dispatcher composite started pulling
+// this header and cb_active_webcontents_resolver.h into the same TU,
+// the inline forward-decl + canonical class definition triggered ODR
+// redefinition errors at compile time. The drafter's
+// TODO(M4-R3-r2-interface) anticipated this migration; CV2-81 wiring
+// triggered it; attempt-5 resolves it.
 //
-// Contract:
+// Contract preserved (declared canonically in cb_active_webcontents_resolver.h):
 //   * GetActiveWebContents() returns the WebContents that the FSVC is
 //     currently capturing from, or nullptr if no capture is active.
 //   * Must be safe to call from BrowserThread::UI.
 //   * Lifetime: caller-owned, must outlive any CbInputDispatchMouse
 //     that references it.
-//
-// TODO(M4-R3-r2-interface): when R2 lands, replace this forward
-// declaration with `#include "cloud-browser/capture/build-integration/
-// cb_active_webcontents_resolver.h"` and drop the inline interface.
-class WebContentsResolver {
- public:
-  virtual ~WebContentsResolver() = default;
-  virtual content::WebContents* GetActiveWebContents() = 0;
-};
 
 // (CbLastPointerSnapshot is defined canonically in cb_last_pointer.h —
 // M4 R10. R3 delegates its inline snapshot storage to

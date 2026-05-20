@@ -11,7 +11,12 @@
 #include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
-#include "content/public/browser/native_web_keyboard_event.h"
+// CV2-81 attempt-5 fix-forward (lesson-(g.1) Mutation-shape, 5th
+// instance this campaign): chromium-7727 moved
+// native_web_keyboard_event.h from content/public/browser/ to
+// components/input/. Same family as Wave 1's 83f21af
+// native_widget_types.h → native_ui_types.h rename.
+#include "components/input/native_web_keyboard_event.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"

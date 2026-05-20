@@ -140,6 +140,13 @@ index 0000000000..f4503f144e
 +    "//third_party/webrtc/api:enable_media",
 +    "//third_party/webrtc/api:libjingle_peerconnection_api",
 +    "//third_party/webrtc/api:media_stream_interface",
++    # CV2-81 attempt-5 fix-forward (lesson-(g.4) Discipline-shape at
++    # BUILD.gn dep layer): webrtc/api/data_channel_interface.h does
++    # #include "api/priority.h"; libjingle_peerconnection_api does NOT
++    # transitively re-export priority's config in chromium-7727's
++    # bundled webrtc. Explicit dep brings the priority target's
++    # public_config (-I third_party/webrtc/) into our compilation.
++    "//third_party/webrtc/api:priority",
 +    "//third_party/webrtc/api:scoped_refptr",
 +    "//third_party/webrtc/api/audio:audio_device",
 +    "//third_party/webrtc/api/audio:create_audio_device_module",

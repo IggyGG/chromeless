@@ -6,7 +6,11 @@
 #include "cloud-browser/capture/build-integration/cb_input_dispatch_clipboard.h"
 
 #include "base/logging.h"
-#include "content/public/browser/native_web_keyboard_event.h"
+// CV2-81 attempt-5 fix-forward (lesson-(g.1) Mutation-shape, 5th
+// instance this campaign): chromium-7727 moved
+// native_web_keyboard_event.h from content/public/browser/ to
+// components/input/. Sibling to keyboard.cc:14 fix.
+#include "components/input/native_web_keyboard_event.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/web_contents.h"
