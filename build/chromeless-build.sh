@@ -452,6 +452,11 @@ if [[ -n "${STUB_MODE}" ]]; then
     for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so; do
         : > "${ARTIFACTS_DIR}/context/${runtime_asset}"
     done
+    # CV2-89: stub the SwANGLE Vulkan ICD descriptor JSON. Real path
+    # below sed-rewrites the chromium-generated JSON's library_path to
+    # absolute; stub just creates the empty placeholder for kaniko
+    # context-layout testing.
+    : > "${ARTIFACTS_DIR}/context/vk_swiftshader_icd.json"
     log "[stub] wrote placeholder binary to ${ARTIFACTS_DIR}/context/cloud_browser_worker"
 else
     [[ -f "${binary_src}" ]] || die "build did not produce ${binary_src}"
@@ -478,8 +483,53 @@ else
         [[ -f "${asset_src}" ]] || die "runtime asset missing: ${asset_src}"
         cp "${asset_src}" "${ARTIFACTS_DIR}/context/${runtime_asset}"
     done
+
+    # CV2-89: stage the SwANGLE Vulkan ICD descriptor JSON.
+    #
+    # Why this exists: chromium's build emits vk_swiftshader_icd.json
+    # alongside libvk_swiftshader.so in ${OUT_DIR}. The implementation
+    # lib is the Vulkan driver; the JSON is the Vulkan loader's
+    # registration descriptor (it tells libvulkan.so.1 "here is a
+    # driver, here is its library_path"). Without the JSON, the
+    # loader scans /usr/share/vulkan/icd.d/*.json, finds nothing,
+    # and vkCreateInstance returns VK_ERROR_INITIALIZATION_FAILED
+    # ("Internal Vulkan error (-3)"), which propagates as
+    # `eglInitialize SwANGLE failed with error EGL_NOT_INITIALIZED`
+    # in chromium's GPU process, killing the renderer.
+    #
+    # Why the sed: the upstream JSON has a relative
+    # `"library_path": "./libvk_swiftshader.so"` that expects the lib
+    # to be co-located with the JSON. Dockerfile.runtime installs the
+    # JSON at /usr/share/vulkan/icd.d/ (loader's standard search path)
+    # but the lib at /usr/local/bin/. Rewriting library_path to the
+    # absolute /usr/local/bin path eliminates the co-location
+    # dependency. Option C from the CV2-89 pre-investigation findings
+    # — recommended over symlinks (Option A) or env-var driving
+    # (Option B) because the JSON contents become auditable + the
+    # filesystem layout stays minimally disturbed.
+    #
+    # Methodology event: 9th instance of lesson-(i) (previously-
+    # untested code path FATALs when first exercised) + new
+    # sub-lesson (g.3) "Completeness-shape" (partial-copy gap
+    # rather than literal drift). Pre-CV2-78 Wave 1, no test
+    # harness exercised the renderer-DOM-bearing path, so the
+    # missing-ICD-JSON never surfaced. CV2-89 closes that gap at
+    # the image-packaging layer.
+    icd_src="${CHROMIUM_SRC}/${OUT_DIR}/vk_swiftshader_icd.json"
+    [[ -f "${icd_src}" ]] || die "runtime asset missing: ${icd_src} (CV2-89: chromium build did not emit SwANGLE ICD descriptor — check args.gn use_swiftshader_with_subzero / swiftshader_for_webgpu settings)"
+    sed 's|"\./libvk_swiftshader\.so"|"/usr/local/bin/libvk_swiftshader.so"|' \
+        "${icd_src}" > "${ARTIFACTS_DIR}/context/vk_swiftshader_icd.json"
+    # Sanity check the sed actually applied — if upstream changes
+    # the relative-path form (e.g. drops the ./, becomes "libvk_..."),
+    # the sed becomes a silent no-op and we'd ship a broken JSON.
+    # Fail loud rather than ship a non-functional image.
+    grep -q '"/usr/local/bin/libvk_swiftshader.so"' \
+        "${ARTIFACTS_DIR}/context/vk_swiftshader_icd.json" || \
+        die "CV2-89: sed-rewrite of library_path did not apply — check upstream vk_swiftshader_icd.json format. Saw: $(grep library_path "${icd_src}" || echo '<no library_path line>')"
+
     log "packaged ${artifact_path}"
     log "staged binary to ${ARTIFACTS_DIR}/context/cloud_browser_worker"
+    log "staged SwANGLE ICD descriptor with absolute library_path (CV2-89)"
 fi
 
 step_done
