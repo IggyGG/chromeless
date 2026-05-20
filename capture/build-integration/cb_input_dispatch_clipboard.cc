@@ -10,9 +10,24 @@
 // instance this campaign): chromium-7727 moved
 // native_web_keyboard_event.h from content/public/browser/ to
 // components/input/. Sibling to keyboard.cc:14 fix.
+//
+// CV2-81 attempt-7 fix-forward (lesson-(g.1) Mutation-shape, locus
+// twin of the header move): the SAME chromium-7727 change also
+// re-homed the type from namespace content:: to namespace input::
+// (components/input/native_web_keyboard_event.h declares
+// `namespace input { struct NativeWebKeyboardEvent ... }`). The use
+// sites below construct input::NativeWebKeyboardEvent accordingly.
 #include "components/input/native_web_keyboard_event.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
+// CV2-81 attempt-7 fix-forward (lesson-(g.3) Completeness-shape): this
+// TU does rwhv->GetRenderWidgetHost() in DispatchCopy(), a member
+// access that needs the COMPLETE content::RenderWidgetHostView type —
+// content/public/browser/web_contents.h only forward-declares it.
+// The sibling input-dispatch TUs (mouse/keyboard/touch/drag/ime)
+// already carry this include; clipboard.cc was the lone gap, so
+// attempt-6 failed here with "member access into incomplete type".
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
 #include "third_party/blink/public/common/input/web_keyboard_event.h"
@@ -116,7 +131,7 @@ void CbInputDispatchClipboard::DispatchCopy(content::WebContents* wc,
 
   // kRawKeyDown — triggers the editor command on the renderer.
   {
-    content::NativeWebKeyboardEvent native(
+    input::NativeWebKeyboardEvent native(
         blink::WebInputEvent::Type::kRawKeyDown,
         modifiers_blink,
         event_time);
@@ -139,7 +154,7 @@ void CbInputDispatchClipboard::DispatchCopy(content::WebContents* wc,
 
   // kKeyUp — pages with `keyup` listeners track the up edge.
   {
-    content::NativeWebKeyboardEvent native(
+    input::NativeWebKeyboardEvent native(
         blink::WebInputEvent::Type::kKeyUp,
         modifiers_blink,
         event_time);

@@ -392,20 +392,28 @@ void CbInputDispatchTouch::FillWebTouchPoint(
   // WebTouchPoint inherits WebPointerProperties; we set the touch-
   // specific fields plus the pointer-properties basics chromium uses
   // for hit testing.
+  //
+  // CV2-81 attempt-7 fix-forward (lesson-(g.1) Mutation-shape):
+  // chromium-7727's blink::WebPointerProperties moved position_in_widget
+  // / position_in_screen out of the public field surface — they are now
+  // protected members (position_in_widget_ / position_in_screen_)
+  // reached through the SetPositionInWidget() / SetPositionInScreen()
+  // setters and the PositionInWidget() / PositionInScreen() getters.
+  // Direct field assignment (attempt-6's form) no longer compiles.
   out->id = src.identifier;
   out->state = state;
   out->pointer_type = blink::WebPointerProperties::PointerType::kTouch;
-  out->position_in_widget = gfx::PointF(widget_pos.x, widget_pos.y);
+  out->SetPositionInWidget(gfx::PointF(widget_pos.x, widget_pos.y));
   // Screen-space position. We don't have the screen offset of the
   // captured widget here (chromium computes that lazily for synthetic
   // events); the FSVC framing is window-local so identifying
-  // position_in_screen with position_in_widget matches what a
+  // position-in-screen with position-in-widget matches what a
   // real touch on the captured rect would deliver.
   //
   // TODO(M4-R6-screen-space): once M4 R2 exposes the captured-window
   // origin, add it here so multi-monitor configurations dispatch
   // with correct screen coords.
-  out->position_in_screen = out->position_in_widget;
+  out->SetPositionInScreen(out->PositionInWidget());
   out->radius_x = static_cast<float>(src.radius_x);
   out->radius_y = static_cast<float>(src.radius_y);
   out->rotation_angle = static_cast<float>(src.twist);
@@ -430,7 +438,18 @@ bool CbInputDispatchTouch::ForwardWebTouchEvent(
   if (!impl) {
     return false;
   }
-  impl->ForwardTouchEventWithLatencyInfo(event, ui::LatencyInfo());
+  // CV2-81 attempt-7 fix-forward (lesson-(g.2) Locus-shape):
+  // chromium-7727 relocated ForwardTouchEventWithLatencyInfo off
+  // RenderWidgetHostImpl onto input::RenderInputRouter (declared in
+  // components/input/render_input_router.h, pulled in transitively by
+  // render_widget_host_impl.h). The signature is unchanged
+  // — (const blink::WebTouchEvent&, const ui::LatencyInfo&) — so this
+  // is a pure receiver-relocation. RenderWidgetHostImpl::
+  // GetRenderInputRouter() is the public accessor for a live RWHI.
+  // (The mouse path's ForwardMouseEventWithLatencyInfo did NOT move,
+  // which is why M4 R3 still compiles unchanged.)
+  impl->GetRenderInputRouter()->ForwardTouchEventWithLatencyInfo(
+      event, ui::LatencyInfo());
   return true;
 }
 

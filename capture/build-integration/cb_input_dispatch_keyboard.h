@@ -10,7 +10,7 @@
 // The keyboard path is the spec's "native equivalent" of the Go
 // input-bridge/main.go CDP dispatcher, but driven through chromium's
 // internal `RenderWidgetHost::ForwardKeyboardEvent` API with
-// `content::NativeWebKeyboardEvent` instead of
+// `input::NativeWebKeyboardEvent` instead of
 // `Input.dispatchKeyEvent`. The two paths are intentionally
 // semantically parity-aligned — the same envelope sequence MUST
 // produce the same observable DOM event sequence (keydown / keypress /

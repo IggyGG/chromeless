@@ -16,6 +16,11 @@
 // native_web_keyboard_event.h from content/public/browser/ to
 // components/input/. Same family as Wave 1's 83f21af
 // native_widget_types.h → native_ui_types.h rename.
+//
+// CV2-81 attempt-7 fix-forward (lesson-(g.1) Mutation-shape, locus
+// twin of the header move): the SAME chromium-7727 change also
+// re-homed the type from namespace content:: to namespace input::.
+// The use sites below construct input::NativeWebKeyboardEvent.
 #include "components/input/native_web_keyboard_event.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
@@ -139,7 +144,7 @@ void CbInputDispatchKeyboard::DispatchKey(const base::DictValue& data,
   // kRawKeyDown / kKeyUp event for the scancode side. Skipped when
   // there is no scancode (pure text-synthesis path).
   if (have_scancode) {
-    content::NativeWebKeyboardEvent native(
+    input::NativeWebKeyboardEvent native(
         is_down ? blink::WebInputEvent::Type::kRawKeyDown
                 : blink::WebInputEvent::Type::kKeyUp,
         static_cast<int>(modifiers_blink),
@@ -167,7 +172,7 @@ void CbInputDispatchKeyboard::DispatchKey(const base::DictValue& data,
   if (is_down) {
     const std::string text = SynthesizedTextFor(key);
     if (!text.empty()) {
-      content::NativeWebKeyboardEvent char_event(
+      input::NativeWebKeyboardEvent char_event(
           blink::WebInputEvent::Type::kChar,
           static_cast<int>(modifiers_blink),
           event_time);

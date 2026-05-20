@@ -488,9 +488,28 @@ source_set("input_dispatch") {
   ]
   deps = [
     "//base",
-    # webrtc::DataChannelObserver + webrtc::DataBuffer live in
-    # //third_party/webrtc/api:libjingle_peerconnection_api, which is
-    # re-exported through the passthrough source_set.
+  ]
+
+  # webrtc::DataChannelObserver + webrtc::DataBuffer live in
+  # //third_party/webrtc/api:libjingle_peerconnection_api, re-exported
+  # through the passthrough source_set.
+  #
+  # CV2-81 attempt-7 fix-forward (lesson-(g.4) Discipline-shape, BUILD.gn
+  # public_deps layer — supersedes the attempt-5 deps-layer attempt that
+  # mis-targeted the mechanism): this MUST be public_deps, not deps. The
+  # PUBLIC header cb_input_dispatch.h #includes webrtc's
+  # data_channel_interface.h, which itself #includes "api/priority.h"
+  # (resolved via webrtc's public_config: -I third_party/webrtc). A plain
+  # `deps` entry configures only input_dispatch's own TUs — it does NOT
+  # propagate the webrtc include-dir config to targets that depend on
+  # input_dispatch and include cb_input_dispatch.h. :input_dispatch_composite
+  # is exactly such a consumer and (unlike the per-delegate source_sets)
+  # does not pull //content/public/browser, which would otherwise carry
+  # the webrtc config incidentally — so attempt-6 failed there with
+  # "'api/priority.h' file not found". public_deps makes input_dispatch
+  # re-export the passthrough's public_config to every consumer; that is
+  # the mechanism-correct fix.
+  public_deps = [
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
@@ -832,9 +851,10 @@ source_set("input_dispatch_ime") {
 # M4 R6 (CV2-46) — touch native dispatch.
 #
 # Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
-# RenderWidgetHostImpl::ForwardTouchEventWithLatencyInfo for synthetic
+# input::RenderInputRouter::ForwardTouchEventWithLatencyInfo (reached
+# via RenderWidgetHostImpl::GetRenderInputRouter()) for synthetic
 # multi-touch sequences. Mirrors the cast precedent set by M4 R3
-# (mouse) for the impl-only Forward* method. Source files landed in
+# (mouse) for the impl-only Forward* methods. Source files landed in
 # the M4 R6 wave; source_set added by CV2-81.
 # ---------------------------------------------------------------------
 source_set("input_dispatch_touch") {
@@ -846,8 +866,9 @@ source_set("input_dispatch_touch") {
     "//base",
     ":input_dispatch",
     ":input_dispatch_mouse",
-    # RenderWidgetHostImpl::ForwardTouchEventWithLatencyInfo,
-    # blink::WebTouchEvent / WebTouchPoint via content-public re-export.
+    # RenderWidgetHostImpl + input::RenderInputRouter (the latter pulled
+    # in transitively by render_widget_host_impl.h), blink::WebTouchEvent
+    # / WebTouchPoint — all via the content-public re-export.
     "//content/public/browser",
   ]
   configs += [ ":cb_include_paths" ]               # T17.

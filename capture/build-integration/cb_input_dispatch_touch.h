@@ -9,7 +9,7 @@
 //
 // The touch path is the native equivalent of input-bridge/main.go's
 // touch CDP dispatcher, but driven through chromium's internal
-// `RenderWidgetHostImpl::ForwardTouchEventWithLatencyInfo` /
+// `input::RenderInputRouter::ForwardTouchEventWithLatencyInfo` /
 // `blink::WebTouchEvent` instead of `Input.dispatchTouchEvent`. The
 // two paths are intentionally semantically parity-aligned — the same
 // envelope sequence MUST produce the same observable DOM
@@ -234,8 +234,11 @@ class CbInputDispatchTouch : public CbInputDispatchDelegate {
   // directly — the public surface for synthetic input is
   // RenderWidgetHostInputEventRouter (browser-side gesture routing).
   // For now we cast to RenderWidgetHostImpl via the impl-side header,
-  // matching M4 R3's mouse path. If chromium's public API grows a
-  // ForwardTouchEventWithLatencyInfo before integration, swap.
+  // matching M4 R3's mouse path, and reach the touch-forwarding entry
+  // through RenderWidgetHostImpl::GetRenderInputRouter() — chromium-7727
+  // relocated ForwardTouchEventWithLatencyInfo onto
+  // input::RenderInputRouter (CV2-81 attempt-7). If chromium's public
+  // API grows a synthetic-touch entry point before integration, swap.
   bool ForwardWebTouchEvent(content::RenderWidgetHost* rwh,
                             const blink::WebTouchEvent& event);
 
