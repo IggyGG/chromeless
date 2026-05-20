@@ -79,7 +79,33 @@ mkdir -p "${ARTIFACTS_DIR}" "${LOGS_DIR}"
 # to stderr (so kubectl logs picks them up) and to the same log.
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
-CHROMELESS_GIT_SHA_DEFAULT="$(git -C "${CHROMELESS_REPO}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+# CHROMELESS_GIT_SHA — short SHA of the chromeless checkout; tags the
+# build artifact and the runtime image (cr<branch>-<sha>).
+#
+# CV2-79 (IMAGE_TAG=unknown — recurrence #4 fix): the bootstrap init
+# container clones ${CHROMELESS_REPO} (/workspace) as root, but this
+# script runs as uid 1000. A bare `git -C "${CHROMELESS_REPO}"
+# rev-parse` then trips git's "detected dubious ownership" guard
+# (CVE-2022-24765 hardening); the error was swallowed by 2>/dev/null
+# and the `|| echo unknown` fallback silently produced cr7727-unknown
+# for four builds running. `.git` IS present — only the uid mismatch
+# between the root clone and the uid-1000 reader is wrong.
+#
+# Fix: resolve inside a subshell whose GIT_CONFIG_GLOBAL points at a
+# throwaway config that whitelists the checkout via safe.directory.
+# safe.directory is honored ONLY from system/global config — never
+# from `-c` or a repo-local config — so a scratch global config is the
+# one surgical lever. The subshell confines the override so it cannot
+# leak into the chromium patch-apply / depot_tools git calls later in
+# this build.
+CHROMELESS_GIT_SHA_DEFAULT="$(
+    _cb_gitcfg="$(mktemp "${TMPDIR:-/tmp}/cb-gitconfig.XXXXXX" 2>/dev/null || echo "/tmp/cb-gitconfig.$$")"
+    export GIT_CONFIG_GLOBAL="${_cb_gitcfg}"
+    git config --global --add safe.directory "${CHROMELESS_REPO}" >/dev/null 2>&1 || true
+    _cb_sha="$(git -C "${CHROMELESS_REPO}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+    rm -f "${_cb_gitcfg}"
+    printf '%s' "${_cb_sha}"
+)"
 : "${CHROMELESS_GIT_SHA:=${CHROMELESS_GIT_SHA_DEFAULT}}"
 
 DEFAULT_TARGETS="cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests"
@@ -133,6 +159,18 @@ log "  chromium_src=${CHROMIUM_SRC}"
 log "  artifacts=${ARTIFACTS_DIR}  logs=${LOGS_DIR}  sccache=${SCCACHE_DIR}"
 log "  targets='${CHROMELESS_BUILD_TARGETS}'"
 log "  stub_mode=${STUB_MODE:-0}  skip_fetch=${SKIP_FETCH:-0}"
+
+# CV2-79 loud guard: an unresolved SHA yields a non-traceable
+# cr<branch>-unknown tag that also collides with any other failed-
+# derivation build. This class recurred four times because the
+# fallback was silent — surface it loudly so a 5th recurrence is
+# caught here, at build time, instead of in post-hoc triage.
+if [[ "${CHROMELESS_GIT_SHA}" == "unknown" ]]; then
+    log "WARN: CHROMELESS_GIT_SHA unresolved from ${CHROMELESS_REPO} — the image"
+    log "WARN:   and artifact will tag cr${CHROMIUM_BRANCH_NUMBER}-unknown (not"
+    log "WARN:   traceable, collision-prone). Pass CHROMELESS_GIT_SHA explicitly,"
+    log "WARN:   or check the bootstrap clone / checkout ownership (CV2-79)."
+fi
 
 if [[ -z "${STUB_MODE}" ]]; then
     require_tool git
