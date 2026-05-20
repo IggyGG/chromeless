@@ -91,6 +91,7 @@
 #include <cstdint>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch_mouse.h"
@@ -229,12 +230,21 @@ class CbInputDispatchKeyboard : public CbInputDispatchDelegate {
   static std::string SynthesizedTextFor(const std::string& key);
 
   // M4 R2 resolver. Caller-owned; can be null pre-R2.
-  WebContentsResolver* const resolver_;
+  // CV2-81 first-compile-link fix-forward iteration 2 (lesson-(g.3-meta)
+  // Completeness-of-class-sweep applied): this pre-existing file was
+  // pulled into the cloud_browser_worker target transitively via
+  // composite.h → clipboard.h → keyboard.h; iteration 1's grep-sweep
+  // was narrow-scoped to error-visible files and missed this file.
+  // Full-glob sweep on iteration 2 caught it.
+  const raw_ptr<WebContentsResolver> resolver_;
 
   // Cross-rank modifier state shared with R3. Caller-owned; can be
   // null only in unit-test setups that don't exercise the modifier
   // path (R4's test ctor accepts null and skips the OR-in).
-  CbHeldModifierState* const shared_modifiers_;
+  // Note: mutable T (not const-T) — R4 OR-mutates the shared state;
+  // contrast with clipboard.h's `const raw_ptr<const CbHeldModifierState>`
+  // which is read-only. Semantic intent preserved per (g.4-precision).
+  const raw_ptr<CbHeldModifierState> shared_modifiers_;
 };
 
 }  // namespace cloud_browser
