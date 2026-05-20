@@ -86,10 +86,28 @@
 //     (NOTIMPLEMENTED_LOG_ONCE returning nullptr) is acceptable. If
 //     a future ring surfaces a code path that needs them, override
 //     here.
+//
+// CV2-78 ring 8 follow-up (this revision adds GetDisplayNearestWindow):
+//   The R1 header above explicitly anticipated this case — "If a
+//   future ring surfaces a code path that needs them, override here."
+//   The M5 R1 per-event verification rv6.b surfaced
+//   `display::ScreenBase::GetDisplayNearestWindow` as a NOTIMPLEMENTED
+//   log line firing at boot. Aura's cursor-routing path consults
+//   Screen::GetDisplayNearestWindow before reaching IsWindowUnderCursor;
+//   when the upstream stub returns a default-constructed Display (with
+//   NOTIMPLEMENTED_LOG_ONCE), routing can short-circuit before the gate
+//   the R1 commit opened. This override returns the 1280x720 default
+//   display the embedder seeded in PreEarlyInitialization (the worker
+//   is single-display by construction — main_parts seeds exactly one
+//   Display into ScreenBase::display_list()), via the same
+//   GetPrimaryDisplay() ScreenBase already exposes. Mirrors the
+//   chromium upstream pattern (headless/lib/browser/headless_screen.cc)
+//   collapsed to the single-display case.
 
 #ifndef CAPTURE_BUILD_INTEGRATION_CB_HEADLESS_SCREEN_H_
 #define CAPTURE_BUILD_INTEGRATION_CB_HEADLESS_SCREEN_H_
 
+#include "ui/display/display.h"
 #include "ui/display/screen_base.h"
 #include "ui/gfx/geometry/point.h"
 // CV2-78 Wave 1 first-compile-link fix-forward: chromium-7727 renamed
@@ -142,6 +160,28 @@ class CbHeadlessScreen : public display::ScreenBase {
   // return it here. R1 ships without that seam to keep this commit
   // ring-disciplined (lesson j).
   gfx::Point GetCursorScreenPoint() override;
+
+  // Returns the single 1280x720 default display the embedder seeds
+  // into ScreenBase::display_list() at construction. The cb-chromium
+  // worker is single-display by construction (cloud_browser_browser_
+  // main_parts.cc PreEarlyInitialization seeds exactly one Display);
+  // any window the runtime has IS on that display.
+  //
+  // CV2-78 ring 8 — closes the upstream NOTIMPLEMENTED stub
+  // `display::ScreenBase::GetDisplayNearestWindow` which returns a
+  // default-constructed Display. Aura's cursor-routing path consults
+  // this method early; the stub's empty-Display return can short-
+  // circuit routing before reaching the IsWindowUnderCursor gate the
+  // CV2-78 R1 commit opened.
+  //
+  // Implementation collapses upstream HeadlessScreen's
+  // GetDisplayFromScreenRect lookup (multi-display) to a primary-
+  // display return — see class-level comment for the single-display
+  // rationale. Const-qualified to match `display::ScreenBase`'s
+  // virtual; ScreenBase's GetPrimaryDisplay() is itself const and
+  // public, so this is a one-liner delegate.
+  display::Display GetDisplayNearestWindow(
+      gfx::NativeWindow window) const override;
 };
 
 }  // namespace cloud_browser
