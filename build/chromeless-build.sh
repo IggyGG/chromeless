@@ -528,23 +528,27 @@ else
     # alongside libvk_swiftshader.so in ${OUT_DIR}. The implementation
     # lib is the Vulkan driver; the JSON is the Vulkan loader's
     # registration descriptor (it tells libvulkan.so.1 "here is a
-    # driver, here is its library_path"). Without the JSON, the
-    # loader scans /usr/share/vulkan/icd.d/*.json, finds nothing,
-    # and vkCreateInstance returns VK_ERROR_INITIALIZATION_FAILED
+    # driver, here is its library_path"). Without a *reachable* JSON,
+    # vkCreateInstance returns VK_ERROR_INITIALIZATION_FAILED
     # ("Internal Vulkan error (-3)"), which propagates as
     # `eglInitialize SwANGLE failed with error EGL_NOT_INITIALIZED`
     # in chromium's GPU process, killing the renderer.
     #
+    # rv8: Dockerfile.runtime installs this JSON at
+    # /usr/local/bin/vk_swiftshader_icd.json — co-located with the
+    # ANGLE libs — because chromium's SwANGLE path self-sets
+    # VK_ICD_FILENAMES to <ANGLE module dir>/vk_swiftshader_icd.json,
+    # and that override makes the Vulkan loader skip the generic
+    # /usr/share/vulkan/icd.d/ scan. See the rv8 comment block in
+    # Dockerfile.runtime for the full CV2-89 ring-N+1 root cause.
+    #
     # Why the sed: the upstream JSON has a relative
-    # `"library_path": "./libvk_swiftshader.so"` that expects the lib
-    # to be co-located with the JSON. Dockerfile.runtime installs the
-    # JSON at /usr/share/vulkan/icd.d/ (loader's standard search path)
-    # but the lib at /usr/local/bin/. Rewriting library_path to the
-    # absolute /usr/local/bin path eliminates the co-location
-    # dependency. Option C from the CV2-89 pre-investigation findings
-    # — recommended over symlinks (Option A) or env-var driving
-    # (Option B) because the JSON contents become auditable + the
-    # filesystem layout stays minimally disturbed.
+    # `"library_path": "./libvk_swiftshader.so"`. The sed rewrites it
+    # to the absolute /usr/local/bin/libvk_swiftshader.so so the path
+    # is unambiguous regardless of the JSON's own location (the lib
+    # and JSON are in fact co-located at /usr/local/bin/, so a
+    # relative path would also resolve — absolute is kept for
+    # robustness and because the grep sanity-check below keys on it).
     #
     # Methodology event: 9th instance of lesson-(i) (previously-
     # untested code path FATALs when first exercised) + new
