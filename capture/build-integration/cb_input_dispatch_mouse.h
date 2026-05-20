@@ -76,6 +76,7 @@
 #include <cstdint>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 #include "cloud-browser/capture/build-integration/cb_last_pointer.h"
@@ -282,7 +283,11 @@ class CbInputDispatchMouse : public CbInputDispatchDelegate {
   CbLastPointerState last_pointer_state_;
 
   // M4 R2 resolver. Caller-owned; can be null pre-R2.
-  WebContentsResolver* const resolver_;
+  // CV2-81 first-compile-link fix-forward (lesson-(g.4) Discipline-shape).
+  // build-czar grep-sweep caught this site beyond the 10-error build cutoff;
+  // had the sweep been limited to the visible 6 violations, a third-pass FAIL
+  // on this same lint family would have surfaced one iteration later.
+  const raw_ptr<WebContentsResolver> resolver_;
 };
 
 }  // namespace cloud_browser

@@ -148,6 +148,7 @@
 
 #include <cstdint>
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch_keyboard.h"
@@ -203,8 +204,13 @@ class CbInputDispatchClipboard : public CbInputDispatchDelegate {
   // already held" diagnostic. Marked const because R8 never
   // mutates the shared state — see "Cross-rank modifier
   // discipline" in the file header.
-  WebContentsResolver* const resolver_;
-  const CbHeldModifierState* const shared_modifiers_;
+  //
+  // CV2-81 first-compile-link fix-forward (10th lesson-(i) ring,
+  // lesson-(g.4) Discipline-shape): raw T* const wrapped in
+  // raw_ptr<T> for chromium-style lint compliance. Mirrors
+  // CV2-75's 9d33276 fix-forward precedent.
+  const raw_ptr<WebContentsResolver> resolver_;
+  const raw_ptr<const CbHeldModifierState> shared_modifiers_;
 };
 
 }  // namespace cloud_browser

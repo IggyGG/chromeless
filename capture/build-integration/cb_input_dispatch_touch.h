@@ -90,6 +90,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch_mouse.h"
@@ -290,7 +291,8 @@ class CbInputDispatchTouch : public CbInputDispatchDelegate {
   blink::WebTouchEvent last_assembled_event_for_testing_;
 
   // M4 R2 resolver. Caller-owned; can be null pre-R2.
-  WebContentsResolver* const resolver_;
+  // CV2-81 first-compile-link fix-forward (lesson-(g.4) Discipline-shape).
+  const raw_ptr<WebContentsResolver> resolver_;
 };
 
 }  // namespace cloud_browser

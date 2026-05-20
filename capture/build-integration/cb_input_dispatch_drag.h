@@ -132,6 +132,7 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch_mouse.h"
@@ -406,11 +407,14 @@ class CbInputDispatchDrag : public CbInputDispatchDelegate {
   bool brought_to_front_ = false;
 
   // M4 R2 resolver. Caller-owned; can be null pre-R2.
-  WebContentsResolver* const resolver_;
+  // CV2-81 first-compile-link fix-forward (10th lesson-(i) ring,
+  // lesson-(g.4) Discipline-shape): wrapped in raw_ptr<T> for
+  // chromium-style lint compliance per 9d33276 precedent.
+  const raw_ptr<WebContentsResolver> resolver_;
 
   // M4 R3 mouse instance — read-only, for the shared held-modifier
   // state. Caller-owned; can be null in unit tests.
-  const CbInputDispatchMouse* const mouse_;
+  const raw_ptr<const CbInputDispatchMouse> mouse_;
 
   // dragOperationsMask. Hard-coded `kCopy` per v1; promoted to a
   // member so a v2 modifier-driven path can flip it without touching
