@@ -110,6 +110,15 @@ CbAuraPlatformData::CbAuraPlatformData(const gfx::Size& initial_size) {
             << " / after=" << bounds_after.ToString()
             << " / requested=" << gfx::Rect(initial_size).ToString();
 
+  // Mirror content_shell's Aura platform path: showing the root Window is not
+  // enough on its own; the WindowTreeHost must also be shown so Aura hit
+  // testing can route points to the WebContents child instead of returning no
+  // event handler. Without this, RenderWidgetHostViewAura receives renderer
+  // cursor updates but UpdateCursorIfOverSelf() stops at
+  // root_window->GetEventHandlerForPoint(...)=nullptr before it reaches
+  // CbCursorClient::SetCursor.
+  host_->Show();
+
   host_->window()->SetLayoutManager(
       std::make_unique<FillLayout>(host_->window()));
 
