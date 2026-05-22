@@ -296,7 +296,10 @@ async function main() {
     wait_window_ms: POST_SEND_WAIT_MS,
   });
 
-  try { pc.close(); ws.close(1000); } catch {}
+  // @roamhq/wrtc can segfault during process teardown after a successful
+  // cursor-path run. The verdict evidence is already emitted above; exit
+  // directly so automation records the PASS instead of a native finalizer crash.
+  process.exit(0);
 }
 
 main().catch((e) => {
