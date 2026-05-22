@@ -122,8 +122,11 @@ count_cb_clients() {
     echo "ERROR: pactl list short clients rc=${rc}: ${stderr_text}" >&2
     return 1
   fi
-  # Match common chromium / cb_audio_device_module client names.
-  printf '%s\n' "${out}" | grep -ciE 'chromium|cb_audio|cb_chromium' || true
+  # Match common chromium / cb_audio_device_module client names. Chromium 147's
+  # libwebrtc Pulse client currently reports application.name="WEBRTC
+  # VoiceEngine" and application.process.binary="chromeless"; keep the older
+  # names as accepted aliases for previous rv images.
+  printf '%s\n' "${out}" | grep -ciE 'chromium|cb_audio|cb_chromium|chromeless|WEBRTC VoiceEngine' || true
 }
 
 # Pre-teardown count.

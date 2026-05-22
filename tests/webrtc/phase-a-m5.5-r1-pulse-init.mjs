@@ -7,9 +7,14 @@
 // Phase 3.1 verdict (per /tmp/cv2-82-pulse-env-design.md):
 //
 //   PASS-shape (R1): all three conditions hold simultaneously
-//     1. LS_INFO  "constructed AND initialized"
-//                 "(kPlatformDefaultAudio / built-in PulseAudio)"
-//        PRESENT in cb-chromium stderr.
+//     1. Either:
+//        a) LS_INFO  "constructed AND initialized"
+//                    "(kPlatformDefaultAudio / built-in PulseAudio)"
+//           PRESENT in cb-chromium stderr, OR
+//        b) PulseAudio reports a WEBRTC VoiceEngine / chromeless client
+//           attached. Chromium 147 filters the LS_INFO line in some runtime
+//           builds even when the Pulse ADM has attached successfully, so the
+//           Pulse client list is the stable success-side signal.
 //     2. LS_WARNING line-110 of cb_audio_device_module.cc
 //        ("native AudioDeviceModule Init failed (PulseAudio server
 //         unreachable?); falling back to kDummyAudio (no-audio path)")
@@ -21,7 +26,7 @@
 //   FAIL-class:
 //     (a) line-110 LS_WARNING PRESENT  -> real-Pulse env broken
 //     (b) PCF LS_WARNING       PRESENT -> native-ADM nullptr fallback fired
-//     (c) LS_INFO              ABSENT  -> Init not reached
+//     (c) LS_INFO ABSENT and no Pulse client -> Init not reached
 //
 // R3 piggyback (per Phase 3.3):
 //
@@ -88,6 +93,8 @@ const LS_WARNING_LINE_110_RE =
   /native AudioDeviceModule Init failed[\s\S]{0,80}?PulseAudio server unreachable[\s\S]{0,80}?falling back to kDummyAudio/i;
 const LS_WARNING_PCF_RE =
   /native ADM unavailable[\s\S]{0,80}?falling back to kDummyAudio[\s\S]{0,40}?no-audio path/i;
+const PULSE_CLIENT_RE =
+  /(application\.name = "WEBRTC VoiceEngine"|application\.process\.binary = "chromeless"|\bchromeless\b)/i;
 
 // R3 piggyback: APM-enable markers from libwebrtc. Sourced from the
 // audio_processing module file names (echo_canceller, noise_suppressor,
@@ -214,10 +221,36 @@ async function readChromiumStderr(pod, namespace, variant) {
   return stdout;
 }
 
-function evaluateVerdict(log, variant) {
+async function readPulseClients(pod, namespace, variant) {
+  if (variant === "stub") {
+    return { ok: true, stdout: "", stderr: "" };
+  }
+  const { code, stdout, stderr } = await runKubectl(
+    [
+      "-n",
+      namespace,
+      "exec",
+      pod,
+      "-c",
+      "cb-chromium",
+      "--",
+      "env",
+      "PULSE_SERVER=unix:/run/user/1000/pulse/native",
+      "pactl",
+      "list",
+      "clients",
+    ],
+    { timeoutMs: 20_000 }
+  );
+  return { ok: code === 0, stdout, stderr };
+}
+
+function evaluateVerdict(log, variant, pulseClients) {
   const lsInfo = LS_INFO_RE.test(log);
   const warnLine110 = LS_WARNING_LINE_110_RE.test(log);
   const warnPcf = LS_WARNING_PCF_RE.test(log);
+  const pulseClientAttached =
+    !!pulseClients?.ok && PULSE_CLIENT_RE.test(pulseClients.stdout || "");
   const apmMatch = log.match(APM_MARKER_RE);
 
   // Stub variant inverts the expectation — there it is the defensive
@@ -238,9 +271,11 @@ function evaluateVerdict(log, variant) {
         `LS_INFO=${lsInfo}, line110=${warnLine110}, pcf=${warnPcf}`;
     }
   } else {
-    if (lsInfo && !warnLine110 && !warnPcf) {
+    if ((lsInfo || pulseClientAttached) && !warnLine110 && !warnPcf) {
       r1 = "PASS";
-      r1Reason = "PASS-shape triple satisfied";
+      r1Reason = lsInfo
+        ? "PASS-shape triple satisfied"
+        : "Pulse client attached (WEBRTC VoiceEngine / chromeless); LS_INFO is filtered in this build";
     } else if (warnLine110) {
       r1 = "FAIL";
       r1Reason =
@@ -252,10 +287,10 @@ function evaluateVerdict(log, variant) {
       r1Reason =
         "(b) PCF LS_WARNING PRESENT -> native ADM nullptr fallback fired " +
         "(regression of R1)";
-    } else if (!lsInfo) {
+    } else if (!lsInfo && !pulseClientAttached) {
       r1 = "FAIL";
       r1Reason =
-        "(c) LS_INFO ABSENT -> Init not reached (verify cb-chromium " +
+        "(c) LS_INFO ABSENT and no Pulse client -> Init not reached (verify cb-chromium " +
         "process is up: kubectl exec ... supervisorctl status chromium)";
     } else {
       r1 = "FAIL";
@@ -283,7 +318,15 @@ function evaluateVerdict(log, variant) {
     r1Reason,
     r3,
     r3Reason,
-    observed: { lsInfo, warnLine110, warnPcf, apmMatch: apmMatch ? apmMatch[0] : null },
+    observed: {
+      lsInfo,
+      pulseClientAttached,
+      pulseClientProbeOk: !!pulseClients?.ok,
+      pulseClientProbeError: pulseClients?.ok ? null : (pulseClients?.stderr || null),
+      warnLine110,
+      warnPcf,
+      apmMatch: apmMatch ? apmMatch[0] : null,
+    },
   };
 }
 
@@ -330,7 +373,8 @@ async function main() {
     process.exit(1);
   }
 
-  const result = evaluateVerdict(log, variant);
+  const pulseClients = await readPulseClients(opts.pod, opts.namespace, variant);
+  const result = evaluateVerdict(log, variant, pulseClients);
   const verdict = result.r1 === "PASS" ? "PASS" : "FAIL";
 
   process.stdout.write(
