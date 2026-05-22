@@ -127,8 +127,8 @@ class CbInputDispatchCompositeDelegate : public CbInputDispatchDelegate {
   // typed dispatchers' constructors. MUST outlive this object.
   explicit CbInputDispatchCompositeDelegate(WebContentsResolver* resolver);
 
-  CbInputDispatchCompositeDelegate(
-      const CbInputDispatchCompositeDelegate&) = delete;
+  CbInputDispatchCompositeDelegate(const CbInputDispatchCompositeDelegate&) =
+      delete;
   CbInputDispatchCompositeDelegate& operator=(
       const CbInputDispatchCompositeDelegate&) = delete;
 
@@ -149,17 +149,16 @@ class CbInputDispatchCompositeDelegate : public CbInputDispatchDelegate {
   // in CbInputDispatchDelegate are no-ops; the typed dispatchers
   // inherit those defaults today, so this fan-out is currently
   // free of side effects but keeps the contract complete.
-  void OnInputEventDecodeError(
-      const std::string& reason,
-      const std::string& raw_payload_preview) override;
-  void OnInputEventUnknownType(const std::string& type,
-                               int64_t seq) override;
+  void OnInputEventDecodeError(const std::string& reason,
+                               const std::string& raw_payload_preview) override;
+  void OnInputEventUnknownType(const std::string& type, int64_t seq) override;
 
   // Test seams — expose the typed dispatchers so unit tests can poke
   // at per-dispatcher state (e.g. CbInputDispatchMouse::last_pointer()
   // for R10's snapshot assertions) without re-instantiating the
   // composite. Never used by production code.
-  CbInputDispatchMouse* mouse_for_testing() { return mouse_.get(); }
+  CbInputDispatchMouse* mouse_dispatch() { return mouse_.get(); }
+  CbInputDispatchMouse* mouse_for_testing() { return mouse_dispatch(); }
   const CbLastPointerState* last_pointer_state() const {
     return mouse_ ? mouse_->last_pointer_state() : nullptr;
   }
@@ -167,9 +166,7 @@ class CbInputDispatchCompositeDelegate : public CbInputDispatchDelegate {
   CbInputDispatchIme* ime_for_testing() { return ime_.get(); }
   CbInputDispatchTouch* touch_for_testing() { return touch_.get(); }
   CbInputDispatchDrag* drag_for_testing() { return drag_.get(); }
-  CbInputDispatchClipboard* clipboard_for_testing() {
-    return clipboard_.get();
-  }
+  CbInputDispatchClipboard* clipboard_for_testing() { return clipboard_.get(); }
 
  private:
   // Shared modifier state injected into R4 (keyboard) + R8 (clipboard).

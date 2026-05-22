@@ -6,9 +6,10 @@
 // This harness keeps the stimulus narrow: it uses CDP only to create a
 // rendered `cursor:pointer` target and to call Cb.startFrameSinkCapture, then
 // sends one `mouse_move` envelope over the WebRTC input data channel. The
-// verdict remains external: grep cb-chromium stderr for
-// `CbCursorClient::SetCursor.*new_type=2` and, on diagnostic images,
-// `CV2-83-PROBE`.
+// primary verdict is the cursor DataChannel itself: a v1 cursor envelope with
+// shape="pointer" proves SetCursor reached CbCursorClient, crossed the
+// CbCursorXyJoin/CbCursorDcEmitter chain, and arrived at the answerer.
+// cb-chromium stderr greps remain useful secondary evidence.
 
 import WebSocket from "ws";
 import wrtc from "@roamhq/wrtc";
@@ -118,9 +119,12 @@ async function prepareRendererTarget() {
   }
 }
 
-async function connectInputDataChannel() {
+async function connectNativeDataChannels() {
   const ws = new WebSocket(BROKER_URL);
   const pc = new RTCPeerConnection({ iceServers: [] });
+  const dcs = new Map();
+  const opened = new Set();
+  const cursorMessages = [];
 
   let resolveHandshake;
   let rejectHandshake;
@@ -152,19 +156,39 @@ async function connectInputDataChannel() {
   pc.ondatachannel = (ev) => {
     const dc = ev.channel;
     log("info", "ondatachannel", { label: dc.label, readyState: dc.readyState });
-    if (dc.label !== "input") {
-      return;
+    dcs.set(dc.label, dc);
+    if (dc.label === "cursor") {
+      dc.onmessage = (msg) => {
+        const raw = typeof msg.data === "string" ? msg.data : String(msg.data || "");
+        let parsed = null;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          // Keep raw for diagnostics; validation happens after the wait window.
+        }
+        cursorMessages.push({ raw, parsed });
+        log("ok", "cursor DC message", { raw, parsed });
+      };
     }
     const onOpen = () => {
-      log("ok", "input DC open");
-      clearTimeout(handshakeTimeout);
-      resolveHandshake({ pc, ws, inputDc: dc });
+      opened.add(dc.label);
+      log("ok", `${dc.label} DC open`, { opened: [...opened] });
+      if (opened.has("input") && opened.has("cursor")) {
+        clearTimeout(handshakeTimeout);
+        resolveHandshake({
+          pc,
+          ws,
+          inputDc: dcs.get("input"),
+          cursorDc: dcs.get("cursor"),
+          cursorMessages,
+        });
+      }
     };
     if (dc.readyState === "open") {
       onOpen();
     }
     dc.onopen = onOpen;
-    dc.onerror = (err) => log("err", "input DC error", { err: String(err?.error || err) });
+    dc.onerror = (err) => log("err", `${dc.label} DC error`, { err: String(err?.error || err) });
   };
 
   ws.on("open", () => send({ type: "hello", from: "client" }));
@@ -224,7 +248,11 @@ async function main() {
         },
       }
     : await prepareRendererTarget();
-  const { pc, ws, inputDc } = await connectInputDataChannel();
+  const { pc, ws, inputDc, cursorDc, cursorMessages } =
+    await connectNativeDataChannels();
+  if (!inputDc || !cursorDc) {
+    throw new Error("native DC handshake resolved without input/cursor channels");
+  }
 
   const envelope = {
     v: 1,
@@ -243,8 +271,27 @@ async function main() {
 
   await new Promise((r) => setTimeout(r, POST_SEND_WAIT_MS));
 
-  log("ok", "WIRE VERDICT: native cursor stimulus complete; verdict derived externally", {
-    grep_for_pass: "CbCursorClient::SetCursor.*new_type=2",
+  const cursorEnvelope = cursorMessages.find((msg) => {
+    const env = msg.parsed;
+    return env
+      && env.v === 1
+      && env.type === "cursor"
+      && env.data
+      && env.data.visible === true
+      && env.data.shape === "pointer";
+  });
+  if (!cursorEnvelope) {
+    log("err", "CV2-83-VERDICT FAIL — no pointer cursor envelope received", {
+      cursor_messages: cursorMessages,
+      expected: { v: 1, type: "cursor", data: { visible: true, shape: "pointer" } },
+    });
+    try { pc.close(); ws.close(1011); } catch {}
+    process.exit(4);
+  }
+
+  log("ok", "CV2-83-VERDICT PASS — pointer cursor envelope received", {
+    cursor_envelope: cursorEnvelope.parsed,
+    grep_for_secondary_pass: "CbCursorClient::SetCursor.*new_type=2",
     grep_for_probe: "CV2-83-PROBE",
     wait_window_ms: POST_SEND_WAIT_MS,
   });

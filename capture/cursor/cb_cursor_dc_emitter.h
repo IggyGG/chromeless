@@ -70,10 +70,10 @@
 //
 // # CbDataChannelHostObserver pause/resume
 //
-// R6 also implements CbDataChannelHostObserver and registers itself
-// as the host-level observer (via the host's ctor; the host accepts a
-// single host-level observer pointer). It uses two state-change
-// signals:
+// R6 also implements CbDataChannelHostObserver and receives cursor
+// state changes through a per-channel DataChannelObserver shim bound
+// with CbDataChannelHost::BindObserver(kCursor, ...). It uses two
+// state-change signals:
 //
 //   1. OnChannelStateChanged(kCursor, kOpen) → flips
 //      cursor_dc_open_ = true, drains any pending JoinedCursorState
@@ -113,13 +113,12 @@
 // UI thread with the embedder-provided ui_task_runner_ so the
 // emitter's mutable state (cursor_dc_open_, pending_) is touched on
 // a single sequence. The hop is mandatory — the host's docs say
-// observer fan-out happens on the signaling-task-runner sequence
+// observer fan-out happens on the libwebrtc signaling thread
 // and the embedder must not assume that's the UI thread.
 //
-// The CbDataChannelHost::Send call itself is internally thread-safe
-// (its header documents the auto-hop to the signaling thread), so
-// R6 can call Send() directly from the UI thread without an
-// intermediate PostTask.
+// Cursor sends use CbDataChannelHost::SendAsync. Cursor callbacks are
+// delivered from Aura's UI-thread cursor path, so R6 must not block
+// that callback while waiting for the WebRTC signaling thread.
 //
 // # Lifetime
 //
@@ -158,6 +157,7 @@
 #define CAPTURE_CURSOR_CB_CURSOR_DC_EMITTER_H_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -254,12 +254,11 @@ class CbCursorDcEmitter : public signaling::CbDataChannelHostObserver {
   // Lifetime: all four pointers are caller-owned and MUST outlive
   // this object. None may be null. The task runner is also caller-
   // owned; typically content::GetUIThreadTaskRunner({}).
-  CbCursorDcEmitter(
-      CbCursorXyJoin* xy_join,
-      EmitPolicy* emit_policy,
-      EnvelopeAssembler* envelope_assembler,
-      signaling::CbDataChannelHost* dc_host,
-      scoped_refptr<base::SequencedTaskRunner> ui_task_runner);
+  CbCursorDcEmitter(CbCursorXyJoin* xy_join,
+                    EmitPolicy* emit_policy,
+                    EnvelopeAssembler* envelope_assembler,
+                    signaling::CbDataChannelHost* dc_host,
+                    scoped_refptr<base::SequencedTaskRunner> ui_task_runner);
 
   CbCursorDcEmitter(const CbCursorDcEmitter&) = delete;
   CbCursorDcEmitter& operator=(const CbCursorDcEmitter&) = delete;
@@ -311,6 +310,8 @@ class CbCursorDcEmitter : public signaling::CbDataChannelHostObserver {
   void OnJoinedForTesting(const JoinedCursorState& joined);
 
  private:
+  class CursorChannelObserver;
+
   // R3 emit-callback handler. Fires synchronously on the UI thread
   // from R1's CursorChangeCallback dispatch. Runs the four-step
   // Decide → AllocSeq → encode → Send → OnEmitted dance.
@@ -320,21 +321,27 @@ class CbCursorDcEmitter : public signaling::CbDataChannelHostObserver {
   // cursor_dc_open_, drains pending_ on kOpen, replays the
   // EmitPolicy's ReplayBuffer() onto the wire on the kClosed →
   // kOpen edge.
-  void OnChannelStateChanged_Ui(
-      signaling::CbDcLabel label,
-      webrtc::DataChannelInterface::DataState state);
+  void OnChannelStateChanged_Ui(signaling::CbDcLabel label,
+                                webrtc::DataChannelInterface::DataState state);
 
   // Encode |joined| via the R2 assembler with the supplied wire seq
-  // and write the result to the kCursor channel. Returns true on
-  // successful host->Send. Sets *out_json (when non-null) to the
-  // encoded bytes for tracing.
+  // and post the write to the kCursor channel on the libwebrtc
+  // signaling thread. |record_emitted| controls whether a successful
+  // queue result should update the policy's OnEmitted bookkeeping
+  // (normal emits yes, replayed snapshots no).
   //
-  // Increments stats_.emits or stats_.send_errors. Does NOT call
-  // OnEmitted on the policy — caller (OnJoined) owns the policy
-  // bookkeeping order.
-  bool EncodeAndSend(const JoinedCursorState& joined,
-                     int64_t seq,
-                     std::string* out_json);
+  // Increments stats_.send_errors synchronously on encode failure;
+  // async send completion updates stats_.emits / stats_.send_errors.
+  void EncodeAndSendAsync(const JoinedCursorState& joined,
+                          int64_t seq,
+                          bool record_emitted);
+
+  // UI-thread reply for EncodeAndSendAsync.
+  void OnSendComplete(JoinedCursorState joined,
+                      int64_t seq,
+                      bool record_emitted,
+                      bool ok,
+                      std::string message);
 
   // Replay the EmitPolicy's ReplayBuffer() onto the wire after a
   // kClosed → kOpen transition. Each replayed snapshot reuses its
@@ -353,10 +360,16 @@ class CbCursorDcEmitter : public signaling::CbDataChannelHostObserver {
   const raw_ptr<EnvelopeAssembler> envelope_assembler_;
   const raw_ptr<signaling::CbDataChannelHost> dc_host_;
   const scoped_refptr<base::SequencedTaskRunner> ui_task_runner_;
+  std::unique_ptr<CursorChannelObserver> cursor_channel_observer_;
 
   // True when the kCursor channel has hit kOpen and has not yet
   // transitioned to kClosing/kClosed. Touched on the UI thread only.
   bool cursor_dc_open_ = false;
+
+  // Distinguishes the initial kConnecting -> kOpen transition from a
+  // real reconnect. The initial open drains pending state but must not
+  // also replay the just-recorded policy buffer.
+  bool cursor_dc_ever_opened_ = false;
 
   // Whether BindAndStart has run + Stop has not. Lets dtor + Stop
   // be idempotent.

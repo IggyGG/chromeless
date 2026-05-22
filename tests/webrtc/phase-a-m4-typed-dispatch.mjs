@@ -94,7 +94,8 @@
 //        leaked into another dispatcher's payload-handler.
 //
 // HALT classes (image-level regression, not CV2-81 defect):
-//   H1   handshake timeout (4 DCs don't all open) → CV2-77 DC-creation
+//   H1   handshake timeout (expected native DCs don't all open) →
+//        CV2-77/CV2-83 DC-creation regression
 //        regression (route to build-czar). Same as M4 R1 harness exit 2.
 //   H2   no input DC → CV2-77 input DC name regression (route to build-czar)
 //   H3   CDP attach fail → CV2-87 / SwANGLE-era CDP unavailability (route
@@ -184,7 +185,7 @@ const STIMULUS_TARGET_HTML =
   + '</body></html>';
 const STIMULUS_TARGET_URL = process.env.STIMULUS_TARGET_URL
   || ("data:text/html," + encodeURIComponent(STIMULUS_TARGET_HTML));
-const EXPECTED_LABELS = Object.freeze(["input", "cursor", "clipboard", "files"]);
+const EXPECTED_LABELS = Object.freeze(["input", "stats", "cursor", "clipboard", "files"]);
 
 function log(level, msg, extra) {
   const line = { ts: new Date().toISOString(), level, msg, ...(extra || {}) };
@@ -345,7 +346,7 @@ async function main() {
     process.exit(5);
   }
 
-  // ───── Phase 1: WebRTC handshake (4 DCs open) ─────
+  // ───── Phase 1: WebRTC handshake (native DC set opens) ─────
   const ws = new WebSocket(BROKER_URL);
   const pc = new RTCPeerConnection({ iceServers: [] });
 
@@ -379,7 +380,9 @@ async function main() {
       openedLabels.add(dc.label);
       log("ok", `DC.onopen "${dc.label}"`, { opened: [...openedLabels] });
       if (EXPECTED_LABELS.every((l) => openedLabels.has(l))) {
-        log("ok", "handshake complete — all 4 DCs open");
+        log("ok", "handshake complete — all expected DCs open", {
+          expected_labels: EXPECTED_LABELS,
+        });
         clearTimeout(handshakeTimeout);
         resolveHandshake();
       }

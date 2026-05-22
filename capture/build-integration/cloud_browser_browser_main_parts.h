@@ -89,8 +89,19 @@ namespace audio {
 class CbAudioLifecycle;
 }  // namespace audio
 
+namespace cursor {
+class CbCursorDcEmitter;
+class EmitPolicy;
+class EnvelopeAssembler;
+}  // namespace cursor
+
+namespace signaling {
+class CbDataChannelHost;
+}  // namespace signaling
+
 class CbAuraPlatformData;
 class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
+class CbCursorXyJoin;
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
 
@@ -359,69 +370,41 @@ class CloudBrowserBrowserMainParts
   std::unique_ptr<cloud_browser::signaling::CbOffererDriver> offerer_driver_;
   webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
 
-  // CV2-69 F7-skinny — answerer-facing DataChannels. Created by
-  // PreMainMessageLoopRun step 8 via pc->CreateDataChannelOrError;
-  // held as scoped_refptr to keep alive past the create call (the
-  // PC also holds a strong ref internally). The DC HANDLER BINDING
-  // (M4 R1 input dispatch / M5 R6 cursor / M6 R2 clipboard relay /
-  // M6 R3 file-upload relay) is deferred to a follow-up R#.
+  // CV2-83 — answerer-facing DataChannels, owned by CbDataChannelHost
+  // instead of four ad-hoc scoped_refptr members. The host creates the
+  // canonical channel labels before the first offer and owns the
+  // observer trampoline that fans messages/state to per-channel
+  // consumers.
   //
   // Labels are wire-contract — must match the chromeless/client
   // TypeScript answerer's hardcoded labels EXACTLY (Trap #1):
-  //   input_dc_      → channel label "input"
-  //   cursor_dc_     → channel label "cursor"
-  //   clipboard_dc_  → channel label "clipboard"
-  //   files_dc_      → channel label "files" (NOT "file-upload" —
-  //                    the FILE name is file-upload.ts but the
-  //                    CHANNEL is "files"; the trap was the
-  //                    file-name-vs-channel-name conflation)
-  webrtc::scoped_refptr<webrtc::DataChannelInterface> input_dc_;
-  webrtc::scoped_refptr<webrtc::DataChannelInterface> cursor_dc_;
-  webrtc::scoped_refptr<webrtc::DataChannelInterface> clipboard_dc_;
-  webrtc::scoped_refptr<webrtc::DataChannelInterface> files_dc_;
+  //   CbDcLabel::kInput     → channel label "input"
+  //   CbDcLabel::kCursor    → channel label "cursor"
+  //   CbDcLabel::kClipboard → channel label "clipboard"
+  //   CbDcLabel::kFiles     → channel label "files" (NOT
+  //                           "file-upload" — the FILE name is
+  //                           file-upload.ts but the CHANNEL is
+  //                           "files")
+  std::unique_ptr<cloud_browser::signaling::CbDataChannelHost> dc_host_;
   // ============== END CV2-69 ==============
 
   // ============== CV2-75 RUNTIME-WIRE (Ring 2) ==============
   //
   // M4/M5/M6 consumer attachment — the gap that surfaced as the
-  // architectural Phase-A failure: CV2-69 created the 4 DCs but never
+  // architectural Phase-A failure: CV2-69 created the DCs but never
   // bound observers, so inbound SCTP frames sat in libwebrtc's read
-  // buffer with no handler (silent no-op for any functional test).
-  // CV2-75 closes that gap by instantiating one consumer per DC +
-  // calling RegisterObserver in the PreMainMessageLoopRun DC-creation
-  // blocks.
+  // buffer with no handler. CV2-75 closed input/clipboard/files;
+  // CV2-83 adopts CbDataChannelHost and wires the cursor egress path.
   //
-  // PATH A choice (vs Path B via CbDataChannelHost): cb_dc_host
-  // hardcodes the wire label "file-upload" in its enum but the
-  // portal answerer routes on "files" (Trap #1, hard-fixed by CV2-69
-  // at the four direct CreateDataChannelOrError call sites above);
-  // additionally cb_dc_host creates all 5 channels including "stats"
-  // unconditionally, which would scope-creep the 5th-DC wire-contract
-  // change beyond CV2-75. Both are deferred to follow-up tickets:
-  //   * cv2/m6-r1-stats-dc — 5th DC + CbStatsRelay + portal-spec
-  //   * cv2/m3-r5-dc-host-adoption — kFiles rename DONE (CV2-77 sub-
-  //     fix 4); 5-DC vs parameterized CreateOutboundChannels decision
-  //     remains + enables CbCursorDcEmitter M5 R6 (which already takes
-  //     `signaling::CbDataChannelHost*`)
+  // Consumers attached here:
+  //   * CbInputDispatch        → kInput     (M4 R1, CV2-41)
+  //   * CbCursorDcEmitter      → kCursor    (M5 R6, CV2-24)
+  //   * CbClipboardRelay       → kClipboard (M6 R2, CV2-34)
+  //   * CbFileUploadRelay      → kFiles     (M6 R3, CV2-35)
   //
-  // The 3 consumers attached here:
-  //   * CbInputDispatch        → input_dc_     (M4 R1, CV2-41)
-  //   * CbClipboardRelay       → clipboard_dc_ (M6 R2, CV2-34)
-  //   * CbFileUploadRelay      → files_dc_     (M6 R3, CV2-35)
-  //
-  // Not-here-because-already-wired-elsewhere:
-  //   * CbCursorClient (M5 R1, CV2-19) — owned by CbAuraPlatformData
-  //     (cb_aura_platform_data.cc:152-153 constructs + registers via
-  //     aura::client::SetCursorClient in aura_'s ctor). The brief's
-  //     "compiled but not instantiated" claim was off-by-one for this
-  //     class — true at the main_parts layer but false at aura_'s
-  //     layer. Re-instantiating at main_parts would double-register.
-  //
-  // Deferred to follow-up tickets:
-  //   * CbStatsRelay (M6 R1, CV2-33) — needs a 5th "stats" DC not in
-  //     the current F7-skinny set (see cv2/m6-r1-stats-dc).
-  //   * CbCursorDcEmitter (M5 R6, CV2-24) — needs cb_dc_host adoption
-  //     (see cv2/m3-r5-dc-host-adoption).
+  // Deferred to follow-up: CbStatsRelay (M6 R1, CV2-33). The "stats"
+  // channel may open, but without a relay its inbound frames are
+  // intentionally dropped by the host's unbound observer slot.
   //
   // Construction-arg notes (read the consumer headers for full
   // contracts):
@@ -447,10 +430,10 @@ class CloudBrowserBrowserMainParts
   //     production-WS decision.
   //
   // Teardown ordering: explicit LIFO in PostMainMessageLoopRun
-  // BEFORE the F7-skinny DC ref drops. UnregisterObserver each DC
-  // first (must outlive the DC ref drop to avoid use-after-free in
-  // libwebrtc's late callbacks); then drop the consumer state; then
-  // the existing CV2-69 LIFO drops the DCs themselves.
+  // BEFORE the DataChannel host drops its DC refs. Unbind each
+  // observer first (must outlive the DC ref drop to avoid
+  // use-after-free in libwebrtc's late callbacks); then drop the
+  // consumer state; then the existing CV2-69 LIFO drops the peer.
   // CV2-81 — M4 R2 active-WebContents resolver. Single instance per
   // browser process; held as a value member so the address is stable
   // across the lifetime of `this`. Threaded into the composite delegate
@@ -463,6 +446,10 @@ class CloudBrowserBrowserMainParts
   CbActiveWebContentsResolver active_webcontents_resolver_;
   std::unique_ptr<CbInputDispatchCompositeDelegate> input_delegate_;
   std::unique_ptr<CbInputDispatch> input_dispatch_;
+  std::unique_ptr<CbCursorXyJoin> cursor_xy_join_;
+  std::unique_ptr<cursor::EmitPolicy> cursor_emit_policy_;
+  std::unique_ptr<cursor::EnvelopeAssembler> cursor_envelope_assembler_;
+  std::unique_ptr<cursor::CbCursorDcEmitter> cursor_dc_emitter_;
   std::unique_ptr<CbClipboardBridgeWsClient> clipboard_ws_;
   std::unique_ptr<CbClipboardRelay> clipboard_relay_;
   std::unique_ptr<CbFileUploadBridgeWsClient> file_upload_ws_;

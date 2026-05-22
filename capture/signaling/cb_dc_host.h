@@ -28,9 +28,9 @@
 // (CbDataChannelHost::ChannelObserver, private impl) that the host
 // registers as the channel's *real* observer; the trampoline forwards
 // OnMessage / OnBufferedAmountChange / IsOkToCallOnTheNetworkThread
-// to the consumer-bound observer verbatim, and additionally hops
-// OnStateChange onto the signaling-task-runner sequence to update
-// host state + notify the host-level observer.
+// to the consumer-bound observer verbatim, and additionally updates
+// host state + notifies the host-level observer on the libwebrtc
+// signaling thread.
 //
 // # The five channels (labels are exact + case-sensitive)
 //
@@ -81,14 +81,11 @@
 // The host is constructed + driven from the embedder's UI thread (the
 // thread that drives CbOffererDriver). All consumer-facing Send()
 // calls accept calls from any thread — internally they hop onto the
-// libwebrtc signaling thread via PostTask onto signaling_task_runner_
-// before touching dc->Send(), because DataChannelInterface::Send is
-// only safe on the signaling thread. ChannelObserver::OnMessage and
-// OnBufferedAmountChange arrive on the libwebrtc signaling thread and
-// are forwarded synchronously to the consumer; OnStateChange is
-// additionally hopped onto signaling_task_runner_ to update host
-// state + notify the host observer, but the consumer-facing forward
-// also fires synchronously on the signaling thread.
+// libwebrtc signaling thread via rtc::Thread::BlockingCall before
+// touching dc->Send(), because DataChannelInterface::Send is only safe
+// on the signaling thread. ChannelObserver::OnMessage,
+// OnBufferedAmountChange, and OnStateChange arrive on the libwebrtc
+// signaling thread and are forwarded synchronously to the consumer.
 //
 // # Lifetime
 //
@@ -145,12 +142,14 @@
 #include "api/rtc_error.h"
 #include "api/scoped_refptr.h"
 #include "base/containers/flat_set.h"
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/synchronization/lock.h"
 #include "base/task/sequenced_task_runner.h"
 #include "rtc_base/copy_on_write_buffer.h"
+#include "rtc_base/thread.h"
 
 namespace cloud_browser::signaling {
 
@@ -202,9 +201,8 @@ const char* LabelToString(CbDcLabel label);
 // channel surfaces as an explicit log rather than silent acceptance).
 std::optional<CbDcLabel> LabelFromString(std::string_view s);
 
-// Optional host-level observer. Fires on the signaling-task-runner
-// sequence the host was constructed with (typically libwebrtc's
-// signaling thread; the embedder may inject its own runner in tests).
+// Optional host-level observer. Fires on the libwebrtc signaling thread
+// the host was constructed with.
 //
 // The primary client is M6 R1's CbWebrtcEventEmitter — it wires
 // EmitDcOpened() in OnChannelStateChanged(label, kOpen), and the
@@ -242,6 +240,8 @@ class CbDataChannelHostObserver {
 // enum — guarded as defence-in-depth), and the libwebrtc-native error
 // returned by DataChannelInterface::Send for any send-time failure.
 using SendResult = webrtc::RTCError;
+using SendAsyncCallback =
+    base::OnceCallback<void(bool ok, std::string message)>;
 
 // CbDataChannelHost
 //
@@ -254,7 +254,7 @@ using SendResult = webrtc::RTCError;
 //
 //   auto host = std::make_unique<CbDataChannelHost>(
 //       driver.pc(), m6_event_emitter.get(),
-//       signaling_task_runner);
+//       signaling_thread);
 //   host->CreateOutboundChannels();           // before first offer
 //   host->BindObserver(CbDcLabel::kInput,  input_dispatch.get());
 //   host->BindObserver(CbDcLabel::kStats,  stats_relay.get());
@@ -275,18 +275,14 @@ class CbDataChannelHost {
   //     thread's late callbacks.
   // |host_observer|: optional CbDataChannelHostObserver — typically
   //     points at M6 R1's CbWebrtcEventEmitter. nullptr is fine.
-  // |signaling_task_runner|: the task runner the host uses for its
-  //     own state mutations + host_observer fan-out. In production
-  //     this is libwebrtc's signaling thread; in unit tests, a
-  //     TestSimpleTaskRunner. NOTE: this is NOT the embedder's UI
-  //     thread — the host deliberately stays on the signaling side
-  //     so Send() doesn't need a hop in the hot path. The embedder's
-  //     UI thread interacts with the host only via the public Send()
-  //     + BindObserver() APIs, which are thread-safe.
-  CbDataChannelHost(
-      webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
-      CbDataChannelHostObserver* host_observer,
-      scoped_refptr<base::SequencedTaskRunner> signaling_task_runner);
+  // |signaling_thread|: the libwebrtc signaling thread that owns the
+  //     PeerConnection proxy. The host marshals all PC/DC mutations
+  //     through this thread with BlockingCall so embedder/UI callers
+  //     never touch DataChannelInterface from the wrong sequence.
+  //     Must outlive the host.
+  CbDataChannelHost(webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+                    CbDataChannelHostObserver* host_observer,
+                    webrtc::Thread* signaling_thread);
 
   CbDataChannelHost(const CbDataChannelHost&) = delete;
   CbDataChannelHost& operator=(const CbDataChannelHost&) = delete;
@@ -311,9 +307,9 @@ class CbDataChannelHost {
   // succeeds slot-side but no traffic ever flows because the
   // libwebrtc DC doesn't exist.
   //
-  // Thread: caller's thread; internally posts onto signaling_task_-
-  // runner_ for the actual CreateDataChannelOrError calls because
-  // libwebrtc requires PC mutation on the signaling thread. Returns
+  // Thread: caller's thread; internally hops onto signaling_thread_
+  // for the actual CreateDataChannelOrError calls because libwebrtc
+  // requires PC mutation on the signaling thread. Returns
   // synchronously — the embedder's call site BLOCKS on the post.
   // TODO(M3-R5-async-create): if benchmarks show the synchronous
   // wait is too long (>10ms for 5 channels), split into a
@@ -341,8 +337,7 @@ class CbDataChannelHost {
   // internal fan-out vector. R1 design is single-observer because
   // every existing consumer wants single-observer semantics and the
   // multi-observer case has no concrete user yet.
-  void BindObserver(CbDcLabel label,
-                    webrtc::DataChannelObserver* observer);
+  void BindObserver(CbDcLabel label, webrtc::DataChannelObserver* observer);
 
   // True iff CreateOutboundChannels() succeeded AND the channel for
   // |label| reached kOpen at least once. Used by the embedder's
@@ -353,8 +348,8 @@ class CbDataChannelHost {
   // True iff every channel has hit kOpen at least once. Latched.
   bool AllChannelsOpen() const;
 
-  // Text-frame emit on |label|. Hops onto signaling_task_runner_ if
-  // the caller isn't already on it, then invokes dc->Send(buf,
+  // Text-frame emit on |label|. Hops onto signaling_thread_ if the
+  // caller isn't already on it, then invokes dc->Send(buf,
   // is_binary=false). Returns kNone on a successful POST to the
   // libwebrtc Send queue (NOT a successful network deliver — the
   // SCTP stack does the rest fire-and-forget); returns kInvalidState
@@ -366,6 +361,16 @@ class CbDataChannelHost {
   // emit when the SCTP buffer balloons. R1 ships fire-and-forget;
   // M5 R3 will add the gate.
   SendResult Send(CbDcLabel label, std::string_view text);
+
+  // Async text-frame emit. Posts the actual DataChannel send onto
+  // signaling_thread_ and returns immediately to the caller. |callback|
+  // is invoked on |reply_runner| with the same queued/not-queued
+  // semantics as Send(). Use this from UI hot paths that may run
+  // inside Chromium posted-task scopes that disallow blocking waits.
+  void SendAsync(CbDcLabel label,
+                 std::string text,
+                 scoped_refptr<base::SequencedTaskRunner> reply_runner,
+                 SendAsyncCallback callback);
 
   // Binary-frame emit on |label|. Same threading + error model as
   // text Send; calls dc->Send(buf, is_binary=true). The binary path
@@ -396,7 +401,7 @@ class CbDataChannelHost {
   };
 
   // Hop helper — RAII-style: invokes |fn| synchronously if we're
-  // already on signaling_task_runner_, else PostTask + wait.
+  // already on signaling_thread_, else BlockingCall + wait.
   void RunOnSignalingSync(base::OnceClosure fn);
 
   // ChannelObserver callbacks — invoked on signaling thread.
@@ -412,7 +417,7 @@ class CbDataChannelHost {
   // PC. The dtor runs Shutdown() first, which is belt-and-braces.
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
   raw_ptr<CbDataChannelHostObserver> host_observer_;
-  scoped_refptr<base::SequencedTaskRunner> signaling_task_runner_;
+  raw_ptr<webrtc::Thread> signaling_thread_;
 
   // obs_lock_ guards observer slot mutation in BindObserver +
   // observer slot read in the ChannelObserver trampoline. Held only

@@ -89,6 +89,7 @@ class CbAuraPlatformData {
   ~CbAuraPlatformData();
 
   aura::WindowTreeHost* host() { return host_.get(); }
+  CbCursorClient* cursor_client() { return cursor_client_.get(); }
 
  private:
   // Declaration order matters — destruction is reverse. Clients that

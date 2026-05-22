@@ -25,29 +25,32 @@
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
-#include "capture/build-integration/cb_aura_platform_data.h"
-#include "capture/build-integration/cb_headless_screen.h"  // CV2-78
-#include "capture/build-integration/cloud_browser_browser_context.h"
-#include "capture/build-integration/cloud_browser_pcf.h"
 #include "capture/audio/cb_audio_lifecycle.h"
 #include "capture/audio/cb_audio_options.h"
 #include "capture/audio/cb_audio_track.h"
+#include "capture/build-integration/cb_aura_platform_data.h"
+#include "capture/build-integration/cb_cursor_xy_join.h"
+#include "capture/build-integration/cb_headless_screen.h"  // CV2-78
+#include "capture/build-integration/cloud_browser_browser_context.h"
+#include "capture/build-integration/cloud_browser_pcf.h"
+#include "capture/cursor/cb_cursor_dc_emitter.h"
+#include "capture/cursor/cb_cursor_emit_policy.h"
+#include "capture/cursor/cb_cursor_envelope.h"
 #include "capture/framesink-capturer/capturer.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
-#include "capture/signaling/cb_ice_config.h"      // CV2-69
-#include "capture/signaling/cb_offerer_driver.h"  // CV2-69
+#include "capture/signaling/cb_dc_host.h"
+#include "capture/signaling/cb_ice_config.h"           // CV2-69
+#include "capture/signaling/cb_offerer_driver.h"       // CV2-69
 #include "capture/signaling/cb_signaling_ws_client.h"  // CV2-69
-#include "capture/signaling/cb_wire_envelope.h"   // CV2-69
+#include "capture/signaling/cb_wire_envelope.h"        // CV2-69
 #include "components/viz/host/host_frame_sink_manager.h"
+#include "content/browser/compositor/surface_utils.h"  // nogncheck — same
 #include "content/public/browser/browser_thread.h"     // CV2-75
 #include "content/public/browser/storage_partition.h"  // CV2-69
-#include "content/browser/compositor/surface_utils.h"  // nogncheck — same
                                                        // visibility caveat
-                                                       // as cb_devtools_agent.cc;
-                                                       // patches/0005 unblock
-                                                       // applies here too.
-#include "mojo/public/cpp/bindings/remote.h"
-#include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
+// as cb_devtools_agent.cc;
+// patches/0005 unblock
+// applies here too.
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_socket_factory.h"
 #include "content/public/browser/navigation_controller.h"
@@ -56,12 +59,14 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/result_codes.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/ip_address.h"
 #include "net/base/net_errors.h"
 #include "net/log/net_log_source.h"
 #include "net/socket/server_socket.h"
 #include "net/socket/tcp_server_socket.h"
 #include "rtc_base/thread.h"
+#include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/page_transition_types.h"
@@ -85,13 +90,14 @@ constexpr int kBackLog = 10;
 // Required for cb-browserless deployment so the kubelet readiness
 // probe + ClusterIP service routing can reach the listener — when
 // hardcoded to loopback, only intra-pod curl works.
-class ConfigurableTCPServerSocketFactory : public content::DevToolsSocketFactory {
+class ConfigurableTCPServerSocketFactory
+    : public content::DevToolsSocketFactory {
  public:
   ConfigurableTCPServerSocketFactory(net::IPAddress address, uint16_t port)
       : address_(std::move(address)), port_(port) {}
 
-  ConfigurableTCPServerSocketFactory(const ConfigurableTCPServerSocketFactory&) =
-      delete;
+  ConfigurableTCPServerSocketFactory(
+      const ConfigurableTCPServerSocketFactory&) = delete;
   ConfigurableTCPServerSocketFactory& operator=(
       const ConfigurableTCPServerSocketFactory&) = delete;
 
@@ -100,13 +106,14 @@ class ConfigurableTCPServerSocketFactory : public content::DevToolsSocketFactory
     auto socket =
         std::make_unique<net::TCPServerSocket>(nullptr, net::NetLogSource());
     const std::string address_str = address_.ToString();
-    if (socket->ListenWithAddressAndPort(address_str, port_, kBackLog) != net::OK) {
-      LOG(ERROR) << "DevTools HTTP listener: failed to bind "
-                 << address_str << ":" << port_;
+    if (socket->ListenWithAddressAndPort(address_str, port_, kBackLog) !=
+        net::OK) {
+      LOG(ERROR) << "DevTools HTTP listener: failed to bind " << address_str
+                 << ":" << port_;
       return nullptr;
     }
-    LOG(INFO) << "DevTools HTTP listener bound on "
-              << address_str << ":" << port_;
+    LOG(INFO) << "DevTools HTTP listener bound on " << address_str << ":"
+              << port_;
     return socket;
   }
 
@@ -148,8 +155,7 @@ net::IPAddress ReadRemoteDebuggingAddress() {
   if (!cmd.HasSwitch("remote-debugging-address")) {
     return net::IPAddress::IPv4Localhost();
   }
-  const std::string value =
-      cmd.GetSwitchValueASCII("remote-debugging-address");
+  const std::string value = cmd.GetSwitchValueASCII("remote-debugging-address");
   net::IPAddress parsed;
   if (!parsed.AssignFromIPLiteral(value)) {
     LOG(WARNING) << "Invalid --remote-debugging-address value '" << value
@@ -193,8 +199,7 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
     content::WebContents* web_contents,
     viz::FrameSinkId frame_sink_id) {
   if (!web_contents || !frame_sink_id.is_valid()) {
-    active_webcontents_resolver_.SetActiveCapture(nullptr,
-                                                  viz::FrameSinkId());
+    active_webcontents_resolver_.SetActiveCapture(nullptr, viz::FrameSinkId());
     LOG(WARNING) << "CV2-81: active capture cleared by invalid "
                     "SetActiveCapture input";
     return;
@@ -321,9 +326,10 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // WebContents::WasShown() below makes Chromium treat the page as visible, but
   // it does not show the Aura container window created by WebContentsViewAura.
   // The renderer can still lay out in that state, yet Aura hit testing returns
-  // no event handler because the parent container is hidden; cursor routing then
-  // stops before CbCursorClient::SetCursor. Show the native view explicitly so
-  // root_window->GetEventHandlerForPoint(...) can descend into the RWHV child.
+  // no event handler because the parent container is hidden; cursor routing
+  // then stops before CbCursorClient::SetCursor. Show the native view
+  // explicitly so root_window->GetEventHandlerForPoint(...) can descend into
+  // the RWHV child.
   if (aura::Window* native_view = initial_web_contents_->GetNativeView()) {
     native_view->Show();
   }
@@ -357,9 +363,9 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // Post-fix expectation: HasFocus=true, ViewBounds=non-zero.
   if (auto* rwhv = initial_web_contents_->GetRenderWidgetHostView()) {
     LOG(INFO) << "CloudBrowserBrowserMainParts: boot WebContents post-Focus "
-                 "RWHV bounds=" << rwhv->GetViewBounds().ToString()
-              << " hasFocus=" << rwhv->HasFocus()
-              << " visibility="
+                 "RWHV bounds="
+              << rwhv->GetViewBounds().ToString()
+              << " hasFocus=" << rwhv->HasFocus() << " visibility="
               << static_cast<int>(initial_web_contents_->GetVisibility());
   } else {
     LOG(WARNING) << "CloudBrowserBrowserMainParts: boot WebContents has "
@@ -377,10 +383,11 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   //    side-effect is what we actually want (the handle itself is
   //    discarded — the host keeps a global registry of all live agent
   //    hosts and that's what /json walks).
-  std::ignore = content::DevToolsAgentHost::GetOrCreateFor(
-      initial_web_contents_.get());
+  std::ignore =
+      content::DevToolsAgentHost::GetOrCreateFor(initial_web_contents_.get());
 
-  // 4. DevTools HTTP listener — bind <--remote-debugging-address>:<--remote-debugging-port>.
+  // 4. DevTools HTTP listener — bind
+  // <--remote-debugging-address>:<--remote-debugging-port>.
   StartDevToolsHttpHandler();
 
   // 5. Browser-process PeerConnectionFactory (ChromelessV2 M1 —
@@ -456,8 +463,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
           [] { return CreateCloudBrowserDefaultAudioDeviceModule(); });
   webrtc::AudioDeviceModule* adm_debug = adm.get();
   pcf_ = CreateCloudBrowserPcf(network_thread_.get(), worker_thread_.get(),
-                               signaling_thread_.get(), env,
-                               std::move(adm));
+                               signaling_thread_.get(), env, std::move(adm));
   CHECK(pcf_) << "CreateCloudBrowserPcf returned null — the browser-process "
               << "PeerConnectionFactory failed to construct. ChromelessV2 M1 "
               << "requires a non-null PCF for the M2+ pipeline.";
@@ -510,8 +516,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // that builds capturer+R3 atomically with the right binding. Build
   // structurally complete; M2 R5 is the runtime-correctness gate.
   auto capturer = std::make_unique<CloudBrowserFrameSinkCapturer>(
-      std::move(producer),
-      base::DoNothing());
+      std::move(producer), base::DoNothing());
 
   cb_track_source_ =
       webrtc::make_ref_counted<CloudBrowserFrameSinkVideoTrackSource>(
@@ -589,14 +594,14 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "CV2-69: LoadIceConfigFromEnv() returned nullopt — contract "
          "violation (default-STUN fallback should never miss). Inspect "
          "cb_ice_config.cc for env-parse regression.";
-  LOG(INFO) << "CV2-69 ICE: " << ice_cfg->summary.stun << " stun, "
-            << ice_cfg->summary.turn << " turn, "
-            << ice_cfg->summary.other << " other; transport_policy="
-            << (ice_cfg->transport_policy ==
-                        webrtc::PeerConnectionInterface::IceTransportsType::
-                            kRelay
-                    ? "relay"
-                    : "all");
+  LOG(INFO)
+      << "CV2-69 ICE: " << ice_cfg->summary.stun << " stun, "
+      << ice_cfg->summary.turn << " turn, " << ice_cfg->summary.other
+      << " other; transport_policy="
+      << (ice_cfg->transport_policy ==
+                  webrtc::PeerConnectionInterface::IceTransportsType::kRelay
+              ? "relay"
+              : "all");
 
   webrtc::PeerConnectionInterface::RTCConfiguration rtc_config;
   rtc_config.servers = std::move(ice_cfg->servers);
@@ -604,8 +609,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
 
   audio_lifecycle_ = std::make_unique<audio::CbAudioLifecycle>(
       /*downstream=*/this,
-      /*observer=*/nullptr,
-      base::SequencedTaskRunner::GetCurrentDefault(),
+      /*observer=*/nullptr, base::SequencedTaskRunner::GetCurrentDefault(),
       adm_debug);
 
   // F5 step 5 — Construct R4 CbOffererDriver. observer is the M5.5
@@ -628,12 +632,10 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // re-test#3 CreateOffer crash). signaling_thread_ is torn down
   // strictly after offerer_driver_ in PostMainMessageLoopRun, so the
   // raw pointer the driver holds stays valid for the driver's life.
-  offerer_driver_ =
-      std::make_unique<cloud_browser::signaling::CbOffererDriver>(
-          pcf_, signaling_thread_.get(), ws_client_.get(),
-          std::move(rtc_config),
-          /*observer=*/audio_lifecycle_.get(),
-          base::SequencedTaskRunner::GetCurrentDefault());
+  offerer_driver_ = std::make_unique<cloud_browser::signaling::CbOffererDriver>(
+      pcf_, signaling_thread_.get(), ws_client_.get(), std::move(rtc_config),
+      /*observer=*/audio_lifecycle_.get(),
+      base::SequencedTaskRunner::GetCurrentDefault());
 
   // F5 step 6 — Start the offerer + open the WS dial. Order:
   // offerer_driver_->Start() first creates the PeerConnection
@@ -643,19 +645,87 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   offerer_driver_->Start();
   ws_client_->Connect();
 
+  // CV2-83 / cb_dc_host adoption — create and bind the native
+  // DataChannels before adding media transceivers. The first media
+  // AddTransceiver triggers the offer; the DCs must already exist so
+  // the initial SDP carries the complete native channel set.
+  if (offerer_driver_->pc()) {
+    dc_host_ = std::make_unique<cloud_browser::signaling::CbDataChannelHost>(
+        offerer_driver_->pc(),
+        /*host_observer=*/nullptr, signaling_thread_.get());
+    const webrtc::RTCError dc_create = dc_host_->CreateOutboundChannels();
+    if (!dc_create.ok()) {
+      LOG(ERROR) << "CV2-83: CbDataChannelHost channel creation failed: "
+                 << dc_create.message();
+    } else {
+      LOG(INFO) << "CV2-83: CbDataChannelHost created native outbound "
+                   "DataChannels";
+    }
+
+    input_delegate_ = std::make_unique<CbInputDispatchCompositeDelegate>(
+        &active_webcontents_resolver_);
+    if (screen_) {
+      screen_->SetLastPointerSource(input_delegate_->last_pointer_state());
+    }
+    input_dispatch_ = std::make_unique<CbInputDispatch>(
+        content::GetUIThreadTaskRunner({}), input_delegate_.get());
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kInput,
+                           input_dispatch_.get());
+    LOG(INFO) << "CV2-81: \"input\" DC observer = CbInputDispatch "
+                 "(composite delegate = R3..R8 typed pipeline)";
+
+    if (aura_ && aura_->cursor_client()) {
+      cursor_xy_join_ = std::make_unique<CbCursorXyJoin>(
+          aura_->cursor_client(), input_delegate_->mouse_dispatch());
+      cursor_xy_join_->Initialize();
+      cursor_emit_policy_ = std::make_unique<cursor::EmitPolicy>();
+      cursor_envelope_assembler_ =
+          std::make_unique<cursor::EnvelopeAssembler>();
+      cursor_dc_emitter_ = std::make_unique<cursor::CbCursorDcEmitter>(
+          cursor_xy_join_.get(), cursor_emit_policy_.get(),
+          cursor_envelope_assembler_.get(), dc_host_.get(),
+          content::GetUIThreadTaskRunner({}));
+      cursor_dc_emitter_->BindAndStart();
+      LOG(INFO) << "CV2-83: CbCursorXyJoin + CbCursorEmitPolicy + "
+                   "CbCursorDcEmitter wired to \"cursor\" DataChannel";
+    } else {
+      LOG(ERROR) << "CV2-83: cannot wire cursor emitter — Aura cursor "
+                    "client is missing";
+    }
+
+    clipboard_ws_ = std::make_unique<CbClipboardBridgeWsClient>(
+        /*label=*/"inbound",
+        /*url=*/"off", content::GetIOThreadTaskRunner({}));
+    clipboard_relay_ =
+        std::make_unique<CbClipboardRelay>(std::move(clipboard_ws_));
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kClipboard,
+                           clipboard_relay_.get());
+    LOG(INFO) << "CV2-75: \"clipboard\" DC observer = "
+                 "CbClipboardRelay (WS disabled / url=off)";
+
+    file_upload_ws_ = std::make_unique<CbFileUploadBridgeWsClient>(
+        /*url=*/"off", content::GetIOThreadTaskRunner({}));
+    file_upload_relay_ = std::make_unique<CbFileUploadRelay>(
+        std::move(file_upload_ws_), dc_host_.get());
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
+                           file_upload_relay_.get());
+    LOG(INFO) << "CV2-75: \"files\" DC observer = "
+                 "CbFileUploadRelay (WS disabled / url=off, "
+                 "outbound dc_host enabled)";
+  }
+
   if (offerer_driver_->pc()) {
     webrtc::PeerConnectionFactoryInterface* pcf = pcf_.get();
     webrtc::PeerConnectionInterface* pc = offerer_driver_->pc();
     SendOnlyAudioTransceiver audio_bindings =
         signaling_thread_->BlockingCall([pcf, pc] {
-          return AddSendOnlyAudioTransceiver(
-              pcf, pc, BuildMediaAudioOptions(), "cb-audio-0");
+          return AddSendOnlyAudioTransceiver(pcf, pc, BuildMediaAudioOptions(),
+                                             "cb-audio-0");
         });
     if (audio_lifecycle_) {
-      audio_lifecycle_->AdoptBindings(
-          std::move(audio_bindings.source),
-          std::move(audio_bindings.track),
-          std::move(audio_bindings.transceiver));
+      audio_lifecycle_->AdoptBindings(std::move(audio_bindings.source),
+                                      std::move(audio_bindings.track),
+                                      std::move(audio_bindings.transceiver));
     }
   } else {
     LOG(ERROR) << "CV2-82: offerer driver has no PC after Start(); "
@@ -678,8 +748,8 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   } else {
     webrtc::RtpTransceiverInit video_init;
     video_init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
-    auto tx_result = offerer_driver_->pc()->AddTransceiver(
-        video_track_, video_init);
+    auto tx_result =
+        offerer_driver_->pc()->AddTransceiver(video_track_, video_init);
     if (!tx_result.ok()) {
       LOG(ERROR) << "CV2-69: AddTransceiver(video, sendonly) failed: "
                  << tx_result.error().message()
@@ -692,169 +762,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
     }
   }
 
-  // F7-skinny step 8 — Create the four answerer-facing DataChannels.
-  // Phase A acceptance per the v3 narrative requires DC handshake
-  // (offer → ICE → DC opens). Each CreateDataChannel adds an m=
-  // application line to the offer SDP; the answerer-side client
-  // (chromeless/client/src/*.ts) listens for each via the canonical
-  // label strings:
-  //
-  //   "input"      — client/src/input.ts wraps "input" channel
-  //                  (RTCDataChannel for mouse/key/scroll/IME/touch).
-  //   "cursor"     — client/src/cursor.ts subscribes to "cursor"
-  //                  (cb_cursor_dc_emitter outbound feed).
-  //   "clipboard"  — client/src/clipboard.ts wraps "clipboard"
-  //                  (independent from "input"; copy/paste relay).
-  //   "files"      — client/src/file-upload.ts wraps "files"
-  //                  (NOT "file-upload" — the FILE is file-upload.ts
-  //                  but the CHANNEL is "files"; this is Trap #1 in
-  //                  the v3 narrative, hard-fixed here at source).
-  //
-  // The DC handler binding (M4 R1 input dispatch, M5 R6 cursor emit,
-  // M6 R2 clipboard relay, M6 R3 file-upload relay) is deferred to a
-  // follow-up R# — those classes need to be wired to the DataChannel
-  // observer interface and to the active WebContents resolver.
-  // Phase A only needs the DCs to OPEN; inbound data dispatch is
-  // Phase B/full-bring-up scope.
-  //
-  // We hold scoped_refptr<DataChannelInterface> for each one to keep
-  // the underlying libwebrtc data channel alive past this scope. The
-  // PC also holds a strong ref internally, but pin them here so a
-  // future handler-binding R# can grab them via main_parts accessors
-  // without re-resolving via pc->GetDataChannel.
-  if (offerer_driver_->pc()) {
-    auto* pc = offerer_driver_->pc();
-    webrtc::DataChannelInit dc_init;
-    dc_init.ordered = true;
-    // Per CreateDataChannelOrError return shape (libwebrtc v118+):
-    // returns RTCErrorOr<scoped_refptr<DataChannelInterface>>.
-    {
-      auto r = pc->CreateDataChannelOrError("input", &dc_init);
-      if (r.ok()) {
-        input_dc_ = r.MoveValue();
-        LOG(INFO) << "CV2-69 DC: created \"input\"";
-        // CV2-81 (M4 typed-dispatcher runtime-wire) — bind
-        // CbInputDispatch as the DC observer. Delegate is the
-        // M4 typed-pipeline CbInputDispatchCompositeDelegate which
-        // fans the envelope into R3 (mouse) / R4 (keyboard) / R5
-        // (IME) / R6 (touch) / R7 (drag) / R8 (clipboard). Closes
-        // the 24h+ gap where CV2-75 R1's CbInputLoggingDelegate
-        // stand-in was the production runtime while R2..R10 lived
-        // as deadweight source. The composite holds a raw pointer
-        // to active_webcontents_resolver_ (M4 R2); the resolver is
-        // a value member of this class so its address is stable
-        // for the composite's lifetime.
-        //
-        // CbInputDispatch hops to UI via the injected runner before
-        // touching delegate state — thread discipline matches the
-        // CV2-69 lessons (no BlockingCall from network thread; no
-        // raw-ptr capture-at-construction for capture-lifecycle
-        // objects, which the composite delegate isn't).
-        input_delegate_ =
-            std::make_unique<CbInputDispatchCompositeDelegate>(
-                &active_webcontents_resolver_);
-        if (screen_) {
-          screen_->SetLastPointerSource(input_delegate_->last_pointer_state());
-        }
-        input_dispatch_ = std::make_unique<CbInputDispatch>(
-            content::GetUIThreadTaskRunner({}),
-            input_delegate_.get());
-        input_dc_->RegisterObserver(input_dispatch_.get());
-        LOG(INFO) << "CV2-81: \"input\" DC observer = CbInputDispatch "
-                     "(composite delegate = R3..R8 typed pipeline)";
-      } else {
-        LOG(ERROR) << "CV2-69 DC \"input\" creation failed: "
-                   << r.error().message();
-      }
-    }
-    {
-      auto r = pc->CreateDataChannelOrError("cursor", &dc_init);
-      if (r.ok()) {
-        cursor_dc_ = r.MoveValue();
-        LOG(INFO) << "CV2-69 DC: created \"cursor\"";
-        // CV2-75: cursor DC observer NOT bound at this layer. The DC
-        // emit side is M5 R6 (CbCursorDcEmitter, CV2-24) which takes
-        // a `signaling::CbDataChannelHost*` and is therefore deferred
-        // along with the cb_dc_host adoption (see follow-up
-        // cv2/m3-r5-dc-host-adoption). The aura cursor-client side
-        // (M5 R1 / CbCursorClient) is ALREADY wired by
-        // CbAuraPlatformData (cb_aura_platform_data.cc:152-153) — not
-        // a CV2-75 deliverable.
-        // In the interim, inbound frames on "cursor" are dropped by
-        // libwebrtc's default (no-observer) path — which is fine for
-        // CV2-75 scope because the v1 "cursor" channel is one-way EMIT
-        // from browser to portal (no inbound traffic by contract per
-        // cb_dc_host.h:46-50).
-        LOG(INFO) << "CV2-75: \"cursor\" DC observer DEFERRED to M5 R6 "
-                     "(needs cb_dc_host adoption — out of scope here)";
-      } else {
-        LOG(ERROR) << "CV2-69 DC \"cursor\" creation failed: "
-                   << r.error().message();
-      }
-    }
-    {
-      auto r = pc->CreateDataChannelOrError("clipboard", &dc_init);
-      if (r.ok()) {
-        clipboard_dc_ = r.MoveValue();
-        LOG(INFO) << "CV2-69 DC: created \"clipboard\"";
-        // CV2-75 (M6 R2) — bind CbClipboardRelay as the DC observer.
-        // WS client is constructed in `disabled()` mode (url="off")
-        // per cb_clipboard_relay.h:207 — the WS production backend
-        // has a TODO(M6-R2-ws-backend) and the v1 production-WS
-        // choice isn't locked yet. The relay OnMessage path still
-        // fires + logs; bridge POST is short-circuited.
-        clipboard_ws_ = std::make_unique<CbClipboardBridgeWsClient>(
-            /*label=*/"inbound",
-            /*url=*/"off",
-            content::GetIOThreadTaskRunner({}));
-        clipboard_relay_ = std::make_unique<CbClipboardRelay>(
-            std::move(clipboard_ws_));
-        clipboard_dc_->RegisterObserver(clipboard_relay_.get());
-        LOG(INFO) << "CV2-75: \"clipboard\" DC observer = "
-                     "CbClipboardRelay (WS disabled / url=off)";
-      } else {
-        LOG(ERROR) << "CV2-69 DC \"clipboard\" creation failed: "
-                   << r.error().message();
-      }
-    }
-    {
-      // Trap #1 hard-fix: channel label is "files" (matches
-      // client/src/file-upload.ts:3 "Wraps the \"files\" RTCDataChannel"),
-      // NOT "file-upload". The emitter file is file-upload.ts; the
-      // channel itself is "files".
-      auto r = pc->CreateDataChannelOrError("files", &dc_init);
-      if (r.ok()) {
-        files_dc_ = r.MoveValue();
-        LOG(INFO) << "CV2-69 DC: created \"files\" (Trap #1 label-exact)";
-        // CV2-75 (M6 R3) — bind CbFileUploadRelay as the DC observer.
-        // Same "off"-URL pattern as clipboard above; the WS production
-        // backend has a TODO(M6-R3-ws-backend). Observer-binding
-        // proves the architectural runtime wire; functional WS path
-        // lands in a follow-up.
-        file_upload_ws_ = std::make_unique<CbFileUploadBridgeWsClient>(
-            /*url=*/"off",
-            content::GetIOThreadTaskRunner({}));
-        // dc_host=nullptr: CV2-75 doesn't adopt cb_dc_host (see header
-        // comment). cb_file_upload_relay.h:362-364 explicitly supports
-        // nullptr — the inbound direction (DC → bridge) still works;
-        // the outbound (bridge reply → DC) drops frames silently. With
-        // WS in "off" mode no replies will arrive anyway, so the
-        // dropped-no-host counter stays at 0. cb_dc_host adoption is
-        // the cv2/m3-r5-dc-host-adoption follow-up.
-        file_upload_relay_ = std::make_unique<CbFileUploadRelay>(
-            std::move(file_upload_ws_),
-            /*dc_host=*/nullptr);
-        files_dc_->RegisterObserver(file_upload_relay_.get());
-        LOG(INFO) << "CV2-75: \"files\" DC observer = "
-                     "CbFileUploadRelay (WS disabled / url=off, "
-                     "outbound dc_host=null — M5R6/cb_dc_host deferred)";
-      } else {
-        LOG(ERROR) << "CV2-69 DC \"files\" creation failed: "
-                   << r.error().message();
-      }
-    }
-  }
-  // ============== END CV2-69 F5 + F6 + F7-skinny ==============
+  // ============== END CV2-69 / CV2-83 native peer setup ==============
 
   return content::RESULT_CODE_NORMAL_EXIT;
 }
@@ -894,11 +802,11 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // is the SignalingClientObserver; its dtor runs strictly after
   // ws_client_'s dtor (member init reverse order at process exit).
 
-  // ============== CV2-75 TEARDOWN (LIFO, RUNS FIRST) ==============
+  // ============== CV2-75/CV2-83 TEARDOWN (LIFO, RUNS FIRST) ==============
   //
-  // Unregister DC observers + drop consumer state BEFORE the F7-skinny
-  // DC scoped_refptr drops below. Same drop-the-observer-before-its-
-  // producer discipline as the existing CV2-69 ordering comment.
+  // Unbind DC observers + drop consumer state BEFORE dc_host_ drops its
+  // DataChannel refs. Same drop-the-observer-before-its-producer
+  // discipline as the existing CV2-69 ordering comment.
   //
   // libwebrtc's DataChannel keeps a raw pointer back via
   // RegisterObserver/UnregisterObserver; if we drop the consumer
@@ -906,23 +814,25 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // OnStateChange / OnMessage callback that races libwebrtc's
   // internal teardown lands on freed memory. UnregisterObserver MUST
   // outlive the consumer dtor.
-  if (files_dc_ && file_upload_relay_) {
-    files_dc_->UnregisterObserver();
+  if (dc_host_) {
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
+                           nullptr);
   }
   file_upload_relay_.reset();
   file_upload_ws_.reset();
-  if (clipboard_dc_ && clipboard_relay_) {
-    clipboard_dc_->UnregisterObserver();
+  if (dc_host_) {
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kClipboard,
+                           nullptr);
   }
   clipboard_relay_.reset();
   clipboard_ws_.reset();
-  // No cursor DC observer registered (M5 R6 deferred); nothing to
-  // UnregisterObserver on cursor_dc_. CbCursorClient is owned by
-  // CbAuraPlatformData (aura_); its dtor handles
-  // SetCursorClient(window, nullptr) + cursor_client_.reset() on
-  // aura_'s teardown later in this function.
-  if (input_dc_ && input_dispatch_) {
-    input_dc_->UnregisterObserver();
+  cursor_dc_emitter_.reset();
+  cursor_envelope_assembler_.reset();
+  cursor_emit_policy_.reset();
+  cursor_xy_join_.reset();
+  if (dc_host_) {
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kInput,
+                           nullptr);
   }
   input_dispatch_.reset();
   // CV2-81: input_delegate_ is now CbInputDispatchCompositeDelegate
@@ -936,12 +846,9 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
     screen_->SetRootWindow(nullptr);
   }
   input_delegate_.reset();
-  // ============== END CV2-75/CV2-81 TEARDOWN ==============
+  dc_host_.reset();
+  // ============== END CV2-75/CV2-81/CV2-83 TEARDOWN ==============
 
-  files_dc_ = nullptr;
-  clipboard_dc_ = nullptr;
-  cursor_dc_ = nullptr;
-  input_dc_ = nullptr;
   video_track_ = nullptr;
   if (offerer_driver_) {
     if (audio_lifecycle_) {
@@ -1096,13 +1003,11 @@ void CloudBrowserBrowserMainParts::OnEnvelope(
 void CloudBrowserBrowserMainParts::OnClosed(uint16_t code,
                                             std::string_view reason) {
   // SignalingClientObserver path: WS close (RFC 6455 code + reason).
-  LOG(INFO) << "CV2-69 ws_client: closed code=" << code
-            << " reason=" << reason;
+  LOG(INFO) << "CV2-69 ws_client: closed code=" << code << " reason=" << reason;
 }
 
 void CloudBrowserBrowserMainParts::OnError(std::string_view reason) {
-  LOG(ERROR) << "CV2-69 ws_client: transport/handshake/codec error: "
-             << reason
+  LOG(ERROR) << "CV2-69 ws_client: transport/handshake/codec error: " << reason
              << " — client is half-broken; offerer driver should "
                 "Close() and a follow-up R# should add R7 reconnect "
                 "supervision.";
@@ -1131,8 +1036,7 @@ void CloudBrowserBrowserMainParts::OnRenegotiationCompleted() {
 void CloudBrowserBrowserMainParts::OnClosed(std::string_view reason) {
   // OffererDriverObserver path: offerer-driven session-ended event
   // (distinct from the WS-client OnClosed two-arg form above).
-  LOG(INFO) << "CV2-69 offerer_driver: session closed, reason="
-            << reason;
+  LOG(INFO) << "CV2-69 offerer_driver: session closed, reason=" << reason;
 }
 
 void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {

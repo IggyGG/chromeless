@@ -61,8 +61,7 @@ std::optional<std::string> EncodeWithSeq(EnvelopeAssembler* assembler,
   // Use Assemble (not AssembleAndEncode) so we can stamp the seq
   // before the JSON write. Wall #2 above explains why; the R2 seq
   // overload is the proper fix.
-  V1EnvelopeView view = assembler->Assemble(joined.type,
-                                            joined.visible,
+  V1EnvelopeView view = assembler->Assemble(joined.type, joined.visible,
                                             /*now_epoch_ms=*/0);
   view.seq = seq;
 
@@ -81,6 +80,41 @@ std::optional<std::string> EncodeWithSeq(EnvelopeAssembler* assembler,
 }
 
 }  // namespace
+
+class CbCursorDcEmitter::CursorChannelObserver
+    : public webrtc::DataChannelObserver {
+ public:
+  explicit CursorChannelObserver(CbCursorDcEmitter* emitter)
+      : emitter_(emitter) {}
+
+  CursorChannelObserver(const CursorChannelObserver&) = delete;
+  CursorChannelObserver& operator=(const CursorChannelObserver&) = delete;
+
+  ~CursorChannelObserver() override = default;
+
+  void OnStateChange() override {
+    if (!emitter_) {
+      return;
+    }
+    const bool open = emitter_->dc_host_->IsOpen(kLabel);
+    emitter_->OnChannelStateChanged(
+        kLabel, open ? webrtc::DataChannelInterface::DataState::kOpen
+                     : webrtc::DataChannelInterface::DataState::kClosed);
+  }
+
+  void OnMessage(const webrtc::DataBuffer& /*buffer*/) override {
+    // The cursor channel is browser -> client only in v1. Inbound frames
+    // on this label are client drift; drop them quietly to match the
+    // host's unbound-channel behaviour.
+  }
+
+  void OnBufferedAmountChange(uint64_t /*sent_data_size*/) override {}
+
+  bool IsOkToCallOnTheNetworkThread() override { return false; }
+
+ private:
+  raw_ptr<CbCursorDcEmitter> emitter_;
+};
 
 CbCursorDcEmitter::CbCursorDcEmitter(
     CbCursorXyJoin* xy_join,
@@ -123,76 +157,22 @@ void CbCursorDcEmitter::BindAndStart() {
 
   // R3's emit slot — single-occupancy by R3's contract. The bound
   // callback will fire synchronously on the UI thread (R3 header).
-  xy_join_->SetEmitCallback(base::BindRepeating(
-      &CbCursorDcEmitter::OnJoined, weak_factory_.GetWeakPtr()));
+  xy_join_->SetEmitCallback(base::BindRepeating(&CbCursorDcEmitter::OnJoined,
+                                                weak_factory_.GetWeakPtr()));
 
-  // M3 R5 has TWO observer surfaces:
-  //   1. A host-level CbDataChannelHostObserver passed into the
-  //      host's ctor. v1 production wires this to M6 R1's
-  //      CbWebrtcEventEmitter, not to R6.
-  //   2. Per-channel webrtc::DataChannelObserver via
-  //      host->BindObserver(label, observer). R6 binds itself here
-  //      so the kCursor state changes route to R6 without
-  //      contending for the host-level slot M6 wants.
-  //
-  // But R6's CbCursorDcEmitter implements the *host-level*
-  // observer surface (signaling::CbDataChannelHostObserver) — the
-  // host-level surface delivers state-change with a CbDcLabel
-  // attached, while the webrtc::DataChannelObserver per-channel
-  // surface only knows about the single channel it's bound to.
-  // The host-level surface is the cleaner seam for R6 because the
-  // OnChannelStateChanged signature already carries the label.
-  //
-  // Resolution (DRAFT decision): R6 attaches as the host-level
-  // observer. M6 R1's CbWebrtcEventEmitter — which today is the
-  // assumed sole consumer of the host-level slot — will need to
-  // either fan-out on its side or move to a per-channel observer
-  // when M6 R1 lands. M6 R1 is currently drafted but not yet
-  // integrated; clarifying the fan-out is a small follow-up that
-  // doesn't block R6 wiring.
-  //
-  // TODO(M5-R6-host-observer-fanout): coordinate with M6 R1's
-  // integration so the host-level observer slot has a fan-out
-  // adapter. Until then, R6 owning the slot is the right call
-  // because cursor open/close is on the M5 critical path and M6
-  // stats forwarding can wait.
-  //
-  // Practical note: the host's observer pointer is set at
-  // construction time (see CbDataChannelHost ctor docs). R6 cannot
-  // bind itself by calling a setter on the existing host instance
-  // in this DRAFT — the host has no SetHostObserver method. R6's
-  // BindAndStart instead registers a per-channel
-  // webrtc::DataChannelObserver via host->BindObserver(kCursor,
-  // shim), where `shim` is a thin DataChannelObserver that
-  // forwards OnStateChange into R6's OnChannelStateChanged.
-  //
-  // TODO(M5-R6-host-ctor-injection): teach CbDataChannelHost's
-  // ctor to accept the host-level observer as an optional
-  // post-construction setter, OR have CbOffererDriver wire the
-  // host with R6's observer pointer pre-construction once R6 is
-  // alive by then in the embedder bring-up order. Until then the
-  // per-channel observer trampoline below is sufficient for the
-  // open/close signals R6 needs.
-  //
-  // For the DRAFT: leave R6 as the host-level observer in TYPE
-  // (we inherit CbDataChannelHostObserver), and leave a TODO to
-  // wire it through the host ctor. The OnChannelStateChanged
-  // override is callable from either surface — the M6 R1 work
-  // will simply route into it.
-  //
-  // The per-channel observer trampoline is NOT installed in this
-  // DRAFT because it requires a separate DataChannelObserver
-  // adapter class that touches webrtc::DataBuffer types not yet
-  // pulled by R6's header dep set. The follow-up commit lands the
-  // adapter; the DRAFT documents the intent.
-  //
-  // TODO(M5-R6-per-channel-observer-trampoline): write a small
-  // DataChannelObserver adapter class (or use a lambda
-  // type-erasure via an anonymous-namespace class in this .cc)
-  // that forwards OnStateChange → OnChannelStateChanged with
-  // label=kCursor. Bind it via dc_host_->BindObserver(kCursor,
-  // &trampoline). Owned by this object; UnregisterObserver in
-  // Stop().
+  // R6 needs cursor-channel open/close but the host-level observer slot
+  // is reserved for session-wide consumers. Bind a tiny per-channel
+  // DataChannelObserver shim through CbDataChannelHost's normal
+  // observer fan-out; it converts OnStateChange into the labelled
+  // CbDataChannelHostObserver callback this class already implements.
+  cursor_channel_observer_ = std::make_unique<CursorChannelObserver>(this);
+  dc_host_->BindObserver(kLabel, cursor_channel_observer_.get());
+  if (dc_host_->IsOpen(kLabel)) {
+    OnChannelStateChanged(kLabel,
+                          webrtc::DataChannelInterface::DataState::kOpen);
+  }
+  LOG(INFO) << "CV2-83: CbCursorDcEmitter bound to cursor DataChannel "
+               "(per-channel state observer active)";
 }
 
 void CbCursorDcEmitter::Stop() {
@@ -211,12 +191,8 @@ void CbCursorDcEmitter::Stop() {
   // race-free.
   xy_join_->SetEmitCallback(JoinedCursorCallback());
 
-  // TODO(M5-R6-per-channel-observer-trampoline): once the
-  // trampoline lands, dc_host_->BindObserver(kCursor, nullptr) here
-  // to unwire the open/close stream before R6 destructs. Until
-  // then, R6's OnChannelStateChanged override is unreachable from
-  // the host (the host has no per-channel observer pointer to
-  // unset).
+  dc_host_->BindObserver(kLabel, nullptr);
+  cursor_channel_observer_.reset();
 
   // Invalidate weak pointers so any UI-task-runner hop posted
   // before Stop but not yet dispatched is dropped on dispatch.
@@ -235,9 +211,8 @@ void CbCursorDcEmitter::OnChannelStateChanged(
   // Fires on libwebrtc signaling thread. Hop to the UI thread so
   // emitter state mutation stays on a single sequence.
   ui_task_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(&CbCursorDcEmitter::OnChannelStateChanged_Ui,
-                     weak_factory_.GetWeakPtr(), label, state));
+      FROM_HERE, base::BindOnce(&CbCursorDcEmitter::OnChannelStateChanged_Ui,
+                                weak_factory_.GetWeakPtr(), label, state));
 }
 
 void CbCursorDcEmitter::OnChannelStateChanged_Ui(
@@ -255,8 +230,9 @@ void CbCursorDcEmitter::OnChannelStateChanged_Ui(
   using State = webrtc::DataChannelInterface::DataState;
   switch (state) {
     case State::kOpen: {
-      const bool was_closed = !cursor_dc_open_;
+      const bool reopen = cursor_dc_ever_opened_ && !cursor_dc_open_;
       cursor_dc_open_ = true;
+      cursor_dc_ever_opened_ = true;
 
       // Drain a single pending-while-closed edge, if any. Always do
       // this BEFORE replay so the most-recent state lands last on
@@ -272,7 +248,7 @@ void CbCursorDcEmitter::OnChannelStateChanged_Ui(
       // ReplayBuffer is empty there). Use was_closed AND a non-
       // empty replay buffer; this combination uniquely identifies
       // reconnect.
-      if (was_closed) {
+      if (reopen) {
         ReplayOnOpen();
       }
       break;
@@ -356,28 +332,12 @@ void CbCursorDcEmitter::OnJoined(const JoinedCursorState& joined) {
 
   // Decided emit, DC is open. Allocate the wire seq, encode, send.
   const int64_t seq = emit_policy_->AllocSeq();
-  std::string sent_json;
-  if (!EncodeAndSend(joined, seq, &sent_json)) {
-    // Send failure — don't call OnEmitted, don't update last_.
-    // Next equivalent joined edge will try again with a fresh seq
-    // (R4's AllocSeq doesn't roll back; the seq we just allocated
-    // is gone, leaving a one-seq gap in the wire stream).
-    //
-    // TODO(M5-R6-seq-rollback): R4 has no AllocSeqRollback() entry
-    // point. A wire-side gap is harmless for the cursor protocol
-    // (consumers don't reason about contiguity) but if a future
-    // channel needs gapless seqs, add the rollback to R4 and call
-    // it here.
-    return;
-  }
-
-  // Bookkeeping last per R4's contract.
-  emit_policy_->OnEmitted(joined);
+  EncodeAndSendAsync(joined, seq, /*record_emitted=*/true);
 }
 
-bool CbCursorDcEmitter::EncodeAndSend(const JoinedCursorState& joined,
-                                      int64_t seq,
-                                      std::string* out_json) {
+void CbCursorDcEmitter::EncodeAndSendAsync(const JoinedCursorState& joined,
+                                           int64_t seq,
+                                           bool record_emitted) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(ui_sequence_);
 
   std::optional<std::string> encoded =
@@ -390,24 +350,37 @@ bool CbCursorDcEmitter::EncodeAndSend(const JoinedCursorState& joined,
     LOG(WARNING) << "CbCursorDcEmitter: EncodeJson returned nullopt "
                     "for seq="
                  << seq;
-    return false;
+    return;
   }
 
-  // Internal-thread-safe per CbDataChannelHost::Send docs — no hop
-  // needed from the UI thread.
-  const signaling::SendResult result = dc_host_->Send(kLabel, *encoded);
-  if (!result.ok()) {
+  // Cursor edges are delivered synchronously on the UI thread from
+  // Aura's SetCursor path. Do not BlockingCall into libwebrtc from
+  // that posted-task context; queue the send onto the signaling thread
+  // and handle the queued/not-queued result back on UI.
+  dc_host_->SendAsync(
+      kLabel, std::move(*encoded), ui_task_runner_,
+      base::BindOnce(&CbCursorDcEmitter::OnSendComplete,
+                     weak_factory_.GetWeakPtr(), joined, seq, record_emitted));
+}
+
+void CbCursorDcEmitter::OnSendComplete(JoinedCursorState joined,
+                                       int64_t seq,
+                                       bool record_emitted,
+                                       bool ok,
+                                       std::string message) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(ui_sequence_);
+
+  if (!ok) {
     ++stats_.send_errors;
     LOG(WARNING) << "CbCursorDcEmitter: DC Send failed for seq=" << seq
-                 << " err=" << result.message();
-    return false;
+                 << " err=" << message;
+    return;
   }
 
   ++stats_.emits;
-  if (out_json) {
-    *out_json = std::move(*encoded);
+  if (record_emitted) {
+    emit_policy_->OnEmitted(joined);
   }
-  return true;
 }
 
 void CbCursorDcEmitter::ReplayOnOpen() {
@@ -441,8 +414,7 @@ void CbCursorDcEmitter::ReplayOnOpen() {
     // is the correct semantics for a replay: "this is the latest
     // known state as of now".
 
-    std::string ignored_json;
-    EncodeAndSend(joined, snap.seq, &ignored_json);
+    EncodeAndSendAsync(joined, snap.seq, /*record_emitted=*/false);
     // We DO NOT call OnEmitted on the policy for replays — the
     // snapshot is already in last_/replay_, recording it again
     // would be a no-op for last_ (same state) but would push a

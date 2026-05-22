@@ -11,10 +11,9 @@
 
 #include "base/check.h"
 #include "base/functional/bind.h"
+#include "base/location.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
-#include "base/synchronization/waitable_event.h"
-#include "base/task/bind_post_task.h"
 
 namespace cloud_browser::signaling {
 
@@ -77,8 +76,7 @@ const base::flat_set<CbDcLabel>& DefaultOutboundLabels() {
 // only — never across the consumer callback itself, so the consumer
 // can call back into host->Send() without deadlocking.
 // ---------------------------------------------------------------------
-class CbDataChannelHost::ChannelObserver
-    : public webrtc::DataChannelObserver {
+class CbDataChannelHost::ChannelObserver : public webrtc::DataChannelObserver {
  public:
   ChannelObserver(CbDataChannelHost* host, CbDcLabel label)
       : host_(host), label_(label) {}
@@ -168,12 +166,12 @@ class CbDataChannelHost::ChannelObserver
 CbDataChannelHost::CbDataChannelHost(
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
     CbDataChannelHostObserver* host_observer,
-    scoped_refptr<base::SequencedTaskRunner> signaling_task_runner)
+    webrtc::Thread* signaling_thread)
     : pc_(std::move(pc)),
       host_observer_(host_observer),
-      signaling_task_runner_(std::move(signaling_task_runner)) {
+      signaling_thread_(signaling_thread) {
   DCHECK(pc_);
-  DCHECK(signaling_task_runner_);
+  DCHECK(signaling_thread_);
   DETACH_FROM_SEQUENCE(public_api_sequence_);
 }
 
@@ -182,22 +180,12 @@ CbDataChannelHost::~CbDataChannelHost() {
 }
 
 void CbDataChannelHost::RunOnSignalingSync(base::OnceClosure fn) {
-  if (signaling_task_runner_->RunsTasksInCurrentSequence()) {
+  if (signaling_thread_->IsCurrent()) {
     std::move(fn).Run();
     return;
   }
-  base::WaitableEvent done(
-      base::WaitableEvent::ResetPolicy::MANUAL,
-      base::WaitableEvent::InitialState::NOT_SIGNALED);
-  signaling_task_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(
-          [](base::OnceClosure inner, base::WaitableEvent* d) {
-            std::move(inner).Run();
-            d->Signal();
-          },
-          std::move(fn), &done));
-  done.Wait();
+  base::OnceClosure closure = std::move(fn);
+  signaling_thread_->BlockingCall([&closure] { std::move(closure).Run(); });
 }
 
 webrtc::RTCError CbDataChannelHost::CreateOutboundChannels(
@@ -215,8 +203,7 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels(
   // worse error anyway; we surface a clearer one. The full ordering
   // contract lives in the header file-level comment.
   if (!pc_) {
-    return webrtc::RTCError(webrtc::RTCErrorType::INVALID_STATE,
-                            "PC is null");
+    return webrtc::RTCError(webrtc::RTCErrorType::INVALID_STATE, "PC is null");
   }
 
   webrtc::RTCError first_error;
@@ -253,8 +240,8 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels(
           }
           const std::string label_str = LabelToString(label);
 
-          auto dc_or_err = self->pc_->CreateDataChannelOrError(
-              label_str, &init);
+          auto dc_or_err =
+              self->pc_->CreateDataChannelOrError(label_str, &init);
           if (!dc_or_err.ok()) {
             LOG(ERROR) << "[M3-R5] CreateDataChannelOrError(" << label_str
                        << ") failed: " << dc_or_err.error().message();
@@ -266,11 +253,10 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels(
 
           auto& slot = self->slots_[i];
           slot.dc = dc_or_err.MoveValue();
-          slot.trampoline =
-              std::make_unique<ChannelObserver>(self, label);
+          slot.trampoline = std::make_unique<ChannelObserver>(self, label);
           slot.dc->RegisterObserver(slot.trampoline.get());
-          VLOG(1) << "[M3-R5] created + registered observer for `"
-                  << label_str << "` (sctp id=" << slot.dc->id() << ")";
+          VLOG(1) << "[M3-R5] created + registered observer for `" << label_str
+                  << "` (sctp id=" << slot.dc->id() << ")";
         }
       },
       this, &labels, &first_error));
@@ -278,9 +264,8 @@ webrtc::RTCError CbDataChannelHost::CreateOutboundChannels(
   return first_error;
 }
 
-void CbDataChannelHost::BindObserver(
-    CbDcLabel label,
-    webrtc::DataChannelObserver* observer) {
+void CbDataChannelHost::BindObserver(CbDcLabel label,
+                                     webrtc::DataChannelObserver* observer) {
   // Public API — any thread.
   base::AutoLock lock(obs_lock_);
   bound_observers_[static_cast<size_t>(label)] = observer;
@@ -294,8 +279,8 @@ void CbDataChannelHost::BindObserver(
 bool CbDataChannelHost::IsOpen(CbDcLabel label) const {
   base::AutoLock lock(slots_lock_);
   const auto& slot = slots_[static_cast<size_t>(label)];
-  return slot.dc && slot.dc->state() ==
-                        webrtc::DataChannelInterface::DataState::kOpen;
+  return slot.dc &&
+         slot.dc->state() == webrtc::DataChannelInterface::DataState::kOpen;
 }
 
 bool CbDataChannelHost::AllChannelsOpen() const {
@@ -303,8 +288,7 @@ bool CbDataChannelHost::AllChannelsOpen() const {
   return all_open_latched_;
 }
 
-SendResult CbDataChannelHost::Send(CbDcLabel label,
-                                   std::string_view text) {
+SendResult CbDataChannelHost::Send(CbDcLabel label, std::string_view text) {
   // Capture by value so the closure owns the bytes for the duration
   // of the hop. The string_view at the call site can vanish.
   std::string owned(text);
@@ -324,8 +308,7 @@ SendResult CbDataChannelHost::Send(CbDcLabel label,
                                   "channel not created");
           return;
         }
-        if (dc->state() !=
-            webrtc::DataChannelInterface::DataState::kOpen) {
+        if (dc->state() != webrtc::DataChannelInterface::DataState::kOpen) {
           *out = webrtc::RTCError(webrtc::RTCErrorType::INVALID_STATE,
                                   "channel not open");
           return;
@@ -350,6 +333,25 @@ SendResult CbDataChannelHost::Send(CbDcLabel label,
   return result;
 }
 
+void CbDataChannelHost::SendAsync(
+    CbDcLabel label,
+    std::string text,
+    scoped_refptr<base::SequencedTaskRunner> reply_runner,
+    SendAsyncCallback callback) {
+  DCHECK(reply_runner);
+
+  signaling_thread_->PostTask([this, label, body = std::move(text),
+                               reply_runner = std::move(reply_runner),
+                               callback = std::move(callback)]() mutable {
+    const SendResult result = Send(label, body);
+    if (!callback.is_null()) {
+      reply_runner->PostTask(FROM_HERE,
+                             base::BindOnce(std::move(callback), result.ok(),
+                                            std::string(result.message())));
+    }
+  });
+}
+
 SendResult CbDataChannelHost::SendBinary(CbDcLabel label,
                                          webrtc::CopyOnWriteBuffer buffer) {
   webrtc::RTCError result;
@@ -367,8 +369,7 @@ SendResult CbDataChannelHost::SendBinary(CbDcLabel label,
                                   "channel not created");
           return;
         }
-        if (dc->state() !=
-            webrtc::DataChannelInterface::DataState::kOpen) {
+        if (dc->state() != webrtc::DataChannelInterface::DataState::kOpen) {
           *out = webrtc::RTCError(webrtc::RTCErrorType::INVALID_STATE,
                                   "channel not open");
           return;
@@ -423,7 +424,7 @@ void CbDataChannelHost::Shutdown() {
 }
 
 void CbDataChannelHost::OnChannelStateChanged_Signaling(CbDcLabel label) {
-  DCHECK(signaling_task_runner_->RunsTasksInCurrentSequence());
+  DCHECK(signaling_thread_->IsCurrent());
 
   webrtc::DataChannelInterface::DataState state;
   {

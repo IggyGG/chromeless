@@ -96,15 +96,14 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   if (started_) {
     return;
   }
-  started_ = true;
 
   // 1. Configure the producer side.
   producer_->SetFormat(format_);
   producer_->SetMinCapturePeriod(min_capture_period_);
   producer_->SetResolutionConstraints(resolution_, resolution_,
-                                       /*use_fixed_aspect_ratio=*/true);
+                                      /*use_fixed_aspect_ratio=*/true);
   producer_->ChangeTarget(std::move(target),
-                           /*sub_capture_target_version=*/0);
+                          /*sub_capture_target_version=*/0);
 
   // 2. Bind our consumer receiver and hand the remote to the producer.
   //    kPreferMappableSharedImage is the right pick when the format is
@@ -115,7 +114,16 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
       (format_ == media::PIXEL_FORMAT_NV12)
           ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage
           : viz::mojom::BufferFormatPreference::kDefault;
+  if (consumer_.is_bound()) {
+    // Viz may have called OnStopped() after a prior capture session,
+    // which flips started_ back to false but leaves our consumer pipe
+    // bound. A later Cb.startFrameSinkCapture must not call
+    // BindNewPipeAndPassRemote() on an already-bound receiver; reset
+    // the stale pipe first and bind a fresh one for the new Start().
+    consumer_.reset();
+  }
   producer_->Start(consumer_.BindNewPipeAndPassRemote(), buffer_pref);
+  started_ = true;
 }
 
 void CloudBrowserFrameSinkCapturer::Stop() {
@@ -156,8 +164,7 @@ void CloudBrowserFrameSinkCapturer::OnFrameCaptured(
     auto scope = base::MakeRefCounted<BufferHandleScope>(
         std::move(callbacks),
         base::BindRepeating(
-            [](FrameSinkCapturerStats* s) { ++s->buffers_done; },
-            &stats_));
+            [](FrameSinkCapturerStats* s) { ++s->buffers_done; }, &stats_));
     return;
   }
 
@@ -172,12 +179,11 @@ void CloudBrowserFrameSinkCapturer::OnFrameCaptured(
   // media::VideoFrame; if WrapAsMediaFrame fails, scope drops here.
   auto scope = base::MakeRefCounted<BufferHandleScope>(
       std::move(callbacks),
-      base::BindRepeating(
-          [](FrameSinkCapturerStats* s) { ++s->buffers_done; },
-          &stats_));
+      base::BindRepeating([](FrameSinkCapturerStats* s) { ++s->buffers_done; },
+                          &stats_));
 
-  scoped_refptr<media::VideoFrame> frame = WrapAsMediaFrame(
-      std::move(data), info, content_rect, scope);
+  scoped_refptr<media::VideoFrame> frame =
+      WrapAsMediaFrame(std::move(data), info, content_rect, scope);
   if (!frame) {
     ++stats_.frames_failed_to_wrap;
     return;  // scope destruction → Done().
@@ -226,7 +232,8 @@ CloudBrowserFrameSinkCapturer::WrapAsMediaFrame(
     const media::mojom::VideoFrameInfoPtr& info,
     const gfx::Rect& content_rect,
     scoped_refptr<BufferHandleScope> scope) {
-  if (!data) return nullptr;
+  if (!data)
+    return nullptr;
 
   // The producer uses two buffer-handle variants:
   //   * read_only_shmem_region — CPU-side shared memory (I420 / ARGB
@@ -240,19 +247,15 @@ CloudBrowserFrameSinkCapturer::WrapAsMediaFrame(
       return nullptr;
     }
     frame = media::VideoFrame::WrapExternalData(
-        info->pixel_format,
-        info->coded_size,
-        info->visible_rect,
+        info->pixel_format, info->coded_size, info->visible_rect,
         info->visible_rect.size(),
-        base::span<const uint8_t>(
-            static_cast<const uint8_t*>(mapping.memory()),
-            mapping.size()),
+        base::span<const uint8_t>(static_cast<const uint8_t*>(mapping.memory()),
+                                  mapping.size()),
         info->timestamp);
     if (frame) {
       // Keep the mapping alive for as long as the frame exists.
       frame->BackWithOwnedSharedMemory(
-          std::move(data->get_read_only_shmem_region()),
-          std::move(mapping));
+          std::move(data->get_read_only_shmem_region()), std::move(mapping));
     }
 #if 0
   // TODO(T17): port GMB→VideoFrame path to MappableSharedImage when
@@ -275,7 +278,8 @@ CloudBrowserFrameSinkCapturer::WrapAsMediaFrame(
     return nullptr;
   }
 
-  if (!frame) return nullptr;
+  if (!frame)
+    return nullptr;
 
   // Attach the timing + color metadata libwebrtc cares about. The
   // capturer's CAPTURE_END_TIME is the right reference for our

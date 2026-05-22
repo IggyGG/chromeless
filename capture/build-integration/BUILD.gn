@@ -1,27 +1,27 @@
-# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#Copyright 2026 The Cloud Browser WebRTC Authors.All rights reserved.
 #
-# gn target for the Phase-2 cloud-browser worker binary.
+#gn target for the Phase - 2 cloud - browser worker binary.
 #
-# This binary embeds Chromium (browser process), instantiates
-# HostFrameSinkManager + a FrameSinkVideoCapturer (T47), routes the
-# captured frames into libwebrtc with our CloudBrowserVideoEncoderFactory
-# (T19 / T35 / T36) plugged in, and runs the WebRTC sender side of the
-# pipeline.
+#This binary embeds Chromium(browser process), instantiates
+#HostFrameSinkManager + a FrameSinkVideoCapturer(T47), routes the
+#captured frames into libwebrtc with our CloudBrowserVideoEncoderFactory
+#(T19 / T35 / T36) plugged in, and runs the WebRTC sender side of the
+#pipeline.
 #
-# Layout assumes this repo is symlinked into the Chromium src/ tree at
-# //cloud-browser. The encoder sources still live at //cloud-browser/
-# capture/encoder/...; this BUILD.gn references them via that path.
+#Layout assumes this repo is symlinked into the Chromium src / tree at
+#//cloud-browser. The encoder sources still live at //cloud-browser/
+#capture / encoder / ...; this BUILD.gn references them via that path.
 #
-# TODO(T17-build-env): exercise this on a Linux box with depot_tools.
+#TODO(T17 - build - env) : exercise this on a Linux box with depot_tools.
 
 import("//build/config/features.gni")
-import("//build/config/sanitizers/sanitizers.gni")
-import("//testing/test.gni")  # provides test() template used below
+    import("//build/config/sanitizers/sanitizers.gni")
+        import("//testing/test.gni") #provides test() template used below
 
-# ---------------------------------------------------------------------
-# Encoder factory + per-codec wrappers.
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+#Encoder factory + per - codec wrappers.
 #
-# Linkable on its own so unit tests in capture/encoder/*_test.cc can
+#Linkable on its own so unit tests in capture / encoder/*_test.cc can
 # pick it up without dragging in the worker binary's main().
 # ---------------------------------------------------------------------
 # NVENC SDK gate. The NVIDIA Video Codec SDK is not redistributable
@@ -946,6 +946,32 @@ source_set("input_dispatch_composite") {
 }
 
 # ---------------------------------------------------------------------
+# M5 R1 (CV2-19) — browser-process cursor observer.
+#
+# Registered on host_->window() by CbAuraPlatformData. Kept in its own
+# source_set so M5 R3's cursor_xy_join can depend on the cursor source
+# without depending on the full :embedder target and creating
+# embedder -> cursor_xy_join -> embedder.
+# ---------------------------------------------------------------------
+source_set("cursor_client") {
+  sources = [
+    "cb_cursor_client.cc",
+    "cb_cursor_client.h",
+  ]
+  deps = [
+    "//base",
+    "//skia",
+    "//ui/aura",
+    "//ui/base",
+    "//ui/base/cursor/mojom:cursor_type_shared",
+    "//ui/display",
+    "//ui/gfx/geometry",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # M5 R3 (CV2-21) — cursor x,y join.
 #
 # Tiny coordinator that subscribes to M5 R1's CbCursorClient::
@@ -961,9 +987,8 @@ source_set("cursor_xy_join") {
   ]
   deps = [
     "//base",
-    # M5 R1 — CbCursorClient + CursorChangeCallback. Lives in
-    # :embedder per R1's BUILD.gn diff.
-    ":embedder",
+    # M5 R1 — CbCursorClient + CursorChangeCallback.
+    ":cursor_client",
     # M4 R3 — CbInputDispatchMouse + CbLastPointerSnapshot struct.
     ":input_dispatch_mouse",
     # ui::mojom::CursorType — already a public_dep of //ui/aura which
@@ -989,11 +1014,6 @@ source_set("embedder") {
     # necessary but not sufficient on their own.
     "cb_aura_platform_data.cc",
     "cb_aura_platform_data.h",
-    # M5 R1 (CV2-19) — browser-process cursor observer. Registered
-    # on host_->window() in CbAuraPlatformData; foundation for the
-    # native cursor egress path that replaces capture/cursor-watcher/.
-    "cb_cursor_client.cc",
-    "cb_cursor_client.h",
     "cb_devtools_agent.cc",
     "cb_devtools_agent.h",
     "cb_focus_client.cc",
@@ -1044,6 +1064,7 @@ source_set("embedder") {
     ":cb_audio_lifecycle",
     ":cb_audio_options",
     ":cb_audio_track",
+    ":cursor_client",
     "//cloud-browser/capture/signaling:cb_ice_config",
     "//cloud-browser/capture/signaling:cb_offerer_driver",
     "//cloud-browser/capture/signaling:cb_signaling_ws_client",
@@ -1063,10 +1084,15 @@ source_set("embedder") {
     # resolver (declared via :active_webcontents_resolver above).
     # main_parts owns the unique_ptr; ctor takes the resolver pointer.
     ":input_dispatch_composite",
+    ":cursor_xy_join",
+    "//cloud-browser/capture/cursor:cb_cursor_emit_policy",
+    "//cloud-browser/capture/cursor:cb_cursor_dc_emitter",
+    "//cloud-browser/capture/cursor:cb_cursor_envelope",
     # CV2-83 — CbHeadlessScreen reads the M4 R10 last-pointer state
     # directly after CV2-81 installs the typed mouse dispatcher as
     # runtime source. Direct dep keeps GN header ownership explicit.
     ":pointer_state",
+    "//cloud-browser/capture/signaling:cb_dc_host",
     # CV2-69 F1 + F3 — chromium-subsystem bootstrap inits the embedder
     # was skipping (gpu-test-lead audit /tmp/cv2-embedder-init-audit.md).
     # F1 (ResourceBundle) lives in //ui/base already in this list;
