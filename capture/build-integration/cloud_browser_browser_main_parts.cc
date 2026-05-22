@@ -318,6 +318,16 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "WebContents::Create returned null — chromium browser process "
       << "is misconfigured (renderer host process not yet up?).";
 
+  // WebContents::WasShown() below makes Chromium treat the page as visible, but
+  // it does not show the Aura container window created by WebContentsViewAura.
+  // The renderer can still lay out in that state, yet Aura hit testing returns
+  // no event handler because the parent container is hidden; cursor routing then
+  // stops before CbCursorClient::SetCursor. Show the native view explicitly so
+  // root_window->GetEventHandlerForPoint(...) can descend into the RWHV child.
+  if (aura::Window* native_view = initial_web_contents_->GetNativeView()) {
+    native_view->Show();
+  }
+
   // 2a. Mark the WebContents as visible + focused. Without WasShown(),
   //     chromium leaves the WebContents in Visibility::HIDDEN — the
   //     RenderWidgetHostView never receives ShowWithVisibility() and
