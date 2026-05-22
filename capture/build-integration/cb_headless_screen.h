@@ -49,9 +49,7 @@
 //   - capture/build-integration/cb_cursor_client.{h,cc} — the
 //     downstream CursorClient that this Screen subclass unblocks.
 //   - capture/build-integration/cb_last_pointer.{h,cc} — M4 R10
-//     last-known-pointer state. NOT consumed by this revision; see
-//     the GetCursorScreenPoint() note below for the wiring-frontier
-//     rationale (lesson j: single commit advances ONE ring).
+//     last-known-pointer state consumed by GetCursorScreenPoint().
 //
 // R1 scope (CV2-78):
 //   * IsWindowUnderCursor — return true for any non-null aura
@@ -59,33 +57,23 @@
 //     aura never asks this question about a window other than the
 //     embedder's host_->window() (see cb_aura_platform_data.cc), so
 //     "always true for non-null" is the correct shape, not a stub.
-//   * GetCursorScreenPoint — return gfx::Point(0,0) for now. Aura
-//     consumers tolerate a default point (the upstream stub returns
-//     the same value with NOTIMPLEMENTED_LOG_ONCE, so any consumer
-//     that fataled on it would have fataled long before R1 landed
-//     when the upstream stub was the installed Screen). A follow-up
-//     R# wires this through CbLastPointerState (M4 R10), but doing
-//     so today would require ALSO runtime-wiring CbInputDispatchMouse
-//     (which currently is not instantiated by main_parts — the
-//     "input" DC observer is CbInputLoggingDelegate per CV2-75) and
-//     that's a separate ring of the cascade. Per lesson (j) we
-//     advance exactly ONE ring per commit; the seam for the
-//     follow-up wire is documented in GetCursorScreenPoint's body.
+//   * GetCursorScreenPoint — returns the browser-process pointer
+//     coordinate from CbInputDispatchMouse once the typed input
+//     dispatcher is runtime-wired, falling back to gfx::Point(0,0)
+//     before first input.
+//   * GetWindowAtScreenPoint — returns the single Aura root window
+//     for points inside the seeded display. Linux
+//     RenderWidgetHostViewAura::UpdateCursorIfOverSelf() asks this
+//     BEFORE it calls CursorClient::SetCursor; the ScreenBase stub
+//     returns nullptr and short-circuits the per-event cursor route.
 //
 // Non-goals for R1:
-//   * Last-pointer wiring (deferred; see GetCursorScreenPoint comment).
 //   * Multi-window selection (the worker is single-window by
 //     construction; cb_aura_platform_data.cc constructs ONE
 //     WindowTreeHost and that is the only Aura root that ever
 //     exists in the process).
-//   * Overriding GetWindowAtScreenPoint /
-//     GetLocalProcessWindowAtPoint — those are reachable only from
-//     paths the cb-chromium worker does not exercise (see
-//     window_event_dispatcher.cc IS_WIN-guarded synthesize-mouse-
-//     move; we're Linux-only). The default ScreenBase behaviour
-//     (NOTIMPLEMENTED_LOG_ONCE returning nullptr) is acceptable. If
-//     a future ring surfaces a code path that needs them, override
-//     here.
+//   * GetLocalProcessWindowAtPoint — still not exercised by the
+//     Linux cb-chromium worker cursor path.
 //
 // CV2-78 ring 8 follow-up (this revision adds GetDisplayNearestWindow):
 //   The R1 header above explicitly anticipated this case — "If a
@@ -140,6 +128,10 @@ class CbHeadlessScreen : public display::ScreenBase {
   // conservative (0,0) fallback.
   void SetLastPointerSource(const CbLastPointerState* last_pointer_state);
 
+  // Supplies the single Aura root window owned by CbAuraPlatformData.
+  // nullptr clears the root during teardown.
+  void SetRootWindow(gfx::NativeWindow root_window);
+
   // display::Screen via ScreenBase:
 
   // Returns true for any non-null Aura window. The cb-chromium worker
@@ -162,6 +154,15 @@ class CbHeadlessScreen : public display::ScreenBase {
   // successful pointer forward. Falls back to gfx::Point(0,0) before
   // first input and after pointer-leave.
   gfx::Point GetCursorScreenPoint() override;
+
+  // Linux RenderWidgetHostViewAura::UpdateCursorIfOverSelf() first asks
+  // Screen::GetWindowAtScreenPoint(cursor_screen_point), then rejects
+  // cursor updates if the returned window is null or belongs to a
+  // different root. Returning the cb-chromium worker's single Aura root
+  // for in-display points opens that upstream gate while preserving the
+  // single-window/display model.
+  gfx::NativeWindow GetWindowAtScreenPoint(
+      const gfx::Point& point) override;
 
   // Returns the single 1280x720 default display the embedder seeds
   // into ScreenBase::display_list() at construction. The cb-chromium
@@ -187,6 +188,7 @@ class CbHeadlessScreen : public display::ScreenBase {
 
  private:
   raw_ptr<const CbLastPointerState> last_pointer_state_ = nullptr;
+  gfx::NativeWindow root_window_ = nullptr;
 };
 
 }  // namespace cloud_browser

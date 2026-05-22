@@ -82,7 +82,7 @@ sleep 4
 kill $PF1 2>/dev/null
 # verdict grep:
 kubectl exec cv2-82-real-pulse -n $NS -c cb-chromium -- \
-  grep -E "CbCursorClient::SetCursor.*new_type=2|NOTIMPLEMENTED.*display::ScreenBase::(IsWindowUnderCursor|GetCursorScreenPoint|GetDisplayNearestWindow)" \
+  grep -E "CbCursorClient::SetCursor.*new_type=2|NOTIMPLEMENTED.*display::ScreenBase::(IsWindowUnderCursor|GetCursorScreenPoint|GetWindowAtScreenPoint|GetDisplayNearestWindow)" \
   /var/log/supervisor/chromium.err.log || echo "(no SetCursor / no NOTIMPLEMENTED)"
 
 # ═══ 7. FIRE M4  (CV2-81 — typed dispatch); run in-pod for ICE + localhost CDP

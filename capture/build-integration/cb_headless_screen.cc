@@ -19,6 +19,12 @@ void CbHeadlessScreen::SetLastPointerSource(
             << (last_pointer_state_ ? "installed" : "cleared");
 }
 
+void CbHeadlessScreen::SetRootWindow(gfx::NativeWindow root_window) {
+  root_window_ = root_window;
+  LOG(INFO) << "CV2-83: CbHeadlessScreen root window "
+            << (root_window_ ? "installed" : "cleared");
+}
+
 bool CbHeadlessScreen::IsWindowUnderCursor(gfx::NativeWindow window) {
   // Single-root-window embedder: cb_aura_platform_data.cc constructs
   // exactly one WindowTreeHost, and the only consumer that ever asks
@@ -51,6 +57,24 @@ gfx::Point CbHeadlessScreen::GetCursorScreenPoint() {
   // Conservative fallback before the first successful browser-process
   // pointer dispatch, or after the client reports a pointer leave.
   return gfx::Point();
+}
+
+gfx::NativeWindow CbHeadlessScreen::GetWindowAtScreenPoint(
+    const gfx::Point& point) {
+  if (!root_window_) {
+    return nullptr;
+  }
+
+  const display::Display display = GetPrimaryDisplay();
+  if (!display.bounds().Contains(point)) {
+    return nullptr;
+  }
+
+  // The worker is a single-root-window embedder. Returning the root
+  // satisfies RenderWidgetHostViewAura's pre-SetCursor same-root gate;
+  // it still independently asks root_window->GetEventHandlerForPoint()
+  // before routing to CursorClient::SetCursor.
+  return root_window_;
 }
 
 display::Display CbHeadlessScreen::GetDisplayNearestWindow(

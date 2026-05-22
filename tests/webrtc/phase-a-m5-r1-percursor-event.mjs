@@ -43,6 +43,9 @@
 //     regression — route to build-czar).
 //   - NOTIMPLEMENTED for display::ScreenBase::GetCursorScreenPoint still
 //     PRESENT → CV2-78 ring-2 stub not overridden.
+//   - NOTIMPLEMENTED for display::ScreenBase::GetWindowAtScreenPoint still
+//     PRESENT → Linux RenderWidgetHostViewAura cursor self-check still
+//     returns nullptr before it can route to CursorClient::SetCursor.
 //   - NOTIMPLEMENTED for display::ScreenBase::GetDisplayNearestWindow still
 //     PRESENT → CV2-88 ring-8 override regressed (added Wave 2.5 audit
 //     cleanup — was missing from Wave 1 era harness; covers d7bc3c0
@@ -227,6 +230,8 @@ async function main() {
         "NOTIMPLEMENTED.*display::ScreenBase::IsWindowUnderCursor",
       grep_for_screen_gate_partial_ring_2:
         "NOTIMPLEMENTED.*display::ScreenBase::GetCursorScreenPoint",
+      grep_for_screen_gate_ring_3:
+        "NOTIMPLEMENTED.*display::ScreenBase::GetWindowAtScreenPoint",
       grep_for_screen_gate_ring_8:
         "NOTIMPLEMENTED.*display::ScreenBase::GetDisplayNearestWindow",
       stimulus_ts_ms: stimulusTs,

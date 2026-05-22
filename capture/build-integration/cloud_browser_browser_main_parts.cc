@@ -286,6 +286,9 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   //     beyond this via the standard renderer-side viewport machinery;
   //     this is just the host window's initial bounds.
   aura_ = std::make_unique<CbAuraPlatformData>(gfx::Size(1280, 720));
+  if (screen_) {
+    screen_->SetRootWindow(aura_root_window());
+  }
 
   // Note for CV2-75 (M5 R1 / CbCursorClient): the cursor-client is
   // ALREADY constructed + registered by CbAuraPlatformData's ctor
@@ -920,6 +923,7 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // the "resolver_lifetime > dispatcher_lifetime" contract.
   if (screen_) {
     screen_->SetLastPointerSource(nullptr);
+    screen_->SetRootWindow(nullptr);
   }
   input_delegate_.reset();
   // ============== END CV2-75/CV2-81 TEARDOWN ==============

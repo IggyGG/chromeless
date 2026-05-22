@@ -40,7 +40,8 @@ VERDICT: <PASS | FAIL | HALT H3>
  (1) positive:  renderer-DOM laid out — link rect non-zero = <y/n>
                 CbCursorClient::SetCursor new_type=2 within ~2s = <y/n>
  (2) FAIL-class: NOTIMPLEMENTED ScreenBase::IsWindowUnderCursor <>,
-                ::GetCursorScreenPoint <>, ::GetDisplayNearestWindow <>;
+                ::GetCursorScreenPoint <>, ::GetWindowAtScreenPoint <>,
+                ::GetDisplayNearestWindow <>;
                 routing reaches Aura but not CbCursorClient <>
  (3) upstream-gate: HALT H3 renderer-DOM empty (SwANGLE) <> — THE rv7 gate;
                 rv8 must clear this
