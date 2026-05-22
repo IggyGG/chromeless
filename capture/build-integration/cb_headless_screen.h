@@ -59,8 +59,11 @@
 //     "always true for non-null" is the correct shape, not a stub.
 //   * GetCursorScreenPoint — returns the browser-process pointer
 //     coordinate from CbInputDispatchMouse once the typed input
-//     dispatcher is runtime-wired, falling back to gfx::Point(0,0)
-//     before first input.
+//     dispatcher is runtime-wired, falling back to the center of the
+//     single display before first native input. The fallback must be
+//     inside the WebContents Aura child because RenderWidgetHostViewAura
+//     checks root_window->GetEventHandlerForPoint(GetCursorScreenPoint())
+//     before it calls CursorClient::SetCursor.
 //   * GetWindowAtScreenPoint — returns the single Aura root window
 //     for points inside the seeded display. Linux
 //     RenderWidgetHostViewAura::UpdateCursorIfOverSelf() asks this
@@ -151,8 +154,8 @@ class CbHeadlessScreen : public display::ScreenBase {
 
   // Returns the latest in-widget pointer coordinate from M4's typed
   // mouse dispatcher when that source is installed and has observed a
-  // successful pointer forward. Falls back to gfx::Point(0,0) before
-  // first input and after pointer-leave.
+  // successful pointer forward. Falls back to the center of the single
+  // display before first native input and after pointer-leave.
   gfx::Point GetCursorScreenPoint() override;
 
   // Linux RenderWidgetHostViewAura::UpdateCursorIfOverSelf() first asks

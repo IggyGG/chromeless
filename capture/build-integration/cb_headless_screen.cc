@@ -6,6 +6,7 @@
 #include "capture/build-integration/cb_headless_screen.h"
 
 #include "base/logging.h"
+#include "ui/gfx/geometry/rect.h"
 
 namespace cloud_browser {
 
@@ -56,6 +57,19 @@ gfx::Point CbHeadlessScreen::GetCursorScreenPoint() {
 
   // Conservative fallback before the first successful browser-process
   // pointer dispatch, or after the client reports a pointer leave.
+  //
+  // RenderWidgetHostViewAura::UpdateCursorIfOverSelf() asks Aura for
+  // the event handler at this point before routing to CursorClient.
+  // In the single-window worker, the display center is safely inside
+  // the WebContents child installed by CbAuraPlatformData's fill
+  // layout, while the boundary origin can hit the root/non-client edge
+  // and short-circuit the cursor route.
+  const display::Display display = GetPrimaryDisplay();
+  const gfx::Rect bounds = display.bounds();
+  if (!bounds.IsEmpty()) {
+    return gfx::Point(bounds.x() + bounds.width() / 2,
+                      bounds.y() + bounds.height() / 2);
+  }
   return gfx::Point();
 }
 
