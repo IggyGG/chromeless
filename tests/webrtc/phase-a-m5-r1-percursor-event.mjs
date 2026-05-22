@@ -12,8 +12,9 @@
 // docstring, capture/build-integration/cb_headless_screen.{h,cc}):
 //
 //   1. Open a CDP session against the cb-chromium worker (port 9222).
-//   2. Navigate to `data:text/html,<a href="#">link</a>` — the link gets the
-//      UA default `cursor: pointer` style.
+//   2. Navigate to `data:text/html,<a href="#" style="cursor:pointer">link</a>`
+//      — the CSS cursor stimulus is explicit so the verdict checks the
+//      Chromium/Aura cursor route, not browser UA-link cursor policy.
 //   3. Dispatch Input.dispatchMouseEvent { type: "mouseMoved", x: 10, y: 10 }
 //      so the cursor lands over the link's bounding box.
 //   4. Wait up to 3 s for cb-chromium to:
@@ -70,7 +71,7 @@
 //   CDP_PORT                    — default 9222
 //   CDP_CONNECT_TIMEOUT_MS      — default 60000 (cb-chromium boot lag)
 //   POST_STIMULUS_WAIT_MS       — default 3000 (PostTask + LOG margin)
-//   STIMULUS_TARGET_URL         — default data:text/html,<a href="#">link</a>
+//   STIMULUS_TARGET_URL         — default data:text/html,<a style="cursor:pointer">link</a>
 //                                  (kept inline so the test is self-contained;
 //                                  no external network reach needed)
 
@@ -87,7 +88,7 @@ const POST_STIMULUS_WAIT_MS = parseInt(process.env.POST_STIMULUS_WAIT_MS || "300
 // encodeURIComponent escapes `#` `<` `>` `"` and spaces so the whole payload
 // stays inside the data: URL. (Wave 2 rv8 verification finding.)
 const STIMULUS_TARGET_HTML =
-  '<html><body style="margin:0"><a href="#" style="display:inline-block;padding:10px 20px;font-size:24px">link</a></body></html>';
+  '<html><body style="margin:0"><a href="#" style="display:inline-block;padding:10px 20px;font-size:24px;cursor:pointer">link</a></body></html>';
 const STIMULUS_TARGET_URL = process.env.STIMULUS_TARGET_URL
   || ("data:text/html," + encodeURIComponent(STIMULUS_TARGET_HTML));
 
