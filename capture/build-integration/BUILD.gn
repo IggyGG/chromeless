@@ -419,6 +419,7 @@ source_set("cb_audio_lifecycle") {
   ]
   deps = [
     "//base",
+    "//third_party/abseil-cpp:absl",
     # CV2-69 — TODO marker retired (M55-R5-merge-with-m3-r4-r6 commit
     # landed). :cb_offerer_driver is the M3 R4 target.
     "//cloud-browser/capture/signaling:cb_offerer_driver",
@@ -1062,6 +1063,10 @@ source_set("embedder") {
     # resolver (declared via :active_webcontents_resolver above).
     # main_parts owns the unique_ptr; ctor takes the resolver pointer.
     ":input_dispatch_composite",
+    # CV2-83 — CbHeadlessScreen reads the M4 R10 last-pointer state
+    # directly after CV2-81 installs the typed mouse dispatcher as
+    # runtime source. Direct dep keeps GN header ownership explicit.
+    ":pointer_state",
     # CV2-69 F1 + F3 — chromium-subsystem bootstrap inits the embedder
     # was skipping (gpu-test-lead audit /tmp/cv2-embedder-init-audit.md).
     # F1 (ResourceBundle) lives in //ui/base already in this list;
