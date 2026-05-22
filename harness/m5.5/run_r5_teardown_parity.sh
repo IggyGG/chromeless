@@ -49,6 +49,7 @@ KUBECTL="${KUBECTL_BIN:-kubectl}"
 POD=""
 NAMESPACE="chromeless"
 SETTLE_SECONDS=5
+PULSE_SERVER_VALUE="${PULSE_SERVER_VALUE:-unix:/run/user/1000/pulse/native}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,7 +114,7 @@ count_cb_clients() {
   local out rc
   err=$(mktemp)
   out="$("${KUBECTL}" -n "${NAMESPACE}" exec "${POD}" -c cb-chromium -- \
-    pactl list short clients 2>"${err}")" || rc=$? && rc=${rc:-0}
+    env PULSE_SERVER="${PULSE_SERVER_VALUE}" pactl list short clients 2>"${err}")" || rc=$? && rc=${rc:-0}
   local stderr_text
   stderr_text=$(cat "${err}")
   rm -f "${err}"

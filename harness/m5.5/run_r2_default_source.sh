@@ -42,6 +42,7 @@ set -euo pipefail
 KUBECTL="${KUBECTL_BIN:-kubectl}"
 POD=""
 NAMESPACE="chromeless"
+PULSE_SERVER_VALUE="${PULSE_SERVER_VALUE:-unix:/run/user/1000/pulse/native}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -110,7 +111,7 @@ fi
 # applies to any kubectl-exec that may emit info chatter to stderr).
 err=$(mktemp)
 INFO_OUT="$("${KUBECTL}" -n "${NAMESPACE}" exec "${POD}" -c cb-chromium -- \
-  pactl info 2>"${err}")" || INFO_RC=$? && INFO_RC=${INFO_RC:-0}
+  env PULSE_SERVER="${PULSE_SERVER_VALUE}" pactl info 2>"${err}")" || INFO_RC=$? && INFO_RC=${INFO_RC:-0}
 INFO_STDERR=$(cat "${err}")
 rm -f "${err}"
 
@@ -136,7 +137,7 @@ fi
 # RUNNING/SUSPENDED state column (typically column 5).
 err=$(mktemp)
 LIST_OUT="$("${KUBECTL}" -n "${NAMESPACE}" exec "${POD}" -c cb-chromium -- \
-  pactl list short sources 2>"${err}")" || LIST_RC=$? && LIST_RC=${LIST_RC:-0}
+  env PULSE_SERVER="${PULSE_SERVER_VALUE}" pactl list short sources 2>"${err}")" || LIST_RC=$? && LIST_RC=${LIST_RC:-0}
 LIST_STDERR=$(cat "${err}")
 rm -f "${err}"
 
