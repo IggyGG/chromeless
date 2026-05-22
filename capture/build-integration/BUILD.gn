@@ -746,13 +746,17 @@ source_set("input_dispatch_mouse") {
     "cb_input_dispatch_mouse.cc",
     "cb_input_dispatch_mouse.h",
   ]
+  public_deps = [
+    # Public header cb_input_dispatch_mouse.h includes these headers,
+    # so downstream consumers need their public configs too. In
+    # particular, :input_dispatch re-exports WebRTC's include config
+    # for api/priority.h through its passthrough public_dep.
+    ":active_webcontents_resolver",
+    ":input_dispatch",
+    ":pointer_state",
+  ]
   deps = [
     "//base",
-    # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
-    ":input_dispatch",
-    # R10's CbLastPointerState — R3 delegates its inline last-pointer
-    # storage to this source_set per the M4 fold-in plan.
-    ":pointer_state",
     # RenderWidgetHost::ForwardMouseEvent / ForwardWheelEvent,
     # RenderWidgetHostView::GetDeviceScaleFactor + Focus, WebContents::
     # WasShown + GetRenderViewHost + GetRenderWidgetHostView.
