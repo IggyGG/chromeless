@@ -1,0 +1,164 @@
+From 8f3f240dbd0840ed8249f9b55aa27bc8374f8752 Mon Sep 17 00:00:00 2001
+From: Iggy <iggy@triform.ai>
+Date: Fri, 22 May 2026 17:30:17 +0300
+Subject: [PATCH] cv2-83: probe aura cursor routing gates
+
+---
+ .../render_widget_host_view_aura.cc           | 87 +++++++++++++++++--
+ 1 file changed, 78 insertions(+), 9 deletions(-)
+
+diff --git a/content/browser/renderer_host/render_widget_host_view_aura.cc b/content/browser/renderer_host/render_widget_host_view_aura.cc
+index 95f75a2..524b981 100644
+--- a/content/browser/renderer_host/render_widget_host_view_aura.cc
++++ b/content/browser/renderer_host/render_widget_host_view_aura.cc
+@@ -804,17 +804,36 @@ bool RenderWidgetHostViewAura::ShouldSkipCursorUpdate() const {
+   display::Screen* screen = display::Screen::Get();
+   CHECK(screen);
+ 
++  LOG(INFO) << "CV2-83-PROBE ShouldSkipCursorUpdate enter view=" << this
++            << " window=" << window_ << " root_window=" << root_window
++            << " screen=" << screen;
++
+   // Ignore cursor update messages if the window under the cursor is not us.
+ #if BUILDFLAG(IS_WIN)
+   gfx::Point cursor_screen_point = screen->GetCursorScreenPoint();
+   aura::Window* window = screen->GetWindowAtScreenPoint(cursor_screen_point);
+-  if (!window || window->GetRootWindow() != root_window) {
++  const bool skip = !window || window->GetRootWindow() != root_window;
++  LOG(INFO) << "CV2-83-PROBE ShouldSkipCursorUpdate win point=("
++            << cursor_screen_point.x() << "," << cursor_screen_point.y()
++            << ") window_at_point=" << window << " skip=" << skip;
++  if (skip) {
++    LOG(INFO) << "CV2-83-PROBE ShouldSkipCursorUpdate return=true"
++              << " reason=window_at_point_root_mismatch";
+     return true;
+   }
+ #elif !BUILDFLAG(IS_CHROMEOS)
+-  if (!screen->IsWindowUnderCursor(root_window))
++  const bool under_cursor = screen->IsWindowUnderCursor(root_window);
++  LOG(INFO) << "CV2-83-PROBE ShouldSkipCursorUpdate non_chromeos"
++            << " is_window_under_cursor=" << under_cursor;
++  if (!under_cursor) {
++    LOG(INFO) << "CV2-83-PROBE ShouldSkipCursorUpdate return=true"
++              << " reason=is_window_under_cursor_false";
+     return true;
++  }
++#else
++  LOG(INFO) << "CV2-83-PROBE ShouldSkipCursorUpdate chromeos_no_screen_gate";
+ #endif  // !BUILDFLAG(IS_CHROMEOS)
++  LOG(INFO) << "CV2-83-PROBE ShouldSkipCursorUpdate return=false";
+   return false;
+ }
+ 
+@@ -988,12 +1007,22 @@ void RenderWidgetHostViewAura::SetInsets(const gfx::Insets& insets) {
+ }
+ 
+ void RenderWidgetHostViewAura::UpdateCursor(const ui::Cursor& cursor) {
++  LOG(INFO) << "CV2-83-PROBE UpdateCursor enter view=" << this
++            << " cursor_type=" << static_cast<int>(cursor.type())
++            << " window=" << window_;
+   GetCursorManager()->UpdateCursor(this, cursor);
+ }
+ 
+ void RenderWidgetHostViewAura::DisplayCursor(const ui::Cursor& cursor) {
++  LOG(INFO) << "CV2-83-PROBE DisplayCursor enter view=" << this
++            << " cursor_type=" << static_cast<int>(cursor.type())
++            << " window=" << window_;
+   current_cursor_ = WebCursor(cursor);
+   current_cursor_.UpdateDisplayInfoForWindow(window_);
++  const gfx::NativeCursor native_cursor = current_cursor_.GetNativeCursor();
++  LOG(INFO) << "CV2-83-PROBE DisplayCursor current_native_type="
++            << static_cast<int>(native_cursor.type())
++            << " call=UpdateCursorIfOverSelf";
+   UpdateCursorIfOverSelf();
+ }
+ 
+@@ -2853,38 +2882,78 @@ void RenderWidgetHostViewAura::CreateDelegatedFrameHostClient() {
+ }
+ 
+ void RenderWidgetHostViewAura::UpdateCursorIfOverSelf() {
+-  if (host()->GetProcess()->FastShutdownStarted())
++  LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf enter view=" << this
++            << " host=" << host() << " window=" << window_;
++  if (host()->GetProcess()->FastShutdownStarted()) {
++    LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf return"
++              << " reason=fast_shutdown_started";
+     return;
++  }
+ 
+   aura::Window* root_window = window_->GetRootWindow();
+-  if (!root_window)
++  if (!root_window) {
++    LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf return"
++              << " reason=no_root_window";
+     return;
++  }
++  LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf root_window="
++            << root_window;
+ 
+-  if (ShouldSkipCursorUpdate())
++  if (ShouldSkipCursorUpdate()) {
++    LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf return"
++              << " reason=ShouldSkipCursorUpdate";
+     return;
++  }
+ 
+   display::Screen* screen = display::Screen::Get();
+   CHECK(screen);
+-  gfx::Point root_window_point = screen->GetCursorScreenPoint();
++  gfx::Point screen_point = screen->GetCursorScreenPoint();
++  gfx::Point root_window_point = screen_point;
+   aura::client::ScreenPositionClient* screen_position_client =
+       aura::client::GetScreenPositionClient(root_window);
+   if (screen_position_client) {
+     screen_position_client->ConvertPointFromScreen(
+         root_window, &root_window_point);
+   }
+-
+-  if (root_window->GetEventHandlerForPoint(root_window_point) != window_)
++  LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf cursor_point"
++            << " screen=(" << screen_point.x() << "," << screen_point.y()
++            << ") root=(" << root_window_point.x() << ","
++            << root_window_point.y() << ") screen_position_client="
++            << screen_position_client;
++
++  aura::Window* event_handler =
++      root_window->GetEventHandlerForPoint(root_window_point);
++  LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf handler_check"
++            << " handler=" << event_handler << " window=" << window_
++            << " matches=" << (event_handler == window_);
++  if (event_handler != window_) {
++    LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf return"
++              << " reason=event_handler_mismatch";
+     return;
++  }
+ 
+   gfx::NativeCursor cursor = current_cursor_.GetNativeCursor();
++  LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf native_cursor"
++            << " type=" << static_cast<int>(cursor.type())
++            << " is_loading=" << is_loading_;
+   // Do not show loading cursor when the cursor is currently hidden.
+-  if (is_loading_ && cursor != ui::mojom::CursorType::kNone)
++  if (is_loading_ && cursor != ui::mojom::CursorType::kNone) {
+     cursor = ui::Cursor(ui::mojom::CursorType::kPointer);
++    LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf loading_override"
++              << " type=" << static_cast<int>(cursor.type());
++  }
+ 
+   aura::client::CursorClient* cursor_client =
+       aura::client::GetCursorClient(root_window);
++  LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf cursor_client="
++            << cursor_client;
+   if (cursor_client) {
++    LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf call=SetCursor"
++              << " cursor_type=" << static_cast<int>(cursor.type());
+     cursor_client->SetCursor(cursor);
++  } else {
++    LOG(INFO) << "CV2-83-PROBE UpdateCursorIfOverSelf return"
++              << " reason=no_cursor_client";
+   }
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+
