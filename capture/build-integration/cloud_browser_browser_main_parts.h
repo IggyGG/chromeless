@@ -55,6 +55,7 @@
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+#include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
 // that hold the runtime-wire consumer instances. CbCursorClient (M5
 // R1) is NOT included here — it's owned by CbAuraPlatformData
@@ -83,6 +84,10 @@ class Window;
 }  // namespace aura
 
 namespace cloud_browser {
+
+namespace audio {
+class CbAudioLifecycle;
+}  // namespace audio
 
 class CbAuraPlatformData;
 class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
@@ -184,6 +189,15 @@ class CloudBrowserBrowserMainParts
   // lifetime of the worker. Defined out-of-line so the header doesn't
   // need to pull in the track-source class definition.
   CloudBrowserFrameSinkVideoTrackSource* cb_track_source() const;
+
+  // Called by CbDevToolsManagerDelegate after Cb.startFrameSinkCapture
+  // successfully resolves and starts capture for a WebContents. This is
+  // the shared active-target handoff for M4 typed input dispatch: the
+  // input DataChannel carries input envelopes, but the frame-sink
+  // capture command establishes which WebContents those envelopes
+  // should target.
+  void SetActiveCapture(content::WebContents* web_contents,
+                        viz::FrameSinkId frame_sink_id);
 
  private:
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
@@ -329,6 +343,7 @@ class CloudBrowserBrowserMainParts
   //   * ws_client_->Disconnect() (graceful close)
   //   * ws_client_.reset()
   std::unique_ptr<cloud_browser::signaling::SignalingWsClient> ws_client_;
+  std::unique_ptr<audio::CbAudioLifecycle> audio_lifecycle_;
   // CbOffererDriver is plain unique_ptr-owned by the embedder. It
   // inherits only the two NON-refcounted observer interfaces
   // (SignalingClientObserver + PeerConnectionObserver). The three

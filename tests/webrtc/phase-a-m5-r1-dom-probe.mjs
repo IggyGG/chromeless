@@ -57,8 +57,10 @@ const CDP_HOST = process.env.CDP_HOST || "localhost";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 const CDP_CONNECT_TIMEOUT_MS = parseInt(process.env.CDP_CONNECT_TIMEOUT_MS || "60000", 10);
 const POST_LOAD_SETTLE_MS = parseInt(process.env.POST_LOAD_SETTLE_MS || "2000", 10);
+const STIMULUS_TARGET_HTML =
+  '<html><body style="margin:0"><a href="#" style="display:inline-block;padding:10px 20px;font-size:24px">link</a></body></html>';
 const STIMULUS_TARGET_URL = process.env.STIMULUS_TARGET_URL
-  || 'data:text/html,<html><body style="margin:0"><a href="#" style="display:inline-block;padding:10px 20px;font-size:24px">link</a></body></html>';
+  || ("data:text/html," + encodeURIComponent(STIMULUS_TARGET_HTML));
 
 function log(level, msg, extra) {
   const line = { ts: new Date().toISOString(), level, msg, ...(extra || {}) };

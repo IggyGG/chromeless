@@ -5,10 +5,19 @@
 
 #include "capture/build-integration/cb_headless_screen.h"
 
+#include "base/logging.h"
+
 namespace cloud_browser {
 
 CbHeadlessScreen::CbHeadlessScreen() = default;
 CbHeadlessScreen::~CbHeadlessScreen() = default;
+
+void CbHeadlessScreen::SetLastPointerSource(
+    const CbLastPointerState* last_pointer_state) {
+  last_pointer_state_ = last_pointer_state;
+  LOG(INFO) << "CV2-83: CbHeadlessScreen last-pointer source "
+            << (last_pointer_state_ ? "installed" : "cleared");
+}
 
 bool CbHeadlessScreen::IsWindowUnderCursor(gfx::NativeWindow window) {
   // Single-root-window embedder: cb_aura_platform_data.cc constructs
@@ -30,19 +39,17 @@ bool CbHeadlessScreen::IsWindowUnderCursor(gfx::NativeWindow window) {
 }
 
 gfx::Point CbHeadlessScreen::GetCursorScreenPoint() {
-  // R1 default. See cb_headless_screen.h class-level comment for the
-  // wiring-frontier rationale — CbLastPointerState (M4 R10) is the
-  // intended source, but its writer (CbInputDispatchMouse) is not
-  // currently runtime-wired into main_parts (the input-DC observer
-  // is CbInputLoggingDelegate per CV2-75 R1). Per lesson (j), this
-  // commit advances ONE ring (Screen registration / cursor-gate);
-  // routing the last-pointer through is a separate ring that the
-  // CbInputDispatchMouse runtime-wire follow-up will resolve.
-  //
-  // Returning gfx::Point(0,0) matches the upstream ScreenBase stub's
-  // observable behaviour (which was the installed Screen up until
-  // this subclass landed), so any consumer that previously tolerated
-  // the stub continues to tolerate this.
+  if (last_pointer_state_) {
+    const CbLastPointerSnapshot& snap =
+        last_pointer_state_->last_pointer();
+    if (!snap.at.is_null() && snap.in_widget) {
+      return gfx::Point(static_cast<int>(snap.x),
+                        static_cast<int>(snap.y));
+    }
+  }
+
+  // Conservative fallback before the first successful browser-process
+  // pointer dispatch, or after the client reports a pointer leave.
   return gfx::Point();
 }
 

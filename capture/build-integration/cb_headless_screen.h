@@ -110,6 +110,8 @@
 #include "ui/display/display.h"
 #include "ui/display/screen_base.h"
 #include "ui/gfx/geometry/point.h"
+#include "base/memory/raw_ptr.h"
+#include "cloud-browser/capture/build-integration/cb_last_pointer.h"
 // CV2-78 Wave 1 first-compile-link fix-forward: chromium-7727 renamed
 // ui/gfx/native_widget_types.h → ui/gfx/native_ui_types.h (same file,
 // still declares gfx::NativeWindow + gfx::NativeView et al). The
@@ -133,6 +135,11 @@ class CbHeadlessScreen : public display::ScreenBase {
 
   ~CbHeadlessScreen() override;
 
+  // Supplies the browser-process pointer state written by M4's typed
+  // mouse dispatcher. nullptr clears the source and restores the
+  // conservative (0,0) fallback.
+  void SetLastPointerSource(const CbLastPointerState* last_pointer_state);
+
   // display::Screen via ScreenBase:
 
   // Returns true for any non-null Aura window. The cb-chromium worker
@@ -150,15 +157,10 @@ class CbHeadlessScreen : public display::ScreenBase {
   // cursor".
   bool IsWindowUnderCursor(gfx::NativeWindow window) override;
 
-  // Returns gfx::Point(0,0). See class-level comment for the
-  // wiring-frontier rationale (M4 R10 CbLastPointerState exists but
-  // is not yet runtime-fed — CbInputDispatchMouse is unwired in the
-  // current main_parts assembly). The follow-up that wires
-  // CbInputDispatchMouse into the input DC observer chain MAY add a
-  // setter on this class (`SetLastPointerSource(CbLastPointerState*)`)
-  // so the Screen can read the most recent in-widget coordinate and
-  // return it here. R1 ships without that seam to keep this commit
-  // ring-disciplined (lesson j).
+  // Returns the latest in-widget pointer coordinate from M4's typed
+  // mouse dispatcher when that source is installed and has observed a
+  // successful pointer forward. Falls back to gfx::Point(0,0) before
+  // first input and after pointer-leave.
   gfx::Point GetCursorScreenPoint() override;
 
   // Returns the single 1280x720 default display the embedder seeds
@@ -182,6 +184,9 @@ class CbHeadlessScreen : public display::ScreenBase {
   // public, so this is a one-liner delegate.
   display::Display GetDisplayNearestWindow(
       gfx::NativeWindow window) const override;
+
+ private:
+  raw_ptr<const CbLastPointerState> last_pointer_state_ = nullptr;
 };
 
 }  // namespace cloud_browser

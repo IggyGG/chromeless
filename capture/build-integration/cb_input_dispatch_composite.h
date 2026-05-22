@@ -160,6 +160,9 @@ class CbInputDispatchCompositeDelegate : public CbInputDispatchDelegate {
   // for R10's snapshot assertions) without re-instantiating the
   // composite. Never used by production code.
   CbInputDispatchMouse* mouse_for_testing() { return mouse_.get(); }
+  const CbLastPointerState* last_pointer_state() const {
+    return mouse_ ? mouse_->last_pointer_state() : nullptr;
+  }
   CbInputDispatchKeyboard* keyboard_for_testing() { return keyboard_.get(); }
   CbInputDispatchIme* ime_for_testing() { return ime_.get(); }
   CbInputDispatchTouch* touch_for_testing() { return touch_.get(); }

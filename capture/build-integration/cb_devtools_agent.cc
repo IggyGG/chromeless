@@ -112,8 +112,11 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     content::BrowserContext* default_browser_context,
     aura::Window* aura_context_window,
     base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
-        track_source_getter)
+        track_source_getter,
+    base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
+        active_capture_callback)
     : track_source_getter_(std::move(track_source_getter)),
+      active_capture_callback_(std::move(active_capture_callback)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
   // NOTE: we deliberately do NOT Run() the getter here. CV2-69
@@ -280,6 +283,11 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
   // "auto-start policy (R5)" non-goal carve-out (which already names
   // R5 as the lifecycle owner).
   track_source->StartCapture(viz::VideoCaptureTarget(frame_sink_id));
+
+  web_contents->Focus();
+  if (active_capture_callback_) {
+    active_capture_callback_.Run(web_contents, frame_sink_id);
+  }
 
   LOG(INFO) << "Cb.startFrameSinkCapture: track-source pass-through started "
             << "capture on " << frame_sink_id.ToString();

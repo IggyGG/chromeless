@@ -90,13 +90,19 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   // emits a ServerError envelope rather than UAFing.
   base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
       track_source_getter;
+  base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
+      active_capture_callback;
   if (main_parts_) {
     track_source_getter = base::BindRepeating(
         &CloudBrowserBrowserMainParts::cb_track_source,
         base::Unretained(main_parts_));
+    active_capture_callback = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::SetActiveCapture,
+        base::Unretained(main_parts_));
   }
   return std::make_unique<CbDevToolsManagerDelegate>(
-      default_context, aura_context, std::move(track_source_getter));
+      default_context, aura_context, std::move(track_source_getter),
+      std::move(active_capture_callback));
 }
 
 }  // namespace cloud_browser

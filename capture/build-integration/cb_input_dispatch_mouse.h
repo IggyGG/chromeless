@@ -164,6 +164,13 @@ class CbInputDispatchMouse : public CbInputDispatchDelegate {
     return last_pointer_state_.last_pointer();
   }
 
+  // Production seam for M5 cursor routing. CbHeadlessScreen reads the
+  // same state R3 mutates after successful pointer forwards so Aura can
+  // answer GetCursorScreenPoint from the browser-process input path.
+  const CbLastPointerState* last_pointer_state() const {
+    return &last_pointer_state_;
+  }
+
   // Test seam — flips the bring-to-front-once latch without an actual
   // dispatch. Used by cb_input_dispatch_mouse_test.cc to verify
   // subsequent dispatches do NOT re-activate.

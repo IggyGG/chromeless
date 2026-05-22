@@ -301,6 +301,15 @@ async function ensureRendererPresent() {
       return { halt: "H3", reason: "renderer-DOM empty post-navigation" };
     }
 
+    try {
+      const captureResult = await client.send("Cb.startFrameSinkCapture");
+      log("ok", "Cb.startFrameSinkCapture complete", captureResult || {});
+    } catch (e) {
+      log("err", "HALT H3: Cb.startFrameSinkCapture failed", { err: String(e) });
+      try { await client.close(); } catch {}
+      return { halt: "H3", reason: `Cb.startFrameSinkCapture failed: ${String(e)}` };
+    }
+
     try { await client.close(); } catch {}
     return { ok: true };
   } catch (e) {

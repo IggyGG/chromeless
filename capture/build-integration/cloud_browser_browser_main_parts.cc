@@ -10,6 +10,7 @@
 #include <string>
 #include <utility>
 
+#include "api/audio/audio_device.h"
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
 #include "api/make_ref_counted.h"
@@ -28,6 +29,9 @@
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
+#include "capture/audio/cb_audio_lifecycle.h"
+#include "capture/audio/cb_audio_options.h"
+#include "capture/audio/cb_audio_track.h"
 #include "capture/framesink-capturer/capturer.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "capture/signaling/cb_ice_config.h"      // CV2-69
@@ -183,6 +187,27 @@ CloudBrowserBrowserMainParts::cb_track_source() const {
   // strong ref). Returns nullptr until PreMainMessageLoopRun step 5b
   // has constructed cb_track_source_.
   return cb_track_source_.get();
+}
+
+void CloudBrowserBrowserMainParts::SetActiveCapture(
+    content::WebContents* web_contents,
+    viz::FrameSinkId frame_sink_id) {
+  if (!web_contents || !frame_sink_id.is_valid()) {
+    active_webcontents_resolver_.SetActiveCapture(nullptr,
+                                                  viz::FrameSinkId());
+    LOG(WARNING) << "CV2-81: active capture cleared by invalid "
+                    "SetActiveCapture input";
+    return;
+  }
+
+  web_contents->Focus();
+  active_webcontents_resolver_.SetActiveCapture(web_contents, frame_sink_id);
+  if (screen_ && input_delegate_) {
+    screen_->SetLastPointerSource(input_delegate_->last_pointer_state());
+  }
+  LOG(INFO) << "CV2-81: active input target set from "
+               "Cb.startFrameSinkCapture, fsid="
+            << frame_sink_id.ToString();
 }
 
 namespace {
@@ -416,6 +441,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
       worker_thread_->BlockingCall(
           [] { return CreateCloudBrowserDefaultAudioDeviceModule(); });
+  webrtc::AudioDeviceModule* adm_debug = adm.get();
   pcf_ = CreateCloudBrowserPcf(network_thread_.get(), worker_thread_.get(),
                                signaling_thread_.get(), env,
                                std::move(adm));
@@ -563,11 +589,16 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   rtc_config.servers = std::move(ice_cfg->servers);
   rtc_config.type = ice_cfg->transport_policy;
 
-  // F5 step 5 — Construct R4 CbOffererDriver. observer=this is
-  // OffererDriverObserver; main_parts forwards lifecycle events to
-  // LOG sinks (M5.5 R5 audio chain integration deferred). ui_runner
-  // is the sequenced task runner of the embedder's UI thread (this
-  // method runs on it).
+  audio_lifecycle_ = std::make_unique<audio::CbAudioLifecycle>(
+      /*downstream=*/this,
+      /*observer=*/nullptr,
+      base::SequencedTaskRunner::GetCurrentDefault(),
+      adm_debug);
+
+  // F5 step 5 — Construct R4 CbOffererDriver. observer is the M5.5
+  // audio lifecycle, which forwards downstream to main_parts after it
+  // has observed ICE/close/failure edges. ui_runner is the sequenced
+  // task runner of the embedder's UI thread (this method runs on it).
   // std::make_unique — CbOffererDriver is a plain embedder-owned
   // object (inherits only the 2 non-refcounted observer interfaces;
   // its 3 refcounted webrtc SDP-observer callbacks are delivered via
@@ -588,7 +619,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       std::make_unique<cloud_browser::signaling::CbOffererDriver>(
           pcf_, signaling_thread_.get(), ws_client_.get(),
           std::move(rtc_config),
-          /*observer=*/this,
+          /*observer=*/audio_lifecycle_.get(),
           base::SequencedTaskRunner::GetCurrentDefault());
 
   // F5 step 6 — Start the offerer + open the WS dial. Order:
@@ -598,6 +629,25 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // outbound offer envelope from CreateOffer can be sent).
   offerer_driver_->Start();
   ws_client_->Connect();
+
+  if (offerer_driver_->pc()) {
+    webrtc::PeerConnectionFactoryInterface* pcf = pcf_.get();
+    webrtc::PeerConnectionInterface* pc = offerer_driver_->pc();
+    SendOnlyAudioTransceiver audio_bindings =
+        signaling_thread_->BlockingCall([pcf, pc] {
+          return AddSendOnlyAudioTransceiver(
+              pcf, pc, BuildMediaAudioOptions(), "cb-audio-0");
+        });
+    if (audio_lifecycle_) {
+      audio_lifecycle_->AdoptBindings(
+          std::move(audio_bindings.source),
+          std::move(audio_bindings.track),
+          std::move(audio_bindings.transceiver));
+    }
+  } else {
+    LOG(ERROR) << "CV2-82: offerer driver has no PC after Start(); "
+                  "sendonly audio transceiver not attached";
+  }
 
   // F6 step 7 — Add the M2 R3 video sendonly transceiver. THIS is
   // what triggers OnRenegotiationNeeded → CreateOffer → first
@@ -690,6 +740,9 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
         input_delegate_ =
             std::make_unique<CbInputDispatchCompositeDelegate>(
                 &active_webcontents_resolver_);
+        if (screen_) {
+          screen_->SetLastPointerSource(input_delegate_->last_pointer_state());
+        }
         input_dispatch_ = std::make_unique<CbInputDispatch>(
             content::GetUIThreadTaskRunner({}),
             input_delegate_.get());
@@ -865,6 +918,9 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // active_webcontents_resolver_ value member outlives this reset()
   // (destroyed in main_parts field-destruction order), satisfying
   // the "resolver_lifetime > dispatcher_lifetime" contract.
+  if (screen_) {
+    screen_->SetLastPointerSource(nullptr);
+  }
   input_delegate_.reset();
   // ============== END CV2-75/CV2-81 TEARDOWN ==============
 
@@ -874,6 +930,9 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   input_dc_ = nullptr;
   video_track_ = nullptr;
   if (offerer_driver_) {
+    if (audio_lifecycle_) {
+      audio_lifecycle_->PrepareForTeardown("session ended");
+    }
     offerer_driver_->Close("session ended");
     // unique_ptr — reset() drops the driver. The transient SDP-observer
     // adapters are independently refcounted; if libwebrtc still holds
@@ -882,6 +941,7 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
     // WeakPtr — teardown is callback-safe.
     offerer_driver_.reset();
   }
+  audio_lifecycle_.reset();
   if (ws_client_) {
     ws_client_->Disconnect();
     ws_client_.reset();

@@ -1041,6 +1041,8 @@ source_set("embedder") {
     #     crash keys F3, and content::InitializeMojoCore for F2) —
     #     bootstrap inits that the worker was skipping prior to CV2-69.
     ":cb_audio_lifecycle",
+    ":cb_audio_options",
+    ":cb_audio_track",
     "//cloud-browser/capture/signaling:cb_ice_config",
     "//cloud-browser/capture/signaling:cb_offerer_driver",
     "//cloud-browser/capture/signaling:cb_signaling_ws_client",

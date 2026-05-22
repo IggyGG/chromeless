@@ -48,6 +48,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "components/viz/common/surfaces/frame_sink_id.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
 namespace aura {
@@ -127,7 +128,9 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       content::BrowserContext* default_browser_context = nullptr,
       aura::Window* aura_context_window = nullptr,
       base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
-          track_source_getter = {});
+          track_source_getter = {},
+      base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
+          active_capture_callback = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -234,6 +237,13 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // forward the producer remote" trampoline.
   base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
       track_source_getter_;
+
+  // Notifies main_parts after Cb.startFrameSinkCapture successfully
+  // resolves a WebContents + FrameSinkId. This is the M4 resolver
+  // handoff: input DataChannel dispatchers need the same active
+  // capture target that the frame-sink capturer just started using.
+  base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
+      active_capture_callback_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser
