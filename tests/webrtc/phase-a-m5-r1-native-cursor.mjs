@@ -23,6 +23,9 @@ const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 const CDP_CONNECT_TIMEOUT_MS = parseInt(process.env.CDP_CONNECT_TIMEOUT_MS || "60000", 10);
 const HANDSHAKE_TIMEOUT_MS = parseInt(process.env.HANDSHAKE_TIMEOUT_MS || "60000", 10);
 const POST_SEND_WAIT_MS = parseInt(process.env.POST_SEND_WAIT_MS || "5000", 10);
+const SKIP_CDP_PREP = process.env.SKIP_CDP_PREP === "1";
+const MOUSE_X = parseInt(process.env.MOUSE_X || "60", 10);
+const MOUSE_Y = parseInt(process.env.MOUSE_Y || "40", 10);
 
 const STIMULUS_TARGET_HTML =
   '<html><body style="margin:0">'
@@ -208,9 +211,19 @@ async function main() {
     cdp: `${CDP_HOST}:${CDP_PORT}`,
     handshake_timeout_ms: HANDSHAKE_TIMEOUT_MS,
     post_send_wait_ms: POST_SEND_WAIT_MS,
+    skip_cdp_prep: SKIP_CDP_PREP,
   });
 
-  const target = await prepareRendererTarget();
+  const target = SKIP_CDP_PREP
+    ? {
+        x: MOUSE_X,
+        y: MOUSE_Y,
+        rect: {
+          source: "env",
+          note: "SKIP_CDP_PREP=1; caller already navigated and started capture",
+        },
+      }
+    : await prepareRendererTarget();
   const { pc, ws, inputDc } = await connectInputDataChannel();
 
   const envelope = {
