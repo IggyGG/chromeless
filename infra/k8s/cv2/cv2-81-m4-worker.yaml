@@ -1,0 +1,98 @@
+# infra/k8s/cv2/cv2-81-m4-worker.yaml — CV2-81 M4 typed-dispatch verification worker
+#
+# verification-lead 2026-05-20. The M4 typed-dispatch harness
+# (tests/webrtc/phase-a-m4-typed-dispatch.mjs) is a WebRTC peer + CDP hybrid:
+# it rendezvous with this worker on signaling session
+# `cv2-81-m4-typed-dispatch-001`, completes the 4-DC handshake, sends six
+# typed input envelopes over the "input" DC, and CDP-attaches for a
+# renderer-DOM sanity check.
+#
+# Distinct from cv2-82-real-pulse.yaml: no PulseAudio ConfigMap overlay
+# (M4 is input dispatch, not audio — the image's default pulse is fine
+# even degraded). Session id is the M4 harness's, not the audio pod's.
+#
+# ──────────────────────────────────────────────────────────────────────
+# IMAGE TAG IS A PLACEHOLDER — `cr7727-rv8-pending` does not exist; the pod
+# will ImagePullBackOff until the tag is replaced. M4 verification REQUIRES
+# rv8: the M4 harness HALTs H3 if the renderer produces no DOM, and the
+# rv7 renderer is dead (SwANGLE/Vulkan ring-N+1). Bump to the rv8 tag the
+# moment build-czar relays it, then apply.
+# ──────────────────────────────────────────────────────────────────────
+#
+# Requires the signaling broker (cv2-signaling-broker.yaml) to be running
+# in chromeless-tests first — the worker dials
+# signaling.chromeless-tests.svc.cluster.local:8080.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cv2-81-m4-worker
+  namespace: chromeless-tests
+  labels:
+    app.kubernetes.io/name: cv2-81
+    app.kubernetes.io/variant: m4-typed-dispatch
+    app.kubernetes.io/part-of: chromeless
+    cv2.campaign/phase: a
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values: ["triform-7", "triform-8"]
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  imagePullSecrets: [{ name: registry-pull }]
+  shareProcessNamespace: true
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+    - { name: run, emptyDir: { medium: Memory, sizeLimit: 64Mi } }
+    - { name: supervisor-log, emptyDir: { sizeLimit: 64Mi } }
+    - { name: home, emptyDir: { sizeLimit: 512Mi } }
+    - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
+    - { name: x11-socket, emptyDir: { sizeLimit: 16Mi } }
+  containers:
+    - name: cb-chromium
+      # PLACEHOLDER — replace with the rv8 tag before deploy (see header).
+      image: registry.triform.cloud/chromeless/chromeless:cr7727-rv8-pending
+      imagePullPolicy: Always
+      env:
+        # Native CV2 worker signaling contract (cb_signaling_ws_client.cc:34-37).
+        - { name: WEBRTC_SIGNALING_HOST, value: signaling.chromeless-tests.svc.cluster.local:8080 }
+        - { name: WEBRTC_SIGNALING_SESSION_ID, value: cv2-81-m4-typed-dispatch-001 }
+        - { name: WEBRTC_SIGNALING_TLS, value: "0" }
+        - { name: CHROMELESS_REGION, value: triform-eu }
+      ports:
+        - { name: cdp, containerPort: 9222 }
+      volumeMounts:
+        - { name: dshm, mountPath: /dev/shm }
+        - { name: run, mountPath: /run }
+        - { name: supervisor-log, mountPath: /var/log/supervisor }
+        - { name: home, mountPath: /home/cbuser }
+        - { name: tmp, mountPath: /tmp }
+        - { name: x11-socket, mountPath: /tmp/.X11-unix }
+      resources:
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 512Mi }
+        limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 2Gi }
+      startupProbe:
+        httpGet: { path: /json/version, port: cdp }
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 36
+      readinessProbe:
+        httpGet: { path: /json/version, port: cdp }
+        periodSeconds: 10
+        failureThreshold: 3
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }

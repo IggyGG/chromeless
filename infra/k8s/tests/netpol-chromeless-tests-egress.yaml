@@ -12,9 +12,9 @@
 #                         secret mounts via TokenRequest)
 #   * external 80/443 — debian apt repos, npm registry, etc.
 #                       (test-driver does `apt-get install ffmpeg`,
-#                       `npm install` for the wire scenarios; the
-#                       build-input-bridge initContainer fetches Go
-#                       modules)
+#                       `npm install` for the wire scenarios)
+#                       M7 R4: build-input-bridge initContainer
+#                       removed; native peer (M4) replaced it.
 #
 # Without this, Calico's default-deny-egress (enforced via
 # GlobalNetworkPolicy + the per-namespace baseline) blocks every
@@ -56,10 +56,9 @@ spec:
             cidr: 10.96.0.10/32
 
     # Cluster-internal forgejo HTTP — runtime git clone of the
-    # chromeless repo for bootstrap-tests + build-input-bridge
-    # initContainers. Companion ingress rule in
-    # netpol-forgejo-allow-chromeless-tests.yaml allows the receiving
-    # forgejo pod to accept this.
+    # chromeless repo for bootstrap-tests initContainer. Companion
+    # ingress rule in netpol-forgejo-allow-chromeless-tests.yaml
+    # allows the receiving forgejo pod to accept this.
     - ports:
         - port: 3000
           protocol: TCP
@@ -77,6 +76,32 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: registry
 
+    # Cluster-internal CV2 signaling broker — the native CV2 worker pods
+    # (cb-chromium) dial the in-namespace `signaling` Deployment over
+    # WebSocket on :8080 to exchange SDP/ICE. Added 2026-05-20
+    # (verification-lead, Wave 2 rv8): the broker Deployment did not exist
+    # when this policy was first written, so the worker→broker egress path
+    # was never exercised — the worker's dial silently hit default-deny-egress
+    # (ERR_CONNECTION_TIMED_OUT after ~135s).
+    #
+    # Scoped to the signaling-labelled pods in this namespace. The `to` peer
+    # uses an explicit namespaceSelector + podSelector pair: an A/B probe
+    # showed this Calico install does NOT honour a *bare* podSelector egress
+    # peer (worker→broker stayed timed-out), while the namespaceSelector form
+    # used by the forgejo/registry rules above works. The pair below is the
+    # same effective scope as a bare podSelector (signaling pods, this
+    # namespace) expressed in the form Calico enforces.
+    - ports:
+        - port: 8080
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: chromeless-tests
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: signaling
+
     # kube-apiserver on the host network. Same shape as chromeless-build.
     - ports:
         - port: 6443
@@ -89,9 +114,8 @@ spec:
 
     # External HTTP/HTTPS — debian apt repos (ffmpeg + ca-certificates
     # in the test-driver), npm registry (npm install for the wire
-    # scenarios), Go module proxy (build-input-bridge). Excludes
-    # RFC1918 + link-local because intra-cluster + intra-VPC traffic
-    # should match the more specific rules above.
+    # scenarios). Excludes RFC1918 + link-local because intra-cluster
+    # + intra-VPC traffic should match the more specific rules above.
     - ports:
         - port: 80
           protocol: TCP

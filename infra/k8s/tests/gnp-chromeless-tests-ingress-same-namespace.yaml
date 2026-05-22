@@ -1,0 +1,36 @@
+# gnp-chromeless-tests-ingress-same-namespace.yaml
+#
+# Calico GlobalNetworkPolicy — re-allows same-namespace pod-to-pod ingress
+# within the chromeless-tests namespace.
+#
+# Same-namespace pod-to-pod traffic is default-denied cluster-wide; each
+# namespace that needs intra-namespace traffic carries a dedicated
+# `allow-<ns>-ingress-same-namespace` GlobalNetworkPolicy (see the existing
+# `default.allow-cikada-ingress-same-namespace` and
+# `default.allow-signoz-ingress-same-namespace`). chromeless-tests never had
+# one because nothing in it needed same-namespace traffic until the CV2
+# signaling broker Deployment landed (Wave 2 rv8) — the native CV2 worker
+# pods (cb-chromium) must reach the in-namespace `signaling` Deployment on
+# :8080 over WebSocket.
+#
+# This is a VERBATIM 1:1 clone of `default.allow-cikada-ingress-same-namespace`
+# with the only change being the namespace name (cikada -> chromeless-tests).
+# Pairs with the egress half in netpol-chromeless-tests-egress.yaml.
+# Operator-authorized 2026-05-21 (verification-lead, Wave 2 rv8).
+
+apiVersion: crd.projectcalico.org/v1
+kind: GlobalNetworkPolicy
+metadata:
+  name: default.allow-chromeless-tests-ingress-same-namespace
+  labels:
+    projectcalico.org/tier: default
+spec:
+  tier: default
+  namespaceSelector: kubernetes.io/metadata.name == 'chromeless-tests'
+  types:
+    - Ingress
+  ingress:
+    - action: Allow
+      destination: {}
+      source:
+        namespaceSelector: kubernetes.io/metadata.name == 'chromeless-tests'

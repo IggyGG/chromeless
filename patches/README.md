@@ -67,13 +67,15 @@ seam) or upstreamed.
 
 | # | Patch | Purpose | Upstream tracking |
 |---|-------|---------|-------------------|
-| 0001 | `0001-expose-encoder-factory-injection.patch` | Adds `ContentBrowserClient::GetWebRtcVideoEncoderFactory()`; consulted from `PeerConnectionDependencyFactory::CreatePeerConnectionFactory()` so our embedder can plug `CloudBrowserVideoEncoderFactory` (T19) into libwebrtc. | None yet — file an upstream bug post-Phase-2 prototype if shape stabilises. |
-| 0005 | `0005-expose-host-frame-sink-manager.patch` | Adds `content::GetEmbedderHostFrameSinkManager()` — a CONTENT_EXPORT free function in `content/public/browser/content_browser_client.h` that re-exports the content-internal `content::GetHostFrameSinkManager()` so the cloud-browser embedder (`capture/build-integration/cb_devtools_agent.cc` — Track E / T55) can build a producer-side `mojo::Remote<viz::mojom::FrameSinkVideoCapturer>` without depending on `//content/browser:browser` (whose visibility list rejects out-of-tree consumers). | None yet — same disposition as 0001; file upstream bug if pattern proves durable across two roll cycles. |
+| 0005 | `0005-expose-host-frame-sink-manager.patch` | Adds `content::GetEmbedderHostFrameSinkManager()` — a CONTENT_EXPORT free function in `content/public/browser/content_browser_client.h` that re-exports the content-internal `content::GetHostFrameSinkManager()` so the cloud-browser embedder (`capture/build-integration/cb_devtools_agent.cc` — Track E / T55) can build a producer-side `mojo::Remote<viz::mojom::FrameSinkVideoCapturer>` without depending on `//content/browser:browser` (whose visibility list rejects out-of-tree consumers). | None yet — file upstream bug if pattern proves durable across two roll cycles. |
 
-When patch 0002/3/4/etc. lands, append it to the table above (don't
-reorder the list — patch numbers are stable references). 0002–0004
-already exist on disk but are not yet indexed here; add them in a
-follow-up doc-only commit.
+M7 R6: patches 0001 and 0004 retired. With M1 instantiating
+`PeerConnectionFactoryInterface` in the browser process inside
+`cloud_browser_main_parts.cc`, the renderer-side `GetWebRtcVideoEncoderFactory()`
+embedder hook (0001) and its `unique_ptr` include glue (0004) are
+unreachable. 0002–0003 still exist on disk and apply during build.
+When patch 0002/3 land in this table, append them (don't reorder —
+patch numbers are stable references).
 
 ## When NOT to add a patch
 
@@ -88,8 +90,6 @@ follow-up doc-only commit.
 
 ## Verification
 
-The patch series is currently shape-only — see the `TODO(T17-build-env)`
-markers in `0001-expose-encoder-factory-injection.patch`. The diff
-context lines are illustrative; real context will be re-resolved
-when the build environment first applies the series. The *shape*
-(one virtual, one consultation site, two header includes) is stable.
+Apply via `build/chromeless-build.sh apply-patches` which runs `git am`
+against the Chromium tree pinned per `docs/build/chromium-from-source.md`
+§6. Conflicts are fix-forward, never skip.

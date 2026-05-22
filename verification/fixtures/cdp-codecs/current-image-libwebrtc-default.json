@@ -1,0 +1,17 @@
+{
+  "_provenance": "REFERENCE FIXTURE — pre-real-capture placeholder representing libwebrtc's default video codec advertisement when no CloudBrowserVideoEncoderFactory is injected (the current chromeless:ci state per the M0 architecture record at .triform/architecture/chromeless-native-webrtc.md PR #1708: 'encoder factory NOT installed on main; capability probe via raw CDP showed VP8/AV1/6-variant H264 = libwebrtc default'). Constructed 2026-05-16 by m0-dev to match the documented libwebrtc default surface. MUST be re-captured from the actual chromeless:ci image (via verification/scripts/cb-encoder-probe-v3.mjs) and overwritten before the M0 PR merges — the fixture-from-real-artifact discipline (memory/feedback_test_fixtures_from_real_artifacts) is non-negotiable. See R5 closeout commit + CI run logs for the real-capture provenance.",
+  "imageRef": "chromeless:ci",
+  "capturedAt": "2026-05-16T00:00:00Z",
+  "codecs": [
+    { "mimeType": "video/VP8", "clockRate": 90000, "channels": null, "sdpFmtpLine": null },
+    { "mimeType": "video/VP9", "clockRate": 90000, "channels": null, "sdpFmtpLine": "profile-id=0" },
+    { "mimeType": "video/VP9", "clockRate": 90000, "channels": null, "sdpFmtpLine": "profile-id=2" },
+    { "mimeType": "video/H264", "clockRate": 90000, "channels": null, "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f" },
+    { "mimeType": "video/H264", "clockRate": 90000, "channels": null, "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f" },
+    { "mimeType": "video/H264", "clockRate": 90000, "channels": null, "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f" },
+    { "mimeType": "video/H264", "clockRate": 90000, "channels": null, "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d0034" },
+    { "mimeType": "video/H264", "clockRate": 90000, "channels": null, "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f" },
+    { "mimeType": "video/H264", "clockRate": 90000, "channels": null, "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640034" },
+    { "mimeType": "video/AV1", "clockRate": 90000, "channels": null, "sdpFmtpLine": "level-idx=5;profile=0;tier=0" }
+  ]
+}

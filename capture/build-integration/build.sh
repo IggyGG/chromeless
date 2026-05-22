@@ -157,6 +157,35 @@ cmd_apply_patches() {
                 log "WARN: no fallback ref for branch-heads/${CHROMIUM_BRANCH_NUMBER}; tree may be dirty"
             fi
         fi
+        # `git reset --hard` only undoes TRACKED file changes; untracked
+        # files persist. `git am` then refuses to apply a patch that
+        # CREATES one of those files: "untracked working tree files
+        # would be overwritten by merge". Observed 2026-05-17 on build
+        # #6 v2: patches/0003 failed because
+        # third_party/webrtc_overrides/cloud_browser/BUILD.gn was
+        # untracked in the tree (residue from prior partial apply).
+        #
+        # The first attempt at this fix was a rootwide `git clean -fdx`
+        # which is far too aggressive: chromium has many legitimately-
+        # untracked artifacts (gclient-fetched binaries at
+        # buildtools/linux64/gn, third_party/llvm-build/, .gclient_entries,
+        # .cipd_client, etc.) that are NOT patch residue but ARE
+        # untracked + ignored by .gitignore. Rootwide -x deleted those
+        # too, broke STEP 5 gn gen ("Could not find gn executable at
+        # buildtools/linux64/gn"). Observed on build #6 v3 (8rq9z).
+        #
+        # Surgical fix: only clean the paths that our patches CREATE
+        # as new directories. Per current patch series:
+        #   0001 modifies third_party/webrtc/api/* (tracked, reset handles)
+        #   0002 modifies root BUILD.gn                (tracked, reset handles)
+        #   0003 CREATES third_party/webrtc_overrides/cloud_browser/ ← clean here
+        #   0004 modifies content/public/browser/*.cc  (tracked, reset handles)
+        #   0005 modifies components/viz/host/*.h      (tracked, reset handles)
+        # Only 0003 introduces a brand-new directory; the residue from
+        # a partial prior run is always in that directory. Scoping the
+        # clean to `--` <path> avoids touching gclient binaries.
+        (cd "${CHROMIUM_SRC}" && git clean -fdx -- third_party/webrtc_overrides/cloud_browser/) >/dev/null 2>&1 || \
+            log "WARN: scoped clean failed; untracked residue may persist"
     fi
 
     log "Applying ${#patches[@]} patch(es) to ${CHROMIUM_SRC}..."

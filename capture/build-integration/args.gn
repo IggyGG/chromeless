@@ -41,6 +41,52 @@ rtc_include_tests        = false
 enable_libaom            = true
 enable_dav1d_decoder     = true
 
+# ---- Audio Device Module --------------------------------------------
+# webrtc/api/audio:create_audio_device_module + the AudioDeviceModuleImpl
+# gn targets only register when this flag is true. Default is
+# !build_with_chromium = false in chromium builds; webrtc expects
+# chromium embedders to provide their own ADM via the audio service.
+# For our M1 PCF placeholder ADM (kDummyAudio via
+# webrtc::CreateAudioDeviceModule), we DO need the webrtc internal
+# implementation linked in. Set to true to make the symbol available.
+# M5.5 ships the real Pulse-based ADM; this flag stays true since
+# that path also uses webrtc::AudioDeviceModuleImpl under the hood.
+rtc_include_internal_audio_device = true
+
+# CV2-75 Ring 3 — activate the PulseAudio backend in WebRTC's Linux ADM
+# factory. Without this flag, third_party/webrtc/webrtc.gni:278 declares
+# `rtc_include_pulse_audio = !build_with_chromium`, which is FALSE for
+# our chromium-bundled libwebrtc build. That causes audio_device/BUILD.
+# gn:357-358 to skip the WEBRTC_ENABLE_LINUX_PULSE define, and
+# audio_device_impl.cc:201-209 takes the ALSA-only branch:
+#
+#   WARNING: audio_device_impl.cc:205 PulseAudio is disabled using build flag.
+#   ERROR:   audio_device_alsa_linux.cc:618 device index is out of range [0,-1]
+#   ERROR:   adm_helpers.cc:44 Unable to set playout device.
+#
+# (Empirical evidence from baseline-rv1 cb-chromium logs, surfaced by
+# functional-test-lead via cheap-preview log grep, 2026-05-19. M5.5 R0
+# acceptance: absence of the disable-warning + ALSA-out-of-range pair.)
+#
+# CV2-75 Ring 3 v2 fix-forward (post-rv2 FAIL): the flag is
+# `rtc_include_pulse_audio`, NOT `rtc_use_pulse_audio` (the latter does
+# not exist in webrtc.gni — the prior version of this line was a no-op).
+# Verified by direct grep of webrtc.gni:278 + BUILD.gn:357 +
+# audio_device_impl.cc:196 ("'rtc_include_pulse_audio' build flag")
+# against chromium-7727's chromium-src on T7.
+#
+# This is a runtime-only gate — symbols compile fine either way; the
+# failure only manifests when an audio-track is requested. PipeWire
+# (rtc_use_pipewire) and the dummy-audio path
+# (rtc_use_dummy_audio_file_devices) default to false in WebRTC's
+# build conventions, so no sibling enable/disable is needed. No
+# chromium-side `use_pulseaudio` flag is needed either — that gates
+# chromium's media/audio/audio_manager_pulse.cc which our worker
+# doesn't use (cb_audio_device_module.cc calls
+# webrtc::CreateAudioDeviceModule directly, bypassing chromium's
+# content/media audio_service abstraction).
+rtc_include_pulse_audio = true
+
 # ---- Headless / server-shaped ---------------------------------------
 use_ozone                = true
 ozone_platform_headless  = true

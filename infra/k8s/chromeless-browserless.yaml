@@ -100,10 +100,6 @@ spec:
               value: chromeless-browserless
             - name: SIGNALING_URL
               value: ws://triform.triform-wtf.svc.cluster.local:3000/api/webrtc/signaling
-            - name: STREAMER_FPS
-              value: "30"
-            - name: IDLE_TIMEOUT_S
-              value: "999999"
             - name: CHROMELESS_USE_FAKE_MEDIA
               value: "1"
             - name: CHROMELESS_REGION
@@ -111,8 +107,6 @@ spec:
           ports:
             - name: cdp
               containerPort: 9222
-            - name: streamer
-              containerPort: 9000
           volumeMounts:
             - { name: dshm, mountPath: /dev/shm }
             - { name: run, mountPath: /run }

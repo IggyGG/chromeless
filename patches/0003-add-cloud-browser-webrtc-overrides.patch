@@ -30,25 +30,68 @@ uses it).
 
 Targets re-exported:
   webrtc_api_passthrough (non-testonly):
-    api/units:data_rate                   (webrtc::DataRate)
-    api/video:encoded_image               (webrtc::EncodedImage)
-    api/video:video_bitrate_allocation    (webrtc::VideoBitrateAllocation)
-    api/video:video_frame                 (webrtc::VideoFrame, I420Buffer)
-    api/video_codecs:video_codecs_api     (VideoEncoder, EncoderFactory,
-                                            SdpVideoFormat, VideoCodec)
-    modules/video_coding                  (CodecSpecificInfo, h264_globals,
-                                            video_codec_interface, error_codes)
-    rtc_base:logging                      (RTC_LOG)
+    api/units:data_rate                            (webrtc::DataRate)
+    api/video:encoded_image                        (webrtc::EncodedImage)
+    api/video:video_bitrate_allocation             (webrtc::VideoBitrateAllocation)
+    api/video:video_frame                          (webrtc::VideoFrame, I420Buffer)
+    api/video:video_rtp_headers                    (webrtc::VideoFrame metadata
+                                                     helpers, RTP-side video info)
+    api/video_codecs:video_codecs_api              (VideoEncoder, EncoderFactory,
+                                                     SdpVideoFormat, VideoCodec)
+    media:rtc_media_base                           (cricket::MediaType +
+                                                     base media-stream types)
+    pc:video_track_source                          (webrtc::VideoTrackSource —
+                                                     concrete base class for the
+                                                     FrameSink track-source
+                                                     adapter)
+    api:libjingle_peerconnection_api               (webrtc::PeerConnectionFactory
+                                                     Interface,
+                                                     PeerConnectionFactoryDeps,
+                                                     RtpCodecCapability,
+                                                     MediaType)
+    api:media_stream_interface                     (webrtc::MediaStreamTrack
+                                                     Interface,
+                                                     VideoTrackSourceInterface,
+                                                     VideoTrackInterface)
+    api:scoped_refptr                              (webrtc::scoped_refptr)
+    api:enable_media                               (webrtc::EnableMedia)
+    api:create_modular_peer_connection_factory     (webrtc::CreateModular
+                                                     PeerConnectionFactory —
+                                                     chromium-build-safe
+                                                     sibling of the
+                                                     standalone-webrtc-only
+                                                     :create_peerconnection
+                                                     _factory target)
+    api/video_codecs:builtin_video_decoder_factory (webrtc::CreateBuiltin
+                                                     VideoDecoderFactory)
+    api/environment:environment                    (webrtc::Environment)
+    api/environment:environment_factory            (webrtc::CreateEnvironment)
+    api/audio_codecs:builtin_audio_encoder_factory (CreateBuiltinAudioEncoder
+                                                     Factory)
+    api/audio_codecs:builtin_audio_decoder_factory (CreateBuiltinAudioDecoder
+                                                     Factory)
+    api/audio:audio_device                         (webrtc::AudioDeviceModule)
+    modules/video_coding:codec_globals_headers     (h264_globals.h,
+                                                     video_error_codes.h —
+                                                     re-exported public so
+                                                     consumers can include
+                                                     them transitively)
+    modules/video_coding:video_codec_interface     (video_codec_interface.h
+                                                     — public, see above)
+    modules/video_coding                           (CodecSpecificInfo, h264_globals,
+                                                     video_codec_interface, error_codes)
+    rtc_base:logging                               (RTC_LOG)
+    rtc_base:threading                             (rtc::Thread, ThreadManager)
   webrtc_test_passthrough (testonly):
-    test:test_support                     (gtest fixtures, helpers)
+    test:test_support                              (gtest fixtures, helpers)
 
 Touched file:
 - third_party/webrtc_overrides/cloud_browser/BUILD.gn  (new file)
 
 Resolved against branch-heads/7727 (Chromium 147 stable).
 ---
- .../webrtc_overrides/cloud_browser/BUILD.gn   | 57 +++++++++++++++++++
- 1 file changed, 57 insertions(+)
+ .../webrtc_overrides/cloud_browser/BUILD.gn   | 74 +++++++++++++++++++++++
+ 1 file changed, 74 insertions(+)
  create mode 100644 third_party/webrtc_overrides/cloud_browser/BUILD.gn
 
 diff --git a/third_party/webrtc_overrides/cloud_browser/BUILD.gn b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
@@ -56,7 +99,7 @@ new file mode 100644
 index 0000000000..f4503f144e
 --- /dev/null
 +++ b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,82 @@
 +# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 +#
 +# Use of this source code is governed by a BSD-style license that can be
@@ -93,13 +136,38 @@ index 0000000000..f4503f144e
 +  # public_deps so the headers + their transitive types are visible to
 +  # any //cloud-browser/* target that depends on us.
 +  public_deps = [
++    "//third_party/webrtc/api:create_modular_peer_connection_factory",
++    "//third_party/webrtc/api:enable_media",
++    "//third_party/webrtc/api:libjingle_peerconnection_api",
++    "//third_party/webrtc/api:media_stream_interface",
++    # CV2-81 attempt-5 fix-forward (lesson-(g.4) Discipline-shape at
++    # BUILD.gn dep layer): webrtc/api/data_channel_interface.h does
++    # #include "api/priority.h"; libjingle_peerconnection_api does NOT
++    # transitively re-export priority's config in chromium-7727's
++    # bundled webrtc. Explicit dep brings the priority target's
++    # public_config (-I third_party/webrtc/) into our compilation.
++    "//third_party/webrtc/api:priority",
++    "//third_party/webrtc/api:scoped_refptr",
++    "//third_party/webrtc/api/audio:audio_device",
++    "//third_party/webrtc/api/audio:create_audio_device_module",
++    "//third_party/webrtc/api/audio_codecs:builtin_audio_decoder_factory",
++    "//third_party/webrtc/api/audio_codecs:builtin_audio_encoder_factory",
++    "//third_party/webrtc/api/environment:environment",
++    "//third_party/webrtc/api/environment:environment_factory",
 +    "//third_party/webrtc/api/units:data_rate",
 +    "//third_party/webrtc/api/video:encoded_image",
 +    "//third_party/webrtc/api/video:video_bitrate_allocation",
 +    "//third_party/webrtc/api/video:video_frame",
++    "//third_party/webrtc/api/video:video_rtp_headers",
++    "//third_party/webrtc/api/video_codecs:builtin_video_decoder_factory",
 +    "//third_party/webrtc/api/video_codecs:video_codecs_api",
++    "//third_party/webrtc/media:rtc_media_base",
++    "//third_party/webrtc/modules/video_coding:codec_globals_headers",
++    "//third_party/webrtc/modules/video_coding:video_codec_interface",
 +    "//third_party/webrtc/modules/video_coding",
++    "//third_party/webrtc/pc:video_track_source",
 +    "//third_party/webrtc/rtc_base:logging",
++    "//third_party/webrtc/rtc_base:threading",
 +  ]
 +}
 +
@@ -114,6 +182,6 @@ index 0000000000..f4503f144e
 +    "//third_party/webrtc/test:test_support",
 +  ]
 +}
--- 
+--
 2.43.0
 

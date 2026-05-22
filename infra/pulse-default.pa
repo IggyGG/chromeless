@@ -28,9 +28,13 @@
 #     module ever inadvertently routes captured audio back to the default
 #     sink.
 #
-# `virtual_mic` remains as an explicit silent null-source for tests that
-# specifically want a quiet microphone (e.g. getUserMedia tests that
-# don't want to pick up streamer-page audio).
+# NOTE: a `virtual_mic` module-null-source was removed here. On
+# PulseAudio 17.0 (the Debian-trixie image base of rv7/rv8)
+# module-null-source fails `pa_modargs` parsing; the `.fail` directive
+# below then aborts the REST of this config — taking down the whole
+# audio plumbing, not just the optional mic. The core routing
+# (cb_audio / cb_capture / loopback) does not depend on virtual_mic;
+# getUserMedia/getDisplayMedia read cb_capture.monitor.
 #
 # `.fail` makes startup abort if any module fails to load — better to
 # crashloop than to silently run without audio plumbing.
@@ -57,9 +61,9 @@ load-module module-null-sink sink_name=cb_capture sink_properties=device.descrip
 ### silently break the capture path.
 load-module module-loopback source=cb_audio.monitor sink=cb_capture latency_msec=20 source_dont_move=true sink_dont_move=true
 
-### Optional silent microphone for tests that want a quiet input device
-### independent of whatever cb_audio is playing.
-load-module module-null-source source_name=virtual_mic source_properties=device.description="cbrowser-virtual-mic"
+### (The optional `virtual_mic` module-null-source was removed — see the
+### header NOTE: it fails pa_modargs on PulseAudio 17.0 and `.fail`
+### then aborts the whole config.)
 
 set-default-sink cb_audio
 set-default-source cb_capture.monitor

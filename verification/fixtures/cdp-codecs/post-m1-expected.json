@@ -1,0 +1,19 @@
+{
+  "_provenance": "Derived from capture/encoder/encoder_factory_stub.cc:146 GetSupportedFormats() on 2026-05-16 (worktree @ b438523d8). VP9 first (preference order), then H264 Constrained Baseline 3.1 (profile-level-id=42e01f, packetization-mode=1, level-asymmetry-allowed=1). VP8 + AV1 absent per Phase 1 factory config (enable_vp8=false default; AV1 only when an NVENC path is available). This fixture is the POST-M1 expected shape — what `RTCRtpSender.getCapabilities('video').codecs` MUST return once the CloudBrowserVideoEncoderFactory is injected into the browser-process PeerConnectionFactoryDependencies.",
+  "imageRef": "chromeless:post-m1-expected",
+  "capturedAt": "2026-05-16T00:00:00Z",
+  "codecs": [
+    {
+      "mimeType": "video/VP9",
+      "clockRate": 90000,
+      "channels": null,
+      "sdpFmtpLine": null
+    },
+    {
+      "mimeType": "video/H264",
+      "clockRate": 90000,
+      "channels": null,
+      "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+    }
+  ]
+}

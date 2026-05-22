@@ -451,7 +451,19 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 // wsHandler upgrades the request, learns the peer's role from its first
 // message, registers it with the session, and runs read/write pumps.
 func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID := strings.TrimPrefix(r.URL.Path, "/ws/")
+	// CV2-81 (verification-lead 2026-05-20): the native cb-chromium worker
+	// dials ws://<host>/api/webrtc/signaling/<session> — cb_signaling_ws_client.cc
+	// hardcodes that path (the physics-broker shape). The legacy JS-streamer
+	// and the e2e harnesses dial /ws/<session>. Accept either prefix so a
+	// single signaling server brokers both peer kinds; the path remaining
+	// after the matched prefix is the session id.
+	sessionID := r.URL.Path
+	for _, p := range []string{"/api/webrtc/signaling/", "/ws/"} {
+		if strings.HasPrefix(sessionID, p) {
+			sessionID = strings.TrimPrefix(sessionID, p)
+			break
+		}
+	}
 	if sessionID == "" || strings.ContainsRune(sessionID, '/') {
 		http.Error(w, "invalid session_id", http.StatusBadRequest)
 		return
@@ -693,6 +705,10 @@ func main() {
 		mux.HandleFunc("/admin/revoke", adminRevokeHandler(deny, logger))
 	}
 	mux.HandleFunc("/ws/", h.wsHandler)
+	// CV2-81: route-alias for the native cb-chromium worker, which hardcodes
+	// ws://<host>/api/webrtc/signaling/<session>. Same handler; wsHandler
+	// strips whichever prefix matched.
+	mux.HandleFunc("/api/webrtc/signaling/", h.wsHandler)
 	mux.HandleFunc("/probe", probeHandler(logger)) // T102
 	mux.Handle("/metrics", metricsHandler())       // T38
 

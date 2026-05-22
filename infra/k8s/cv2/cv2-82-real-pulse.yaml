@@ -1,0 +1,128 @@
+---
+# ─────────────────────────────────────────────────────────────
+# VARIANT: cv2-82-real-pulse  —  rv7 RE-IMAGE (verification-lead, Wave 2)
+#
+# Image bumped cr7727-fd020fad6e97 (rv5 placeholder) -> cr7727-24c5c0d (rv7).
+# rv7 = cv2/wave-2-integration @ 24c5c0d; bundles CV2-81/82/88/89.
+# Otherwise byte-identical to /tmp/cv2-82-real-pulse-deploy.yaml (the #224
+# pre-deploy artifact).
+#
+# PulseAudio up + cb_audio fed a continuous 1 kHz sine via module-sine.
+# Verifies M5.5 R1 + R2 + R3 + R5. Also serves as the CDP :9222 target
+# for the M5-R1 cursor harness.
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cv2-82-pulse-config
+  namespace: chromeless-tests
+data:
+  pulse-default-real.pa: |
+    .fail
+    load-module module-native-protocol-unix auth-anonymous=1 socket=/run/user/1000/pulse/native
+    load-module module-null-sink sink_name=cb_audio sink_properties=device.description="chromeless-audio-playback"
+    load-module module-null-sink sink_name=cb_capture sink_properties=device.description="chromeless-audio-capture"
+    load-module module-loopback source=cb_audio.monitor sink=cb_capture latency_msec=20 source_dont_move=true sink_dont_move=true
+    # CV2-82 verification-lead 2026-05-20: the optional `virtual_mic`
+    # null-source is REMOVED. On the rv7 image (Debian trixie base)
+    # `module-null-source` fails `pa_modargs_new` parsing, and the `.fail`
+    # directive then aborts the rest of the config (module-sine +
+    # set-default-* never run) → pactl "Connection refused", no default
+    # source. virtual_mic is documented "Optional" in infra/pulse-default.pa
+    # and is NOT used by M5.5 R1/R2/R5 (those route via cb_capture.monitor).
+    # Root fix belongs in infra/pulse-default.pa so rv8 bakes it clean.
+    # CV2-82 ADDITION: sine driver into cb_audio. Provides a known signal
+    # for R4 outbound-rtp.audioLevel verification without needing a
+    # pre-baked WAV file or an HTMLMediaElement playback.
+    load-module module-sine sink=cb_audio frequency=1000
+    set-default-sink cb_audio
+    set-default-source cb_capture.monitor
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cv2-82-real-pulse
+  namespace: chromeless-tests
+  labels:
+    app.kubernetes.io/name: cv2-82
+    app.kubernetes.io/variant: real-pulse
+    app.kubernetes.io/part-of: chromeless
+    cv2.campaign/phase: a
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values: ["triform-7", "triform-8"]
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  imagePullSecrets: [{ name: registry-pull }]
+  shareProcessNamespace: true
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+    - { name: run, emptyDir: { medium: Memory, sizeLimit: 64Mi } }
+    - { name: supervisor-log, emptyDir: { sizeLimit: 64Mi } }
+    - { name: home, emptyDir: { sizeLimit: 512Mi } }
+    - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
+    - { name: x11-socket, emptyDir: { sizeLimit: 16Mi } }
+    - name: pulse-config
+      configMap:
+        name: cv2-82-pulse-config
+        defaultMode: 0644
+        items:
+          - key: pulse-default-real.pa
+            path: default.pa
+  containers:
+    - name: cb-chromium
+      image: registry.triform.cloud/chromeless/chromeless:cr7727-24c5c0d
+      imagePullPolicy: Always
+      env:
+        # CV2-82 verification-lead 2026-05-20: the native CV2 worker reads
+        # WEBRTC_SIGNALING_HOST / WEBRTC_SIGNALING_SESSION_ID /
+        # WEBRTC_SIGNALING_TLS (cb_signaling_ws_client.cc:34-37) — NOT the
+        # legacy SIGNALING_URL/SESSION_ID (JS-streamer contract). With the
+        # old names the worker logs "native signaling subsystem disabled.
+        # Worker runs as CDP-only target" and never builds the media-PCF/ADM.
+        - { name: WEBRTC_SIGNALING_HOST, value: signaling.chromeless-tests.svc.cluster.local:8080 }
+        - { name: WEBRTC_SIGNALING_SESSION_ID, value: cv2-82-real-pulse }
+        - { name: WEBRTC_SIGNALING_TLS, value: "0" }
+        - { name: CHROMELESS_REGION, value: triform-eu }
+      ports:
+        - { name: cdp, containerPort: 9222 }
+      volumeMounts:
+        - { name: dshm, mountPath: /dev/shm }
+        - { name: run, mountPath: /run }
+        - { name: supervisor-log, mountPath: /var/log/supervisor }
+        - { name: home, mountPath: /home/cbuser }
+        - { name: tmp, mountPath: /tmp }
+        - { name: x11-socket, mountPath: /tmp/.X11-unix }
+        - name: pulse-config
+          mountPath: /etc/pulse/default.pa
+          subPath: default.pa
+          readOnly: true
+      resources:
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 512Mi }
+        limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 2Gi }
+      startupProbe:
+        httpGet: { path: /json/version, port: cdp }
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 36
+      readinessProbe:
+        httpGet: { path: /json/version, port: cdp }
+        periodSeconds: 10
+        failureThreshold: 3
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }

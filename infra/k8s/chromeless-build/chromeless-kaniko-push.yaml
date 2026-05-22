@@ -1,8 +1,8 @@
 # chromeless-kaniko-push — push the runtime chromeless image after a chromeless-build
 # Job has staged the build context.
 #
-# WHY: build-job-{x264,vaapi,nvenc}.yaml all run chromeless-build.sh which in
-# Step 9 stages the runtime image build context to
+# WHY: build-job-{x264,x264-t7,vaapi,nvenc}.yaml all run chromeless-build.sh
+# which in Step 9 stages the runtime image build context to
 # ${CHROMELESS_WORK_ROOT}/artifacts/context/ on the chromium-src hostPath.
 # That step writes Dockerfile + cloud_browser_worker + supervisord +
 # launch-chromeless.sh + IMAGE_TAG. It does NOT push: the planned
@@ -12,36 +12,62 @@
 # This Job picks up where the build left off and pushes to the
 # forgejo registry.
 #
-# WHEN: apply this AFTER chromeless-build-${VARIANT} reaches Succeeded. Do
+# WHEN: apply this AFTER chromeless-build-<variant> reaches Succeeded. Do
 # not chain it onto the build Job itself — the registry needs to be
 # scaled to 1 replica before the push (BUGS-513 workaround) and that
 # is an operator step today.
 #
-# VARIANT MATRIX: this manifest defaults to the x264 / sw profile on
-# triform-8. To push vaapi or nvenc, the operator edits the file
-# in place per the README. The fields that change per variant are
-# enumerated in chromeless-kaniko-push.README.md § Variant overrides.
+# >>> THIS MANIFEST IS A TEMPLATE — DO NOT `kubectl apply -f` DIRECTLY <<<
 #
-# Tag is driven by CHROMELESS_KANIKO_TAG env-var ($(CHROMELESS_KANIKO_TAG) in args
-# uses K8s downward-API-style interpolation). nodeName + hostPath
-# path cannot be env-driven on a Job manifest and are explicit.
+# Three fields are envsubst placeholders driven by the operator's environment:
+#   - CHROMELESS_KANIKO_TAG  — REQUIRED, the unique destination tag.
+#                              MUST match what chromeless-build.sh Step 9
+#                              wrote to ${CHROMELESS_WORK_ROOT}/artifacts/
+#                              context/IMAGE_TAG on the build node (the
+#                              "cr<branch>-<commit-sha>" form, e.g.
+#                              cr7727-8367359). Auditability is broken
+#                              if this is reused across distinct builds.
+#   - KANIKO_NODE            — REQUIRED, "triform-7" or "triform-8" (the
+#                              node whose hostPath holds the build
+#                              artifacts). Operator hard-constraint:
+#                              T7/T8 only — never T2/T3/T5/T6.
+#   - KANIKO_VARIANT_LABEL   — REQUIRED, the variant tag for k8s labels
+#                              ("sw", "x264-t7", "vaapi", "nvenc").
+#                              Informational only — the actual binary
+#                              shipped is whatever Step 9 staged.
+#
+# Use the wrapper script (canonical path):
+#
+#   ./infra/k8s/chromeless-build/chromeless-kaniko-push.sh triform-7
+#
+# That script reads IMAGE_TAG over ssh from the build node, exports the
+# three vars, substitutes via `envsubst '${...} ${...} ${...}'` (allowlist
+# form — does NOT clobber the unrelated ${VAR} mentions in this header
+# or in the Kaniko args' $(VAR) downward-API interpolation), applies,
+# and tails the kaniko logs into /tmp/kaniko-push.log.
 #
 # See:
 #   - infra/k8s/chromeless-build/chromeless-kaniko-push.README.md (full activation
 #     procedure, variant overrides, BUGS-513 dance, future work)
-#   - infra/k8s/chromeless-build/build-job-x264.yaml line 1 (build context)
+#   - infra/k8s/chromeless-build/chromeless-kaniko-push.sh (canonical apply wrapper)
+#   - infra/k8s/chromeless-build/build-job-x264-t7.yaml (build context on T7)
+#   - infra/k8s/chromeless-build/build-job-x264.yaml (build context on T8)
 #   - build/chromeless-build.sh Step 9 (where /work/artifacts/context comes
-#     from)
+#     from and where IMAGE_TAG is written)
 
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: chromeless-kaniko-push
+  # Tag-suffixed Job name so successive pushes don't collide on the
+  # immutable Job resource (kubectl apply on an existing Job is a no-op
+  # for spec changes — we want a fresh Job per tag).
+  name: chromeless-kaniko-push-${CHROMELESS_KANIKO_TAG}
   namespace: chromeless-build
   labels:
     app.kubernetes.io/name: chromeless
     app.kubernetes.io/component: image-push
-    app.kubernetes.io/variant: sw
+    app.kubernetes.io/variant: ${KANIKO_VARIANT_LABEL}
+    chromeless.triform.cloud/tag: ${CHROMELESS_KANIKO_TAG}
 spec:
   # backoffLimit:1 — kaniko push is short-lived; one retry on a
   # transient registry 502 is fine. More than that and it's
@@ -59,20 +85,29 @@ spec:
       labels:
         app.kubernetes.io/name: chromeless
         app.kubernetes.io/component: image-push
-        app.kubernetes.io/variant: sw
+        app.kubernetes.io/variant: ${KANIKO_VARIANT_LABEL}
+        chromeless.triform.cloud/tag: ${CHROMELESS_KANIKO_TAG}
     spec:
-      restartPolicy: OnFailure
+      # Never (not OnFailure) — backoffLimit:1 + Never means at most
+      # 2 pod attempts total, with no in-place container restarts. An
+      # OnFailure pod can churn its container before the Job gives up,
+      # which masks the failure mode in the logs and confuses the
+      # post-mortem. Kaniko push is short and either works or doesn't —
+      # we want the failure mode preserved cleanly.
+      restartPolicy: Never
       # Pin to the node that holds the build artifacts on its
-      # hostPath. CHANGE THIS for nvenc — see README.
-      nodeName: triform-8
+      # hostPath. T7/T8 only — operator hard-constraint.
+      nodeName: ${KANIKO_NODE}
       nodeSelector:
-        kubernetes.io/hostname: triform-8
+        kubernetes.io/hostname: ${KANIKO_NODE}
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:v1.23.2
           # K8s interpolates $(VAR) in args from container env at
           # pod-create time. CHROMELESS_KANIKO_TAG below drives both the
           # destination tag and the IMAGE_TAG build-arg.
+          # NOTE: $(VAR) is K8s downward-API, NOT ${VAR} envsubst —
+          # the envsubst wrapper leaves these alone.
           args:
             - --dockerfile=/workspace/Dockerfile
             - --context=/workspace
@@ -93,10 +128,12 @@ spec:
             # is verbose enough to drown the actual error.
             - --verbosity=info
           env:
-            # Override per variant. Defaults to the sw / x264 tag
-            # that chromeless-smoke pulls.
+            # REQUIRED — substituted by the wrapper from IMAGE_TAG on
+            # the build node. Must be unique per build SHA for
+            # auditability; CV2-era convention is "cr<branch>-<sha>"
+            # (e.g. cr7727-8367359 for chromeless commit 8367359).
             - name: CHROMELESS_KANIKO_TAG
-              value: "cr7727-sw"
+              value: "${CHROMELESS_KANIKO_TAG}"
             # kaniko reads docker auth from $DOCKER_CONFIG/config.json.
             - name: DOCKER_CONFIG
               value: /kaniko/.docker
@@ -121,9 +158,10 @@ spec:
         # supervisord.conf + launch-chromeless.sh + IMAGE_TAG from
         # here.
         #
-        # CHANGE THIS for nvenc:
-        #   sw / x264 / vaapi (triform-8): /var/lib/longhorn/chromeless-build/chromium-src/artifacts/context
-        #   nvenc             (triform-5): /mnt/data/chromeless-build-t5/chromium-src/artifacts/context
+        # Path is identical on T7 and T8 (parallel build lanes share the
+        # same on-node layout); only the nodeName above differs.
+        #   T7/T8: /var/lib/longhorn/chromeless-build/chromium-src/artifacts/context
+        #   T5 (nvenc, out-of-scope for CV2 M-stack): /mnt/data/chromeless-build-t5/...
         - name: workspace
           hostPath:
             path: /var/lib/longhorn/chromeless-build/chromium-src/artifacts/context

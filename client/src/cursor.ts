@@ -272,17 +272,27 @@ function svgFor(shape: string): string {
 /** Convenience: subscribe to a data channel and render on every message.
  *  Returns the underlying renderer so callers can dispose. */
 export function attachCursorChannel(
-  dc: { addEventListener: (ev: "message", h: (e: MessageEvent) => void) => void },
+  dc: {
+    addEventListener: (ev: "message", h: (e: MessageEvent) => void) => void;
+    removeEventListener?: (ev: "message", h: (e: MessageEvent) => void) => void;
+  },
   video: HTMLVideoElement,
   opts?: CursorOverlayOptions,
 ): { update(env: unknown): void; dispose(): void } {
   const r = renderCursor(video, opts);
-  dc.addEventListener("message", (e) => {
+  const onMessage = (e: MessageEvent): void => {
     try {
       r.update(JSON.parse(typeof e.data === "string" ? e.data : ""));
     } catch {
       /* drop malformed */
     }
-  });
-  return r;
+  };
+  dc.addEventListener("message", onMessage);
+  return {
+    update: r.update,
+    dispose(): void {
+      dc.removeEventListener?.("message", onMessage);
+      r.dispose();
+    },
+  };
 }

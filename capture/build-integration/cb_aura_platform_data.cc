@@ -10,8 +10,10 @@
 #include "base/check.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "capture/build-integration/cb_cursor_client.h"
 #include "capture/build-integration/cb_focus_client.h"
 #include "capture/build-integration/cb_window_parenting_client.h"
+#include "ui/aura/client/cursor_client.h"
 #include "ui/aura/client/default_capture_client.h"
 #include "ui/aura/client/focus_client.h"
 #include "ui/aura/env.h"
@@ -108,6 +110,15 @@ CbAuraPlatformData::CbAuraPlatformData(const gfx::Size& initial_size) {
             << " / after=" << bounds_after.ToString()
             << " / requested=" << gfx::Rect(initial_size).ToString();
 
+  // Mirror content_shell's Aura platform path: showing the root Window is not
+  // enough on its own; the WindowTreeHost must also be shown so Aura hit
+  // testing can route points to the WebContents child instead of returning no
+  // event handler. Without this, RenderWidgetHostViewAura receives renderer
+  // cursor updates but UpdateCursorIfOverSelf() stops at
+  // root_window->GetEventHandlerForPoint(...)=nullptr before it reaches
+  // CbCursorClient::SetCursor.
+  host_->Show();
+
   host_->window()->SetLayoutManager(
       std::make_unique<FillLayout>(host_->window()));
 
@@ -133,11 +144,22 @@ CbAuraPlatformData::CbAuraPlatformData(const gfx::Size& initial_size) {
   capture_client_ = std::make_unique<aura::client::DefaultCaptureClient>(
       host_->window());
 
-  // 4. Window parenting client — last so a window-create that races
-  //    against ctor doesn't get parented to a half-built tree. RAII
-  //    self-registers on construction, deregisters on destruction.
+  // 4. Window parenting client. RAII self-registers on construction,
+  //    deregisters on destruction.
   window_parenting_client_ =
       std::make_unique<CbWindowParentingClient>(host_->window());
+
+  // 5. Cursor client (M5 R1 / CV2-19) — last because nothing else
+  //    needs it during platform-data construction, but the renderer
+  //    will reach for GetCursorClient(window) as soon as the first
+  //    cursor-style change hits RenderWidgetHostViewAura. Mirrors
+  //    CbFocusClient: explicit SetCursorClient registration here +
+  //    explicit clear in dtor (the ctor doesn't take root_window
+  //    only because TestCursorClient happens to register from its
+  //    ctor; we centralise registration here for teardown-order
+  //    parity with focus_client_).
+  cursor_client_ = std::make_unique<CbCursorClient>(host_->window());
+  aura::client::SetCursorClient(host_->window(), cursor_client_.get());
 }
 
 CbAuraPlatformData::~CbAuraPlatformData() {
@@ -148,6 +170,10 @@ CbAuraPlatformData::~CbAuraPlatformData() {
   // live window.
   if (host_ && host_->window()) {
     aura::client::SetFocusClient(host_->window(), nullptr);
+    // M5 R1 — cursor client was registered via SetCursorClient (not
+    // by its ctor), so it wouldn't auto-deregister in its dtor. Clear
+    // the registration BEFORE host_->window() goes away.
+    aura::client::SetCursorClient(host_->window(), nullptr);
   }
   // Other clients (parenting, capture, activation) self-deregister in
   // their dtors. unique_ptr destruction order (reverse of declaration)

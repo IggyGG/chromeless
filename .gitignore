@@ -50,3 +50,4 @@ Thumbs.db
 # Project-specific
 harness/captures/
 tests/artifacts/
+capture/input-bridge/input-bridge

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<!--
+  Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+
+  Use of this source code is governed by a BSD-style license that can be
+  found in the LICENSE file.
+
+  harness/m4-uat/fixtures/uat-page.html — M4 UAT fixture page.
+
+  Loaded by the native Chromium under test; the harness drives
+  events via the input DataChannel and reads observable state back
+  via CDP Runtime.evaluate.
+
+  Observable contract:
+    document.lastInputEvent      — last DOM input event, normalised
+                                   to a plain object with the keys
+                                   the scenarios assert on.
+    window.__uat_last_drop_text  — last text/plain drop payload.
+    window.__uat_drag_active     — true between drag_start and
+                                   drop OR drag_end(success=false).
+    window.__uat_last_copy_text  — selectedText at the time of the
+                                   last `copy` event.
+    window.__uat_touches_active  — array of active Touch identifiers.
+    window.__uat_keydown_count   — incrementing counter, used by the
+                                   IME suppression test.
+    window.__uat_last_pointer    — R10 last-pointer snapshot (populated
+                                   by the C++ test marker — see
+                                   cb_input_dispatch_test_marker.h).
+
+  The DOM listeners below are intentionally exhaustive. They mirror
+  every event type the M4 R3..R8 + R10 dispatchers inject. If a new
+  M4 surface lands, add the matching listener here.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>M4 UAT</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    #uat-stage {
+      width: 100vw; height: 100vh; padding: 16px;
+      background: #f3f3f7; box-sizing: border-box;
+    }
+    #uat-text-input { width: 320px; padding: 6px; font-size: 14px; }
+    #uat-copy-source { padding: 8px; background: #fff; border: 1px solid #ccc;
+                       max-width: 600px; user-select: text; }
+    #uat-drop-target { margin-top: 16px; height: 160px; border: 2px dashed #888;
+                       display: flex; align-items: center; justify-content: center;
+                       color: #666; background: #fff; }
+    .seq { font: 11px monospace; color: #999; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <main id="uat-stage">
+    <h1>cloud-browser M4 UAT</h1>
+    <p>This page is consumed by <code>harness/m4-uat/uat.mjs</code>.
+       Do not paste real credentials.</p>
+
+    <label>type here: <input id="uat-text-input" type="text"></label>
+
+    <div id="uat-copy-source">UAT-CLIPBOARD-CANARY: copy this exact text</div>
+
+    <div id="uat-drop-target">drop target</div>
+
+    <p class="seq">last input event: <span id="uat-debug-last"></span></p>
+  </main>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // ---- Normalised lastInputEvent snapshot ---------------------
+    function captureEvent(ev) {
+      // Only pull stable, harness-comparable fields.
+      const out = { type: ev.type, t: Date.now() };
+
+      // Mouse / wheel
+      if ('clientX' in ev) { out.clientX = ev.clientX; out.clientY = ev.clientY; }
+      if ('button'  in ev) { out.button  = ev.button; }
+      if ('deltaX'  in ev) { out.deltaX  = ev.deltaX; }
+      if ('deltaY'  in ev) { out.deltaY  = ev.deltaY; }
+      if ('deltaMode' in ev) { out.deltaMode = ev.deltaMode; }
+
+      // Keyboard
+      if ('code' in ev) { out.code = ev.code; }
+      if ('key'  in ev) { out.key  = ev.key; }
+      if ('shiftKey' in ev) {
+        out.shiftKey = ev.shiftKey;
+        out.ctrlKey  = ev.ctrlKey;
+        out.altKey   = ev.altKey;
+        out.metaKey  = ev.metaKey;
+      }
+
+      // Composition
+      if (ev.type && ev.type.startsWith('composition')) {
+        out.data = ev.data;
+      }
+
+      document.lastInputEvent = out;
+      document.getElementById('uat-debug-last').textContent =
+          out.type + ' ' + JSON.stringify(out);
+    }
+
+    const EVENTS = [
+      'mousemove', 'mousedown', 'mouseup', 'wheel',
+      'keydown', 'keyup', 'keypress',
+      'compositionstart', 'compositionupdate', 'compositionend',
+      'touchstart', 'touchmove', 'touchend', 'touchcancel',
+      'dragenter', 'dragover', 'dragleave', 'drop', 'dragend',
+      'copy', 'paste', 'cut',
+    ];
+    for (const e of EVENTS) {
+      document.addEventListener(e, captureEvent, { capture: true });
+    }
+
+    // ---- IME suppression counter -------------------------------
+    window.__uat_keydown_count = 0;
+    document.addEventListener('keydown', () => {
+      // R5's contract: while compositionstart..compositionend, the
+      // native side suppresses key_* envelopes. So the count
+      // increments ONLY when a key event actually reaches the DOM.
+      window.__uat_keydown_count++;
+    }, { capture: true });
+
+    // ---- Drag tracking -----------------------------------------
+    window.__uat_drag_active = false;
+    window.__uat_last_drop_text = null;
+    document.addEventListener('dragenter', () => {
+      window.__uat_drag_active = true;
+    }, { capture: true });
+    const dropEl = document.getElementById('uat-drop-target');
+    dropEl.addEventListener('dragover', e => { e.preventDefault(); });
+    dropEl.addEventListener('drop', e => {
+      e.preventDefault();
+      try {
+        window.__uat_last_drop_text = e.dataTransfer.getData('text/plain');
+      } catch (err) {
+        window.__uat_last_drop_text = '<error: ' + err.message + '>';
+      }
+      window.__uat_drag_active = false;
+    });
+    document.addEventListener('dragend', () => {
+      window.__uat_drag_active = false;
+    });
+
+    // ---- Copy tracking -----------------------------------------
+    window.__uat_last_copy_text = null;
+    document.addEventListener('copy', e => {
+      try {
+        window.__uat_last_copy_text = window.getSelection().toString();
+      } catch (err) {
+        window.__uat_last_copy_text = '<error: ' + err.message + '>';
+      }
+    });
+
+    // ---- Touch active set --------------------------------------
+    window.__uat_touches_active = [];
+    function syncTouches(ev) {
+      // ev.touches is the post-event active set per spec.
+      const ids = [];
+      for (let i = 0; i < ev.touches.length; i++) {
+        ids.push(ev.touches[i].identifier);
+      }
+      window.__uat_touches_active = ids;
+    }
+    document.addEventListener('touchstart',  syncTouches, { capture: true });
+    document.addEventListener('touchmove',   syncTouches, { capture: true });
+    document.addEventListener('touchend',    syncTouches, { capture: true });
+    document.addEventListener('touchcancel', syncTouches, { capture: true });
+
+    // ---- R10 last-pointer snapshot ----------------------------
+    // The C++ test marker (cb_input_dispatch_test_marker.h) is the
+    // canonical writer. As a software-side fallback for the harness
+    // to function before the marker compiles, mirror mouse_move /
+    // mouse_leave from DOM events. The C++ writer overrides whichever
+    // installed later, so the test seam always reflects the
+    // last-applied source.
+    window.__uat_last_pointer = null;
+    document.addEventListener('mousemove', e => {
+      window.__uat_last_pointer = {
+        x: e.clientX, y: e.clientY, in_widget: true,
+        source: 'dom-fallback',
+      };
+    }, { capture: true });
+    document.addEventListener('mouseleave', () => {
+      if (window.__uat_last_pointer) {
+        window.__uat_last_pointer = Object.assign(
+          {}, window.__uat_last_pointer,
+          { in_widget: false, source: 'dom-fallback' });
+      }
+    }, { capture: true });
+  })();
+  </script>
+</body>
+</html>

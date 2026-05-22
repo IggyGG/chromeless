@@ -94,7 +94,8 @@
 //        leaked into another dispatcher's payload-handler.
 //
 // HALT classes (image-level regression, not CV2-81 defect):
-//   H1   handshake timeout (4 DCs don't all open) → CV2-77 DC-creation
+//   H1   handshake timeout (expected native DCs don't all open) →
+//        CV2-77/CV2-83 DC-creation regression
 //        regression (route to build-czar). Same as M4 R1 harness exit 2.
 //   H2   no input DC → CV2-77 input DC name regression (route to build-czar)
 //   H3   CDP attach fail → CV2-87 / SwANGLE-era CDP unavailability (route
@@ -170,12 +171,21 @@ const POST_SEND_WAIT_MS = parseInt(process.env.POST_SEND_WAIT_MS || "4000", 10);
 const CDP_HOST = process.env.CDP_HOST || "localhost";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 const CDP_CONNECT_TIMEOUT_MS = parseInt(process.env.CDP_CONNECT_TIMEOUT_MS || "60000", 10);
+// The HTML payload of a `data:text/html,` URL MUST be percent-encoded: the
+// raw `#` in `href="#"` is otherwise parsed as the URL fragment delimiter,
+// truncating the document at `<a href="#` — the renderer lays out an empty
+// body and the renderer-DOM probe reports a false HALT H3. encodeURIComponent
+// escapes `#` `<` `>` `"` and spaces so the whole payload stays inside the
+// data: URL. (Wave 2 rv8 verification finding — same fix as
+// phase-a-m5-r1-percursor-event.mjs.)
+const STIMULUS_TARGET_HTML =
+  '<html><body style="margin:0">'
+  + '<a href="#" style="display:inline-block;padding:10px 20px;font-size:24px">link</a>'
+  + '<input id="t" autofocus style="position:absolute;top:80px;left:10px;width:200px;height:30px"/>'
+  + '</body></html>';
 const STIMULUS_TARGET_URL = process.env.STIMULUS_TARGET_URL
-  || 'data:text/html,<html><body style="margin:0">'
-   + '<a href="#" style="display:inline-block;padding:10px 20px;font-size:24px">link</a>'
-   + '<input id="t" autofocus style="position:absolute;top:80px;left:10px;width:200px;height:30px"/>'
-   + '</body></html>';
-const EXPECTED_LABELS = Object.freeze(["input", "cursor", "clipboard", "files"]);
+  || ("data:text/html," + encodeURIComponent(STIMULUS_TARGET_HTML));
+const EXPECTED_LABELS = Object.freeze(["input", "stats", "cursor", "clipboard", "files"]);
 
 function log(level, msg, extra) {
   const line = { ts: new Date().toISOString(), level, msg, ...(extra || {}) };
@@ -292,6 +302,15 @@ async function ensureRendererPresent() {
       return { halt: "H3", reason: "renderer-DOM empty post-navigation" };
     }
 
+    try {
+      const captureResult = await client.send("Cb.startFrameSinkCapture");
+      log("ok", "Cb.startFrameSinkCapture complete", captureResult || {});
+    } catch (e) {
+      log("err", "HALT H3: Cb.startFrameSinkCapture failed", { err: String(e) });
+      try { await client.close(); } catch {}
+      return { halt: "H3", reason: `Cb.startFrameSinkCapture failed: ${String(e)}` };
+    }
+
     try { await client.close(); } catch {}
     return { ok: true };
   } catch (e) {
@@ -327,7 +346,7 @@ async function main() {
     process.exit(5);
   }
 
-  // ───── Phase 1: WebRTC handshake (4 DCs open) ─────
+  // ───── Phase 1: WebRTC handshake (native DC set opens) ─────
   const ws = new WebSocket(BROKER_URL);
   const pc = new RTCPeerConnection({ iceServers: [] });
 
@@ -361,7 +380,9 @@ async function main() {
       openedLabels.add(dc.label);
       log("ok", `DC.onopen "${dc.label}"`, { opened: [...openedLabels] });
       if (EXPECTED_LABELS.every((l) => openedLabels.has(l))) {
-        log("ok", "handshake complete — all 4 DCs open");
+        log("ok", "handshake complete — all expected DCs open", {
+          expected_labels: EXPECTED_LABELS,
+        });
         clearTimeout(handshakeTimeout);
         resolveHandshake();
       }

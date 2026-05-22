@@ -60,7 +60,30 @@ set -euo pipefail
 
 : "${CHROMELESS_REPO:=/workspace}"
 : "${CHROMIUM_BRANCH_NUMBER:=7727}"
-: "${SCCACHE_DIR:=/sccache}"
+# build-czar 2026-05-17: default SCCACHE_DIR to /work/sccache, not the
+# legacy /sccache hostPath mount. Commit 73e37e7 (S3 sccache backend)
+# removed the per-node /sccache hostPath volume + volumeMount + the
+# SCCACHE_DIR env that pinned it. STEP 4's `mkdir -p ${SCCACHE_DIR}`
+# then tried to create /sccache on the read-only container root →
+# `Permission denied` → STEP 4 abort → OnFailure restart (Build #24
+# vp5rw restart=1). In S3 mode sccache's real cache is the Hetzner
+# bucket; SCCACHE_DIR is only the local daemon scratch/socket dir, so
+# any writable path works. /work is the always-mounted, uid-1000-owned
+# workdir hostPath — safe for both S3 mode and any future local mode.
+# An explicit SCCACHE_DIR env (if ever re-added to the manifest) still
+# overrides this default.
+#
+# build-czar 2026-05-17 iter9: /work/sccache also fails — the workdir
+# hostPath root (/work) is owned by root; the init container only
+# `chown 1000:1000`s the specific subdirs /work/src|/work/artifacts|
+# /work/logs (Phase 5), NOT /work itself, so the uid-1000 build
+# container cannot mkdir a fresh /work/sccache under it (Build #25
+# vhgtc STEP 4: mkdir /work/sccache Permission denied, restart=1).
+# /tmp is always world-writable in the container and sccache's local
+# dir in S3 mode is pure ephemeral daemon scratch (real cache = the
+# Hetzner bucket, persistence not needed), so /tmp/sccache is the
+# robust choice — no dependency on init-container chown coverage.
+: "${SCCACHE_DIR:=/tmp/sccache}"
 : "${SKIP_FETCH:=}"
 : "${STUB_MODE:=}"
 
@@ -392,6 +415,16 @@ ninja_args=()
 if [[ -n "${NINJA_PARALLELISM:-}" ]]; then
     ninja_args+=(-j "${NINJA_PARALLELISM}")
 fi
+# NINJA_KEEP_GOING — ninja -k arg. When set, ninja continues past
+# failing edges instead of fast-failing on the first error, so a
+# single build pass collects EVERY failing TU. "0" = unlimited
+# (keep going regardless of failure count). Default: unset (ninja's
+# default fast-fail). Used by the build-czar nuclear cold-rebuild
+# diagnostic to surface the full chromium-API-drift surface in one
+# pass rather than iter-by-iter.
+if [[ -n "${NINJA_KEEP_GOING:-}" ]]; then
+    ninja_args+=(-k "${NINJA_KEEP_GOING}")
+fi
 
 # Targets get word-split intentionally below.
 # shellcheck disable=SC2086
@@ -454,9 +487,14 @@ if [[ -n "${STUB_MODE}" ]]; then
     # its layout assumptions in stub runs.
     mkdir -p "${ARTIFACTS_DIR}/context"
     : > "${ARTIFACTS_DIR}/context/cloud_browser_worker"
-    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so; do
+    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
         : > "${ARTIFACTS_DIR}/context/${runtime_asset}"
     done
+    # CV2-89: stub the SwANGLE Vulkan ICD descriptor JSON. Real path
+    # below sed-rewrites the chromium-generated JSON's library_path to
+    # absolute; stub just creates the empty placeholder for kaniko
+    # context-layout testing.
+    : > "${ARTIFACTS_DIR}/context/vk_swiftshader_icd.json"
     log "[stub] wrote placeholder binary to ${ARTIFACTS_DIR}/context/cloud_browser_worker"
 else
     [[ -f "${binary_src}" ]] || die "build did not produce ${binary_src}"
@@ -478,13 +516,62 @@ else
     # it from there.
     mkdir -p "${ARTIFACTS_DIR}/context"
     cp "${binary_src}" "${ARTIFACTS_DIR}/context/cloud_browser_worker"
-    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so; do
+    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
         asset_src="${CHROMIUM_SRC}/${OUT_DIR}/${runtime_asset}"
         [[ -f "${asset_src}" ]] || die "runtime asset missing: ${asset_src}"
         cp "${asset_src}" "${ARTIFACTS_DIR}/context/${runtime_asset}"
     done
+
+    # CV2-89: stage the SwANGLE Vulkan ICD descriptor JSON.
+    #
+    # Why this exists: chromium's build emits vk_swiftshader_icd.json
+    # alongside libvk_swiftshader.so in ${OUT_DIR}. The implementation
+    # lib is the Vulkan driver; the JSON is the Vulkan loader's
+    # registration descriptor (it tells libvulkan.so.1 "here is a
+    # driver, here is its library_path"). Without a *reachable* JSON,
+    # vkCreateInstance returns VK_ERROR_INITIALIZATION_FAILED
+    # ("Internal Vulkan error (-3)"), which propagates as
+    # `eglInitialize SwANGLE failed with error EGL_NOT_INITIALIZED`
+    # in chromium's GPU process, killing the renderer.
+    #
+    # rv8: Dockerfile.runtime installs this JSON at
+    # /usr/local/bin/vk_swiftshader_icd.json — co-located with the
+    # ANGLE libs — because chromium's SwANGLE path self-sets
+    # VK_ICD_FILENAMES to <ANGLE module dir>/vk_swiftshader_icd.json,
+    # and that override makes the Vulkan loader skip the generic
+    # /usr/share/vulkan/icd.d/ scan. See the rv8 comment block in
+    # Dockerfile.runtime for the full CV2-89 ring-N+1 root cause.
+    #
+    # Why the sed: the upstream JSON has a relative
+    # `"library_path": "./libvk_swiftshader.so"`. The sed rewrites it
+    # to the absolute /usr/local/bin/libvk_swiftshader.so so the path
+    # is unambiguous regardless of the JSON's own location (the lib
+    # and JSON are in fact co-located at /usr/local/bin/, so a
+    # relative path would also resolve — absolute is kept for
+    # robustness and because the grep sanity-check below keys on it).
+    #
+    # Methodology event: 9th instance of lesson-(i) (previously-
+    # untested code path FATALs when first exercised) + new
+    # sub-lesson (g.3) "Completeness-shape" (partial-copy gap
+    # rather than literal drift). Pre-CV2-78 Wave 1, no test
+    # harness exercised the renderer-DOM-bearing path, so the
+    # missing-ICD-JSON never surfaced. CV2-89 closes that gap at
+    # the image-packaging layer.
+    icd_src="${CHROMIUM_SRC}/${OUT_DIR}/vk_swiftshader_icd.json"
+    [[ -f "${icd_src}" ]] || die "runtime asset missing: ${icd_src} (CV2-89: chromium build did not emit SwANGLE ICD descriptor — check args.gn use_swiftshader_with_subzero / swiftshader_for_webgpu settings)"
+    sed 's|"\./libvk_swiftshader\.so"|"/usr/local/bin/libvk_swiftshader.so"|' \
+        "${icd_src}" > "${ARTIFACTS_DIR}/context/vk_swiftshader_icd.json"
+    # Sanity check the sed actually applied — if upstream changes
+    # the relative-path form (e.g. drops the ./, becomes "libvk_..."),
+    # the sed becomes a silent no-op and we'd ship a broken JSON.
+    # Fail loud rather than ship a non-functional image.
+    grep -q '"/usr/local/bin/libvk_swiftshader.so"' \
+        "${ARTIFACTS_DIR}/context/vk_swiftshader_icd.json" || \
+        die "CV2-89: sed-rewrite of library_path did not apply — check upstream vk_swiftshader_icd.json format. Saw: $(grep library_path "${icd_src}" || echo '<no library_path line>')"
+
     log "packaged ${artifact_path}"
     log "staged binary to ${ARTIFACTS_DIR}/context/cloud_browser_worker"
+    log "staged SwANGLE ICD descriptor with absolute library_path (CV2-89)"
 fi
 
 step_done
@@ -506,10 +593,7 @@ cp "${CHROMELESS_REPO}/infra/launch-chromeless.sh" "${ARTIFACTS_DIR}/context/lau
 cp "${CHROMELESS_REPO}/infra/supervisord.phase2.conf" "${ARTIFACTS_DIR}/context/supervisord.conf"
 cp "${CHROMELESS_REPO}/infra/pulse-default.pa" "${ARTIFACTS_DIR}/context/pulse-default.pa"
 cp "${CHROMELESS_REPO}/infra/devtools-proxy.sh" "${ARTIFACTS_DIR}/context/devtools-proxy.sh"
-cp "${CHROMELESS_REPO}/infra/streamer-static-server.py" "${ARTIFACTS_DIR}/context/streamer-static-server.py"
-rm -rf "${ARTIFACTS_DIR}/context/streamer" "${ARTIFACTS_DIR}/context/lifecycle"
-mkdir -p "${ARTIFACTS_DIR}/context/streamer"
-cp -R "${CHROMELESS_REPO}/capture/streamer-page/." "${ARTIFACTS_DIR}/context/streamer/"
+rm -rf "${ARTIFACTS_DIR}/context/lifecycle"
 cp -R "${CHROMELESS_REPO}/infra/lifecycle" "${ARTIFACTS_DIR}/context/lifecycle"
 
 # Tag metadata for the kaniko sidecar to read.
@@ -549,6 +633,29 @@ step "10/10 cdp validation"
 
 if [[ -n "${STUB_MODE}" ]]; then
     log "[stub] skipping cluster CDP validation"
+    step_done
+    log ""
+    log "chromeless-build.sh finished successfully"
+    log "  artifact:    ${artifact_path}"
+    log "  image-tag:   chromeless:${image_tag}"
+    log "  log:         ${LOG_FILE}"
+    exit 0
+fi
+
+# SKIP_CDP_VALIDATION=1 short-circuits only STEP 10 (unlike STUB_MODE
+# which skips the earlier build steps). Use when the build pod's
+# container image lacks kubectl: the default chromeless-build pods run
+# from debian:bookworm-slim with no kubectl, so this step's
+# `kubectl apply` fails with exit 127. Observed on build #1 and build
+# #3 (2026-05-17): each consumed all 3 backoffLimit attempts at
+# STEP 10 even though the binary was already successfully built,
+# packaged, and staged at STEPS 6-9. SKIP_CDP_VALIDATION=1 lets the
+# binary ship without round-tripping through CDP validation here;
+# run validation separately from an env that DOES have kubectl, e.g.
+# from a workspace pod via the same manifest path.
+if [[ -n "${SKIP_CDP_VALIDATION:-}" ]]; then
+    log "[SKIP_CDP_VALIDATION=1] skipping cluster CDP validation"
+    log "  -> run validation separately via 'kubectl apply -f ${CHROMELESS_REPO:-?}/infra/k8s/tests/chromeless-cdp-validation.yaml' from an env with kubectl"
     step_done
     log ""
     log "chromeless-build.sh finished successfully"

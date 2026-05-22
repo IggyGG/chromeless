@@ -1,27 +1,27 @@
-# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#Copyright 2026 The Cloud Browser WebRTC Authors.All rights reserved.
 #
-# gn target for the Phase-2 cloud-browser worker binary.
+#gn target for the Phase - 2 cloud - browser worker binary.
 #
-# This binary embeds Chromium (browser process), instantiates
-# HostFrameSinkManager + a FrameSinkVideoCapturer (T47), routes the
-# captured frames into libwebrtc with our CloudBrowserVideoEncoderFactory
-# (T19 / T35 / T36) plugged in, and runs the WebRTC sender side of the
-# pipeline.
+#This binary embeds Chromium(browser process), instantiates
+#HostFrameSinkManager + a FrameSinkVideoCapturer(T47), routes the
+#captured frames into libwebrtc with our CloudBrowserVideoEncoderFactory
+#(T19 / T35 / T36) plugged in, and runs the WebRTC sender side of the
+#pipeline.
 #
-# Layout assumes this repo is symlinked into the Chromium src/ tree at
-# //cloud-browser. The encoder sources still live at //cloud-browser/
-# capture/encoder/...; this BUILD.gn references them via that path.
+#Layout assumes this repo is symlinked into the Chromium src / tree at
+#//cloud-browser. The encoder sources still live at //cloud-browser/
+#capture / encoder / ...; this BUILD.gn references them via that path.
 #
-# TODO(T17-build-env): exercise this on a Linux box with depot_tools.
+#TODO(T17 - build - env) : exercise this on a Linux box with depot_tools.
 
 import("//build/config/features.gni")
-import("//build/config/sanitizers/sanitizers.gni")
-import("//testing/test.gni")  # provides test() template used below
+    import("//build/config/sanitizers/sanitizers.gni")
+        import("//testing/test.gni") #provides test() template used below
 
-# ---------------------------------------------------------------------
-# Encoder factory + per-codec wrappers.
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+#Encoder factory + per - codec wrappers.
 #
-# Linkable on its own so unit tests in capture/encoder/*_test.cc can
+#Linkable on its own so unit tests in capture / encoder/*_test.cc can
 # pick it up without dragging in the worker binary's main().
 # ---------------------------------------------------------------------
 # NVENC SDK gate. The NVIDIA Video Codec SDK is not redistributable
@@ -216,8 +216,19 @@ source_set("encoder_factory") {
 # ---------------------------------------------------------------------
 source_set("framesink_capture") {
   sources = [
+    # M2 R3 (CV2-38) — libwebrtc track-source adapter. Ingests
+    # capturer.h's OnFrameCallback, converts via video_frame_conversion
+    # (M2 R2), broadcasts webrtc::VideoFrame to attached sinks.
+    "../framesink-capturer/cb_framesink_video_track_source.cc",
+    "../framesink-capturer/cb_framesink_video_track_source.h",
     "../framesink-capturer/capturer.cc",
     "../framesink-capturer/capturer.h",
+    # M2 R2 (CV2-37) — media::VideoFrame -> webrtc::VideoFrame
+    # conversion + lifetime-pinning VideoFrameBuffer wrappers. Pulled
+    # into this source_set so R3's track source can call
+    # WrapMediaVideoFrameAsWebrtcFrame() without a cross-target dep.
+    "../framesink-capturer/video_frame_conversion.cc",
+    "../framesink-capturer/video_frame_conversion.h",
   ]
   deps = [
     "//base",
@@ -230,7 +241,764 @@ source_set("framesink_capture") {
     "//mojo/public/cpp/bindings",
     "//services/viz/privileged/mojom",
     "//third_party/abseil-cpp:absl",
+    # M2 R2 — libyuv::NV12ToI420 + I420 plane copy helpers in
+    # video_frame_conversion.cc.
+    "//third_party/libyuv",
+    # All webrtc public-API deps go through the passthrough source_set
+    # in //third_party/webrtc_overrides/cloud_browser/. M2 R1 widened
+    # this passthrough with pc:video_track_source + api:media_stream_
+    # interface (R3's track source) plus the webrtc::VideoFrame /
+    # NV12BufferInterface / I420BufferInterface / I420Buffer::Create /
+    # rtc::TimeMicros() needed by R2's video_frame_conversion.cc.
+    # Same pattern as :encoder_factory above.
+
     "//ui/gfx/geometry",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R2 (CV2-42) — active streamed-WebContents resolver.
+#
+# Concrete implementation of the WebContentsResolver interface coined
+# by M4 R3 (cb_input_dispatch_mouse.h:104-108). Owned by main_parts;
+# notified by CbDevToolsManagerDelegate on every successful
+# Cb.startFrameSinkCapture; queried by M4's input dispatchers
+# (R3..R7) on every dispatch.
+#
+# Kept in its own source_set so the input-dispatch source_sets (which
+# are small and want a tight dep graph) can depend on `:active_
+# webcontents_resolver` directly without pulling in the full
+# `:embedder` set. The embedder set picks it up in turn via
+# composition-root wiring.
+# ---------------------------------------------------------------------
+source_set("active_webcontents_resolver") {
+  sources = [
+    "cb_active_webcontents_resolver.cc",
+    "cb_active_webcontents_resolver.h",
+  ]
+  deps = [
+    "//base",
+    # WebContents, WebContentsObserver, RenderFrameHost,
+    # RenderViewHost, RenderWidgetHost, RenderWidgetHostView.
+    "//content/public/browser",
+    # viz::FrameSinkId — stored in the resolver for diagnostics + the
+    # capture-vs-current FSID mismatch warning.
+    "//components/viz/common",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Native audio ADM seam (M5.5 — CV2-28).
+#
+# Built-in libwebrtc PulseAudio ADM ("choice b" per CV2-28). Provides
+# CreateCloudBrowserNativeAudioDeviceModule() — invoked by
+# cloud_browser_pcf.cc:CreateCloudBrowserDefaultAudioDeviceModule()
+# (the M5.5 injection slot M1-R2 set up). Kept in its own source_set
+# so the audio-impl deps stay localized; the PCF source_set itself
+# remains audio-agnostic.
+#
+# TODO(M5.5-R1-passthrough): if gn check / autoninja rejects the cc
+# file because the kPlatformDefaultAudio factory can't resolve the
+# PulseAudio backend symbols, patches/0003-add-cloud-browser-webrtc-
+# overrides.patch must be widened to re-export
+#   //third_party/webrtc/modules/audio_device:audio_device_impl
+# This is the cross-cut with gn-investigator's prior patches/0003
+# work — coordinate before widening.
+# ---------------------------------------------------------------------
+source_set("cb_audio_device_module") {
+  sources = [
+    "../audio/cb_audio_device_module.cc",
+    "../audio/cb_audio_device_module.h",
+  ]
+  deps = [
+    # The webrtc-overrides passthrough already re-exports
+    # api/audio:audio_device (the AudioDeviceModule interface +
+    # static Create factory declaration). The actual factory
+    # implementation lives in modules/audio_device:audio_device_impl;
+    # M1's kDummyAudio path proves it's already linked transitively
+    # through api:libjingle_peerconnection_api, so the DRAFT does NOT
+    # add an explicit dep here. See TODO above if that assumption
+    # fails to hold for the PulseAudio backend at link time.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Media-grade AudioOptions seam (M5.5 R3 — CV2-30).
+#
+# Builds the webrtc::AudioOptions block attached to the AudioSource /
+# AudioTrack the cloud-browser worker constructs on top of M5.5 R1's
+# native ADM. All APM stages disabled — cb_capture.monitor carries
+# program audio, not a microphone. See capture/audio/cb_audio_options.h.
+# ---------------------------------------------------------------------
+#
+# Builds the webrtc::AudioOptions block attached to the AudioSource /
+# AudioTrack the cloud-browser worker constructs on top of M5.5 R1's
+# native ADM (kPlatformDefaultAudio → built-in PulseAudio →
+# cb_capture.monitor). All APM stages (AEC, AGC, NS, HPF, typing-
+# detection) are disabled — the cb_capture.monitor source carries
+# program audio (music, video, game audio, UI), NOT a microphone, and
+# the voice-tuned default profile corrupts media content. See
+# capture/audio/cb_audio_options.h for the per-stage rationale.
+#
+# Kept in its own source_set so the file's rationale comment stays
+# co-located with the field set; future tuning revisions (R4 stereo,
+# R5 Opus bitrate cap, …) replace ONLY this source_set's body.
+#
+# TODO(M55-R3-build): when R1 (CV2-28 / cv2/m55-r1-native-adm) lands
+# on integration/native-peer first, this source_set sits adjacent to
+# :cb_audio_device_module and the audio dep on cloud_browser_pcf
+# expands from { :cb_audio_device_module } to
+# { :cb_audio_device_module, :cb_audio_options } once the
+# track-attachment site is wired (deferred — that wiring is a
+# follow-up R, not this R3).
+# ---------------------------------------------------------------------
+source_set("cb_audio_options") {
+  sources = [
+    "../audio/cb_audio_options.cc",
+    "../audio/cb_audio_options.h",
+  ]
+  deps = [
+    # api/audio_options.h (webrtc::AudioOptions struct) — re-exported
+    # through the cloud-browser webrtc-overrides passthrough. Same
+    # routing rule every other webrtc public-API dep follows on this
+    # branch (see :encoder_factory and :cb_audio_device_module).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Audio send-path lifecycle owner (M5.5 — CV2-32).
+#
+# CbAudioLifecycle owns the M5.5 R4 send-side audio bindings
+# (AudioSourceInterface + AudioTrackInterface + sendonly
+# RtpTransceiverInterface) for the lifetime of a single peer session
+# and binds their teardown to the M3 R4/R6 peer/session lifecycle.
+#
+# The "load-bearing" function of this source_set is the orphan
+# PulseAudio stream window: PrepareForTeardown() calls
+# transceiver->StopStandard() BEFORE the embedder calls driver.Close(),
+# which lets libwebrtc's worker-thread sender teardown unhook the
+# AudioSourceInterface from AudioState (and run ADM::StopRecording on
+# the PulseAudio backend) while the PeerConnection is still alive. See
+# capture/audio/cb_audio_lifecycle.h for the full design discussion.
+#
+# Kept in its own source_set, like :cb_audio_device_module above, so the
+# audio-impl deps stay localized. The :embedder source_set depends on
+# us; the :cloud_browser_pcf source_set does NOT — R5 sits above the
+# PCF, not inside it.
+# ---------------------------------------------------------------------
+# Pre-merge note (M5.5 R5 DRAFT) — this source_set depends on
+# //cloud-browser/capture/signaling:cb_offerer_driver, which is the
+# target M3 R4 (CV2-54) adds in capture/signaling/BUILD.gn on the
+# cv2/m3-r4-offerer-driver branch (and is extended by M3 R6 /
+# CV2-56 on cv2/m3-r6-renegotiate-teardown). Neither of those has
+# landed on integration/native-peer at draft time, so a gn-check
+# pass against integration/native-peer + this branch alone will
+# report the dep as unresolved. The integration merge expects M3
+# R4 + R6 + this branch all on the same base; at that point the
+# resolve becomes trivial.
+#
+# We deliberately do NOT inline a copy of the OffererDriverObserver
+# interface into this source_set — that would defeat M3 R6's contract
+# (single observer interface across the codebase) and force a
+# duplicate-symbol cleanup at integration time. The TODO marker is
+# the integration signal.
+source_set("cb_audio_lifecycle") {
+  sources = [
+    "../audio/cb_audio_lifecycle.cc",
+    "../audio/cb_audio_lifecycle.h",
+  ]
+  deps = [
+    "//base",
+    "//third_party/abseil-cpp:absl",
+    # CV2-69 — TODO marker retired (M55-R5-merge-with-m3-r4-r6 commit
+    # landed). :cb_offerer_driver is the M3 R4 target.
+    "//cloud-browser/capture/signaling:cb_offerer_driver",
+    # libwebrtc public-API surfaces (AudioSourceInterface,
+    # AudioTrackInterface, RtpTransceiverInterface,
+    # PeerConnectionInterface) all go through the same passthrough
+    # source_set the rest of M1/M3/M5.5 uses; the API headers are
+    # already re-exported there (see patches/0003-add-cloud-browser-
+    # webrtc-overrides.patch, widened in M1 R1).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    # AudioDeviceModule pointer is held raw_ptr-only for log lines
+    # (see cb_audio_lifecycle.h "ADM ref-cycle care" section). The
+    # API header for it rides the passthrough above; no extra dep.
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Browser-process PeerConnectionFactory seam (M1 — CV2-26 / CV2-27).
+#
+# Extracted from cloud_browser_browser_main_parts.cc so the assembly,
+# construction, and codec-line log formatting can be exercised by unit
+# tests without a full chromium browser-process boot. The embedder
+# source_set below depends on us; cloud_browser_pcf_unittests links us
+# directly.
+# ---------------------------------------------------------------------
+source_set("cloud_browser_pcf") {
+  sources = [
+    "cloud_browser_pcf.cc",
+    "cloud_browser_pcf.h",
+  ]
+  deps = [
+    ":cb_audio_device_module",                    # M5.5-R1 — CV2-28.
+    ":encoder_factory",
+    # All webrtc public-API deps go through the passthrough source_set
+    # in //third_party/webrtc_overrides/cloud_browser/ — see comment on
+    # :encoder_factory above. M1-R1 widened the passthrough to
+    # re-export PCF + audio + env + threading types (see
+    # patches/0003-add-cloud-browser-webrtc-overrides.patch).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Input DataChannel sink (M4 — CV2-41).
+#
+# webrtc::DataChannelObserver subclass that consumes the v1 input wire
+# protocol (docs/protocols/input-channel.md) on the libwebrtc signaling
+# thread and PostTask's a typed dispatch onto BrowserThread::UI. The
+# delegate interface stays empty-ish for R1 (LoggingDelegate); R3 / R4 /
+# R5 / R6 / R7 / R8 of M4 plug in real RWHV / Input.* / touch / drag
+# injection.
+#
+# Standalone source_set so:
+#   * the unit test target (R1 ships with cb_input_dispatch_test.cc)
+#     can link only this without dragging in the full embedder set
+#   * M3 R can take a clean dep on us to wire the observer into the
+#     "input" DataChannel without coupling to embedder internals
+# ---------------------------------------------------------------------
+source_set("input_dispatch") {
+  sources = [
+    "cb_input_dispatch.cc",
+    "cb_input_dispatch.h",
+  ]
+  deps = [
+    "//base",
+  ]
+
+  # webrtc::DataChannelObserver + webrtc::DataBuffer live in
+  # //third_party/webrtc/api:libjingle_peerconnection_api, re-exported
+  # through the passthrough source_set.
+  #
+  # CV2-81 attempt-7 fix-forward (lesson-(g.4) Discipline-shape, BUILD.gn
+  # public_deps layer — supersedes the attempt-5 deps-layer attempt that
+  # mis-targeted the mechanism): this MUST be public_deps, not deps. The
+  # PUBLIC header cb_input_dispatch.h #includes webrtc's
+  # data_channel_interface.h, which itself #includes "api/priority.h"
+  # (resolved via webrtc's public_config: -I third_party/webrtc). A plain
+  # `deps` entry configures only input_dispatch's own TUs — it does NOT
+  # propagate the webrtc include-dir config to targets that depend on
+  # input_dispatch and include cb_input_dispatch.h. :input_dispatch_composite
+  # is exactly such a consumer and (unlike the per-delegate source_sets)
+  # does not pull //content/public/browser, which would otherwise carry
+  # the webrtc config incidentally — so attempt-6 failed there with
+  # "'api/priority.h' file not found". public_deps makes input_dispatch
+  # re-export the passthrough's public_config to every consumer; that is
+  # the mechanism-correct fix.
+  public_deps = [
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Stats relay + WebRTC event emitter (M6 R1 — CV2-33).
+#
+# Browser-process replacement for streamer.js's StatsRelay and
+# MetricsEmitter (Wave 2 A4, chromeless commit 9850264). On the stats
+# DataChannel message, forwards raw frame to
+# http://localhost:9100/stats-update; on lifecycle transitions, posts
+# {event, attrs} envelopes to http://localhost:9100/webrtc-event. Both
+# routes are kept by M6 disposition (metrics-sidecar stays after the
+# M7 streamer deletion).
+#
+# Standalone source_set so:
+#   * the unit test target (cb_stats_relay_test.cc, follow-up R) can
+#     link without dragging in the full embedder set
+#   * M3 R can take a clean dep on us to wire CbStatsRelay into the
+#     "stats" DC and own a CbWebrtcEventEmitter on the PCF host
+#
+# Network deps: services/network for SimpleURLLoader + ResourceRequest,
+# net for HttpRequestHeaders + traffic annotation. These are
+# browser-process-only — the source_set must not be linked from
+# render-process code.
+# ---------------------------------------------------------------------
+source_set("stats_relay") {
+  sources = [
+    "cb_stats_relay.cc",
+    "cb_stats_relay.h",
+  ]
+  deps = [
+    "//base",
+    "//net/traffic_annotation",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Native clipboard DC ↔ bridge WS relay (CV2-34, M6 R2).
+#
+# Bidirectional relay between the WebRTC "clipboard" DataChannel and
+# the existing clipboard-bridge sidecar (capture/clipboard-bridge/).
+# Replaces streamer.js's clipboard wiring (deleted in M7).
+#
+# Inbound (DC→bridge): CbClipboardRelay is a DataChannelObserver
+# bound onto the kClipboard channel via M3 R5's BindObserver. Each
+# DC text frame is forwarded verbatim to the bridge's WS source
+# endpoint (default ws://127.0.0.1:9300/clipboard).
+#
+# Outbound (bridge→DC): CbClipboardOutboundServer accepts WS
+# connections from the bridge's WS sink (default 127.0.0.1:9301
+# path /clipboard). Each frame is forwarded via dc_host->Send(
+# kClipboard, text).
+#
+# Standalone source_set so:
+#   * the unit test target (cb_clipboard_relay_test.cc, follow-up R)
+#     can link without dragging in the full embedder set
+#   * M3 R wiring can take a clean dep on us to instantiate both
+#     halves of the relay alongside CbStatsRelay
+#
+# Deps mirror :stats_relay; the WS-backend production wiring (TODO
+# in the .cc) will add either //services/network/public/cpp or
+# //net/server depending on the backend choice locked in for R2's
+# follow-up CL. The DRAFT compiles against the existing deps because
+# the WS hop is stubbed behind an interface for testability.
+# ---------------------------------------------------------------------
+source_set("clipboard_relay") {
+  sources = [
+    "cb_clipboard_relay.cc",
+    "cb_clipboard_relay.h",
+  ]
+  deps = [
+    "//base",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    "//net/traffic_annotation",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Native file-upload DC ↔ file-bridge WS relay (CV2-35, M6 R3).
+#
+# Bidirectional relay between the WebRTC "files" DataChannel and
+# the existing file-bridge sidecar (capture/file-bridge/). Replaces
+# streamer.js's file-upload wiring (deleted in M7).
+#
+# Inbound (DC→bridge): CbFileUploadRelay is a DataChannelObserver
+# bound onto the kFiles channel via M3 R5's BindObserver. Each
+# DC text frame (file_upload_start / file_upload_chunk / file_upload
+# _end / file_upload_cancel — see docs/protocols/file-upload.md) is
+# forwarded verbatim to the bridge's WS endpoint (default
+# ws://127.0.0.1:9400/files).
+#
+# Outbound (bridge→DC): the same CbFileUploadBridgeWsClient owns the
+# WS read-loop. Each reply frame from the bridge (file_upload_progress
+# / file_upload_complete / file_upload_error) is forwarded via
+# dc_host->Send(kFiles, text).
+#
+# One duplex WS (not two unidirectional like clipboard) because the
+# file-bridge protocol is fundamentally request/response correlated
+# by upload_id, and the bridge speaks one socket per session. See
+# cb_file_upload_relay.h header for the full rationale.
+#
+# Standalone source_set so:
+#   * the unit test target (cb_file_upload_relay_test.cc, follow-up
+#     R) can link without dragging in the full embedder set
+#   * M3 R wiring can take a clean dep on us to instantiate the
+#     relay alongside CbStatsRelay + CbClipboardRelay
+#
+# Deps mirror :clipboard_relay; the WS-backend production wiring
+# (TODO in the .cc) will add either //services/network/public/cpp
+# or //net/websockets depending on the backend choice locked in for
+# R3's follow-up CL. The DRAFT compiles against the existing deps
+# because the WS hop is stubbed behind an interface for testability.
+# ---------------------------------------------------------------------
+source_set("file_upload_relay") {
+  sources = [
+    "cb_file_upload_relay.cc",
+    "cb_file_upload_relay.h",
+  ]
+  deps = [
+    "//base",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    "//net/traffic_annotation",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Send-side audio composition (M5.5 R4 — CV2-31).
+#
+# Wires M5.5 R1's AudioDeviceModule + M5.5 R3's AudioOptions helper
+# into the M3 R4 PeerConnection by way of M1's PCF: CreateAudioSource
+# → CreateAudioTrack → AddTransceiver(sendonly). See
+# capture/audio/cb_audio_track.h for the full composition rationale.
+#
+# Source files live in ../audio/ alongside R1's cb_audio_device_module
+# (mirrors the M5.5 layout convention — audio-related source files
+# share capture/audio/, BUILD targets live in capture/build-integration/
+# because that's where gn-check-clean visibility into the webrtc
+# passthrough lives).
+#
+# This source_set does NOT depend on R1's :cb_audio_device_module
+# source_set — R4 only consumes PCF/PC interfaces, both of which come
+# in via the webrtc-overrides passthrough. R1's ADM only affects what
+# the PCF's AudioSource is bound to under the hood; R4 doesn't see it.
+# TODO(M55-R4-r1-r3-merge): when R1, R3, R4 all land on
+# integration/native-peer, audit whether grouping them under a single
+# `cb_audio` source_set is cleaner than three siblings — for the
+# parallel draft we keep the source_sets disjoint so the merges don't
+# need to coordinate on BUILD.gn ordering.
+#
+# TODO(M55-R4-r3-source-set): R4 takes the cricket::AudioOptions
+# value by const ref so it does NOT include R3's helper header — R4
+# is the consumer of the value, not the producer. The R4 caller
+# (M5.5 R5 lifecycle owner) is the one that #includes R3's header,
+# calls R3's helper, and threads the result through R4. When R3
+# lands and R5 wires the chain end-to-end, the integration commit
+# will add R3's source_set name as a dep on R5's source_set, not
+# on this one. This dep list is intentionally narrow.
+# ---------------------------------------------------------------------
+source_set("cb_audio_track") {
+  sources = [
+    "../audio/cb_audio_track.cc",
+    "../audio/cb_audio_track.h",
+  ]
+  deps = [
+    # PeerConnectionFactoryInterface + PeerConnectionInterface +
+    # AudioSourceInterface + AudioTrackInterface +
+    # RtpTransceiverInterface + cricket::AudioOptions all ride in
+    # via the webrtc-overrides passthrough. M1-R1 already widened
+    # the passthrough to re-export api:libjingle_peerconnection_api
+    # (which transitively exposes the audio + RTP transceiver
+    # interfaces). If gn check rejects this source_set at first
+    # compile, patches/0003 needs to widen further — coordinate
+    # with gn-investigator before doing so (mirror of the M5.5 R1
+    # TODO(M5.5-R1-passthrough)).
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R10 (CV2-50) — last-pointer snapshot + pointer-leave disposition.
+#
+# Standalone state holder + envelope helpers consumed by R3 (mouse).
+# R3 delegates its inline last-pointer storage to this source_set
+# (see fold-in fixup below).
+# ---------------------------------------------------------------------
+source_set("pointer_state") {
+  sources = [
+    "cb_last_pointer.cc",
+    "cb_last_pointer.h",
+  ]
+  deps = [
+    # base::TimeTicks for the snapshot timestamp, base::Value::Dict
+    # for the envelope-shape helpers.
+    "//base",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R3 (CV2-43) — mouse + wheel native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderWidgetHost::ForwardMouseEvent / ForwardWheelEvent. Owns the
+# held-button / held-modifier (shared with R4) / click-ramp / wheel-
+# phase state machines and the content→widget coord map (DSF-aware).
+# ---------------------------------------------------------------------
+source_set("input_dispatch_mouse") {
+  sources = [
+    "cb_input_dispatch_mouse.cc",
+    "cb_input_dispatch_mouse.h",
+  ]
+  public_deps = [
+    # Public header cb_input_dispatch_mouse.h includes these headers,
+    # so downstream consumers need their public configs too. In
+    # particular, :input_dispatch re-exports WebRTC's include config
+    # for api/priority.h through its passthrough public_dep.
+    ":active_webcontents_resolver",
+    ":input_dispatch",
+    ":pointer_state",
+  ]
+  deps = [
+    "//base",
+    # RenderWidgetHost::ForwardMouseEvent / ForwardWheelEvent,
+    # RenderWidgetHostView::GetDeviceScaleFactor + Focus, WebContents::
+    # WasShown + GetRenderViewHost + GetRenderWidgetHostView.
+    # build-czar iter 3 (2026-05-17): //content/public/browser re-exports
+    # blink::WebMouseEvent / WebMouseWheelEvent / WebInputEvent via its
+    # public_deps (RenderWidgetHost forward APIs take WebMouseEvent& by
+    # contract). //third_party/blink/public/common:headers visibility
+    # excludes //cloud-browser/* — direct dep was a gn-check fail at
+    # STEP 5 (Build #19 6vljq); the transitive re-export through
+    # content is the same documented pattern as webrtc_api_passthrough.
+    "//content/public/browser",
+    # ui::ScrollGranularity for WebMouseWheelEvent::delta_units.
+    "//ui/events:events_base",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R4 (CV2-44) — keyboard native dispatch + shared modifier state +
+# unicode text synthesis.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderWidgetHost::ForwardKeyboardEvent with NativeWebKeyboardEvent
+# pairs (kRawKeyDown + optional kChar follow-on) so the four standard
+# DOM event types fire end-to-end (keydown / keypress / input / keyup).
+# Owns mutation of the cross-rank Shift/Ctrl/Alt/Meta bitmask shared
+# with M4 R3 (mouse); the storage itself lives in CbHeldModifierState
+# which the embedder constructs once and injects into both R3 and R4.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_keyboard") {
+  sources = [
+    "cb_input_dispatch_keyboard.cc",
+    "cb_input_dispatch_keyboard.h",
+  ]
+  deps = [
+    "//base",
+    # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
+    ":input_dispatch",
+    # R3's WebContentsResolver forward-declared interface. The
+    # embedder constructs the resolver instance shared with the
+    # keyboard dispatcher.
+    ":input_dispatch_mouse",
+    # RenderWidgetHost::ForwardKeyboardEvent, RenderWidgetHostView,
+    # NativeWebKeyboardEvent. build-czar iter 3 (2026-05-17):
+    # //content/public/browser re-exports blink::WebKeyboardEvent +
+    # WebInputEvent::Modifiers via its public_deps (NativeWebKeyboardEvent
+    # is itself a blink-event wrapper). //third_party/blink/public/common
+    # :headers visibility excludes //cloud-browser/* — using the content
+    # re-export path same as input_dispatch_mouse above.
+    "//content/public/browser",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R5 (CV2-45) — IME native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderFrameHost::GetTextInputClient() / ImeText* APIs for the focused
+# frame. Source files (cb_input_dispatch_ime.{h,cc}) landed in the M4
+# R5 wave; the source_set declaration is added by CV2-81 alongside the
+# composite-delegate wiring so the dispatcher is reachable from the
+# :embedder target (input_dispatch_drag / _touch / _ime each had source
+# but no source_set prior to CV2-81 — the deadweight phase the composite
+# wiring closes out).
+# ---------------------------------------------------------------------
+source_set("input_dispatch_ime") {
+  sources = [
+    "cb_input_dispatch_ime.cc",
+    "cb_input_dispatch_ime.h",
+  ]
+  deps = [
+    "//base",
+    # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
+    ":input_dispatch",
+    # R3's WebContentsResolver forward-declared interface (R5 depends
+    # on the same interface R4/R6/R7/R8 do — see header doc on the
+    # ODR contract).
+    ":input_dispatch_mouse",
+    # RenderFrameHost::GetTextInputClient + ImeText* APIs, RenderWidgetHost,
+    # RenderWidgetHostView. Same content-public re-export path used by
+    # the rest of M4 (blink::WebInputEvent visibility wall).
+    "//content/public/browser",
+    # ui::ImeTextSpan + gfx::Range — referenced from the .cc only;
+    # listed here so a future ime header that surfaces them stays
+    # gn-check clean.
+    "//ui/base/ime",
+    "//ui/gfx/range",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R6 (CV2-46) — touch native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# input::RenderInputRouter::ForwardTouchEventWithLatencyInfo (reached
+# via RenderWidgetHostImpl::GetRenderInputRouter()) for synthetic
+# multi-touch sequences. Mirrors the cast precedent set by M4 R3
+# (mouse) for the impl-only Forward* methods. Source files landed in
+# the M4 R6 wave; source_set added by CV2-81.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_touch") {
+  sources = [
+    "cb_input_dispatch_touch.cc",
+    "cb_input_dispatch_touch.h",
+  ]
+  deps = [
+    "//base",
+    ":input_dispatch",
+    ":input_dispatch_mouse",
+    # RenderWidgetHostImpl + input::RenderInputRouter (the latter pulled
+    # in transitively by render_widget_host_impl.h), blink::WebTouchEvent
+    # / WebTouchPoint — all via the content-public re-export.
+    "//content/public/browser",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R7 (CV2-47) — drag native dispatch.
+#
+# Consumes M4 R1's CbInputDispatchDelegate; drives chromium's
+# RenderWidgetHostImpl::DragTargetDragEnter / Over / Drop / Leave for
+# the synthetic drag-into-renderer pipeline. R7 holds a const pointer
+# to R3 (mouse) to read the shared held-modifier state for the
+# `modifiers` field on each DragTarget* call (TODO(M4-R7-shared-modifier-
+# extraction) consolidates this into CbHeldModifierState at fold-in).
+# Source files landed in the M4 R7 wave; source_set added by CV2-81
+# alongside the DragTarget* call resolution.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_drag") {
+  sources = [
+    "cb_input_dispatch_drag.cc",
+    "cb_input_dispatch_drag.h",
+  ]
+  deps = [
+    "//base",
+    ":input_dispatch",
+    # R3's WebContentsResolver forward-declared interface + the
+    # CbInputDispatchMouse pointer for held-modifier read access.
+    ":input_dispatch_mouse",
+    # RenderWidgetHostImpl::DragTarget* (cast from public
+    # RenderWidgetHost, same pattern as M4 R3 mouse + R6 touch),
+    # content::DropData, blink::WebDragOperation* via the
+    # content-public re-export path.
+    "//content/public/browser",
+    # blink::mojom::DragOperation enum for kDragOperationCopyV1.
+    "//third_party/blink/public/mojom:mojom_platform",
+    "//url",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M4 (CV2-81) — composite typed-dispatcher delegate.
+#
+# Fan-out wrapper that holds all six M4 typed dispatchers (R3 mouse,
+# R4 keyboard, R5 IME, R6 touch, R7 drag, R8 clipboard) and forwards
+# CbInputDispatchDelegate::OnInputEvent to each in sequence. Owns the
+# shared CbHeldModifierState injected into R4 + R8 (R3 + R7 keep their
+# existing modifier paths until the TODO(M4-R*-shared-modifier-
+# extraction) consolidations land).
+#
+# Replaces the CV2-75 R1 production stand-in CbInputLoggingDelegate as
+# the input DC observer the embedder constructs. See the header for
+# the full transition rationale.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_composite") {
+  sources = [
+    "cb_input_dispatch_composite.cc",
+    "cb_input_dispatch_composite.h",
+  ]
+  deps = [
+    "//base",
+    ":input_dispatch",
+    ":input_dispatch_clipboard",
+    ":input_dispatch_drag",
+    ":input_dispatch_ime",
+    ":input_dispatch_keyboard",
+    ":input_dispatch_mouse",
+    ":input_dispatch_touch",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M5 R1 (CV2-19) — browser-process cursor observer.
+#
+# Registered on host_->window() by CbAuraPlatformData. Kept in its own
+# source_set so M5 R3's cursor_xy_join can depend on the cursor source
+# without depending on the full :embedder target and creating
+# embedder -> cursor_xy_join -> embedder.
+# ---------------------------------------------------------------------
+source_set("cursor_client") {
+  sources = [
+    "cb_cursor_client.cc",
+    "cb_cursor_client.h",
+  ]
+  deps = [
+    "//base",
+    "//skia",
+    "//ui/aura",
+    "//ui/base",
+    "//ui/base/cursor/mojom:cursor_type_shared",
+    "//ui/display",
+    "//ui/gfx/geometry",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# M5 R3 (CV2-21) — cursor x,y join.
+#
+# Tiny coordinator that subscribes to M5 R1's CbCursorClient::
+# CursorChangeCallback (type + visible) and on each fire reads M4 R3's
+# CbInputDispatchMouse::last_pointer() snapshot (x, y, buttons, at),
+# assembling a JoinedCursorState that M5 R2 then formats + emits on
+# the cursor DataChannel.
+# ---------------------------------------------------------------------
+source_set("cursor_xy_join") {
+  sources = [
+    "cb_cursor_xy_join.cc",
+    "cb_cursor_xy_join.h",
+  ]
+  deps = [
+    "//base",
+    # M5 R1 — CbCursorClient + CursorChangeCallback.
+    ":cursor_client",
+    # M4 R3 — CbInputDispatchMouse + CbLastPointerSnapshot struct.
+    ":input_dispatch_mouse",
+    # ui::mojom::CursorType — already a public_dep of //ui/aura which
+    # :embedder pulls in transitively, but R3's header includes the
+    # mojom-forward directly so make the dep explicit.
+    "//ui/base/cursor/mojom:cursor_type_shared",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
@@ -254,6 +1022,13 @@ source_set("embedder") {
     "cb_devtools_agent.h",
     "cb_focus_client.cc",
     "cb_focus_client.h",
+    # CV2-78 (M5 R1 — cursor-routing gate). Single-window display::Screen
+    # subclass that overrides IsWindowUnderCursor / GetCursorScreenPoint
+    # so aura's cursor routing reaches CbCursorClient::SetCursor instead
+    # of short-circuiting on the upstream ScreenBase stubs. Replaces
+    # the bare ScreenBase that PreEarlyInitialization was constructing.
+    "cb_headless_screen.cc",
+    "cb_headless_screen.h",
     "cb_window_parenting_client.cc",
     "cb_window_parenting_client.h",
     "cloud_browser_browser_context.cc",
@@ -266,8 +1041,67 @@ source_set("embedder") {
     "content_browser_client.h",
   ]
   deps = [
+    # M4-R2 — active streamed-WebContents resolver. main_parts owns
+    # the unique_ptr and threads the raw pointer through both
+    # CbDevToolsManagerDelegate (so Cb.startFrameSinkCapture can call
+    # SetActiveCapture) and the M4 input dispatchers (R3..R7 take it
+    # at construction).
+    ":active_webcontents_resolver",
+    # M1-R2 — browser-process PCF construction seam. cloud_browser_
+    # browser_main_parts.cc owns 3 rtc::Threads + the pcf_ member and
+    # calls CreateCloudBrowserPcf() from PreMainMessageLoopRun.
+    ":cloud_browser_pcf",
     ":encoder_factory",
     ":framesink_capture",
+    # CV2-69 (M55-R5-merge-with-m3-r4-r6) — native WebRTC peer runtime
+    # wire. cloud_browser_browser_main_parts.cc owns:
+    #   * SignalingWsClient (M3 R2) — wraps the embedder as the
+    #     SignalingClientObserver, dials the broker via
+    #     network::mojom::WebSocket on the browser-process network
+    #     thread, forwards inbound envelopes to offerer_driver_.
+    #   * CbOffererDriver (M3 R4) — owns the PeerConnection lifecycle,
+    #     consumes IceConfig (M3 R3), drives the SDP+ICE dance.
+    # cloud_browser_main.cc additionally calls into:
+    #   * ResourceBundle init (F1, components/crash/core/common for
+    #     crash keys F3, and content::InitializeMojoCore for F2) —
+    #     bootstrap inits that the worker was skipping prior to CV2-69.
+    ":cb_audio_lifecycle",
+    ":cb_audio_options",
+    ":cb_audio_track",
+    ":cursor_client",
+    "//cloud-browser/capture/signaling:cb_ice_config",
+    "//cloud-browser/capture/signaling:cb_offerer_driver",
+    "//cloud-browser/capture/signaling:cb_signaling_ws_client",
+    "//cloud-browser/capture/signaling:cb_wire_envelope",
+    # CV2-75 (M4/M5/M6 runtime-wire) — main_parts owns the unique_ptrs
+    # for the 4 consumer classes that bind to the F7-skinny DCs.
+    # CbCursorClient is part of the embedder source_set itself
+    # (cb_cursor_client.cc is in this target's `sources`), so no new
+    # dep needed for it. Stats relay (M6 R1) is deferred — needs a
+    # 5th "stats" DC that doesn't exist in current F7-skinny.
+    ":clipboard_relay",
+    ":file_upload_relay",
+    ":input_dispatch",
+    # CV2-81 — M4 typed-dispatcher composite delegate. Transitively
+    # pulls all 6 typed dispatchers (R3 mouse / R4 keyboard / R5 IME /
+    # R6 touch / R7 drag / R8 clipboard) + the M4 R2 active-WebContents
+    # resolver (declared via :active_webcontents_resolver above).
+    # main_parts owns the unique_ptr; ctor takes the resolver pointer.
+    ":input_dispatch_composite",
+    ":cursor_xy_join",
+    "//cloud-browser/capture/cursor:cb_cursor_emit_policy",
+    "//cloud-browser/capture/cursor:cb_cursor_dc_emitter",
+    "//cloud-browser/capture/cursor:cb_cursor_envelope",
+    # CV2-83 — CbHeadlessScreen reads the M4 R10 last-pointer state
+    # directly after CV2-81 installs the typed mouse dispatcher as
+    # runtime source. Direct dep keeps GN header ownership explicit.
+    ":pointer_state",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    # CV2-69 F1 + F3 — chromium-subsystem bootstrap inits the embedder
+    # was skipping (gpu-test-lead audit /tmp/cv2-embedder-init-audit.md).
+    # F1 (ResourceBundle) lives in //ui/base already in this list;
+    # F3 (crash keys) is the only new dep.
+    "//components/crash/core/common:crash_key",
     "//base",
     # cloud_browser_browser_context.cc registers with the
     # BrowserContext / Simple keyed-service dependency managers (same
@@ -305,8 +1139,10 @@ source_set("embedder") {
     # the headless versions.
     "//ui/aura",
     "//ui/base",
-    # cloud_browser_browser_main_parts.cc creates a default
-    # display::ScreenBase so chromium's Screen::Get() returns non-null.
+    # cloud_browser_browser_main_parts.cc creates a CbHeadlessScreen
+    # (display::ScreenBase subclass) so chromium's Screen::Get() returns
+    # non-null AND aura's pre-SetCursor gate (IsWindowUnderCursor) does
+    # not short-circuit cursor routing — see cb_headless_screen.h.
     "//ui/display",
     "//ui/gfx/geometry",
     # PlatformWindowInitProperties — passed to aura::WindowTreeHost::
@@ -406,6 +1242,166 @@ test("cloud_browser_encoder_unittests") {
     ":vaapi",
     ":x264",
   ]
+}
+
+# ---------------------------------------------------------------------
+# M4 R8 — clipboard_copy_request dispatch (CV2-48).
+#
+# Synthesises a Ctrl+C NativeWebKeyboardEvent pair on the focused
+# frame in response to a `clipboard_copy_request` envelope. The
+# resulting clipboard delta flows back over M6 R2's clipboard
+# DataChannel, not the input channel. See the file header for the
+# (A) synthesised-keystroke vs (B) WebContents::Copy() decision +
+# rationale.
+# ---------------------------------------------------------------------
+source_set("input_dispatch_clipboard") {
+  sources = [
+    "cb_input_dispatch_clipboard.cc",
+    "cb_input_dispatch_clipboard.h",
+  ]
+  deps = [
+    "//base",
+    # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
+    # TODO(M4-R8-r1-merge): no-op once R1 merges; today this dep
+    # points at a source_set that only exists on
+    # cv2/m4-input-dc-sink.
+    ":input_dispatch",
+    # R3's WebContentsResolver forward-declared interface (R8
+    # depends on the same interface R4/R5/R6/R7 do).
+    # TODO(M4-R8-r3-merge): no-op once R3 merges; today this dep
+    # points at a source_set that only exists on
+    # cv2/m4-r3-mouse-dispatch.
+    ":input_dispatch_mouse",
+    # R4's CbHeldModifierState — read-only diagnostic dependency
+    # (R8 never mutates the shared state).
+    # TODO(M4-R8-r4-merge): no-op once R4 merges; today this dep
+    # points at a source_set that only exists on
+    # cv2/m4-r4-keyboard-dispatch.
+    ":input_dispatch_keyboard",
+    # RenderWidgetHost::ForwardKeyboardEvent, RenderViewHost,
+    # NativeWebKeyboardEvent. build-czar iter 3 (2026-05-17):
+    # //content/public/browser re-exports blink::WebInputEvent::Modifiers
+    # transitively (same fix as input_dispatch_mouse + _keyboard above).
+    "//content/public/browser",
+  ]
+  configs += [ ":cb_include_paths" ]                # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Unit tests for the browser-process PCF seam (M1 — CV2-26 / CV2-27).
+#
+# RED-by-construction pre-T17 — exercises cloud_browser_pcf.{h,cc}
+# without booting a full chromium browser process. Each test fixture
+# documents the assertion shape (see cloud_browser_pcf_test.cc); the
+# K8s chromeless-build Job on triform-2 runs them once the from-source
+# build env reports first-green.
+# ---------------------------------------------------------------------
+test("cloud_browser_pcf_unittests") {
+  sources = [ "cloud_browser_pcf_test.cc" ]
+  deps = [
+    ":cloud_browser_pcf",
+    ":encoder_factory",
+    # See cloud_browser_encoder_unittests above — Wall #37. test_support
+    # provides TestSuite + helpers; run_all_unittests is what supplies main().
+    "//base/test:run_all_unittests",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_test_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+}
+
+# ---------------------------------------------------------------------
+# M4 R10 (CV2-50) — pointer-state unit tests.
+#
+# Pure-C++ coverage for the four CbLastPointerState transitions
+# (default / Update / MarkLeft / re-Update or MarkEntered) plus the
+# envelope-shape helpers. No chromium browser-process boot needed —
+# the class has no thread affinity and no chromium dependencies
+# beyond //base.
+# ---------------------------------------------------------------------
+test("cloud_browser_pointer_state_unittests") {
+  sources = [ "cb_last_pointer_test.cc" ]
+  deps = [
+    ":pointer_state",
+    # base::TimeTicks::Now + base::Value::Dict.
+    "//base",
+    # See cloud_browser_encoder_unittests above — Wall #37. test_support
+    # provides TestSuite + helpers; run_all_unittests is what supplies main().
+    "//base/test:run_all_unittests",
+    "//testing/gtest",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
+}
+
+# ---------------------------------------------------------------------
+# Native audio ADM test support — M5.5 R2 (CV2-29).
+#
+# Observer half of the empirical ADM-source RED test. Buffers the
+# 16-bit PCM the libwebrtc Linux ADM delivers and reports RMS;
+# cloud_browser_adm_unittests below links us. Kept as a source_set
+# (not folded into the test target) so future M5.5 tests — e.g.
+# rate-stability or jitter — can share the observer without
+# re-implementing the AudioTransport.
+# ---------------------------------------------------------------------
+source_set("cb_audio_test_recorder") {
+  testonly = true
+  sources = [
+    "../audio/cb_audio_test_recorder.cc",
+    "../audio/cb_audio_test_recorder.h",
+  ]
+  deps = [
+    # AudioTransport is re-exported by webrtc_api_passthrough today —
+    # the M1 PCF test fixture uses the same surface for its
+    # TestAudioDeviceModule callers. If a libwebrtc rebase moves the
+    # header (the TODO in cb_audio_test_recorder.h covers that), the
+    # widening goes in patches/0003, not here.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Unit tests for the native AudioDeviceModule (M5.5 — CV2-28 / CV2-29).
+#
+# RED-by-construction. Three tests in priority order — see
+# capture/audio/cb_audio_device_module_test.cc for the full surface
+# and the escalation block that names which RED categories specifically
+# demand choice (a) (cb_pulse_adm.{h,cc}).
+#
+# The iron test (MonitorSourceDeliversToneRms) gates on
+# CB_M55_R2_TONE_RUNNING=1 — set by harness/m5.5/run_red_test.sh.
+# Without that env, the iron test SKIPS rather than RED-failing on a
+# missing tone — see the M0 R2-fix's SKIPPED-for-verdict semantics.
+#
+# Dependencies:
+#   * :cb_audio_device_module — added by M5.5 R1 (cv2/m55-r1-native-adm).
+#     Until that branch merges to integration/native-peer this target
+#     is RED at gn-check time (target-not-found). Intentional RED-by-
+#     construction; the M0 build pod runs the test only once R1+R2 are
+#     both on integration/native-peer.
+#   * :cb_audio_test_recorder — added by this R2 patch above.
+# ---------------------------------------------------------------------
+test("cloud_browser_adm_unittests") {
+  sources = [ "../audio/cb_audio_device_module_test.cc" ]
+  deps = [
+    ":cb_audio_device_module",                       # M5.5-R1, CV2-28.
+    ":cb_audio_test_recorder",                       # M5.5-R2, this patch.
+    # See cloud_browser_encoder_unittests above — Wall #37.
+    # run_all_unittests supplies main(); test_support brings TaskQueue
+    # helpers some libwebrtc Linux ADM init paths reach for during
+    # InitRecording.
+    "//base/test:run_all_unittests",
+    "//base/test:test_support",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_test_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]               # T17.
 }
 
 # ---------------------------------------------------------------------

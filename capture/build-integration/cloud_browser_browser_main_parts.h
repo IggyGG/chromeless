@@ -52,8 +52,27 @@
 
 #include <memory>
 
+#include "api/peer_connection_interface.h"
+#include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+#include "components/viz/common/surfaces/frame_sink_id.h"
+// CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
+// that hold the runtime-wire consumer instances. CbCursorClient (M5
+// R1) is NOT included here — it's owned by CbAuraPlatformData
+// (cb_aura_platform_data.cc:152-153 already constructs it + calls
+// aura::client::SetCursorClient on aura_'s ctor), so the M5 R1
+// runtime-wire is satisfied at the aura platform layer without any
+// main_parts plumbing.
+#include "capture/build-integration/cb_active_webcontents_resolver.h"
+#include "capture/build-integration/cb_clipboard_relay.h"
+#include "capture/build-integration/cb_file_upload_relay.h"
+#include "capture/build-integration/cb_input_dispatch.h"
+#include "capture/build-integration/cb_input_dispatch_composite.h"
+#include "capture/signaling/cb_offerer_driver.h"
+#include "capture/signaling/cb_signaling_ws_client.h"
+#include "capture/signaling/cb_wire_envelope.h"
 #include "content/public/browser/browser_main_parts.h"
+#include "rtc_base/thread.h"
 
 namespace content {
 class BrowserContext;
@@ -64,16 +83,42 @@ namespace aura {
 class Window;
 }  // namespace aura
 
-namespace display {
-class ScreenBase;
-}  // namespace display
-
 namespace cloud_browser {
 
-class CbAuraPlatformData;
-class CloudBrowserBrowserContext;
+namespace audio {
+class CbAudioLifecycle;
+}  // namespace audio
 
-class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
+namespace cursor {
+class CbCursorDcEmitter;
+class EmitPolicy;
+class EnvelopeAssembler;
+}  // namespace cursor
+
+namespace signaling {
+class CbDataChannelHost;
+}  // namespace signaling
+
+class CbAuraPlatformData;
+class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
+class CbCursorXyJoin;
+class CloudBrowserBrowserContext;
+class CloudBrowserFrameSinkVideoTrackSource;
+
+// CV2-69 (M55-R5-merge-with-m3-r4-r6) — inherits BOTH
+// SignalingClientObserver and OffererDriverObserver. As the
+// SignalingClientObserver, main_parts forwards inbound envelopes to
+// offerer_driver_->OnEnvelope (resolving the SignalingWsClient ↔
+// CbOffererDriver chicken-and-egg construction-order cycle — see
+// PreMainMessageLoopRun for the wiring rationale). As the
+// OffererDriverObserver, main_parts logs lifecycle transitions for
+// telemetry (full M5.5 R5 chain integration deferred to a follow-up
+// R# that resolves the R7 reconnect-vs-R4-pointer-staleness design
+// question Q2 surfaced during CV2-69 pre-implementation).
+class CloudBrowserBrowserMainParts
+    : public content::BrowserMainParts,
+      public cloud_browser::signaling::SignalingClientObserver,
+      public cloud_browser::signaling::OffererDriverObserver {
  public:
   CloudBrowserBrowserMainParts();
 
@@ -89,6 +134,33 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   void WillRunMainMessageLoop(
       std::unique_ptr<base::RunLoop>& run_loop) override;
   void PostMainMessageLoopRun() override;
+
+  // signaling::SignalingClientObserver (CV2-69) — adapter forwarding to
+  // offerer_driver_ so the embedder can serve as the WS client's
+  // observer at ctor time without depending on a not-yet-constructed
+  // driver. OnEnvelope + OnClosed(uint16_t,string_view) are pure-
+  // virtual on the base. OnConnected + OnError have default no-op;
+  // we override for diagnostic LOGs.
+  void OnConnected() override;
+  void OnEnvelope(const cloud_browser::signaling::Envelope& envelope) override;
+  void OnClosed(uint16_t code, std::string_view reason) override;  // ws path
+  void OnError(std::string_view reason) override;
+
+  // signaling::OffererDriverObserver (CV2-69) — telemetry-only LOG
+  // forwards. Production-grade lifecycle relay (M5.5 R5 audio chain,
+  // M6 R1 stats relay) is deferred to a follow-up R#.
+  //
+  // Note: OffererDriverObserver::OnClosed(string_view) has a different
+  // signature than SignalingClientObserver::OnClosed(uint16_t,string_view).
+  // The two-arg form is the WS-client one (RFC 6455 close code +
+  // reason); the one-arg form is the offerer driver's session-ended
+  // event. Both are explicit overrides to avoid C++ name-hiding.
+  void OnIceConnectionStateChanged(
+      webrtc::PeerConnectionInterface::IceConnectionState state) override;
+  void OnRenegotiationStarted(std::string_view trigger) override;
+  void OnRenegotiationCompleted() override;
+  void OnClosed(std::string_view reason) override;  // offerer-driver path
+  void OnFailed(std::string_view reason) override;
 
   // Public read-only accessor for the default BrowserContext. Returns
   // nullptr until PreMainMessageLoopRun has executed (the context is
@@ -115,6 +187,29 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // upstream pattern.
   aura::Window* aura_root_window() const;
 
+  // Public read-only accessor for the browser-process video track
+  // source (ChromelessV2 M2 R4 — CV2-39). nullptr until PreMain
+  // MessageLoopRun has constructed it (peer-adjacent with pcf_).
+  // CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate
+  // forwards this raw pointer to CbDevToolsManagerDelegate at delegate-
+  // construction time so Cb.startFrameSinkCapture can route the
+  // resolved FrameSinkId + producer mojo into the track source rather
+  // than owning a CloudBrowserFrameSinkCapturer in the delegate. Raw
+  // pointer (not scoped_refptr) because the consumer never bumps the
+  // refcount — main_parts holds the only strong reference for the
+  // lifetime of the worker. Defined out-of-line so the header doesn't
+  // need to pull in the track-source class definition.
+  CloudBrowserFrameSinkVideoTrackSource* cb_track_source() const;
+
+  // Called by CbDevToolsManagerDelegate after Cb.startFrameSinkCapture
+  // successfully resolves and starts capture for a WebContents. This is
+  // the shared active-target handoff for M4 typed input dispatch: the
+  // input DataChannel carries input envelopes, but the frame-sink
+  // capture command establishes which WebContents those envelopes
+  // should target.
+  void SetActiveCapture(content::WebContents* web_contents,
+                        viz::FrameSinkId frame_sink_id);
+
  private:
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
   // and starts content::DevToolsAgentHost::StartRemoteDebuggingServer
@@ -132,10 +227,17 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
   // DisplayObserver against a null Screen — the worker hits this even
   // though it never paints to a real surface, because internal
   // subsystems (audio, prefetch, ...) attach observers as part of
-  // their startup. Constructed in PreMainMessageLoopRun before the
+  // their startup. Constructed in PreEarlyInitialization before the
   // BrowserContext + initial WebContents so the registration order is
   // safe.
-  std::unique_ptr<display::ScreenBase> screen_;
+  //
+  // CV2-78 (M5 R1 cursor-routing gate) — type bumped from
+  // display::ScreenBase to CbHeadlessScreen so aura's pre-SetCursor
+  // gate (IsWindowUnderCursor) returns true and cursor routing
+  // reaches CbCursorClient::SetCursor instead of short-circuiting on
+  // the upstream ScreenBase stub. See cb_headless_screen.h for the
+  // full rationale.
+  std::unique_ptr<CbHeadlessScreen> screen_;
 
   // Aura subsystem (root WindowTreeHost + focus / parenting / capture
   // / activation clients + fill layout). Constructed in PreMain
@@ -157,6 +259,202 @@ class CloudBrowserBrowserMainParts : public content::BrowserMainParts {
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;
+
+  // ChromelessV2 M1 — browser-process PeerConnectionFactory + the 3
+  // dedicated rtc::Threads it runs on. The PCF replaces the renderer-
+  // side libwebrtc PCF that the M0 streamer.js path constructed; in
+  // ChromelessV2 the browser process owns the entire WebRTC peer, so
+  // the PCF lives here.
+  //
+  // CV2-26 R-thread DECISION: own 3 bare rtc::Thread members
+  // (network / worker / signaling) rather than ThreadWrappers around
+  // chromium task runners. Simpler lifetime ordering for the mandated
+  // PCF-teardown-before-browser_context_ ordering and matches
+  // webrtc/examples/peerconnection. Caveat documented on the CV2-26
+  // ticket: PCF methods MUST be marshaled onto the signaling_thread_;
+  // M2/M3 observe this.
+  //
+  // Construction order in PreMainMessageLoopRun (after browser_context_):
+  //   1. Start the 3 threads.
+  //   2. Build the env via webrtc::CreateEnvironment().
+  //   3. Construct pcf_ = CreateCloudBrowserPcf(net, worker, signaling,
+  //                                              env, default ADM).
+  //   4. Log the PCF video-sender codec caps via
+  //      FormatPcfVideoCodecLogLine (CV2-27 M0-R5 probe target).
+  //
+  // Teardown order in PostMainMessageLoopRun:
+  //   * pcf_.reset() FIRST — drops the strong ref the factory holds
+  //     against the threads + the encoder factory + the ADM.
+  //   * Then network_thread_/worker_thread_/signaling_thread_ are
+  //     Stop()ped + reset() (in reverse-construction order, per
+  //     webrtc convention).
+  //   * THEN initial_web_contents_.reset() and browser_context_.reset()
+  //     (these were already first in the pre-M1 order; they remain
+  //     last because they hold raw pointers that the PCF doesn't,
+  //     so dropping the PCF first is purely additive). Mirrors the
+  //     aura_.release() ordering rationale at cc:303-328.
+  std::unique_ptr<webrtc::Thread> network_thread_;
+  std::unique_ptr<webrtc::Thread> worker_thread_;
+  std::unique_ptr<webrtc::Thread> signaling_thread_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf_;
+
+  // ChromelessV2 M2 R4 (CV2-39) — peer-adjacent browser-process video
+  // track source. Owns the CloudBrowserFrameSinkCapturer + R2 frame
+  // conversion + libwebrtc broadcaster (R3 — CV2-38). The
+  // CbDevToolsManagerDelegate Cb.startFrameSinkCapture handler reaches
+  // into this via cb_track_source() to feed it a producer mojo +
+  // resolved FrameSinkId; sinks (the libwebrtc peer track from M3)
+  // attach via AddOrUpdateSink. Reset BEFORE pcf_ in PostMainMessage
+  // LoopRun — the broadcaster may carry sink registrations the PCF's
+  // peer tracks installed; tearing PCF first would leave dangling
+  // weak refs in the broadcaster's sink list. Same ordering rationale
+  // as the pcf_-before-threads comment block above.
+  webrtc::scoped_refptr<CloudBrowserFrameSinkVideoTrackSource> cb_track_source_;
+
+  // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) ==============
+  //
+  // Subset scope per implementer judgment call (CV2-69 §3.5 Option 1):
+  // ship M3 R2 + M3 R4 + M2 R3 video transceiver wiring as the
+  // signaling-only Phase A subset. M3 R7 reconnect + M5.5 R5 audio
+  // lifecycle + M4/M5/M6 DataChannel handler binding deferred to a
+  // follow-up R# (the latter group can be added by issuing the
+  // construction calls + observer binds AFTER offerer_driver_->Start()
+  // without touching the SignalingWsClient/CbOffererDriver wiring
+  // landed here).
+  //
+  // R2 ws_client construction order (resolves the ctor-observer
+  // chicken-and-egg cycle without requiring a SetObserver() method
+  // on either class):
+  //   1. Construct ws_client_ with `this` (main_parts) as
+  //      SignalingClientObserver. main_parts::OnEnvelope forwards
+  //      to offerer_driver_->OnEnvelope after offerer_driver_ is
+  //      constructed. Pre-driver envelopes are LOGged and dropped
+  //      (broker doesn't emit envelopes until the dial completes,
+  //      and offerer_driver_ is constructed before ws_client_->
+  //      Connect() fires the dial).
+  //   2. Construct offerer_driver_ with ws_client_.get() raw pointer.
+  //      The driver IS-A SignalingClientObserver too (it implements
+  //      OnEnvelope as the SDP/ICE dispatcher), but we keep main_parts
+  //      as the registered observer to preserve the adapter shape +
+  //      provide a single place for diagnostic logging.
+  //   3. offerer_driver_->Start() — creates the PeerConnection.
+  //   4. ws_client_->Connect() — opens the dial.
+  //   5. Construct video_track_ from cb_track_source_ + AddTransceiver
+  //      to offerer_driver_->pc() — this is the mutation that triggers
+  //      OnRenegotiationNeeded, which triggers CreateOffer, which
+  //      writes the first `offer` envelope onto the wire.
+  //
+  // Teardown in PostMainMessageLoopRun LIFO (BEFORE existing pcf_
+  // teardown):
+  //   * video_track_.reset() (scoped_refptr; releases transceiver
+  //     binding before the PC drops)
+  //   * offerer_driver_->Close("session ended") (R6 emits bye envelope
+  //     if connected)
+  //   * offerer_driver_.reset() (drops PC; libwebrtc handles teardown)
+  //   * ws_client_->Disconnect() (graceful close)
+  //   * ws_client_.reset()
+  std::unique_ptr<cloud_browser::signaling::SignalingWsClient> ws_client_;
+  std::unique_ptr<audio::CbAudioLifecycle> audio_lifecycle_;
+  // CbOffererDriver is plain unique_ptr-owned by the embedder. It
+  // inherits only the two NON-refcounted observer interfaces
+  // (SignalingClientObserver + PeerConnectionObserver). The three
+  // refcounted webrtc SDP-observer callbacks are delivered through
+  // three transient refcounted adapter objects the driver constructs
+  // internally at each CreateOffer / SetLocalDescription /
+  // SetRemoteDescription call site (see cb_offerer_driver.cc, CV2-69
+  // #176). An earlier iteration made the driver itself refcounted via
+  // make_ref_counted to cure an abstract-class error, but that
+  // surfaced a 3-way RefCountInterface diamond — the adapter
+  // refactor is the libwebrtc-idiomatic fix and lets the driver stay
+  // a plain unique_ptr-owned object.
+  std::unique_ptr<cloud_browser::signaling::CbOffererDriver> offerer_driver_;
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
+
+  // CV2-83 — answerer-facing DataChannels, owned by CbDataChannelHost
+  // instead of four ad-hoc scoped_refptr members. The host creates the
+  // canonical channel labels before the first offer and owns the
+  // observer trampoline that fans messages/state to per-channel
+  // consumers.
+  //
+  // Labels are wire-contract — must match the chromeless/client
+  // TypeScript answerer's hardcoded labels EXACTLY (Trap #1):
+  //   CbDcLabel::kInput     → channel label "input"
+  //   CbDcLabel::kCursor    → channel label "cursor"
+  //   CbDcLabel::kClipboard → channel label "clipboard"
+  //   CbDcLabel::kFiles     → channel label "files" (NOT
+  //                           "file-upload" — the FILE name is
+  //                           file-upload.ts but the CHANNEL is
+  //                           "files")
+  std::unique_ptr<cloud_browser::signaling::CbDataChannelHost> dc_host_;
+  // ============== END CV2-69 ==============
+
+  // ============== CV2-75 RUNTIME-WIRE (Ring 2) ==============
+  //
+  // M4/M5/M6 consumer attachment — the gap that surfaced as the
+  // architectural Phase-A failure: CV2-69 created the DCs but never
+  // bound observers, so inbound SCTP frames sat in libwebrtc's read
+  // buffer with no handler. CV2-75 closed input/clipboard/files;
+  // CV2-83 adopts CbDataChannelHost and wires the cursor egress path.
+  //
+  // Consumers attached here:
+  //   * CbInputDispatch        → kInput     (M4 R1, CV2-41)
+  //   * CbCursorDcEmitter      → kCursor    (M5 R6, CV2-24)
+  //   * CbClipboardRelay       → kClipboard (M6 R2, CV2-34)
+  //   * CbFileUploadRelay      → kFiles     (M6 R3, CV2-35)
+  //
+  // Deferred to follow-up: CbStatsRelay (M6 R1, CV2-33). The "stats"
+  // channel may open, but without a relay its inbound frames are
+  // intentionally dropped by the host's unbound observer slot.
+  //
+  // Construction-arg notes (read the consumer headers for full
+  // contracts):
+  //   * CbInputDispatch wants a UI task runner + a delegate. We pass
+  //     content::GetUIThreadTaskRunner({}) + the M4 typed-pipeline
+  //     delegate CbInputDispatchCompositeDelegate (CV2-81), which
+  //     fans the envelope into R3..R8. The composite is constructed
+  //     with a pointer to active_webcontents_resolver_ (M4 R2) which
+  //     CbDevToolsManagerDelegate also reaches into on each
+  //     Cb.startFrameSinkCapture (single resolver instance per
+  //     browser process — see cb_active_webcontents_resolver.h).
+  //     CV2-75 R1 wired CbInputLoggingDelegate as a transitional
+  //     stand-in; CV2-81 retired it once R2..R10 source landed.
+  //   * CbClipboardBridgeWsClient + CbFileUploadBridgeWsClient take
+  //     a `label`/`url` + io_task_runner. We pass url="off" which
+  //     keeps both clients in `disabled()` mode (see
+  //     cb_clipboard_relay.h:207 + cb_file_upload_relay.h:267) —
+  //     the WS production backend has a TODO(M6-R2-ws-backend) and
+  //     the v1 production-WS choice isn't locked yet. The relay
+  //     OnMessage path still fires + logs; bridge POST is
+  //     short-circuited. This satisfies the observer-binding
+  //     architectural requirement without forcing a premature
+  //     production-WS decision.
+  //
+  // Teardown ordering: explicit LIFO in PostMainMessageLoopRun
+  // BEFORE the DataChannel host drops its DC refs. Unbind each
+  // observer first (must outlive the DC ref drop to avoid
+  // use-after-free in libwebrtc's late callbacks); then drop the
+  // consumer state; then the existing CV2-69 LIFO drops the peer.
+  // CV2-81 — M4 R2 active-WebContents resolver. Single instance per
+  // browser process; held as a value member so the address is stable
+  // across the lifetime of `this`. Threaded into the composite delegate
+  // (R3..R8) at construction + into CbDevToolsManagerDelegate's
+  // SetActiveCapture call path. Must outlive both consumers; declaration
+  // order here puts it BEFORE input_delegate_ so destruction is reverse
+  // (delegate -> resolver), matching the "resolver_lifetime >
+  // dispatcher_lifetime" contract documented on
+  // cb_active_webcontents_resolver.h:123.
+  CbActiveWebContentsResolver active_webcontents_resolver_;
+  std::unique_ptr<CbInputDispatchCompositeDelegate> input_delegate_;
+  std::unique_ptr<CbInputDispatch> input_dispatch_;
+  std::unique_ptr<CbCursorXyJoin> cursor_xy_join_;
+  std::unique_ptr<cursor::EmitPolicy> cursor_emit_policy_;
+  std::unique_ptr<cursor::EnvelopeAssembler> cursor_envelope_assembler_;
+  std::unique_ptr<cursor::CbCursorDcEmitter> cursor_dc_emitter_;
+  std::unique_ptr<CbClipboardBridgeWsClient> clipboard_ws_;
+  std::unique_ptr<CbClipboardRelay> clipboard_relay_;
+  std::unique_ptr<CbFileUploadBridgeWsClient> file_upload_ws_;
+  std::unique_ptr<CbFileUploadRelay> file_upload_relay_;
+  // ============== END CV2-75 ==============
 
   bool devtools_http_handler_started_ = false;
 

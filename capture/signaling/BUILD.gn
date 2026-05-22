@@ -1,0 +1,411 @@
+# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#
+# gn targets for the cb-chromium ↔ physics signaling client.
+#
+# # Module decomposition (CV2-50 .. CV2-54, M3)
+#
+#   R1 (:cb_wire_envelope) — pure codec: typed envelope struct + JSON
+#       encode/decode for the six source-pinned tags. No I/O, no
+#       threading. Linkable on its own so tests don't drag in the
+#       chromium net stack.
+#   R2 (:cb_signaling_ws_client) — native WebSocket client (rides on
+#       //services/network's NetworkContext::CreateWebSocket Mojo
+#       interface).
+#   R3 (:cb_ice_config) — env-driven ICE-server loader.
+#   R4 (:cb_offerer_driver) — offerer handshake driver (SDP+ICE dance).
+#   R5 (:cb_dc_host) — DataChannel host: owns the five outbound DCs
+#       (input, stats, cursor, clipboard, file-upload) created on R4's
+#       PeerConnection; provides observer-binding + Send() API for the
+#       M4/M5/M6 consumer modules.
+#   R6 (:cb_offerer_driver, ext.) — renegotiation + teardown amendments
+#       to R4's source_set; headers + sources changed in
+#       cb_offerer_driver.{h,cc}, BUILD.gn target unchanged.
+#   R7 (:cb_signaling_reconnect) — reconnect supervisor + idle-timeout
+#       keepalive substitute. Wraps R2 with exponential-backoff retry
+#       and a `ReconnectingClientObserver` consumer surface.
+#
+# R1..R7 are all present in this file.
+
+import("//testing/test.gni")  # provides test() template used below
+
+# ---------------------------------------------------------------------
+# R1 — wire-envelope codec.
+#
+# Pure C++ ↔ JSON codec, no I/O. The only chromium dep is //base for
+# base::JSONReader / base::JSONWriter / base::Value. The repo-root
+# include path config lives in capture/build-integration/BUILD.gn —
+# tests + the embedder pick it up via the existing :cb_include_paths
+# config; this BUILD.gn references the codec target by absolute label.
+# ---------------------------------------------------------------------
+source_set("cb_wire_envelope") {
+  sources = [
+    "cb_wire_envelope.cc",
+    "cb_wire_envelope.h",
+  ]
+  deps = [
+    "//base",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R1 unit tests — round-trip + negative.
+# ---------------------------------------------------------------------
+test("cb_wire_envelope_unittests") {
+  sources = [ "cb_wire_envelope_test.cc" ]
+  deps = [
+    ":cb_wire_envelope",
+    "//base/test:run_all_unittests",
+    "//testing/gmock",
+    "//testing/gtest",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R2 — native browser-process WebSocket signaling client.
+#
+# Consumes :cb_wire_envelope for inbound decode + outbound encode.
+# Talks to the chromium network service via the
+# network::mojom::NetworkContext::CreateWebSocket() Mojo interface;
+# the embedder (cloud_browser_browser_main_parts) supplies the
+# NetworkContext pointer from the BrowserContext's default
+# StoragePartition.
+#
+# Pure browser-process code — no renderer / no //content/renderer
+# deps. The :cb_include_paths config is propagated through the
+# :cb_wire_envelope public_configs above.
+# ---------------------------------------------------------------------
+source_set("cb_signaling_ws_client") {
+  sources = [
+    "cb_signaling_ws_client.cc",
+    "cb_signaling_ws_client.h",
+  ]
+  deps = [
+    ":cb_wire_envelope",
+    "//base",
+    "//mojo/public/cpp/bindings",
+    "//mojo/public/cpp/system",
+    # //net carries net::IsolationInfo, SiteForCookies, the network
+    # traffic annotation taxonomy, GURL/Origin. Pure browser-process
+    # dep — no renderer surface.
+    "//net",
+    # //services/network/public/mojom — the WebSocket + NetworkContext
+    # Mojo interface bindings (PendingRemote<WebSocket>,
+    # PendingReceiver<WebSocketClient>, WebSocketHandshakeClient,
+    # WebSocketMessageType, etc).
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//url",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R2 unit tests — URL builder, env loader, and a FakeNetworkContext
+# round-trip that exercises the handshake + read + write pumps with
+# a stubbed network service implementation.
+#
+# TODO(M3-R2-tests): RED-by-construction pre-T17 — adds
+# cb_signaling_ws_client_test.cc alongside the R1 tests in a follow-
+# up commit. The fixture shape mirrors content_shell's WebSocket
+# test pattern (FakeNetworkContext + mojo::Receiver<NetworkContext>
+# pair); putting it in once we know the chromium revision's exact
+# WebSocket-Mojo arg list keeps the test from drifting twice.
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# R3 — ICE-server config source.
+#
+# Pure config code: reads env vars, parses the streamer.js-shape JSON
+# (via //base/json), and returns a value-typed IceConfig holding a
+# vector of webrtc::PeerConnectionInterface::IceServer ready to slot
+# into RTCConfiguration::servers.
+#
+# Deps:
+#   //base — base::JSONReader / base::Value for the JSON parser.
+#   //third_party/webrtc/api — webrtc::PeerConnectionInterface::
+#     IceServer + IceTransportsType live in
+#     "api/peer_connection_interface.h"; the M1 PCF target already
+#     consumes this header via the same passthrough config
+#     (capture/build-integration/BUILD.gn :cb_include_paths), so the
+#     dep + include path here mirror that pattern.
+#
+# No mojo, no //net, no chromium UI deps — R3 is pre-PeerConnection
+# pure config, deliberately the smallest possible link surface so the
+# config parser is testable without the network service.
+# ---------------------------------------------------------------------
+source_set("cb_ice_config") {
+  sources = [
+    "cb_ice_config.cc",
+    "cb_ice_config.h",
+  ]
+  deps = [
+    "//base",
+    # M3-R3 TODO resolved by build-czar 2026-05-17 (CV2-69 cleanup):
+    # CV2-69 (6e7e425) added `#include "api/peer_connection_interface.h"`
+    # to cb_ice_config.h:92 but the corresponding GN dep was missing —
+    # m67vr (#176 first attempt) fast-failed at STEP-6 with
+    # "'api/peer_connection_interface.h' file not found". Sibling targets
+    # cb_offerer_driver (L239) and cb_dc_host (L327) both use the
+    # webrtc_overrides cloud-browser passthrough as the canonical pattern
+    # for accessing api/ headers (//third_party/webrtc/api/* has
+    # visibility restricted to webrtc/* + webrtc_overrides/* only —
+    # external consumers MUST go through the passthrough exposed by
+    # patches/0003-add-cloud-browser-webrtc-overrides.patch). Mirroring
+    # that pattern here resolves the missing-include error.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [
+    "//cloud-browser/capture/build-integration:cb_include_paths",
+  ]
+  public_configs = [
+    "//cloud-browser/capture/build-integration:cb_include_paths",
+  ]
+}
+
+# ---------------------------------------------------------------------
+# R3 unit tests — JSON parser + transport-policy mapper + summary
+# counter + env-defaulting behaviour.
+#
+# RED-by-construction pre-T17 — adds cb_ice_config_test.cc in a
+# follow-up commit. Test plan (each one falsifiable on a single-
+# behaviour change to cb_ice_config.cc):
+#
+#   * ParseIceServersJson:
+#       - empty input → nullopt;
+#       - malformed JSON → nullopt;
+#       - non-array, non-{iceServers:[]} object → nullopt;
+#       - entry without `urls` → dropped, surviving entries kept;
+#       - urls string + urls array forms both work;
+#       - username/credential populated only when present + non-empty;
+#       - all entries dropped → nullopt (so the loader falls back to
+#         default STUN, not an empty list).
+#   * ParseIceTransportPolicy:
+#       - "relay", "RELAY", "Relay" → kRelay;
+#       - "all", "", "garbage", "blocked" → kAll.
+#   * BuildDefaultIceServers:
+#       - returns exactly one server with one url == kDefaultStunUrl.
+#   * SummariseIceServers:
+#       - mixed stun: / stuns: / turn: / turns: / http: counts split
+#         into stun + turn + other respectively.
+#   * LoadConfigFromEnv:
+#       - WEBRTC_ICE_SERVERS unset → config.servers == default STUN;
+#       - WEBRTC_ICE_SERVERS valid → config.servers == parsed list;
+#       - WEBRTC_ICE_TRANSPORT_POLICY=relay → config.transport_policy
+#         == kRelay; otherwise kAll.
+#
+# TODO(M3-R3-tests): the LoadConfigFromEnv tests need a deterministic
+# env-mutation helper. base::ScopedEnvironmentVariableOverride is the
+# right tool here (used elsewhere in chromium browser-process tests);
+# wire it in once we know the chromium revision's exact include path.
+# ---------------------------------------------------------------------
+# test("cb_ice_config_unittests") {
+#   sources = [ "cb_ice_config_test.cc" ]
+#   deps = [
+#     ":cb_ice_config",
+#     "//base/test:run_all_unittests",
+#     "//testing/gmock",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }
+
+# ---------------------------------------------------------------------
+# R4 — offerer handshake driver.
+#
+# Drives the SDP offer/answer + trickle-ICE dance from the cb-chromium
+# side as the sole offerer. Bridges:
+#   * M1's PeerConnectionFactory (//cloud-browser/capture/build-
+#     integration:cloud_browser_pcf) for CreatePeerConnection.
+#   * M3 R1's :cb_wire_envelope for Envelope encode/decode.
+#   * M3 R2's :cb_signaling_ws_client for the duplex wire transport.
+#   * M3 R3's :cb_ice_config for the RTCConfiguration.servers list
+#     fed into CreatePeerConnection.
+#
+# The webrtc/api deps below pull in the libwebrtc public API surface
+# (PeerConnectionInterface, SessionDescriptionInterface,
+# IceCandidateInterface, RtcError, scoped_refptr). These ride on the
+# chromium-bundled webrtc passthrough config from
+# patches/0003-add-cloud-browser-webrtc-overrides.patch — confirm at
+# first-build that //third_party/webrtc visibility is propagating
+# through :cloud_browser_pcf's public_deps so we don't have to
+# re-declare it here.
+# ---------------------------------------------------------------------
+source_set("cb_offerer_driver") {
+  sources = [
+    "cb_offerer_driver.cc",
+    "cb_offerer_driver.h",
+  ]
+  deps = [
+    ":cb_signaling_ws_client",  # M3 R2
+    ":cb_wire_envelope",        # M3 R1
+    "//cloud-browser/capture/build-integration:cloud_browser_pcf",  # M1
+    "//base",
+    # build-czar M-stack fix (2026-05-17): //third_party/webrtc/api:*
+    # targets have visibility restricted to //third_party/webrtc/* and
+    # //third_party/webrtc_overrides/* — external consumers must go
+    # through the cloud-browser passthrough, which re-exports the api/
+    # surface (PeerConnectionInterface, SessionDescriptionInterface,
+    # IceCandidateInterface, RtcError, scoped_refptr, and the SDP
+    # observer interfaces) per patches/0003 + M1-R1 widening. This is
+    # the documented pattern used by :cloud_browser_pcf, :input_dispatch,
+    # and :stats_relay in capture/build-integration/BUILD.gn.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R4 unit tests.
+#
+# cb_offerer_driver_test.cc in a follow-up commit. The fixture shape
+# mirrors libwebrtc's pc_test_fixture pattern: a FakePeerConnection
+# (or libwebrtc's bundled FakePeerConnection if available) + a
+# FakeSignalingWsClient (gmock'd around the SignalingClientObserver
+# contract), exercising:
+#   * Start() → CreatePeerConnection succeeds → first
+#     OnRenegotiationNeeded → CreateOffer → SetLocalDescription →
+#     `offer` envelope on the wire (verbatim string match against
+#     the M3 R1 round-trip fixture's offer-from-streamer.js corpus).
+#   * Inbound `answer` envelope → SetRemoteDescription → state ==
+#     kIceInFlight.
+#   * OnIceCandidate (3x) → 3 `ice` envelopes on the wire.
+#   * OnIceGatheringChange(complete) → `ice` end-of-candidates marker
+#     (the MakeIceEndOfCandidates fixture).
+#   * Inbound `ice` (3x + end-of-candidates) → AddIceCandidate (3x) +
+#     AddIceCandidate(nullptr).
+#   * Inbound `offer` → FailWithReason (v1 broker-misroute negative).
+#
+# R6 (CV2-56) adds the following to the fixture in addition to R4:
+#   * Inbound `request_renegotiate` in kIceInFlight → BeginRenegotiation
+#     → CreateOffer → SetLocalDescription → SendOfferEnvelope (verbatim
+#     against an offer-renegotiated corpus). Observer's
+#     OnRenegotiationStarted("remote") fires once.
+#   * RequestRenegotiation() from the embedder in kIceInFlight → same
+#     dance; observer's OnRenegotiationStarted("embedder") fires once.
+#   * Second OnRenegotiationNeeded() from libwebrtc post-initial →
+#     same dance; observer's OnRenegotiationStarted("libwebrtc") fires
+#     once.
+#   * Coalescing: 3 rapid RequestRenegotiation() calls mid-dance → exactly
+#     one BeginRenegotiation("coalesced-pending") fires on the next
+#     kIceInFlight transition.
+#   * Inbound `bye` → CloseInternal → observer's OnClosed("remote bye")
+#     fires once; pc dropped; state = kClosed. Second `bye` is a no-op.
+#   * Close("session ended") in kIceInFlight → SendByeEnvelope → observer's
+#     OnClosed("session ended") fires once. Second Close() is a no-op.
+#   * Close() during kCreatingOffer → bye emit suppressed (state guard);
+#     observer's OnClosed fires; pc dropped. No CreateOffer success/fail
+#     handlers fire after teardown (weak_factory_'s WeakPtr invalidates
+#     them).
+#
+# Putting the tests in once we know the chromium revision's libwebrtc
+# FakePeerConnection availability keeps the test from drifting twice.
+# If libwebrtc's bundled FakePeerConnection is unavailable in the
+# chromium-bundled tree, a hand-rolled gmock<PeerConnectionInterface>
+# is fine — every method the driver calls is on the public interface.
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# R5 — DataChannel host.
+#
+# Owns the post-handshake DCs created on M3 R4's PeerConnection.
+# Single source_set with no test() target in R1 — the unit-test
+# scaffolding for the host lands once M1 first-green proves the
+# fixtures actually compile against the chromium-pinned libwebrtc.
+# TODO(M3-R5-tests): cb_dc_host_test.cc + test() target — covers
+# the observer-trampoline forwarding, latched all-open semantics,
+# Send()-while-not-open kInvalidState, Shutdown-before-PC-drop
+# ordering, and the create_called_ idempotence guard.
+# ---------------------------------------------------------------------
+source_set("cb_dc_host") {
+  sources = [
+    "cb_dc_host.cc",
+    "cb_dc_host.h",
+  ]
+  deps = [
+    "//base",
+    # libwebrtc — DataChannelInterface, PeerConnectionInterface,
+    # rtc::CopyOnWriteBuffer all routed through the cloud-browser
+    # passthrough. build-czar M-stack fix iter 2 (2026-05-17): Build #17
+    # clgjx STEP 5 gn-fail confirmed //third_party/webrtc/rtc_base:
+    # copy_on_write_buffer has identical visibility restriction
+    # (webrtc/* + webrtc_overrides/* only). cb_input_dispatch.cc uses
+    # rtc::CopyOnWriteBuffer too and its BUILD.gn deps only on the
+    # passthrough — proves the M1-R1 widening of
+    # patches/0003-add-cloud-browser-webrtc-overrides.patch already
+    # re-exports CopyOnWriteBuffer transitively. Drop the direct dep
+    # entirely; the passthrough covers it.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  # Repo-root include-path config — propagated transitively so the
+  # `#include "capture/signaling/cb_dc_host.h"` form resolves the same
+  # way M1's headers resolve. Same config M3 R1..R4 use.
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R7 — reconnect supervisor + idle-timeout keepalive substitute.
+#
+# Pure browser-process code. Depends on :cb_signaling_ws_client (R2)
+# for the inner client and :cb_wire_envelope (R1) for the Envelope
+# struct passed through the observer API. Adds //base/timer for
+# base::OneShotTimer and //base for base::TimeDelta. No new chromium
+# subsystem deps beyond what R2 already pulls in.
+# ---------------------------------------------------------------------
+source_set("cb_signaling_reconnect") {
+  sources = [
+    "cb_signaling_reconnect.cc",
+    "cb_signaling_reconnect.h",
+  ]
+  deps = [
+    ":cb_signaling_ws_client",
+    ":cb_wire_envelope",
+    "//base",
+    # //services/network/public/mojom for the NetworkContext* the
+    # wrapper threads through to the inner client on each
+    # reconnect attempt.
+    "//services/network/public/mojom",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R7 unit tests — backoff schedule, idle-timeout firing, give-up
+# behaviour, observer translation.
+#
+# TODO(M3-R7-tests): RED-by-construction pre-T17 — adds
+# cb_signaling_reconnect_test.cc in a follow-up commit. The fixture
+# will use a FakeSignalingWsClient (a SignalingClientObserver-callback-
+# driven double, not the real R2 client) so the tests don't need a
+# FakeNetworkContext. Drives the wrapper through:
+#
+#   * happy path: Connect → OnConnected → OnEnvelope → Disconnect →
+#     OnClosed(1000).
+#   * remote close → reconnect: OnConnected → OnClosed(1006) → wait
+#     initial_backoff → fresh inner constructed → OnConnected resets
+#     attempts_made_ to 0.
+#   * exponential backoff: 4 reconnect attempts, assert delays follow
+#     initial × multiplier^N up to max_backoff cap.
+#   * give-up: max_attempts=2 + persistent OnError → OnGaveUp(2) fires.
+#   * idle timeout: OnConnected → no envelopes for idle_timeout →
+#     OnIdleFired schedules a reconnect (counts toward max_attempts).
+#   * idle timeout disabled: idle_timeout=0 → timer never armed.
+#   * consumer Disconnect during backoff: backoff timer cancelled,
+#     no further reconnect fires, OnClosed(1000) delivered to
+#     consumer.
+#
+# The test uses base::test::TaskEnvironment::TimeSource::MOCK_TIME so
+# the FastForwardBy() helper can advance through the backoff schedule
+# deterministically without real sleeps.
+# ---------------------------------------------------------------------

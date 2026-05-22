@@ -24,6 +24,7 @@
 
 import { InputChannel } from "./src/input.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
+import { attachCursorChannel } from "./src/cursor.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { fetchTurnConfig } from "./src/turn.js";
 import { prioritizeCodec } from "./src/sdp.js";
@@ -126,6 +127,9 @@ interface Session {
   /** Set when the streamer has opened the "files" data channel (T74). */
   filesDc: RTCDataChannel | null;
   fileUpload: FileUploadChannel | null;
+  /** Set when the streamer has opened the "cursor" data channel. */
+  cursorDc: RTCDataChannel | null;
+  cursor: { update(env: unknown): void; dispose(): void } | null;
   /** Per-session detach function for window-level drop listeners. */
   detachDrop: (() => void) | null;
   /** T81: camera/mic passthrough controller. Bound to the pc lifetime;
@@ -143,6 +147,7 @@ function teardown(reason: string): void {
   try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.detachStats?.(); } catch { /* ignore */ }
   try { active.detachDrop?.(); } catch { /* ignore */ }
+  try { active.cursor?.dispose(); } catch { /* ignore */ }
   // T81: stop the camera/mic before closing the pc so tracks
   // actually fire "ended" and the user-agent's recording-active
   // indicator clears.
@@ -151,6 +156,7 @@ function teardown(reason: string): void {
   try { active.dc?.close(); } catch { /* ignore */ }
   try { active.statsDc?.close(); } catch { /* ignore */ }
   try { active.filesDc?.close(); } catch { /* ignore */ }
+  try { active.cursorDc?.close(); } catch { /* ignore */ }
   try { active.pc.close(); } catch { /* ignore */ }
   if (active.rws.isConnected()) {
     try {
@@ -189,8 +195,23 @@ function wireDataChannel(dc: RTCDataChannel): void {
   log("ok", `← data channel "${dc.label}" (state=${dc.readyState})`);
   if (dc.label === "input") return wireInputChannel(dc);
   if (dc.label === "stats") return wireStatsChannel(dc);
+  if (dc.label === "cursor") return wireCursorChannel(dc);
   if (dc.label === "files") return wireFilesChannel(dc);
   log("warn", `ignoring unknown data channel label: ${dc.label}`);
+}
+
+function wireCursorChannel(dc: RTCDataChannel): void {
+  if (!active) return;
+  active.cursorDc = dc;
+  active.cursor?.dispose();
+  active.cursor = attachCursorChannel(dc, els.video);
+  dc.addEventListener("close", () => {
+    if (active?.cursorDc === dc) {
+      try { active.cursor?.dispose(); } catch { /* ignore */ }
+      active.cursor = null;
+      active.cursorDc = null;
+    }
+  });
 }
 
 function wireStatsChannel(dc: RTCDataChannel): void {
@@ -412,6 +433,7 @@ function rebuildPeerConnection(reason: string): void {
   try { active.detachInput?.(); } catch { /* ignore */ }
   try { active.detachStats?.(); } catch { /* ignore */ }
   try { active.detachDrop?.(); } catch { /* ignore */ }
+  try { active.cursor?.dispose(); } catch { /* ignore */ }
   // T81: rebuilds drop the camera/mic too. Per the threat model
   // §T10, surviving a reconnect with passthrough still active
   // would be silent re-sharing — we explicitly require a fresh
@@ -426,11 +448,14 @@ function rebuildPeerConnection(reason: string): void {
   try { active.dc?.close(); } catch { /* ignore */ }
   try { active.statsDc?.close(); } catch { /* ignore */ }
   try { active.filesDc?.close(); } catch { /* ignore */ }
+  try { active.cursorDc?.close(); } catch { /* ignore */ }
   active.dc = null;
   active.statsDc = null;
   active.filesDc = null;
+  active.cursorDc = null;
   active.input = null;
   active.fileUpload = null;
+  active.cursor = null;
   try { active.pc.close(); } catch { /* ignore */ }
   active.pc = buildPeerConnection();
   els.dc.textContent = "—";
@@ -493,7 +518,9 @@ async function connect(sessionId: string): Promise<void> {
     rws, pc: null as unknown as RTCPeerConnection, iceConfig,
     sessionId, tenantId: issued?.sub ?? "",
     dc: null, input: null, detachInput: null,
-    filesDc: null, fileUpload: null, detachDrop: null,
+    filesDc: null, fileUpload: null,
+    cursorDc: null, cursor: null,
+    detachDrop: null,
     passthrough: null,
     statsDc: null, stats: null, detachStats: null,
     hasOpenedOnce: false,

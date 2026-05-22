@@ -1,0 +1,156 @@
+# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#
+# gn targets for the cb-chromium native cursor egress pipeline.
+#
+# # Module decomposition (CV2-19 .. CV2-24, M5)
+#
+#   R1 — capture/build-integration/cb_cursor_client.{h,cc}
+#        Embedder aura::client::CursorClient registered on
+#        host_->window(). Shipped on cv2/m5-cursor-client-hook.
+#   R2 — capture/cursor/cb_cursor_envelope.{h,cc}
+#        Pure assembler: ui::mojom::CursorType + visibility → JSON
+#        envelope on the cursor-channel v1 wire shape.
+#   R3 — capture/build-integration/cb_cursor_xy_join.{h,cc}
+#        Joins R1's type callback with M4 R3's last pointer
+#        snapshot into a JoinedCursorState.
+#   R4 — capture/cursor/cb_cursor_emit_policy.{h,cc}
+#        Emission policy layer above R3: dedupe, debounce,
+#        per-channel monotonic seq, replay buffer for reconnect.
+#   R5 — capture/cursor/cb_custom_cursor_image.{h,cc}
+#        Pure extractor: ui::Cursor.custom_bitmap() → PNG → base64,
+#        with 64 KiB encoded cap + envelope-apply helper.
+#   R6 — capture/cursor/cb_cursor_dc_emitter.{h,cc}
+#        DataChannel binder: wires R3's emit-callback → R4's Decide
+#        → R2's encode → M3 R5 DC host's Send(kCursor).
+
+import("//testing/test.gni")  # provides test() template
+
+# ---------------------------------------------------------------------
+# R2 — ui::Cursor → cursor-channel v1 envelope assembler.
+# ---------------------------------------------------------------------
+source_set("cb_cursor_envelope") {
+  sources = [
+    "cb_cursor_envelope.cc",
+    "cb_cursor_envelope.h",
+  ]
+  deps = [
+    "//base",
+    "//ui/base/cursor/mojom:cursor_type_shared",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R4 — Cursor-channel emission policy.
+# ---------------------------------------------------------------------
+source_set("cb_cursor_emit_policy") {
+  sources = [
+    "cb_cursor_emit_policy.cc",
+    "cb_cursor_emit_policy.h",
+  ]
+  deps = [
+    "//base",
+    "//cloud-browser/capture/build-integration:cursor_xy_join",
+    "//ui/base/cursor/mojom:cursor_type_shared",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R5 — custom CSS cursor image extractor.
+# ---------------------------------------------------------------------
+source_set("cb_custom_cursor_image") {
+  sources = [
+    "cb_custom_cursor_image.cc",
+    "cb_custom_cursor_image.h",
+  ]
+  deps = [
+    "//base",
+    "//skia",
+    "//ui/base/cursor",
+    "//ui/base/cursor/mojom:cursor_type_shared",
+    "//ui/gfx/codec",
+    "//ui/gfx/geometry",
+  ]
+  public_deps = [
+    ":cb_cursor_envelope",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# R6 — Cursor DataChannel binder + state observer.
+#
+# Integration glue: takes JoinedCursorState edges from R3, runs them
+# through R4's EmitPolicy, encodes via R2's EnvelopeAssembler, and
+# writes onto M3 R5's CbDataChannelHost on CbDcLabel::kCursor. Owns
+# the replay-on-reconnect dance and the pending_while_closed_ slot.
+# ---------------------------------------------------------------------
+source_set("cb_cursor_dc_emitter") {
+  sources = [
+    "cb_cursor_dc_emitter.cc",
+    "cb_cursor_dc_emitter.h",
+  ]
+  deps = [
+    "//base",
+    ":cb_cursor_envelope",
+    ":cb_cursor_emit_policy",
+    "//cloud-browser/capture/build-integration:cursor_xy_join",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    # build-czar M-stack fix (2026-05-17): //third_party/webrtc/api:*
+    # visibility blocks external consumers — use the cloud-browser
+    # passthrough that re-exports DataChannelInterface +
+    # PeerConnectionInterface for the cursor DC emitter. Pattern
+    # mirrors capture/signaling/BUILD.gn cb_dc_host + cb_offerer_driver
+    # and capture/build-integration/BUILD.gn input_dispatch + stats_relay.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Unit tests (RED-by-construction pre-T17 — all commented out for
+# draft commits so we don't push a BUILD.gn that references a
+# non-existent .cc).
+# ---------------------------------------------------------------------
+
+# test("cb_cursor_envelope_unittests") {
+#   sources = [ "cb_cursor_envelope_test.cc" ]
+#   deps = [
+#     ":cb_cursor_envelope",
+#     "//base/test:test_support",
+#     "//base/test:run_all_unittests",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }
+
+# test("cb_cursor_emit_policy_unittests") {
+#   sources = [ "cb_cursor_emit_policy_test.cc" ]
+#   deps = [
+#     ":cb_cursor_emit_policy",
+#     "//base/test:test_support",
+#     "//base/test:run_all_unittests",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }
+
+# test("cb_cursor_dc_emitter_unittests") {
+#   sources = [ "cb_cursor_dc_emitter_test.cc" ]
+#   deps = [
+#     ":cb_cursor_dc_emitter",
+#     "//base/test:test_support",
+#     "//base/test:run_all_unittests",
+#     "//testing/gtest",
+#   ]
+#   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+# }

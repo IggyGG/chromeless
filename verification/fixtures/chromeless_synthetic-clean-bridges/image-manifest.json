@@ -1,0 +1,5 @@
+{
+  "_provenance": "Synthetic clean fixture for R4 bridges-absent — represents post-M7 state where input-bridge + cursor-watcher sidecar surfaces are physically removed.",
+  "imageRef": "chromeless:synthetic-clean-bridges",
+  "paths": []
+}

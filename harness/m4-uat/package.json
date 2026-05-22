@@ -1,0 +1,16 @@
+{
+  "name": "chromeless-m4-uat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M4 functional UAT harness — drives the native input dispatch path end-to-end against a chromeless container while the input-bridge sidecar is still present.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "uat": "node ./uat.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

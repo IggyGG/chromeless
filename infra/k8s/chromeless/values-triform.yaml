@@ -51,16 +51,11 @@ observability:
 
 capture:
   # Integration currently validates the WebRTC/signaling/DataChannel
-  # pipeline against Chromium's synthetic media source. Real
-  # getDisplayMedia on Chromium 147 + Xvfb still fails with
-  # NotReadableError; the durable real-content path is FrameSink capture.
+  # pipeline against Chromium's synthetic media source. M2 FrameSink
+  # capture wires real content into the native VideoTrackSource without
+  # going through getDisplayMedia + the (removed) streamer page.
   fakeMedia: true
   fakeMediaFile: ""
-  # Triform owns streamer target creation so it can pass minted TURN
-  # credentials and relay policy in the streamer URL. Auto-starting a
-  # bootstrap streamer from the pod env registers a host-only browser
-  # peer first and poisons Pattern C replay.
-  autostartStreamer: false
 
 # ---------------------------------------------------------------------
 # Image registry — forgejo. Same path the T112 build runner uses.
@@ -80,8 +75,8 @@ images:
   controller:      { repository: chromeless-controller, tag: "" }
   turnIssuer:      { repository: chromeless-turn-issuer,         tag: "" }
   metricsSidecar:  { repository: chromeless-metrics-sidecar,     tag: "" }
-  inputBridge:     { repository: chromeless-input-bridge,        tag: "" }
-  cursorWatcher:   { repository: chromeless-cursor-watcher,      tag: "" }
+  # M7 R4: inputBridge + cursorWatcher repository entries removed.
+  # Native peer (M4 input DC, M5 cursor egress) replaces them.
   clipboardBridge: { repository: chromeless-clipboard-bridge,    tag: "" }
 
 # ---------------------------------------------------------------------
@@ -275,9 +270,9 @@ defaultPool:
 swPool:
   enabled: true
   # Keep one ready software-encoder pod so Triform Pattern-C sessions do not
-  # pay Chromium startup time on the first WebRTC handshake. Streamer autostart
-  # is disabled; Triform launches the streamer over CDP with per-session
-  # signaling URL/JWT parameters after cookie/session hydration.
+  # pay Chromium startup time on the first WebRTC handshake. M7 R3: the
+  # pod-local streamer page is gone; native peer (M1) builds the
+  # PeerConnection in the browser process, signaled via native client (M3).
   warmReplicas: 1
   maxSessions: 100
   maxAgeSeconds: 1800       # 30 min — recycle aggressively

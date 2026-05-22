@@ -139,7 +139,12 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # cv2/m2-track-source-deps for M2 R1-R4 validation on t8.
+              # Init container MUST match build container's value so
+              # /workspace has the right script (see 337bc88 for the
+              # bite that taught us this invariant). Flip back to "main"
+              # after M2 merges to main.
+              value: "cv2/m2-track-source-deps"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -162,8 +167,6 @@ spec:
           volumeMounts:
             - name: workdir
               mountPath: /work
-            - name: sccache
-              mountPath: /sccache
             - name: workspace
               mountPath: /workspace
       containers:
@@ -228,15 +231,45 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # cv2/m2-track-source-deps for M2 R1-R4 validation on t8.
+              # Init container MUST match build container's value so
+              # /workspace has the right script (see 337bc88 for the
+              # bite that taught us this invariant). Flip back to "main"
+              # after M2 merges to main.
+              value: "cv2/m2-track-source-deps"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
               value: "/workspace"
             - name: CHROMELESS_WORK_ROOT
               value: "/work"
-            - name: SCCACHE_DIR
-              value: "/sccache"
+            # ---- sccache S3 backend (Hetzner Object Storage) ----
+            # Replaces the per-node hostPath /sccache. The hostPath
+            # could never share TUs across pods because sccache's
+            # compiler-input hash folds in pod-instance identity
+            # (PATH/env/wrapper) — confirmed cold across Builds #15-#23.
+            # A shared S3 bucket keyed by the real compiler-input hash
+            # gives true cross-pod / cross-node cache reuse.
+            - name: SCCACHE_BUCKET
+              value: "triform-cv2-sccache"
+            - name: SCCACHE_ENDPOINT
+              value: "https://hel1.your-objectstorage.com"
+            - name: SCCACHE_REGION
+              value: "auto"
+            - name: SCCACHE_S3_USE_SSL
+              value: "true"
+            - name: SCCACHE_S3_KEY_PREFIX
+              value: "cv2/sccache/"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sccache-s3-creds
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sccache-s3-creds
+                  key: AWS_SECRET_ACCESS_KEY
             - name: CHROMELESS_BUILD_TARGETS
               value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             - name: NINJA_PARALLELISM
@@ -244,13 +277,27 @@ spec:
               # minus headroom for sccache server + LTO linker.
               value: "36"
             - name: SKIP_FETCH
-              # Empty = fresh gclient sync (first build on triform-8
-              # has no on-disk tree at /var/lib/longhorn/chromeless-build).
-              # Flip to "1" after sync succeeds to skip re-sync on
-              # subsequent runs.
-              value: ""
+              # "1" — triform-8 has chromium-src + sccache warm from
+              # build #1 (main, pre-M1). f9017f5 in build.sh now does
+              # surgical clean (only third_party/webrtc_overrides/
+              # cloud_browser/) so the SKIP_FETCH retry path is safe;
+              # no risk of nuking buildtools/gn etc. like the rootwide
+              # clean did on triform-7.
+              value: "1"
             - name: STUB_MODE
               value: ""
+            - name: SKIP_CDP_VALIDATION
+              # "1" — build container image is debian:bookworm-slim
+              # which has no kubectl. STEP 10's `kubectl apply` of the
+              # CDP validation manifest fails with exit 127. Without
+              # this, STEP 10 forces Job=Failed even though STEPS 1-9
+              # built + packaged + staged a working binary. Observed
+              # on build #3 + build #7 v11 (l6mkv). Per
+              # chromeless-build.sh:520+ (the matching guard added in
+              # a0d1fe9), value=1 short-circuits the kubectl call and
+              # exits 0 cleanly. Same shape as build-job-x264-t7.yaml's
+              # SKIP_CDP_VALIDATION env.
+              value: "1"
             - name: SCCACHE_IDLE_TIMEOUT
               value: "0"
             - name: SCCACHE_CACHE_SIZE
@@ -259,8 +306,11 @@ spec:
               value: "x264"
           resources:
             requests:
-              # Burstable QoS — see build-job.yaml header.
-              cpu: "12"
+              # cpu 6 (not 12) to fit triform-8's actual headroom
+              # ~6.7 free CPU after triform-tf workspace + isolation
+              # builders + longhorn instance-manager. Limit stays at
+              # 40 so autoninja bursts into idle CPU when peers leave.
+              cpu: "6"
               memory: "96Gi"
             limits:
               cpu: "40"
@@ -269,8 +319,6 @@ spec:
           volumeMounts:
             - name: workdir
               mountPath: /work
-            - name: sccache
-              mountPath: /sccache
             - name: workspace
               mountPath: /workspace
               readOnly: true
@@ -293,14 +341,12 @@ spec:
               type: RuntimeDefault
       volumes:
         # Shares /var/lib/longhorn/chromeless-build/ with build-job.yaml
-        # (default) — gclient checkout + sccache are warm across variants.
+        # (default) — gclient checkout warm across variants. sccache is
+        # now a shared Hetzner S3 backend (SCCACHE_BUCKET=triform-cv2-sccache),
+        # not a per-node hostPath — the hostPath never shared TUs cross-pod.
         - name: workdir
           hostPath:
             path: /var/lib/longhorn/chromeless-build/chromium-src
-            type: DirectoryOrCreate
-        - name: sccache
-          hostPath:
-            path: /var/lib/longhorn/chromeless-build/sccache
             type: DirectoryOrCreate
         - name: workspace
           emptyDir:

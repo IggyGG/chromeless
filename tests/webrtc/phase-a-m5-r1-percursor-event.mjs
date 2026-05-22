@@ -12,8 +12,9 @@
 // docstring, capture/build-integration/cb_headless_screen.{h,cc}):
 //
 //   1. Open a CDP session against the cb-chromium worker (port 9222).
-//   2. Navigate to `data:text/html,<a href="#">link</a>` — the link gets the
-//      UA default `cursor: pointer` style.
+//   2. Navigate to `data:text/html,<a href="#" style="cursor:pointer">link</a>`
+//      — the CSS cursor stimulus is explicit so the verdict checks the
+//      Chromium/Aura cursor route, not browser UA-link cursor policy.
 //   3. Dispatch Input.dispatchMouseEvent { type: "mouseMoved", x: 10, y: 10 }
 //      so the cursor lands over the link's bounding box.
 //   4. Wait up to 3 s for cb-chromium to:
@@ -43,6 +44,9 @@
 //     regression — route to build-czar).
 //   - NOTIMPLEMENTED for display::ScreenBase::GetCursorScreenPoint still
 //     PRESENT → CV2-78 ring-2 stub not overridden.
+//   - NOTIMPLEMENTED for display::ScreenBase::GetWindowAtScreenPoint still
+//     PRESENT → Linux RenderWidgetHostViewAura cursor self-check still
+//     returns nullptr before it can route to CursorClient::SetCursor.
 //   - NOTIMPLEMENTED for display::ScreenBase::GetDisplayNearestWindow still
 //     PRESENT → CV2-88 ring-8 override regressed (added Wave 2.5 audit
 //     cleanup — was missing from Wave 1 era harness; covers d7bc3c0
@@ -67,7 +71,7 @@
 //   CDP_PORT                    — default 9222
 //   CDP_CONNECT_TIMEOUT_MS      — default 60000 (cb-chromium boot lag)
 //   POST_STIMULUS_WAIT_MS       — default 3000 (PostTask + LOG margin)
-//   STIMULUS_TARGET_URL         — default data:text/html,<a href="#">link</a>
+//   STIMULUS_TARGET_URL         — default data:text/html,<a style="cursor:pointer">link</a>
 //                                  (kept inline so the test is self-contained;
 //                                  no external network reach needed)
 
@@ -77,8 +81,16 @@ const CDP_HOST = process.env.CDP_HOST || "localhost";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 const CDP_CONNECT_TIMEOUT_MS = parseInt(process.env.CDP_CONNECT_TIMEOUT_MS || "60000", 10);
 const POST_STIMULUS_WAIT_MS = parseInt(process.env.POST_STIMULUS_WAIT_MS || "3000", 10);
+// The HTML payload of a `data:text/html,` URL MUST be percent-encoded: the
+// raw `#` in `href="#"` is otherwise parsed as the URL fragment delimiter,
+// truncating the document at `<a href="#` — the renderer then lays out an
+// empty body and the link-rect probe (Phase 3) reports H3 with no link.
+// encodeURIComponent escapes `#` `<` `>` `"` and spaces so the whole payload
+// stays inside the data: URL. (Wave 2 rv8 verification finding.)
+const STIMULUS_TARGET_HTML =
+  '<html><body style="margin:0"><a href="#" style="display:inline-block;padding:10px 20px;font-size:24px;cursor:pointer">link</a></body></html>';
 const STIMULUS_TARGET_URL = process.env.STIMULUS_TARGET_URL
-  || 'data:text/html,<html><body style="margin:0"><a href="#" style="display:inline-block;padding:10px 20px;font-size:24px">link</a></body></html>';
+  || ("data:text/html," + encodeURIComponent(STIMULUS_TARGET_HTML));
 
 function log(level, msg, extra) {
   const line = { ts: new Date().toISOString(), level, msg, ...(extra || {}) };
@@ -219,6 +231,8 @@ async function main() {
         "NOTIMPLEMENTED.*display::ScreenBase::IsWindowUnderCursor",
       grep_for_screen_gate_partial_ring_2:
         "NOTIMPLEMENTED.*display::ScreenBase::GetCursorScreenPoint",
+      grep_for_screen_gate_ring_3:
+        "NOTIMPLEMENTED.*display::ScreenBase::GetWindowAtScreenPoint",
       grep_for_screen_gate_ring_8:
         "NOTIMPLEMENTED.*display::ScreenBase::GetDisplayNearestWindow",
       stimulus_ts_ms: stimulusTs,

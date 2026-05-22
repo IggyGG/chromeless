@@ -7,9 +7,11 @@
 #include <memory>
 #include <utility>
 
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "capture/build-integration/cb_devtools_agent.h"
 #include "capture/build-integration/cloud_browser_browser_main_parts.h"
-#include "capture/encoder/encoder_factory.h"
+#include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_main_parts.h"
 #include "content/public/browser/devtools_manager_delegate.h"
@@ -36,19 +38,6 @@ CloudBrowserContentBrowserClient::CreateBrowserMainParts(
   // through Target.createBrowserContext as a workaround).
   main_parts_ = parts.get();
   return parts;
-}
-
-std::unique_ptr<webrtc::VideoEncoderFactory>
-CloudBrowserContentBrowserClient::GetWebRtcVideoEncoderFactory() {
-  // Phase-2 default config: software path on, all HW prefer flags off.
-  // The runtime probes inside nvenc/vaapi/svtav1 encoders are still
-  // honoured by CreateVideoEncoder, so the factory degrades gracefully
-  // when HW is unavailable. Wiring HW prefer flags to a CLI/env knob
-  // is tracked in T63 / T70 / T75 follow-ups; the embedder is
-  // intentionally minimal until the worker's launch path is plumbed
-  // through to here.
-  CloudBrowserVideoEncoderFactory::Config config;
-  return std::make_unique<CloudBrowserVideoEncoderFactory>(std::move(config));
 }
 
 std::unique_ptr<content::DevToolsManagerDelegate>
@@ -80,8 +69,40 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
       main_parts_ ? main_parts_->browser_context() : nullptr;
   aura::Window* aura_context =
       main_parts_ ? main_parts_->aura_root_window() : nullptr;
-  return std::make_unique<CbDevToolsManagerDelegate>(default_context,
-                                                     aura_context);
+  // ChromelessV2 M2 R4 (CV2-39); CV2-69 construction-order fix
+  // (2026-05-18). Pass a LAZY getter, NOT a snapshot.
+  //
+  // This hook fires on the first DevToolsAgentHost::GetOrCreateFor —
+  // PreMainMessageLoopRun *step 3* (cloud_browser_browser_main_parts
+  // .cc:320) — which is BEFORE *step 5b* (:414) constructs
+  // cb_track_source_. A snapshot taken here would therefore ALWAYS be
+  // nullptr: that was the prior ServerError bug — every CV2-69
+  // functional re-test logged "no video track source supplied" /
+  // ServerError on Cb.startFrameSinkCapture even though the ctor arg
+  // was wired (the value, not the wiring, was the problem). The
+  // delegate Run()s this getter at Cb.startFrameSinkCapture DISPATCH
+  // time, by which point PreMainMessageLoopRun has fully returned and
+  // cb_track_source_ is populated. base::Unretained is safe here:
+  // main_parts out-lives the delegate's useful window (the getter is
+  // only Run() during an active CDP session, never at teardown) —
+  // the same lifetime assumption default_context / aura_context
+  // already rely on. Empty getter (main_parts_ null) → the delegate
+  // emits a ServerError envelope rather than UAFing.
+  base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
+      track_source_getter;
+  base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
+      active_capture_callback;
+  if (main_parts_) {
+    track_source_getter = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::cb_track_source,
+        base::Unretained(main_parts_));
+    active_capture_callback = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::SetActiveCapture,
+        base::Unretained(main_parts_));
+  }
+  return std::make_unique<CbDevToolsManagerDelegate>(
+      default_context, aura_context, std::move(track_source_getter),
+      std::move(active_capture_callback));
 }
 
 }  // namespace cloud_browser

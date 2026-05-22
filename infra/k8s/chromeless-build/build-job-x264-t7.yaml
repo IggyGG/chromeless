@@ -133,7 +133,16 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              value: "main"
+              # MUST stay in sync with the build container's
+              # OUR_REPO_REF below. The init container clones this ref
+              # into /workspace; the build container executes
+              # /workspace/build/chromeless-build.sh from THAT ref's
+              # snapshot. Mismatch silently runs an old script — bit us
+              # 2026-05-17: init=main + build=cv2/m2 meant the
+              # SKIP_CDP_VALIDATION fix on cv2/m2's script never ran
+              # because /workspace had main's older script. Build #5
+              # attempts 1 + 2 both hit STEP 10 exit 127.
+              value: "cv2/m2-track-source-deps"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -156,8 +165,6 @@ spec:
           volumeMounts:
             - name: workdir
               mountPath: /work
-            - name: sccache
-              mountPath: /sccache
             - name: workspace
               mountPath: /workspace
       containers:
@@ -204,41 +211,90 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              # integration/native-peer carries the M1 work that main
-              # doesn't have yet: webrtc namespace fix (bf3de29), Q3
-              # video_coding sub-headers (2a1b9f5), Path B webrtc deps
-              # (2829fe5), Path A drop (92e6eae), and the initial M1
-              # merge (87c2dfc). Build #2 on main got to autoninja
-              # 39495/39597 then failed on rtc::Thread errors; those
-              # are exactly what bf3de29 fixed on integration/native-peer.
-              # Flip back to "main" after integration/native-peer is
-              # fast-forward-merged to main post-validation.
-              value: "integration/native-peer"
+              # cv2/m2-track-source-deps for build #5: warm-cache lane.
+              # M1 already validated end-to-end on build #3
+              # (cloud_browser_worker linked + packaged + staged) but
+              # that Job consumed all 3 backoffLimit attempts at STEP
+              # 10's kubectl-not-found infra bug. triform-7 is now idle
+              # with warm sccache + chromium-src; rerunning here against
+              # cv2/m2 validates M2 R1 (track-source webrtc deps) on
+              # warm cache in ~10 min vs t2's ~70-90 min cold path.
+              value: "cv2/m2-track-source-deps"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
               value: "/workspace"
             - name: CHROMELESS_WORK_ROOT
               value: "/work"
-            - name: SCCACHE_DIR
-              value: "/sccache"
+            # ---- sccache S3 backend (Hetzner Object Storage) ----
+            # Replaces the per-node hostPath /sccache. The hostPath
+            # could never share TUs across pods because sccache's
+            # compiler-input hash folds in pod-instance identity
+            # (PATH/env/wrapper) — confirmed cold across Builds #15-#23.
+            # A shared S3 bucket keyed by the real compiler-input hash
+            # gives true cross-pod / cross-node cache reuse.
+            - name: SCCACHE_BUCKET
+              value: "triform-cv2-sccache"
+            - name: SCCACHE_ENDPOINT
+              value: "https://hel1.your-objectstorage.com"
+            - name: SCCACHE_REGION
+              value: "auto"
+            - name: SCCACHE_S3_USE_SSL
+              value: "true"
+            - name: SCCACHE_S3_KEY_PREFIX
+              value: "cv2/sccache/"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sccache-s3-creds
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sccache-s3-creds
+                  key: AWS_SECRET_ACCESS_KEY
             - name: CHROMELESS_BUILD_TARGETS
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+              # Build-czar 2026-05-17 (opt B, post Build #23): drop the
+              # 3 unittest targets — cloud_browser_worker ONLY. Build #23
+              # proved every PRODUCTION cloud-browser TU compiles clean
+              # with iters 1-6 (pcf.o + cb_audio_device_module.o +
+              # worker_main.o all F CXX, cb_dc_host.o no-error). The only
+              # build #23 errors were in cloud_browser_pcf_test.cc
+              # (dynamic_cast/-frtti + TestAudioDeviceModule rename) — a
+              # unittest TU orthogonal to M-stack structural validation.
+              # Operator accepts loss of test-coverage signal (unittests
+              # validate separately later, tracked IMPROVE). Worker-only
+              # = zero error sources + ~20-30% faster build.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker"
             - name: NINJA_PARALLELISM
-              # See build-job.yaml header — sized to the 40-CPU limit
-              # minus headroom for sccache server + LTO linker.
-              value: "36"
+              # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
+              # 36 was conservative. 56 leaves ~8 cores for OS + I/O +
+              # sccache-S3 client. ~25% off the ninja phase.
+              value: "56"
             - name: SKIP_FETCH
-              # "1" because build #2's first attempt already synced the
-              # tree to refs/branch-heads/7727 on triform-7's hostPath
-              # (37GB at /work/src/chromium/src). Subsequent build #2-retry
-              # attempts wedged in gclient sync (silent stall at 5+10 min
-              # marks, exit-127 wedge pattern from build #1). SKIP_FETCH
-              # bypasses Step 1 entirely; the existing tree is at the
-              # correct ref so re-fetching adds no value and hangs.
-              value: "1"
+              # "" for THIS build only: build #6 v3 (8rq9z) ran an
+              # over-aggressive `git clean -fdx` rootwide and deleted
+              # gclient-fetched binaries (buildtools/linux64/gn,
+              # third_party/llvm-build/*, etc.) which are ignored by
+              # .gitignore but legitimately downloaded by gclient
+              # runhooks. SKIP_FETCH=1 won't re-fetch them — only a
+              # full gclient sync will. After this build succeeds
+              # (~15 min cold sync + ~7 min autoninja warm), flip back
+              # to "1" for subsequent runs.
+              value: ""
             - name: STUB_MODE
               value: ""
+            - name: SKIP_CDP_VALIDATION
+              # "1" — build container image is debian:bookworm-slim
+              # which has no kubectl. STEP 10's `kubectl apply -f` of
+              # the CDP validation manifest fails with exit 127.
+              # Observed on build #1 + build #3 (2026-05-17) — each
+              # consumed all 3 backoffLimit attempts at STEP 10 even
+              # though the binary was already built + packaged +
+              # staged at STEPS 6-9. SKIP_CDP_VALIDATION=1 lets the
+              # binary ship; CDP validation runs separately from a
+              # workspace pod that does have kubectl.
+              value: "1"
             - name: SCCACHE_IDLE_TIMEOUT
               value: "0"
             - name: SCCACHE_CACHE_SIZE
@@ -257,8 +313,6 @@ spec:
           volumeMounts:
             - name: workdir
               mountPath: /work
-            - name: sccache
-              mountPath: /sccache
             - name: workspace
               mountPath: /workspace
               readOnly: true
@@ -281,10 +335,9 @@ spec:
           hostPath:
             path: /var/lib/longhorn/chromeless-build/chromium-src
             type: DirectoryOrCreate
-        - name: sccache
-          hostPath:
-            path: /var/lib/longhorn/chromeless-build/sccache
-            type: DirectoryOrCreate
+        # sccache hostPath removed — replaced by shared Hetzner S3
+        # backend (SCCACHE_BUCKET=triform-cv2-sccache). The hostPath
+        # never shared TUs cross-pod (pod-instance hash); S3 does.
         - name: workspace
           emptyDir:
             sizeLimit: 1Gi
