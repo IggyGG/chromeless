@@ -30,9 +30,10 @@
 //         pumps on percussion.
 //       - HPF: 80 Hz cutoff strips bass from music + low-frequency
 //         film/game content.
-//       - Typing detection: pattern-matches keypress transients in
-//         the spectrum and gates them out — wrong heuristic for
-//         every non-keyboard transient (drums, gunshots, UI chimes).
+//       - Typing detection: removed from Chromium 147's public
+//         webrtc::AudioOptions API. If an internal detector still
+//         exists in this libwebrtc revision, it is no longer exposed
+//         as a source-level option here.
 //
 // M5.5 R3 ratifies the "media-grade pass-through" decision: APM off,
 // no client-side processing. The viewer-side WebRTC stack still does
@@ -71,12 +72,13 @@ namespace cloud_browser {
 // Build the webrtc::AudioOptions block to attach to the cloud-browser
 // worker's AudioSource / AudioTrack.
 //
-// The returned options disable every APM stage:
+// The returned options disable every APM stage currently exposed by
+// Chromium 147's public webrtc::AudioOptions API:
 //   * echo_cancellation = false
 //   * auto_gain_control = false
 //   * noise_suppression = false
 //   * highpass_filter   = false
-//   * typing_detection  = false
+//   * typing_detection  = unavailable in this public API revision
 //
 // Rationale (full): see file-header comment. Short version: the
 // cb_capture.monitor source carries the browser tab's mixed program

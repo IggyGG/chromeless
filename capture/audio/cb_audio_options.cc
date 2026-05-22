@@ -3,9 +3,10 @@
 // cb_audio_options.cc — see cb_audio_options.h.
 //
 // CV2-30 R3: media-grade AudioOptions / APM disable. Every APM stage
-// is set to false; the cb_capture.monitor source carries program
-// audio, not a microphone, and the voice-tuned default profile
-// corrupts media content (see header for the per-stage rationale).
+// surfaced by Chromium 147's webrtc::AudioOptions is set to false; the
+// cb_capture.monitor source carries program audio, not a microphone,
+// and the voice-tuned default profile corrupts media content (see
+// header for the per-stage rationale).
 
 #include "capture/audio/cb_audio_options.h"
 
@@ -45,13 +46,10 @@ webrtc::AudioOptions BuildMediaAudioOptions() {
   // For program audio we want the full spectrum delivered.
   options.highpass_filter = false;
 
-  // Typing detection. Pattern-matches keypress transients in the
-  // spectrum and gates them out — wrong heuristic for every
-  // non-keyboard percussive transient (drums, gunshots, UI chimes,
-  // door knocks in dialog). For program audio there's also no
-  // expectation of typing happening near a microphone, so the whole
-  // detector is solving a problem that doesn't exist in this lane.
-  options.typing_detection = false;
+  // Chromium 147 no longer exposes a public AudioOptions typing_detection
+  // field. If an older libwebrtc revision still has an internal typing
+  // detector, there is no public source-level knob to toggle here; the
+  // exported APM controls above are the current API surface.
 
   // TODO(M55-R3-stereo): when R4 brings up stereo capture from the
   // PulseAudio monitor source, set options.stereo_swapping = false
@@ -60,8 +58,8 @@ webrtc::AudioOptions BuildMediaAudioOptions() {
   // (off), which is the right value for the mono path R1 ships.
 
   RTC_LOG(LS_INFO) << "CloudBrowser: BuildMediaAudioOptions — APM "
-                      "disabled (AEC/AGC/NS/HPF/typing-detection all "
-                      "false) for media/program audio pass-through";
+                      "disabled (AEC/AGC/NS/HPF false) for "
+                      "media/program audio pass-through";
 
   return options;
 }
