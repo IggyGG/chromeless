@@ -649,9 +649,9 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // DataChannels before adding media transceivers. The first media
   // AddTransceiver triggers the offer; the DCs must already exist so
   // the initial SDP carries the complete native channel set.
-  if (offerer_driver_->pc()) {
+  if (webrtc::PeerConnectionInterface* pc = offerer_driver_->pc()) {
     dc_host_ = std::make_unique<cloud_browser::signaling::CbDataChannelHost>(
-        offerer_driver_->pc(),
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface>(pc),
         /*host_observer=*/nullptr, signaling_thread_.get());
     const webrtc::RTCError dc_create = dc_host_->CreateOutboundChannels();
     if (!dc_create.ok()) {
