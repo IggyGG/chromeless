@@ -22,6 +22,7 @@ package reconciler
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -232,7 +233,7 @@ func (r *SessionReconciler) findBoundPod(ctx context.Context, sess *cbv1.Browser
 // assignment loop is single-threaded per pool by leader election so
 // adjacent reconciles see different first elements naturally.
 func (r *SessionReconciler) pickWarmPod(ctx context.Context, sess *cbv1.BrowserSession, pool *cbv1.BrowserSessionPool) (*corev1.Pod, error) {
-	needsSessionScopedStreamer := sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" ||
+	needsSessionScopedSignaling := sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" ||
 		sess.Annotations[cbv1.AnnotationBrowserSignalingToken] != ""
 
 	var pods corev1.PodList
@@ -259,41 +260,16 @@ func (r *SessionReconciler) pickWarmPod(ctx context.Context, sess *cbv1.BrowserS
 		if !podReady(p) {
 			continue
 		}
-		if needsSessionScopedStreamer && !streamerAutostartDisabled(p) {
-			// Session-scoped Triform signaling used to be injected via
-			// immutable pod env, so autostarting warm pods cannot be safely
-			// rebound. Pods with autostart disabled are launched by Triform
-			// over CDP with per-session URL params, so they are safe to reuse.
+		if needsSessionScopedSignaling {
+			// Session-scoped Triform signaling is injected through immutable
+			// pod env. Native WebRTC reads WEBRTC_SIGNALING_* at Chromium
+			// launch, so warm pods cannot be safely rebound even when the
+			// legacy streamer autostart is disabled.
 			continue
 		}
 		return p, nil
 	}
 	return nil, nil
-}
-
-func streamerAutostartDisabled(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
-		if container.Name != "chromeless" {
-			continue
-		}
-		for _, item := range container.Env {
-			if item.Name != "CHROMELESS_AUTOSTART_STREAMER" {
-				continue
-			}
-			switch strings.ToLower(strings.TrimSpace(item.Value)) {
-			case "0", "false", "no", "off":
-				return true
-			default:
-				return false
-			}
-		}
-		return false
-	}
-	return false
 }
 
 // bindToPod labels the Pod as assigned and updates the session status.
@@ -466,13 +442,34 @@ func applyAssignedSessionEnv(sess *cbv1.BrowserSession, pod *corev1.Pod) {
 			continue
 		}
 		upsertEnv(&pod.Spec.Containers[i], "SESSION_ID", brokerSessionIDForSession(sess))
+		upsertEnv(&pod.Spec.Containers[i], "WEBRTC_SIGNALING_SESSION_ID", brokerSessionIDForSession(sess))
 		if v := sess.Annotations[cbv1.AnnotationBrowserSignalingURL]; v != "" {
 			upsertEnv(&pod.Spec.Containers[i], "SIGNALING_URL", v)
+			if host, tls, ok := nativeSignalingEndpoint(v); ok {
+				upsertEnv(&pod.Spec.Containers[i], "WEBRTC_SIGNALING_HOST", host)
+				upsertEnv(&pod.Spec.Containers[i], "WEBRTC_SIGNALING_TLS", tls)
+			}
 		}
 		if v := sess.Annotations[cbv1.AnnotationBrowserSignalingToken]; v != "" {
 			upsertEnv(&pod.Spec.Containers[i], "SIGNALING_TOKEN", v)
+			upsertEnv(&pod.Spec.Containers[i], "WEBRTC_SIGNALING_TOKEN", v)
 		}
 		return
+	}
+}
+
+func nativeSignalingEndpoint(raw string) (host string, tls string, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", "", false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss", "https":
+		return u.Host, "1", true
+	case "ws", "http":
+		return u.Host, "0", true
+	default:
+		return "", "", false
 	}
 }
 
