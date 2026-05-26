@@ -235,7 +235,7 @@ TEST(CloudBrowserPcfLogTest, FormatsDeterministicCodecLine) {
   }
 }
 
-TEST(CloudBrowserPcfCodecPreferenceTest, RestrictsFirstLightToH264WhenPresent) {
+TEST(CloudBrowserPcfCodecPreferenceTest, PromotesH264WithVp9Fallback) {
   std::vector<webrtc::RtpCodecCapability> codecs = {
       MakeCodec("VP9"), MakeCodec("rtx"), MakeCodec("H264"),
       MakeCodec("AV1"), MakeCodec("red"), MakeCodec("ulpfec")};
@@ -243,7 +243,8 @@ TEST(CloudBrowserPcfCodecPreferenceTest, RestrictsFirstLightToH264WhenPresent) {
   std::vector<webrtc::RtpCodecCapability> preferred =
       BuildFirstLightVideoCodecPreferences(codecs);
 
-  EXPECT_THAT(CodecNames(preferred), ElementsAre("H264"));
+  EXPECT_THAT(CodecNames(preferred),
+              ElementsAre("H264", "VP9", "rtx", "AV1", "red", "ulpfec"));
 }
 
 TEST(CloudBrowserPcfCodecPreferenceTest, PreservesOrderWhenH264Absent) {

@@ -172,12 +172,10 @@ std::string FormatPcfVideoCodecLogLine(
 // verification.
 //
 // The PCF still advertises the full M1-ratified capability set above. This
-// helper narrows the per-transceiver first-light offer to H.264 when H.264 is
-// available. f76c6fc and b565696 live smokes proved the VP9 path can negotiate
-// and send RTP, but its payload metadata is malformed enough that receivers
-// reject every packet before a decoded frame is produced. Merely moving H.264
-// ahead of VP9 was insufficient because the answer still left the sender on
-// the broken VP9 path.
+// helper moves broadly supported H.264 ahead of VP9 while keeping VP9 as a
+// fallback. f32c947 proved an H.264-only offer is rejected by the Node/wrtc
+// first-light harness, so the offer must retain VP9 while the VP9 encoder
+// supplies valid codec-specific RTP metadata.
 std::vector<webrtc::RtpCodecCapability> BuildFirstLightVideoCodecPreferences(
     const std::vector<webrtc::RtpCodecCapability>& video_send_codecs);
 
