@@ -185,20 +185,17 @@ std::string FormatPcfVideoCodecLogLine(
 
 std::vector<webrtc::RtpCodecCapability> BuildFirstLightVideoCodecPreferences(
     const std::vector<webrtc::RtpCodecCapability>& video_send_codecs) {
-  std::vector<webrtc::RtpCodecCapability> out;
-  out.reserve(video_send_codecs.size());
+  std::vector<webrtc::RtpCodecCapability> h264_only;
 
   for (const auto& codec : video_send_codecs) {
     if (codec.name == "H264") {
-      out.push_back(codec);
+      h264_only.push_back(codec);
     }
   }
-  for (const auto& codec : video_send_codecs) {
-    if (codec.name != "H264") {
-      out.push_back(codec);
-    }
+  if (!h264_only.empty()) {
+    return h264_only;
   }
-  return out;
+  return video_send_codecs;
 }
 
 }  // namespace cloud_browser
