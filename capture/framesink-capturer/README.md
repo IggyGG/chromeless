@@ -48,12 +48,14 @@ this consumer in the T47 design (`docs/capture/framesink-design.md`
 `media::VideoFrame`'s destruction:
 
 1. On every `OnFrameCaptured`, build a refcounted `BufferHandleScope`
-   that owns the `FrameCallbacks` remote.
+   that owns the unbound `FrameCallbacks` pending remote and captures
+   the current sequenced task runner.
 2. Wrap the buffer as a `media::VideoFrame` and pin the scope to its
    `AddDestructionObserver`.
 3. When libwebrtc / encoder / track source finally releases the
-   frame, the scope refcount drops to zero, the destructor fires,
-   `Done()` goes back to the producer.
+   frame, the scope refcount drops to zero. The destructor binds and
+   calls `Done()` on the original capture sequence, posting back there
+   if the frame was released on a libwebrtc worker thread.
 
 The error paths (null `VideoFrameInfo`, wrap failure) drop the scope
 locally — the destructor still fires, the buffer still gets acked,

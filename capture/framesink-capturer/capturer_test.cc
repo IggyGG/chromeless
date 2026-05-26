@@ -27,15 +27,17 @@
 #include <vector>
 
 #include "api/make_ref_counted.h"
+#include "base/functional/bind.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "base/threading/thread.h"
 #include "media/base/video_frame.h"
-#include "mojo/core/embedder/embedder.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "media/mojo/mojom/media_types.mojom.h"
+#include "mojo/core/embedder/embedder.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -284,6 +286,39 @@ TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
   EXPECT_EQ(1u, stats.frames_delivered);
   EXPECT_EQ(1u, stats.buffers_done);
   EXPECT_EQ(0u, stats.frames_dropped_by_capturer);
+}
+
+TEST_F(FrameSinkCapturerTest, DonePostsBackWhenFrameReleasedOffSequence) {
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  producer_.SendFrame();
+  FlushPendingIPC();
+
+  ASSERT_EQ(1u, delivered_.size());
+  scoped_refptr<media::VideoFrame> frame = std::move(delivered_.front());
+  delivered_.clear();
+  EXPECT_EQ(0, producer_.total_done_calls());
+
+  base::Thread release_thread("cv2-91-frame-release");
+  ASSERT_TRUE(release_thread.Start());
+  base::RunLoop released;
+  release_thread.task_runner()->PostTask(
+      FROM_HERE,
+      base::BindOnce(
+          [](scoped_refptr<media::VideoFrame> f, base::OnceClosure done) {
+            f = nullptr;
+            std::move(done).Run();
+          },
+          std::move(frame), released.QuitClosure()));
+  released.Run();
+  release_thread.Stop();
+
+  FlushPendingIPC();
+  EXPECT_EQ(1, producer_.total_done_calls())
+      << "Mojo Done() must be posted back to the capturer sequence when "
+         "libwebrtc releases the frame on an encoder/network thread";
+  EXPECT_EQ(1u, capturer_->GetStats().buffers_done);
 }
 
 TEST_F(FrameSinkCapturerTest, SetOnFrameCallbackReplacesPlaceholderBeforeStart) {
