@@ -460,16 +460,9 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "browser-process video track source construction.";
 
   // R3 takes std::unique_ptr<CloudBrowserFrameSinkCapturer>, not the
-  // raw mojo::Remote. Wrap the producer + a no-op OnFrameCallback
-  // into a capturer first. Note: per R3's docstring at
-  // cb_framesink_video_track_source.cc:38-72, R3 cannot rebind the
-  // capturer's OnFrameCallback to its own OnCapturerFrame ingress
-  // (capturer.h has no SetOnFrameCallback hook today). For the
-  // current M2 R1-R4 landing, we pass base::DoNothing as the callback
-  // — capture won't actually flow until M2 R5 (CV2-40) re-arch ships
-  // either (A) a capturer SetOnFrameCallback hook or (B) a factory
-  // that builds capturer+R3 atomically with the right binding. Build
-  // structurally complete; M2 R5 is the runtime-correctness gate.
+  // raw mojo::Remote. Wrap the producer with a placeholder callback:
+  // CloudBrowserFrameSinkVideoTrackSource immediately rebinds the
+  // capturer to its OnCapturerFrame ingress before capture can Start().
   auto capturer = std::make_unique<CloudBrowserFrameSinkCapturer>(
       std::move(producer),
       base::DoNothing());
@@ -602,10 +595,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // F6 step 7 — Add the M2 R3 video sendonly transceiver. THIS is
   // what triggers OnRenegotiationNeeded → CreateOffer → first
   // offer envelope onto the wire. Without this mutation, Start()
-  // alone leaves the PC idle. Note: actual frames don't flow until
-  // M2 R5 wires the FrameSinkCapturer's OnFrameCallback to the
-  // adapter's OnCapturerFrame ingress; Phase A signaling completes
-  // anyway (offer + ICE + DC handshake doesn't require frames).
+  // alone leaves the PC idle.
   video_track_ = pcf_->CreateVideoTrack(cb_track_source_, "cb-video-0");
   if (!video_track_) {
     LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — "

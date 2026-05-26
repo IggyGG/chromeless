@@ -91,6 +91,16 @@ void CloudBrowserFrameSinkCapturer::Configure(
   min_capture_period_ = min_capture_period;
 }
 
+void CloudBrowserFrameSinkCapturer::SetOnFrameCallback(
+    OnFrameCallback on_frame) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(!on_frame.is_null());
+  DCHECK(!started_) << "SetOnFrameCallback must be called before Start.";
+  DCHECK(!consumer_.is_bound())
+      << "SetOnFrameCallback must not run while a consumer pipe is bound.";
+  on_frame_ = std::move(on_frame);
+}
+
 void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (started_) {

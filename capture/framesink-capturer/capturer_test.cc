@@ -19,12 +19,14 @@
 // design-by-spec.
 
 #include "capture/framesink-capturer/capturer.h"
+#include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
+#include "api/make_ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
@@ -245,6 +247,53 @@ TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
   EXPECT_EQ(1u, stats.frames_delivered);
   EXPECT_EQ(1u, stats.buffers_done);
   EXPECT_EQ(0u, stats.frames_dropped_by_capturer);
+}
+
+TEST_F(FrameSinkCapturerTest, SetOnFrameCallbackReplacesPlaceholderBeforeStart) {
+  std::vector<scoped_refptr<media::VideoFrame>> rebound_delivered;
+  capturer_->SetOnFrameCallback(base::BindLambdaForTesting(
+      [&](scoped_refptr<media::VideoFrame> f) {
+        rebound_delivered.push_back(std::move(f));
+      }));
+
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  producer_.SendFrame();
+  FlushPendingIPC();
+
+  EXPECT_TRUE(delivered_.empty())
+      << "the constructor callback must be replaceable before Start() so "
+         "placeholder callbacks do not black-hole native WebRTC frames";
+  EXPECT_EQ(1u, rebound_delivered.size());
+}
+
+TEST_F(FrameSinkCapturerTest, VideoTrackSourceRebindsCapturerFrameIngress) {
+  FakeProducer producer;
+  auto producer_remote = producer.BindAndPassRemote();
+  auto capturer = std::make_unique<CloudBrowserFrameSinkCapturer>(
+      std::move(producer_remote),
+      base::BindRepeating([](scoped_refptr<media::VideoFrame>) {
+        ADD_FAILURE() << "placeholder capturer callback fired; "
+                         "CloudBrowserFrameSinkVideoTrackSource should "
+                         "rebind it to OnCapturerFrame";
+      }));
+  auto source =
+      webrtc::make_ref_counted<CloudBrowserFrameSinkVideoTrackSource>(
+          std::move(capturer));
+
+  source->capturer_for_test()->Start(
+      viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  producer.SendFrame();
+  FlushPendingIPC();
+
+  EXPECT_EQ(1u, source->GetStats().frames_received_from_capturer)
+      << "captured frames must enter CloudBrowserFrameSinkVideoTrackSource; "
+         "otherwise the browser peer can negotiate a live video track but "
+         "the portal will decode 0x0 forever";
+  EXPECT_EQ(1u, source->GetStats().frames_published_to_sinks);
 }
 
 TEST_F(FrameSinkCapturerTest, MultipleFramesAllAcked) {

@@ -251,6 +251,7 @@ source_set("framesink_capture") {
     # NV12BufferInterface / I420BufferInterface / I420Buffer::Create /
     # rtc::TimeMicros() needed by R2's video_frame_conversion.cc.
     # Same pattern as :encoder_factory above.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
 
     "//ui/gfx/geometry",
   ]
