@@ -117,10 +117,9 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
                            /*sub_capture_target_version=*/0);
 
   // 2. Bind our consumer receiver and hand the remote to the producer.
-  //    kPreferMappableSharedImage is the right pick when the format is
-  //    NV12 — it lets the producer hand us a MappableSharedImage-backed
-  //    handle, enabling the zero-copy GPU path. For I420 / ARGB we
-  //    fall back to shared-memory.
+  //    kPreferMappableSharedImage is only safe for the explicitly configured
+  //    NV12 lane; GPU-less pods default to I420 so Viz gives us CPU shared
+  //    memory instead of a GBM/shared-context-backed frame.
   const auto buffer_pref =
       (format_ == media::PIXEL_FORMAT_NV12)
           ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage

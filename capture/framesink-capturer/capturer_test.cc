@@ -105,7 +105,14 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   bool start_called() const { return start_called_; }
 
   // viz::mojom::FrameSinkVideoCapturer:
-  void SetFormat(media::VideoPixelFormat /*format*/) override {}
+  media::VideoPixelFormat last_format() const { return last_format_; }
+  viz::mojom::BufferFormatPreference last_start_pref() const {
+    return last_start_pref_;
+  }
+
+  void SetFormat(media::VideoPixelFormat format) override {
+    last_format_ = format;
+  }
   void SetMinCapturePeriod(base::TimeDelta /*period*/) override {}
   void SetMinSizeChangePeriod(base::TimeDelta /*min_period*/) override {}
   void SetResolutionConstraints(const gfx::Size& /*min*/,
@@ -120,8 +127,9 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
       uint32_t /*sub_capture_version*/) override {}
   void Start(
       mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumer> consumer,
-      viz::mojom::BufferFormatPreference /*pref*/) override {
+      viz::mojom::BufferFormatPreference pref) override {
     consumer_.Bind(std::move(consumer));
+    last_start_pref_ = pref;
     start_called_ = true;
   }
   void Stop() override {
@@ -160,6 +168,9 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   mojo::Remote<viz::mojom::FrameSinkVideoConsumer> consumer_;
   std::vector<std::unique_ptr<FakeFrameCallbacks>> callback_holders_;
   std::vector<FakeFrameCallbacks*> fake_callbacks_;
+  media::VideoPixelFormat last_format_ = media::PIXEL_FORMAT_UNKNOWN;
+  viz::mojom::BufferFormatPreference last_start_pref_ =
+      viz::mojom::BufferFormatPreference::kDefault;
   bool start_called_ = false;
   bool stop_called_ = false;
   uint64_t ts_us_ = 0;
@@ -221,6 +232,32 @@ TEST_F(FrameSinkCapturerTest, StartForwardsToProducer) {
   capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
   EXPECT_TRUE(producer_.start_called());
+}
+
+TEST_F(FrameSinkCapturerTest, DefaultStartUsesI420SharedMemoryPath) {
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  EXPECT_EQ(media::PIXEL_FORMAT_I420, producer_.last_format())
+      << "the default runtime path must avoid the NV12 mappable-SharedImage "
+         "GMB lane; GPU-less pods do not have a GBM/shared-context backing "
+         "for first-light capture";
+  EXPECT_EQ(viz::mojom::BufferFormatPreference::kDefault,
+            producer_.last_start_pref())
+      << "I420 should use the shared-memory FrameSinkVideoCapturer path";
+}
+
+TEST_F(FrameSinkCapturerTest, ConfiguredNv12StillRequestsMappableSharedImage) {
+  capturer_->Configure(gfx::Size(1280, 720), media::PIXEL_FORMAT_NV12,
+                       base::Hertz(60));
+
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  EXPECT_EQ(media::PIXEL_FORMAT_NV12, producer_.last_format());
+  EXPECT_EQ(viz::mojom::BufferFormatPreference::kPreferMappableSharedImage,
+            producer_.last_start_pref())
+      << "the future hardware/GMB lane should remain opt-in through Configure";
 }
 
 TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {

@@ -267,7 +267,7 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
   //    construction dance that used to live here moved to CloudBrowser
   //    BrowserMainParts step 5b — R3's factory
   //    (CreateCloudBrowserFrameSinkVideoTrackSource) owns it now.
-  //    Defaults (1280x720 NV12 @ 60Hz from capturer.h:136-138) apply
+  //    Defaults (1280x720 I420 @ 60Hz from capturer.h:136-141) apply
   //    unless R5's auto-start policy overrides via
   //    track_source->Configure() before we land here.
   //
