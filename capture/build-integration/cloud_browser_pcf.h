@@ -168,6 +168,17 @@ CreateCloudBrowserDefaultAudioDeviceModule();
 std::string FormatPcfVideoCodecLogLine(
     const std::vector<webrtc::RtpCodecCapability>& video_send_codecs);
 
+// Return the transceiver codec-preference order used for native first-light
+// verification.
+//
+// The PCF still advertises the full M1-ratified capability set above. This
+// helper only reorders the per-transceiver offer preference so broadly
+// supported H.264 is attempted before VP9. f76c6fc live smoke proved the VP9
+// path can negotiate and send RTP but its payload metadata is malformed enough
+// that receivers reject every packet before a decoded frame is produced.
+std::vector<webrtc::RtpCodecCapability> BuildFirstLightVideoCodecPreferences(
+    const std::vector<webrtc::RtpCodecCapability>& video_send_codecs);
+
 }  // namespace cloud_browser
 
 #endif  // CAPTURE_BUILD_INTEGRATION_CLOUD_BROWSER_PCF_H_

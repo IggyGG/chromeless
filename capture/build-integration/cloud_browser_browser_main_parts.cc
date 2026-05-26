@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
@@ -132,6 +133,21 @@ uint16_t ReadRemoteDebuggingPort() {
     return 0;
   }
   return static_cast<uint16_t>(parsed);
+}
+
+std::string FormatCodecPreferenceNamesForLog(
+    const std::vector<webrtc::RtpCodecCapability>& codecs) {
+  std::string out = "[";
+  bool first = true;
+  for (const auto& codec : codecs) {
+    if (!first) {
+      out += ",";
+    }
+    out += codec.name;
+    first = false;
+  }
+  out += "]";
+  return out;
 }
 
 // Reads --remote-debugging-address from the command line. Returns
@@ -614,6 +630,22 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
                     "may not fire and no SDP offer will emit. Worker "
                     "stays alive on CDP path.";
     } else {
+      std::vector<webrtc::RtpCodecCapability> video_codec_preferences =
+          BuildFirstLightVideoCodecPreferences(
+              pcf_->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO)
+                  .codecs);
+      webrtc::RTCError codec_preference_result =
+          tx_result.value()->SetCodecPreferences(video_codec_preferences);
+      if (!codec_preference_result.ok()) {
+        LOG(ERROR) << "CV2-91: SetCodecPreferences(video) failed: "
+                   << codec_preference_result.message()
+                   << " — proceeding with libwebrtc default order; VP9 may "
+                      "negotiate first and starve decoded-frame first-light.";
+      } else {
+        LOG(INFO) << "CV2-91: video transceiver codec preferences applied: "
+                  << FormatCodecPreferenceNamesForLog(
+                         video_codec_preferences);
+      }
       LOG(INFO) << "CV2-69: video sendonly transceiver added; awaiting "
                    "OnRenegotiationNeeded → CreateOffer → wire emission.";
     }
