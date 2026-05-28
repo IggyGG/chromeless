@@ -37,7 +37,8 @@
 #   SCCACHE_DIR             sccache directory. Default: /sccache.
 #   NINJA_PARALLELISM       autoninja -j arg. Default: unset (auto).
 #   CHROMELESS_BUILD_TARGETS        space-separated list. Default: the three
-#                            standard targets below.
+#                            standard code targets plus the headless
+#                            resource packs the runtime image loads.
 #   CHROMELESS_GIT_SHA              short git sha; default derived from
 #                            ${CHROMELESS_REPO}/.git or the env.
 #   SKIP_FETCH              "1" to skip Step 1 entirely (assumes
@@ -131,7 +132,7 @@ CHROMELESS_GIT_SHA_DEFAULT="$(
 )"
 : "${CHROMELESS_GIT_SHA:=${CHROMELESS_GIT_SHA_DEFAULT}}"
 
-DEFAULT_TARGETS="cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests"
+DEFAULT_TARGETS="cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests headless:resource_pack_data headless:resource_pack_strings"
 : "${CHROMELESS_BUILD_TARGETS:=${DEFAULT_TARGETS}}"
 
 # ---------------------------------------------------------------------
@@ -487,7 +488,7 @@ if [[ -n "${STUB_MODE}" ]]; then
     # its layout assumptions in stub runs.
     mkdir -p "${ARTIFACTS_DIR}/context"
     : > "${ARTIFACTS_DIR}/context/cloud_browser_worker"
-    for runtime_asset in icudtl.dat resources.pak chrome_100_percent.pak chrome_200_percent.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
+    for runtime_asset in icudtl.dat headless_lib_data.pak headless_lib_strings.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
         : > "${ARTIFACTS_DIR}/context/${runtime_asset}"
     done
     # CV2-89: stub the SwANGLE Vulkan ICD descriptor JSON. Real path
@@ -516,7 +517,7 @@ else
     # it from there.
     mkdir -p "${ARTIFACTS_DIR}/context"
     cp "${binary_src}" "${ARTIFACTS_DIR}/context/cloud_browser_worker"
-    for runtime_asset in icudtl.dat resources.pak chrome_100_percent.pak chrome_200_percent.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
+    for runtime_asset in icudtl.dat headless_lib_data.pak headless_lib_strings.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
         asset_src="${CHROMIUM_SRC}/${OUT_DIR}/${runtime_asset}"
         [[ -f "${asset_src}" ]] || die "runtime asset missing: ${asset_src}"
         cp "${asset_src}" "${ARTIFACTS_DIR}/context/${runtime_asset}"

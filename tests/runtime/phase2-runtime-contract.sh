@@ -43,12 +43,11 @@ require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/supervisord.phase2.conf"' build/ch
 require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/pulse-default.pa"' build/chromeless-build.sh
 require_grep 'cp "\$\{CHROMELESS_REPO\}/infra/devtools-proxy.sh"' build/chromeless-build.sh
 require_grep 'cp -R "\$\{CHROMELESS_REPO\}/infra/lifecycle"' build/chromeless-build.sh
-require_grep 'for runtime_asset in icudtl.dat resources.pak chrome_100_percent.pak chrome_200_percent.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1' build/chromeless-build.sh
+require_grep 'for runtime_asset in icudtl.dat headless_lib_data.pak headless_lib_strings.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1' build/chromeless-build.sh
 
 reject_grep 'capture/streamer-page|streamer-static-server.py' build/chromeless-build.sh
-require_grep 'COPY[[:space:]]+resources.pak[[:space:]]+/usr/local/bin/resources.pak' build/Dockerfile.runtime
-require_grep 'COPY[[:space:]]+chrome_100_percent.pak[[:space:]]+/usr/local/bin/chrome_100_percent.pak' build/Dockerfile.runtime
-require_grep 'COPY[[:space:]]+chrome_200_percent.pak[[:space:]]+/usr/local/bin/chrome_200_percent.pak' build/Dockerfile.runtime
+require_grep 'COPY[[:space:]]+headless_lib_data.pak[[:space:]]+/usr/local/bin/headless_lib_data.pak' build/Dockerfile.runtime
+require_grep 'COPY[[:space:]]+headless_lib_strings.pak[[:space:]]+/usr/local/bin/headless_lib_strings.pak' build/Dockerfile.runtime
 require_grep 'COPY[[:space:]]+pulse-default.pa[[:space:]]+/etc/pulse/default.pa' build/Dockerfile.runtime
 require_grep 'COPY[[:space:]]+devtools-proxy.sh[[:space:]]+/usr/local/bin/devtools-proxy.sh' build/Dockerfile.runtime
 require_grep 'COPY[[:space:]]+lifecycle/[[:space:]]+/usr/local/lib/cloud-browser/lifecycle/' build/Dockerfile.runtime

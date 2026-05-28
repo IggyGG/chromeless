@@ -65,29 +65,18 @@ void CloudBrowserMainDelegate::PreSandboxStartup() {
   //
   // CV2-89 follow-up: SwiftShader made the renderer path live, and
   // that path reaches Blink's default stylesheet resources. Locale-only
-  // ResourceBundle init is no longer enough; without the common
-  // Chromium resource packs, Blink can DCHECK while constructing the
-  // default SVG stylesheet (css_default_style_sheets.cc).
+  // ResourceBundle init is no longer enough; without the Chromium
+  // resource packs, Blink can DCHECK while constructing the default SVG
+  // stylesheet (css_default_style_sheets.cc).
   base::FilePath resource_dir;
   CHECK(base::PathService::Get(base::DIR_ASSETS, &resource_dir))
       << "base::DIR_ASSETS unavailable";
 
-  ui::ResourceBundle::InitSharedInstanceWithLocale(
-      "en-US",
-      /*delegate=*/nullptr,
-      ui::ResourceBundle::DO_NOT_LOAD_COMMON_RESOURCES);
-  ui::ResourceBundle& bundle = ui::ResourceBundle::GetSharedInstance();
-  bundle.AddDataPackFromPath(
-      RequiredResourcePak(resource_dir, FILE_PATH_LITERAL("resources.pak")),
-      ui::kScaleFactorNone);
-  bundle.AddDataPackFromPath(
-      RequiredResourcePak(resource_dir,
-                          FILE_PATH_LITERAL("chrome_100_percent.pak")),
+  ui::ResourceBundle::InitSharedInstanceWithPakPath(RequiredResourcePak(
+      resource_dir, FILE_PATH_LITERAL("headless_lib_strings.pak")));
+  ui::ResourceBundle::GetSharedInstance().AddDataPackFromPath(
+      RequiredResourcePak(resource_dir, FILE_PATH_LITERAL("headless_lib_data.pak")),
       ui::k100Percent);
-  bundle.AddDataPackFromPath(
-      RequiredResourcePak(resource_dir,
-                          FILE_PATH_LITERAL("chrome_200_percent.pak")),
-      ui::k200Percent);
 
   // ---- F3: Crash-key string-table init ---------------------------------
   // Without this, chromium's SET_CRASH_KEY_VALUE call sites crash the

@@ -269,7 +269,7 @@ spec:
               # 4 targets: worker + 3 unittest suites. pcf_unittests is
               # M2-side coverage of the PCF refactor; encoder/framesink
               # are the M1 + capture-side baselines.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
             # Ninja parallelism sized to CPU limit minus headroom for
             # the sccache server (~1-2 cores) + the LTO linker spike
             # (~2 cores). Limit is 40; 36 parallel ninja jobs leaves
