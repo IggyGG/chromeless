@@ -433,6 +433,14 @@ class CbOffererDriver
   void HandleRequestRenegotiateEnvelope();
   void HandleProbeResultEnvelope(const Envelope& env);
 
+  // Remote ICE can arrive immediately after the portal sends its
+  // answer, before our async SetRemoteDescription(answer) completion
+  // has transitioned the PeerConnection into kIceInFlight. Retain
+  // those candidates and replay them once the remote SDP is applied.
+  void QueueRemoteIceCandidate(const Envelope& env);
+  void FlushPendingRemoteIce();
+  void AddRemoteIcePayload(const IceCandidatePayload& payload);
+
   // Hop landing points — all run on ui_runner_, guarded by
   // weak_factory_'s WeakPtr.
   void HopHandleIceCandidate(
@@ -526,6 +534,8 @@ class CbOffererDriver
 
   // Established on Start(); released on dtor / FailWithReason / bye.
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
+
+  std::vector<IceCandidatePayload> pending_remote_ice_;
 
   OffererState state_ = OffererState::kIdle;
 
