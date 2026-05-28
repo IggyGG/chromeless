@@ -13,6 +13,7 @@
 #include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/path_service.h"
+#include "capture/build-integration/cloud_browser_content_client.h"
 #include "capture/build-integration/content_browser_client.h"
 #include "components/crash/core/common/crash_key.h"
 #include "content/public/app/initialize_mojo_core.h"
@@ -36,6 +37,19 @@ namespace cloud_browser {
 CloudBrowserMainDelegate::CloudBrowserMainDelegate() = default;
 
 CloudBrowserMainDelegate::~CloudBrowserMainDelegate() = default;
+
+content::ContentClient* CloudBrowserMainDelegate::CreateContentClient() {
+  // ContentMain calls this on EVERY process, very early (before
+  // PreSandboxStartup) and keeps the returned pointer for the run's
+  // lifetime. content_client_ is a value member, so the pointer is stable.
+  // Delegating to ResourceBundle is safe even though this fires pre-sandbox
+  // and pre-pak-load: ContentClient only *reads* ResourceBundle lazily, at
+  // GetDataResource call time, which is after PreSandboxStartup has loaded
+  // the pak. Without this bridge the renderer's Blink resource fetch hits
+  // the empty base ContentClient and DCHECKs in css_default_style_sheets.cc.
+  // Mirrors HeadlessContentMainDelegate::CreateContentClient.
+  return &content_client_;
+}
 
 content::ContentBrowserClient*
 CloudBrowserMainDelegate::CreateContentBrowserClient() {
