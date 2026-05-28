@@ -24,9 +24,11 @@
 #include <memory>
 #include <optional>
 
+#include "capture/build-integration/cloud_browser_content_client.h"
 #include "content/public/app/content_main_delegate.h"
 
 namespace content {
+class ContentClient;
 class ContentBrowserClient;
 }  // namespace content
 
@@ -44,6 +46,13 @@ class CloudBrowserMainDelegate : public content::ContentMainDelegate {
   ~CloudBrowserMainDelegate() override;
 
   // content::ContentMainDelegate:
+  // Registers CloudBrowserContentClient so data-resource lookups from EVERY
+  // process (incl. the renderer, where Blink builds the default SVG UA
+  // stylesheet) reach the process-local ResourceBundle. Without this the
+  // base ContentClient returns empty and Blink DCHECKs in
+  // css_default_style_sheets.cc — the CV2 Gate 6 crash. Mirrors
+  // headless/lib/headless_content_main_delegate.cc CreateContentClient.
+  content::ContentClient* CreateContentClient() override;
   content::ContentBrowserClient* CreateContentBrowserClient() override;
 
   // CV2-69 (M55-R5-merge-with-m3-r4-r6) — embedder bootstrap inits the
@@ -64,6 +73,12 @@ class CloudBrowserMainDelegate : public content::ContentMainDelegate {
   // pointer to the instance returned by CreateContentBrowserClient,
   // which is documented to outlive ContentMainRunner.
   std::unique_ptr<CloudBrowserContentBrowserClient> browser_client_;
+
+  // Owned for the lifetime of the delegate. ContentMain stores the raw
+  // pointer returned by CreateContentClient() and uses it for the whole
+  // run, so a value member here (mirroring HeadlessContentClient
+  // content_client_) is the correct lifetime.
+  CloudBrowserContentClient content_client_;
 };
 
 }  // namespace cloud_browser

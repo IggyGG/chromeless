@@ -1011,6 +1011,8 @@ source_set("embedder") {
     "cloud_browser_browser_context.h",
     "cloud_browser_browser_main_parts.cc",
     "cloud_browser_browser_main_parts.h",
+    "cloud_browser_content_client.cc",
+    "cloud_browser_content_client.h",
     "cloud_browser_main.cc",
     "cloud_browser_main.h",
     "content_browser_client.cc",
@@ -1108,6 +1110,10 @@ source_set("embedder") {
     # non-null AND aura's pre-SetCursor gate (IsWindowUnderCursor) does
     # not short-circuit cursor routing — see cb_headless_screen.h.
     "//ui/display",
+    # cloud_browser_content_client.cc includes ui/gfx/image/image.h for the
+    # gfx::Image& return type of GetNativeImageNamed (gn check requires the
+    # direct dep for the directly-included header).
+    "//ui/gfx",
     "//ui/gfx/geometry",
     # PlatformWindowInitProperties — passed to aura::WindowTreeHost::
     # Create() to give the host an initial bounds.
