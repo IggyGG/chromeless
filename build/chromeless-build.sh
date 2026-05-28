@@ -487,7 +487,7 @@ if [[ -n "${STUB_MODE}" ]]; then
     # its layout assumptions in stub runs.
     mkdir -p "${ARTIFACTS_DIR}/context"
     : > "${ARTIFACTS_DIR}/context/cloud_browser_worker"
-    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
+    for runtime_asset in icudtl.dat resources.pak chrome_100_percent.pak chrome_200_percent.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
         : > "${ARTIFACTS_DIR}/context/${runtime_asset}"
     done
     # CV2-89: stub the SwANGLE Vulkan ICD descriptor JSON. Real path
@@ -516,7 +516,7 @@ else
     # it from there.
     mkdir -p "${ARTIFACTS_DIR}/context"
     cp "${binary_src}" "${ARTIFACTS_DIR}/context/cloud_browser_worker"
-    for runtime_asset in icudtl.dat libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
+    for runtime_asset in icudtl.dat resources.pak chrome_100_percent.pak chrome_200_percent.pak libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1; do
         asset_src="${CHROMIUM_SRC}/${OUT_DIR}/${runtime_asset}"
         [[ -f "${asset_src}" ]] || die "runtime asset missing: ${asset_src}"
         cp "${asset_src}" "${ARTIFACTS_DIR}/context/${runtime_asset}"

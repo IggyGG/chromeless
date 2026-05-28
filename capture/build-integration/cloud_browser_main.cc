@@ -8,11 +8,28 @@
 #include <optional>
 #include <variant>
 
+#include "base/check.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/path_service.h"
 #include "capture/build-integration/content_browser_client.h"
 #include "components/crash/core/common/crash_key.h"
 #include "content/public/app/initialize_mojo_core.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/resource/resource_scale_factor.h"
+
+namespace {
+
+base::FilePath RequiredResourcePak(const base::FilePath& resource_dir,
+                                   const base::FilePath::CharType* name) {
+  base::FilePath path = resource_dir.Append(name);
+  CHECK(base::PathExists(path))
+      << "required Chromium resource pack missing: " << path.value();
+  return path;
+}
+
+}  // namespace
 
 namespace cloud_browser {
 
@@ -46,15 +63,31 @@ void CloudBrowserMainDelegate::PreSandboxStartup() {
   // (swiftshader) bypasses the GL paths that touch the ResourceBundle
   // and survives indefinitely.
   //
-  // Minimum-viable init: locale-only, no pak file shipped. If a
-  // future build wants real localized strings, the upgrade path is
-  // to ship cloud_browser.pak (built via GN `repack` template, see
-  // content/shell/BUILD.gn:repack_locale for pattern) and switch to
-  // InitSharedInstanceWithPakPath. Out of scope for CV2-69.
+  // CV2-89 follow-up: SwiftShader made the renderer path live, and
+  // that path reaches Blink's default stylesheet resources. Locale-only
+  // ResourceBundle init is no longer enough; without the common
+  // Chromium resource packs, Blink can DCHECK while constructing the
+  // default SVG stylesheet (css_default_style_sheets.cc).
+  base::FilePath resource_dir;
+  CHECK(base::PathService::Get(base::DIR_ASSETS, &resource_dir))
+      << "base::DIR_ASSETS unavailable";
+
   ui::ResourceBundle::InitSharedInstanceWithLocale(
       "en-US",
       /*delegate=*/nullptr,
       ui::ResourceBundle::DO_NOT_LOAD_COMMON_RESOURCES);
+  ui::ResourceBundle& bundle = ui::ResourceBundle::GetSharedInstance();
+  bundle.AddDataPackFromPath(
+      RequiredResourcePak(resource_dir, FILE_PATH_LITERAL("resources.pak")),
+      ui::kScaleFactorNone);
+  bundle.AddDataPackFromPath(
+      RequiredResourcePak(resource_dir,
+                          FILE_PATH_LITERAL("chrome_100_percent.pak")),
+      ui::k100Percent);
+  bundle.AddDataPackFromPath(
+      RequiredResourcePak(resource_dir,
+                          FILE_PATH_LITERAL("chrome_200_percent.pak")),
+      ui::k200Percent);
 
   // ---- F3: Crash-key string-table init ---------------------------------
   // Without this, chromium's SET_CRASH_KEY_VALUE call sites crash the
