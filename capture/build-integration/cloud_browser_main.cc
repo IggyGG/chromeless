@@ -74,9 +74,23 @@ void CloudBrowserMainDelegate::PreSandboxStartup() {
 
   ui::ResourceBundle::InitSharedInstanceWithPakPath(RequiredResourcePak(
       resource_dir, FILE_PATH_LITERAL("headless_lib_strings.pak")));
+  // headless_lib_data.pak is the headless build's scale-INDEPENDENT data
+  // pack (the //headless:pak repack of headless_lib.grd + blink/content
+  // resources) — the headless equivalent of stock Chromium's
+  // `resources.pak`. It carries the Blink UA stylesheets, including
+  // IDR_UASTYLE_SVG_CSS. Those are looked up via the kScaleFactorNone
+  // bucket (e.g. Blink's CSSDefaultStyleSheets default-SVG-stylesheet
+  // construction at css_default_style_sheets.cc), so the pack MUST be
+  // registered at kScaleFactorNone. The prior cv2-89 revision added it at
+  // k100Percent (carried over from the chrome_100_percent.pak line it
+  // replaced); a k100Percent pack does not answer scale-none lookups, so
+  // IDR_UASTYLE_SVG_CSS resolved empty and Blink hit a FATAL DCHECK
+  // (default_svg_style_->UniversalRules().size() == 1u, 0 vs 1) on the
+  // first SVG layout. kScaleFactorNone matches how the original
+  // resources.pak load and upstream headless register this pack.
   ui::ResourceBundle::GetSharedInstance().AddDataPackFromPath(
       RequiredResourcePak(resource_dir, FILE_PATH_LITERAL("headless_lib_data.pak")),
-      ui::k100Percent);
+      ui::kScaleFactorNone);
 
   // ---- F3: Crash-key string-table init ---------------------------------
   // Without this, chromium's SET_CRASH_KEY_VALUE call sites crash the
