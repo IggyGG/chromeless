@@ -210,6 +210,17 @@ class CloudBrowserBrowserMainParts
   // Capture is unaffected (the copy path is independent of swap).
   void ScheduleCompositorKeepaliveRedraw();
 
+  // CV2 Gate 6 media-RTP observability: poll the PeerConnection's
+  // outbound-rtp stats and LOG(INFO) packets_sent / bytes_sent /
+  // frames_encoded / frames_sent / frame WxH. Started on the first
+  // ICE-connected transition (OnIceConnectionStateChanged). This is the
+  // ONLY way to tell, post-WS-reassembly-fix, whether the guest's encoder
+  // is actually pushing RTP into the relay (packets_sent grows) vs the
+  // media stalling before the wire (packets_sent stays 0) — the guest PC
+  // is native libwebrtc, invisible to CDP/JS getStats, and the native
+  // GetStats relay (M6 R1) is otherwise unwired.
+  void PollOutboundRtpStats();
+
   // Owned global display::Screen instance. chromium fatals on
   // `Check failed: Screen::Get()` from ui/display/display_observer.cc:32
   // during browser-process init when something registers a
@@ -252,6 +263,12 @@ class CloudBrowserBrowserMainParts
   // PreMainMessageLoopRun once aura_ exists; runs for the worker's life
   // (guests are per-session and short-lived, so idle cost is moot).
   base::RepeatingTimer compositor_keepalive_timer_;
+
+  // Drives PollOutboundRtpStats() every 2s once ICE connects. Armed once
+  // (guarded by rtp_stats_timer_armed_) on the first kIceConnectionConnected
+  // / kIceConnectionCompleted transition. CV2 Gate 6 media-RTP diagnosis.
+  base::RepeatingTimer rtp_stats_timer_;
+  bool rtp_stats_timer_armed_ = false;
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;

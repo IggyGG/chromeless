@@ -18,6 +18,10 @@
 #include "api/peer_connection_interface.h"
 #include "api/rtp_parameters.h"
 #include "api/rtp_transceiver_interface.h"
+#include "api/scoped_refptr.h"
+#include "api/stats/rtc_stats_collector_callback.h"
+#include "api/stats/rtc_stats_report.h"
+#include "api/stats/rtcstats_objects.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback_helpers.h"
@@ -1098,6 +1102,69 @@ void CloudBrowserBrowserMainParts::OnIceConnectionStateChanged(
     webrtc::PeerConnectionInterface::IceConnectionState state) {
   LOG(INFO) << "CV2-69 offerer_driver: ICE connection state -> "
             << static_cast<int>(state);
+
+  // CV2 Gate 6 media-RTP diagnosis: once ICE connects, start polling the
+  // outbound-rtp stats so the serial log shows whether the guest encoder
+  // is actually pushing RTP into the (now-paired) relay transport. Armed
+  // once; the RepeatingTimer is owned by `this` and torn down with it.
+  if (!rtp_stats_timer_armed_ &&
+      (state ==
+           webrtc::PeerConnectionInterface::IceConnectionState::
+               kIceConnectionConnected ||
+       state ==
+           webrtc::PeerConnectionInterface::IceConnectionState::
+               kIceConnectionCompleted)) {
+    rtp_stats_timer_armed_ = true;
+    LOG(INFO) << "CV2-RTP: ICE connected — starting outbound-rtp stats poll";
+    PollOutboundRtpStats();  // immediate first sample
+    rtp_stats_timer_.Start(
+        FROM_HERE, base::Seconds(2),
+        base::BindRepeating(
+            &CloudBrowserBrowserMainParts::PollOutboundRtpStats,
+            base::Unretained(this)));
+  }
+}
+
+namespace {
+// One-shot stats sink: logs the guest's outbound-rtp counters, then
+// self-releases (libwebrtc holds a ref across the async GetStats call).
+class CbOutboundRtpStatsLogger : public webrtc::RTCStatsCollectorCallback {
+ public:
+  void OnStatsDelivered(
+      const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report)
+      override {
+    bool any = false;
+    for (const webrtc::RTCOutboundRtpStreamStats* s :
+         report->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>()) {
+      any = true;
+      const std::string kind = s->kind.value_or("?");
+      LOG(INFO) << "CV2-RTP outbound[" << kind << "]"
+                << " packets_sent=" << s->packets_sent.value_or(0)
+                << " bytes_sent=" << s->bytes_sent.value_or(0)
+                << " frames_encoded=" << s->frames_encoded.value_or(0)
+                << " frames_sent=" << s->frames_sent.value_or(0)
+                << " fps=" << s->frames_per_second.value_or(0.0) << " "
+                << s->frame_width.value_or(0) << "x"
+                << s->frame_height.value_or(0)
+                << " target_bitrate=" << s->target_bitrate.value_or(0.0)
+                << " qlim=" << s->quality_limitation_reason.value_or("?");
+    }
+    if (!any) {
+      LOG(INFO) << "CV2-RTP outbound: (no outbound-rtp stream stats yet)";
+    }
+  }
+};
+}  // namespace
+
+void CloudBrowserBrowserMainParts::PollOutboundRtpStats() {
+  if (!offerer_driver_ || !offerer_driver_->pc()) {
+    return;
+  }
+  // GetStats is async + thread-safe; libwebrtc AddRefs the callback and
+  // releases it after OnStatsDelivered, so a transient ref-counted sink
+  // is the right ownership shape (mirrors the SDP-observer adapters).
+  auto sink = webrtc::make_ref_counted<CbOutboundRtpStatsLogger>();
+  offerer_driver_->pc()->GetStats(sink.get());
 }
 
 void CloudBrowserBrowserMainParts::OnRenegotiationStarted(
