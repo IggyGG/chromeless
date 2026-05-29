@@ -55,6 +55,7 @@
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+#include "base/timer/timer.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
 // that hold the runtime-wire consumer instances. CbCursorClient (M5
 // R1) is NOT included here — it's owned by CbAuraPlatformData
@@ -196,6 +197,19 @@ class CloudBrowserBrowserMainParts
   // StopRemoteDebuggingServer iff StartDevToolsHttpHandler ran.
   void StopDevToolsHttpHandler();
 
+  // CV2-ICE / Gate-6 compositor fix: force a root-surface redraw every
+  // frame interval. The FrameSinkVideoCapturer issues CopyOutputRequests
+  // that make the offscreen viz Display *draw* but not *swap* when the
+  // root surface has no on-screen damage, so renderer presentation-time
+  // frame_tokens never get a SWAP_ACK present-ack and orphan in Blink's
+  // LayerTreeView presentation-callback deque (no eviction). After ~60
+  // accrue the guest FATAL-DCHECKs at layer_tree_view.cc:574
+  // (callbacks.size() <= kMaxBufferSize). ScheduleFullRedraw() forces
+  // have_damage=true → should_swap=true → the Display swaps the unviewed
+  // software surface and emits the present-acks that drain the deque.
+  // Capture is unaffected (the copy path is independent of swap).
+  void ScheduleCompositorKeepaliveRedraw();
+
   // Owned global display::Screen instance. chromium fatals on
   // `Check failed: Screen::Get()` from ui/display/display_observer.cc:32
   // during browser-process init when something registers a
@@ -231,6 +245,13 @@ class CloudBrowserBrowserMainParts
   // when their dtors walk their parent pointer. Process is exiting
   // within seconds; OS reclaims memory and the X11 connection cleanly.
   std::unique_ptr<CbAuraPlatformData> aura_;
+
+  // Drives ScheduleCompositorKeepaliveRedraw() at the capture frame
+  // interval so the offscreen Display keeps swapping and present-acking
+  // (see ScheduleCompositorKeepaliveRedraw). Started in
+  // PreMainMessageLoopRun once aura_ exists; runs for the worker's life
+  // (guests are per-session and short-lived, so idle cost is moot).
+  base::RepeatingTimer compositor_keepalive_timer_;
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;
