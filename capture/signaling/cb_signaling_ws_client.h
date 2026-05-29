@@ -310,6 +310,16 @@ class SignalingWsClient
   uint64_t inbound_remaining_ = 0;
   network::mojom::WebSocketMessageType inbound_type_ =
       network::mojom::WebSocketMessageType::TEXT;
+  // CV2 Gate 6 fix: set true in OnDataFrame when the final fragment
+  // (|fin|) of a message has been announced. The decode-dispatch reads
+  // it at the END of OnReadable so a message whose last bytes arrive via
+  // the pipe-readable watcher (a re-fired OnReadable, NOT a fresh
+  // OnDataFrame) is still decoded. Previously the decode lived only at
+  // the bottom of OnDataFrame, so a fragmented frame (e.g. the ~2.5 kB
+  // SDP answer) whose drain completed under the watcher was never
+  // decoded — or its buffer was clobbered by the next message's TEXT
+  // frame — and Decode() saw partial/concatenated JSON → R1 rejection.
+  bool inbound_fin_pending_ = false;
 
   SEQUENCE_CHECKER(sequence_checker_);
   base::WeakPtrFactory<SignalingWsClient> weak_factory_{this};
