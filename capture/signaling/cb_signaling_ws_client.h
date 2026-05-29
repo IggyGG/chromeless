@@ -70,6 +70,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -261,11 +262,17 @@ class SignalingWsClient
                      const std::string& reason) override;
   void OnClosingHandshake() override;
 
-  // Drain the readable data pipe into |inbound_buffer_|, then attempt
-  // a single envelope decode when |inbound_remaining_| reaches zero.
-  // Re-armed by the OnDataFrame callback; the watcher fires on
-  // pipe-readable signal between frames.
+  // Watcher callback: re-enters the single drain site. Re-armed by the
+  // OnDataFrame callback; the watcher fires on pipe-readable signal.
   void OnReadable(MojoResult result);
+
+  // Drain |readable_| into the in-flight message, frame by frame, in order,
+  // reading EXACTLY each queued frame's length. Single drain site, called
+  // from both OnDataFrame and OnReadable.
+  void ConsumePendingFrames();
+  // Dispatch (on fin) the fully-assembled message, or continue accumulating
+  // (on non-fin). Resets inbound_message_ after a successful decode.
+  void FinishFrame(bool fin);
 
   // Write |payload| to the websocket as a single text message. The
   // chromium API is two-stage: SendMessage(type, len) on the WebSocket
@@ -301,25 +308,40 @@ class SignalingWsClient
   mojo::ScopedDataPipeConsumerHandle readable_;
   mojo::ScopedDataPipeProducerHandle writable_;
 
-  // Inbound assembly. WebSocket frames can be fragmented; we
-  // accumulate payload bytes until a frame's announced data_len has
-  // arrived in full, then decode the envelope and reset. Signaling
-  // traffic is small JSON (low-kB envelopes), so a single growing
-  // std::string is the right shape.
-  std::string inbound_buffer_;
-  uint64_t inbound_remaining_ = 0;
-  network::mojom::WebSocketMessageType inbound_type_ =
-      network::mojom::WebSocketMessageType::TEXT;
-  // CV2 Gate 6 fix: set true in OnDataFrame when the final fragment
-  // (|fin|) of a message has been announced. The decode-dispatch reads
-  // it at the END of OnReadable so a message whose last bytes arrive via
-  // the pipe-readable watcher (a re-fired OnReadable, NOT a fresh
-  // OnDataFrame) is still decoded. Previously the decode lived only at
-  // the bottom of OnDataFrame, so a fragmented frame (e.g. the ~2.5 kB
-  // SDP answer) whose drain completed under the watcher was never
-  // decoded — or its buffer was clobbered by the next message's TEXT
-  // frame — and Decode() saw partial/concatenated JSON → R1 rejection.
-  bool inbound_fin_pending_ = false;
+  // Inbound assembly — mirrors blink::WebSocketChannelImpl
+  // (third_party/blink/renderer/modules/websockets/websocket_channel_impl.cc).
+  //
+  // The network service announces each inbound FRAME via OnDataFrame
+  // (fin/type/data_length) and, SEPARATELY and ASYNCHRONOUSLY, streams the
+  // frame bytes into |readable_|. A new message's OnDataFrame can arrive
+  // before the prior message's bytes have drained from the pipe — the
+  // net-service read loop delivers a multi-frame socket read as a batch and
+  // calls OnDataFrame for every frame back-to-back; pipe back-pressure only
+  // gates BETWEEN socket reads, not within a batch (see
+  // services/network/websocket.cc:356 +
+  // net/websockets/websocket_channel.cc:615). So when the ~2.5 kB SDP answer
+  // and a ~210 B ice land in one socket read, both OnDataFrames fire before
+  // either drains and the pipe holds answer‖ice in FIFO order.
+  //
+  // We therefore track frames individually and read EXACTLY each frame's
+  // announced length — never a running total across frames, or back-to-back
+  // messages conflate and Decode() sees concatenated/partial JSON (the
+  // intermittent "R1 Decode() rejected inbound frame"). The prior single
+  // inbound_buffer_/inbound_remaining_/inbound_fin_pending_ model could not
+  // represent two frames whose announcements both arrive before either drains.
+  struct InboundFrame {
+    bool fin;
+    network::mojom::WebSocketMessageType type;
+    uint64_t data_length;  // remaining unread bytes of THIS frame
+  };
+  // FIFO of announced-but-not-yet-fully-drained frames.
+  std::queue<InboundFrame> pending_frames_;
+  // Accumulated payload of the message currently under reassembly (across its
+  // CONTINUATION frames). Decoded + cleared on the fin frame.
+  std::string inbound_message_;
+  // True between a TEXT first-frame and its fin frame: a CONTINUATION is only
+  // legal while this holds; a TEXT while it holds is overlapping-message abuse.
+  bool receiving_message_ = false;
 
   SEQUENCE_CHECKER(sequence_checker_);
   base::WeakPtrFactory<SignalingWsClient> weak_factory_{this};
