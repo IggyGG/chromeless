@@ -468,24 +468,32 @@ void SignalingWsClient::OnDataFrame(
   if (type == network::mojom::WebSocketMessageType::TEXT) {
     inbound_buffer_.clear();
     inbound_type_ = type;
+    inbound_fin_pending_ = false;
   }
   inbound_remaining_ += data_len;
+  // |fin| signals this is the last fragment of the message. Latch it so
+  // the decode-dispatch in OnReadable fires once the drain completes —
+  // even when the final bytes arrive via the pipe-readable watcher (a
+  // re-fired OnReadable) rather than this OnDataFrame call. (CV2 Gate 6
+  // large-frame reassembly fix.)
+  if (fin) {
+    inbound_fin_pending_ = true;
+  }
+
+  VLOG(1) << "cb_signaling: OnDataFrame fin=" << fin
+          << " type=" << (type == network::mojom::WebSocketMessageType::TEXT
+                              ? "TEXT"
+                              : "CONT")
+          << " data_len=" << data_len
+          << " remaining=" << inbound_remaining_
+          << " buffered=" << inbound_buffer_.size();
 
   // Read pump — drain whatever bytes are currently in the readable
-  // pipe. The pipe-watcher re-arms us on additional data.
+  // pipe, then decode if the message is complete. The pipe-watcher
+  // re-arms OnReadable on additional data; the decode now lives THERE
+  // (single-sited) so partial drains that finish under the watcher are
+  // handled identically to ones that finish synchronously here.
   OnReadable(MOJO_RESULT_OK);
-
-  // |fin| signals "this is the last fragment". When we've also
-  // drained all announced bytes, decode + dispatch.
-  if (fin && inbound_remaining_ == 0) {
-    std::optional<Envelope> env = Decode(inbound_buffer_);
-    if (!env.has_value()) {
-      FailWithError("R1 Decode() rejected inbound frame");
-      return;
-    }
-    observer_->OnEnvelope(*env);
-    inbound_buffer_.clear();
-  }
 }
 
 void SignalingWsClient::OnDropChannel(bool was_clean,
@@ -529,8 +537,7 @@ void SignalingWsClient::OnClosingHandshake() {
 
 void SignalingWsClient::OnReadable(MojoResult /*result*/) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (state_ != State::kOpen || !readable_.is_valid() ||
-      inbound_remaining_ == 0) {
+  if (state_ != State::kOpen || !readable_.is_valid()) {
     return;
   }
 
@@ -550,8 +557,10 @@ void SignalingWsClient::OnReadable(MojoResult /*result*/) {
     MojoResult res =
         readable_->BeginReadData(MOJO_READ_DATA_FLAG_NONE, buffer);
     if (res == MOJO_RESULT_SHOULD_WAIT) {
-      // No more bytes right now — chromium will re-fire OnDataFrame
-      // / the pipe-readable watcher when more arrive.
+      // No more bytes right now — chromium re-fires this OnReadable via
+      // the pipe-readable watcher when more arrive. The decode-dispatch
+      // below is NOT reached yet (inbound_remaining_ still > 0), so a
+      // partially-drained message is left intact for the next fire.
       return;
     }
     if (res != MOJO_RESULT_OK) {
@@ -564,6 +573,26 @@ void SignalingWsClient::OnReadable(MojoResult /*result*/) {
         reinterpret_cast<const char*>(buffer.data()), take);
     inbound_remaining_ -= take;
     readable_->EndReadData(take);
+  }
+
+  // Drain complete (inbound_remaining_ == 0). Decode + dispatch ONLY if
+  // the final fragment has been announced (inbound_fin_pending_). This
+  // is the single decode site (CV2 Gate 6 fix): it fires whether the
+  // last bytes were drained synchronously inside OnDataFrame's
+  // OnReadable() call OR later by the pipe-readable watcher re-firing
+  // this method. A multi-fragment message (e.g. the ~2.5 kB SDP answer)
+  // whose tail arrived under the watcher used to be left undecoded /
+  // its buffer clobbered by the next message's TEXT frame, so Decode()
+  // saw partial or concatenated JSON and rejected it (R1 Decode).
+  if (inbound_fin_pending_) {
+    inbound_fin_pending_ = false;
+    std::optional<Envelope> env = Decode(inbound_buffer_);
+    inbound_buffer_.clear();
+    if (!env.has_value()) {
+      FailWithError("R1 Decode() rejected inbound frame");
+      return;
+    }
+    observer_->OnEnvelope(*env);
   }
 }
 
