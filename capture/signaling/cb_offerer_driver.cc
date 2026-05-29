@@ -137,6 +137,25 @@ void CbOffererDriver::Start() {
   // bundles the PeerConnectionObserver (and optional allocator /
   // cert_generator / async-resolver, all left at defaults here).
   webrtc::PeerConnectionDependencies pc_dependencies(/*observer=*/this);
+  // CV2-ICE observability: log the EXACT IceServers + transport policy
+  // handed to the PeerConnection right before creation. The Gate 6 ICE
+  // stall is the guest never creating a TurnPort; this confirms whether
+  // the credentialed TURN server actually survives into rtc_config the
+  // BasicPortAllocator sees (urls + has-username + has-credential), vs
+  // being dropped/stripped before allocation.
+  LOG(INFO) << kLogPrefix << "CV2-ICE PC config: type="
+            << static_cast<int>(ice_config_.type)
+            << " servers=" << ice_config_.servers.size();
+  for (const auto& srv : ice_config_.servers) {
+    std::string urls;
+    for (const auto& u : srv.urls) {
+      if (!urls.empty()) urls += ",";
+      urls += u;
+    }
+    LOG(INFO) << kLogPrefix << "CV2-ICE   server urls=[" << urls
+              << "] has_username=" << (!srv.username.empty())
+              << " has_credential=" << (!srv.password.empty());
+  }
   webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::PeerConnectionInterface>>
       pc_or_error = pcf_->CreatePeerConnectionOrError(
           ice_config_, std::move(pc_dependencies));
@@ -285,13 +304,24 @@ void CbOffererDriver::OnIceCandidate(
   // IceCandidateInterface::Clone() instead, swap to that — it
   // preserves the username_fragment + tcptype fields the
   // sdp_mid/mline_index/candidate-string ctor drops.
+  // CV2-ICE observability: the deployed build never emits a relay
+  // candidate (Gate 6 ICE stall — guest stuck on host candidates only).
+  // Log every gathered candidate at INFO so the guest chromeless.log
+  // shows its full SDP a-line (typ host / srflx / relay). Seeing only
+  // host/srflx here (and never relay) confirms the TurnPort is never
+  // created; a relay line would mean gathering works and the drop is
+  // downstream.
+  LOG(INFO) << kLogPrefix << "CV2-ICE OnIceCandidate mid="
+            << candidate->sdp_mid()
+            << " mline=" << candidate->sdp_mline_index()
+            << " sdp=[" << candidate->candidate() << "]";
   std::unique_ptr<webrtc::IceCandidateInterface> cloned(
       webrtc::CreateIceCandidate(candidate->sdp_mid(),
                                  candidate->sdp_mline_index(),
                                  candidate->candidate()));
   if (!cloned) {
-    VLOG(1) << kLogPrefix
-            << "OnIceCandidate clone failed; dropping candidate";
+    LOG(INFO) << kLogPrefix
+              << "CV2-ICE OnIceCandidate clone failed; dropping candidate";
     return;
   }
   ui_runner_->PostTask(
@@ -302,6 +332,9 @@ void CbOffererDriver::OnIceCandidate(
 
 void CbOffererDriver::OnIceGatheringChange(
     webrtc::PeerConnectionInterface::IceGatheringState new_state) {
+  // CV2-ICE observability: New→Gathering→Complete transitions at INFO.
+  LOG(INFO) << kLogPrefix << "CV2-ICE OnIceGatheringChange state="
+            << static_cast<int>(new_state);
   ui_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(&CbOffererDriver::HopHandleIceGatheringChange,
