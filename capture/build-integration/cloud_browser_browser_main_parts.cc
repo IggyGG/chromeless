@@ -25,6 +25,8 @@
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
+#include "base/timer/timer.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
 #include "capture/build-integration/cloud_browser_browser_context.h"
@@ -62,6 +64,7 @@
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/compositor/compositor.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/gfx/geometry/rect.h"
@@ -201,6 +204,23 @@ CloudBrowserBrowserMainParts::cb_track_source() const {
   return cb_track_source_.get();
 }
 
+void CloudBrowserBrowserMainParts::ScheduleCompositorKeepaliveRedraw() {
+  // Force the offscreen root UI compositor to redraw so the viz Display
+  // swaps and emits presentation-feedback (SWAP_ACK) for the renderer's
+  // per-frame frame_tokens. Without this, FrameSinkVideoCapturer copy
+  // requests draw-but-don't-swap the steady-state offscreen surface, so
+  // those frame_tokens never present-ack and their Blink presentation-
+  // time callbacks orphan in LayerTreeView's no-eviction deque, FATAL-
+  // DCHECKing at layer_tree_view.cc:574 (>60) ~2.5min into a session.
+  if (!aura_) {
+    return;
+  }
+  ui::Compositor* compositor = aura_->host()->compositor();
+  if (compositor) {
+    compositor->ScheduleFullRedraw();
+  }
+}
+
 namespace {
 
 // Internal default display geometry. Matches the Xvfb resolution the
@@ -329,6 +349,20 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   //     drop input on the floor.
   initial_web_contents_->WasShown();
   initial_web_contents_->Focus();
+
+  // CV2-ICE / Gate-6: start the compositor keepalive redraw. The
+  // FrameSinkVideoCapturer draws-but-doesn't-swap the offscreen Display
+  // when the root surface has no on-screen damage, orphaning Blink's
+  // per-frame presentation-time callbacks until they FATAL-DCHECK at 60
+  // (layer_tree_view.cc:574). Forcing a full redraw at the capture frame
+  // interval keeps the Display swapping + present-acking so the deque
+  // drains. ~60fps (16ms) covers the capturer's max rate; the cost is an
+  // unviewed software blit. See ScheduleCompositorKeepaliveRedraw.
+  compositor_keepalive_timer_.Start(
+      FROM_HERE, base::Milliseconds(16),
+      base::BindRepeating(
+          &CloudBrowserBrowserMainParts::ScheduleCompositorKeepaliveRedraw,
+          base::Unretained(this)));
 
   // BUGS-529 diagnostic — confirms the smoking-gun pattern is closed.
   // Pre-fix expectation: HasFocus=false, ViewBounds=0x0.

@@ -1105,6 +1105,10 @@ source_set("embedder") {
     # the headless versions.
     "//ui/aura",
     "//ui/base",
+    # cloud_browser_browser_main_parts.cc calls aura_->host()->compositor()
+    # ->ScheduleFullRedraw() (the Gate-6 presentation-callback drain fix);
+    # the direct #include "ui/compositor/compositor.h" needs the direct dep.
+    "//ui/compositor",
     # cloud_browser_browser_main_parts.cc creates a CbHeadlessScreen
     # (display::ScreenBase subclass) so chromium's Screen::Get() returns
     # non-null AND aura's pre-SetCursor gate (IsWindowUnderCursor) does
