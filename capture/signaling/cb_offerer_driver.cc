@@ -311,10 +311,14 @@ void CbOffererDriver::OnIceCandidate(
   // host/srflx here (and never relay) confirms the TurnPort is never
   // created; a relay line would mean gathering works and the drop is
   // downstream.
-  LOG(INFO) << kLogPrefix << "CV2-ICE OnIceCandidate mid="
-            << candidate->sdp_mid()
-            << " mline=" << candidate->sdp_mline_index()
-            << " sdp=[" << candidate->candidate() << "]";
+  {
+    std::string cand_sdp;
+    candidate->ToString(&cand_sdp);
+    LOG(INFO) << kLogPrefix << "CV2-ICE OnIceCandidate mid="
+              << candidate->sdp_mid()
+              << " mline=" << candidate->sdp_mline_index()
+              << " sdp=[" << cand_sdp << "]";
+  }
   std::unique_ptr<webrtc::IceCandidateInterface> cloned(
       webrtc::CreateIceCandidate(candidate->sdp_mid(),
                                  candidate->sdp_mline_index(),
