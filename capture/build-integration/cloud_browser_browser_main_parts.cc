@@ -1157,14 +1157,21 @@ class CbOutboundRtpStatsLogger : public webrtc::RTCStatsCollectorCallback {
 }  // namespace
 
 void CloudBrowserBrowserMainParts::PollOutboundRtpStats() {
-  if (!offerer_driver_ || !offerer_driver_->pc()) {
+  if (!offerer_driver_) {
     return;
   }
-  // GetStats is async + thread-safe; libwebrtc AddRefs the callback and
-  // releases it after OnStatsDelivered, so a transient ref-counted sink
-  // is the right ownership shape (mirrors the SDP-observer adapters).
+  // GetStats' callback delivery is async + thread-safe, but the
+  // PeerConnection *proxy* dispatch does a blocking thread-hop to the
+  // signaling thread. This poll runs on the UI thread (driven by
+  // rtp_stats_timer_, armed from OnIceConnectionStateChanged which
+  // CbOffererDriver delivers on the UI thread via its ui_runner_),
+  // where chromium installs a per-task DisallowBaseSyncPrimitives — so
+  // calling pc()->GetStats() directly from here trips the DCHECK and
+  // FATALs the worker the instant ICE connects (thread_restrictions.cc:166).
+  // Route through the driver, which marshals onto signaling_thread_ with
+  // a scoped_refptr capture that keeps the PC alive across the async call.
   auto sink = webrtc::make_ref_counted<CbOutboundRtpStatsLogger>();
-  offerer_driver_->pc()->GetStats(sink.get());
+  offerer_driver_->PollOutboundStats(sink);
 }
 
 void CloudBrowserBrowserMainParts::OnRenegotiationStarted(

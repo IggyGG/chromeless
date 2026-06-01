@@ -205,6 +205,22 @@ webrtc::PeerConnectionInterface* CbOffererDriver::pc() const {
   return pc_.get();
 }
 
+void CbOffererDriver::PollOutboundStats(
+    webrtc::scoped_refptr<webrtc::RTCStatsCollectorCallback> callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!pc_ || !signaling_thread_ || !callback) {
+    return;
+  }
+  // Same marshaling discipline as CreateOffer / SetLocalDescription /
+  // AddIceCandidate above: hop onto signaling_thread_ so the PC proxy's
+  // blocking dispatch does NOT run under the UI thread's
+  // DisallowBaseSyncPrimitives. Capture [pc = pc_] (a scoped_refptr) so
+  // the PeerConnection stays alive across the async GetStats call even
+  // if teardown races; libwebrtc holds callback alive until OnStatsDelivered.
+  signaling_thread_->PostTask(
+      [pc = pc_, callback]() { pc->GetStats(callback.get()); });
+}
+
 // ---------------------------------------------------------------------
 // SignalingClientObserver (inbound from ws client, already on UI thread)
 // ---------------------------------------------------------------------

@@ -370,6 +370,18 @@ class CbOffererDriver
   // driver and external mutation races the offerer dance — don't.
   webrtc::PeerConnectionInterface* pc() const;
 
+  // Marshaled PeerConnection::GetStats(). The embedder's RTP-stats poll
+  // runs on the UI thread (driven by a RepeatingTimer), where chromium's
+  // per-task DisallowBaseSyncPrimitives is installed; calling pc()->GetStats
+  // directly from there trips the proxy's blocking thread-hop DCHECK and
+  // FATALs the worker (thread_restrictions.cc:166) the instant ICE connects.
+  // Routing through the driver keeps GetStats on signaling_thread_ with the
+  // same [pc = pc_] ref-capture discipline as every other PC proxy call here,
+  // so the scoped_refptr keeps the PC alive across the async stats delivery.
+  // No-op if the PC is gone.
+  void PollOutboundStats(
+      webrtc::scoped_refptr<webrtc::RTCStatsCollectorCallback> callback);
+
   // SignalingClientObserver — inbound from the ws client. Already on
   // the UI thread per the M3 R2 contract.
   //
