@@ -95,8 +95,22 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
         &CloudBrowserBrowserMainParts::cb_track_source,
         base::Unretained(main_parts_));
   }
+  // CV2-95: same lazy Unretained(main_parts_) getter for the active-
+  // WebContents resolver, so Cb.startFrameSinkCapture can call
+  // SetActiveCapture() on it at capture-start. main_parts out-lives the
+  // delegate's useful window (getter Run() only during an active CDP
+  // session), the identical lifetime assumption track_source_getter
+  // already relies on. Empty getter (main_parts_ null) → the delegate
+  // skips SetActiveCapture (capture still runs) rather than UAFing.
+  base::RepeatingCallback<CbActiveWebContentsResolver*()> resolver_getter;
+  if (main_parts_) {
+    resolver_getter = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::active_webcontents_resolver,
+        base::Unretained(main_parts_));
+  }
   return std::make_unique<CbDevToolsManagerDelegate>(
-      default_context, aura_context, std::move(track_source_getter));
+      default_context, aura_context, std::move(track_source_getter),
+      std::move(resolver_getter));
 }
 
 }  // namespace cloud_browser

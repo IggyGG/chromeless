@@ -67,6 +67,7 @@ namespace cloud_browser {
 
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
+class CbActiveWebContentsResolver;
 
 // Routes the Cb.startFrameSinkCapture CDP method into the
 // browser-process-owned CloudBrowserFrameSinkVideoTrackSource (held by
@@ -123,11 +124,23 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // aura_context_window_ raw snapshots already rely on. A null/empty
   // getter, or a getter that returns nullptr, yields a ServerError
   // envelope rather than a UAF.
+  // |resolver_getter| LAZILY resolves the browser-process-owned
+  // CbActiveWebContentsResolver (CV2-95) at Cb.startFrameSinkCapture
+  // DISPATCH time, using the SAME Unretained(main_parts_) lifetime
+  // contract as track_source_getter. After a successful StartCapture the
+  // handler Runs this getter and calls SetActiveCapture(web_contents,
+  // frame_sink_id) on the resolver — closing the gap where the M4 input
+  // dispatchers' GetActiveWebContents() always returned nullptr (no call
+  // site populated the resolver) and every input event was dropped. A
+  // null/empty getter, or one returning nullptr, simply skips the
+  // SetActiveCapture call (capture still starts) rather than UAFing.
   explicit CbDevToolsManagerDelegate(
       content::BrowserContext* default_browser_context = nullptr,
       aura::Window* aura_context_window = nullptr,
       base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
-          track_source_getter = {});
+          track_source_getter = {},
+      base::RepeatingCallback<CbActiveWebContentsResolver*()>
+          resolver_getter = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -234,6 +247,12 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // forward the producer remote" trampoline.
   base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
       track_source_getter_;
+
+  // CV2-95: lazy getter for the active-WebContents resolver, mirroring
+  // track_source_getter_'s Unretained(main_parts_) lifetime contract.
+  // Run() at Cb.startFrameSinkCapture dispatch time to call
+  // SetActiveCapture() after a successful StartCapture.
+  base::RepeatingCallback<CbActiveWebContentsResolver*()> resolver_getter_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser

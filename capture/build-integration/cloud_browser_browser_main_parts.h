@@ -186,6 +186,18 @@ class CloudBrowserBrowserMainParts
   // need to pull in the track-source class definition.
   CloudBrowserFrameSinkVideoTrackSource* cb_track_source() const;
 
+  // CV2-95: the active-WebContents resolver that M4's input dispatchers
+  // consult on every event (via GetActiveWebContents()). Exposed so the
+  // Cb.startFrameSinkCapture handler can call SetActiveCapture() on it
+  // at capture-start time — the contract cb_active_webcontents_resolver.h
+  // names as "the single authority that calls SetActiveCapture()".
+  // Reached by CbDevToolsManagerDelegate through the same lazy
+  // Unretained(main_parts_) getter pattern as cb_track_source(), so the
+  // resolver-population is wired to capture-start without the delegate
+  // holding a raw main_parts pointer. Returns the address of the value
+  // member active_webcontents_resolver_ (stable for the worker lifetime).
+  CbActiveWebContentsResolver* active_webcontents_resolver();
+
  private:
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
   // and starts content::DevToolsAgentHost::StartRemoteDebuggingServer

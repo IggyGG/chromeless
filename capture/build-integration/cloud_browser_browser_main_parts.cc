@@ -208,6 +208,16 @@ CloudBrowserBrowserMainParts::cb_track_source() const {
   return cb_track_source_.get();
 }
 
+CbActiveWebContentsResolver*
+CloudBrowserBrowserMainParts::active_webcontents_resolver() {
+  // CV2-95: address of the value member. Always non-null (the member is
+  // constructed for the lifetime of main_parts); the resolver itself
+  // null-checks its internal active_ WebContents. The delegate Runs this
+  // via Unretained(main_parts_) at Cb.startFrameSinkCapture dispatch time
+  // to call SetActiveCapture() — see cb_devtools_agent.cc.
+  return &active_webcontents_resolver_;
+}
+
 void CloudBrowserBrowserMainParts::ScheduleCompositorKeepaliveRedraw() {
   // Force the offscreen root UI compositor to redraw so the viz Display
   // swaps and emits presentation-feedback (SWAP_ACK) for the renderer's

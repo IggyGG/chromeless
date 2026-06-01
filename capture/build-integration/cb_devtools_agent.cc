@@ -50,6 +50,7 @@
 
 #include "base/functional/callback.h"
 #include "base/logging.h"
+#include "capture/build-integration/cb_active_webcontents_resolver.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/surfaces/video_capture_target.h"
@@ -112,8 +113,10 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     content::BrowserContext* default_browser_context,
     aura::Window* aura_context_window,
     base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
-        track_source_getter)
+        track_source_getter,
+    base::RepeatingCallback<CbActiveWebContentsResolver*()> resolver_getter)
     : track_source_getter_(std::move(track_source_getter)),
+      resolver_getter_(std::move(resolver_getter)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
   // NOTE: we deliberately do NOT Run() the getter here. CV2-69
@@ -283,6 +286,37 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
 
   LOG(INFO) << "Cb.startFrameSinkCapture: track-source pass-through started "
             << "capture on " << frame_sink_id.ToString();
+
+  // CV2-95: tell the active-WebContents resolver which WebContents is now
+  // being captured. This is the call site cb_active_webcontents_resolver.h
+  // names as "the single authority that calls SetActiveCapture()" — and
+  // which, prior to this fix, did not exist ANYWHERE in the tree. Without
+  // it the resolver's active_ WebContents stays null, so the M4 input
+  // dispatchers (R3 mouse … R8 clipboard) all hit their
+  // GetActiveWebContents()==nullptr "dropped — no active WebContents"
+  // branch and silently discard every event. The capture-start path is
+  // exactly where the resolver expects to be told (capture-selection is
+  // M2's call; the resolver is told the answer). web_contents and
+  // frame_sink_id are already resolved locally above. The resolver is
+  // reached via the lazy Unretained(main_parts_) getter (same lifetime
+  // contract as track_source_getter_); an absent getter or null resolver
+  // simply skips this — capture still runs.
+  if (resolver_getter_) {
+    if (CbActiveWebContentsResolver* resolver = resolver_getter_.Run()) {
+      resolver->SetActiveCapture(web_contents, frame_sink_id);
+    } else {
+      LOG(WARNING) << "Cb.startFrameSinkCapture: resolver getter returned "
+                      "null — input dispatch will drop events (no active "
+                      "WebContents). Check CreateDevToolsManagerDelegate "
+                      "resolver wiring.";
+    }
+  } else {
+    LOG(WARNING) << "Cb.startFrameSinkCapture: no resolver getter wired — "
+                    "input dispatch will drop events (no active WebContents). "
+                    "Check CreateDevToolsManagerDelegate against "
+                    "CloudBrowserBrowserMainParts::active_webcontents_resolver()"
+                    ".";
+  }
 
   return EncodeStartResponse(frame_sink_id.ToString());
 }
