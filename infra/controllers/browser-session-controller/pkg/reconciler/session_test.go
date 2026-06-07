@@ -376,11 +376,19 @@ func TestSession_TriformPatternCNativeSignalingColdStartsWhenAutostartDisabled(t
 }
 
 func TestNativeSignalingEndpointParsesStagingServiceURL(t *testing.T) {
-	host, tls, ok := nativeSignalingEndpoint("ws://triform.triform-staging.svc.cluster.local:3000/api/webrtc/signaling")
+	host, tls, ok := nativeSignalingEndpointFromLookup(
+		"ws://triform.triform-staging.svc.cluster.local:3000/api/webrtc/signaling",
+		func(name string) ([]string, error) {
+			if name != "triform.triform-staging.svc.cluster.local" {
+				t.Fatalf("unexpected lookup name %q", name)
+			}
+			return []string{"10.105.122.49"}, nil
+		},
+	)
 	if !ok {
 		t.Fatal("expected staging service URL to parse")
 	}
-	if host != "triform.triform-staging.svc.cluster.local:3000" {
+	if host != "10.105.122.49:3000" {
 		t.Fatalf("host = %q", host)
 	}
 	if tls != "0" {
