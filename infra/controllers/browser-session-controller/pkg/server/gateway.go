@@ -43,14 +43,16 @@ type SessionGateway struct {
 }
 
 type mintRequest struct {
-	TenantID           string `json:"tenant_id"`
-	ElementID          string `json:"element_id"`
-	PoolName           string `json:"pool_name"`
-	Region             string `json:"region"`
-	IdleTimeoutSeconds int32  `json:"idle_timeout_seconds"`
-	SignalingSessionID string `json:"signaling_session_id"`
-	SignalingURL       string `json:"signaling_url"`
-	SignalingToken     string `json:"signaling_token"`
+	TenantID           string          `json:"tenant_id"`
+	ElementID          string          `json:"element_id"`
+	PoolName           string          `json:"pool_name"`
+	Region             string          `json:"region"`
+	IdleTimeoutSeconds int32           `json:"idle_timeout_seconds"`
+	SignalingSessionID string          `json:"signaling_session_id"`
+	SignalingURL       string          `json:"signaling_url"`
+	SignalingToken     string          `json:"signaling_token"`
+	IceServers         json.RawMessage `json:"ice_servers"`
+	IceTransportPolicy string          `json:"ice_transport_policy"`
 }
 
 type sessionResponse struct {
@@ -297,6 +299,12 @@ func browserSessionFromMintRequest(req mintRequest, cfg GatewayConfig, name stri
 		cbv1.AnnotationBrokerSessionID:       brokerSessionID,
 		cbv1.AnnotationBrowserSignalingURL:   req.SignalingURL,
 		cbv1.AnnotationBrowserSignalingToken: req.SignalingToken,
+	}
+	if len(req.IceServers) > 0 && string(req.IceServers) != "null" {
+		annotations[cbv1.AnnotationBrowserIceServers] = string(req.IceServers)
+	}
+	if req.IceTransportPolicy != "" {
+		annotations[cbv1.AnnotationBrowserIceTransportPolicy] = req.IceTransportPolicy
 	}
 	return &cbv1.BrowserSession{
 		ObjectMeta: metav1.ObjectMeta{

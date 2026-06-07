@@ -271,6 +271,12 @@ const (
 	// AnnotationBrowserSignalingToken is a short-lived browser JWT for the
 	// Triform signaling broker. It is injected into the pod env on cold-start.
 	AnnotationBrowserSignalingToken = "chromeless.io/browser-signaling-token"
+	// AnnotationBrowserIceServers is the JSON ICE-server array that native
+	// cb-chromium reads as WEBRTC_ICE_SERVERS at browser-process startup.
+	AnnotationBrowserIceServers = "chromeless.io/browser-ice-servers"
+	// AnnotationBrowserIceTransportPolicy is copied to
+	// WEBRTC_ICE_TRANSPORT_POLICY ("all" or "relay").
+	AnnotationBrowserIceTransportPolicy = "chromeless.io/browser-ice-transport-policy"
 
 	// AnonymousTenant matches signaling/auth.go's anonymousTenant
 	// constant. Two systems, same string — keep in sync if either
