@@ -81,16 +81,16 @@ spec:
         - name: run
           emptyDir:
             medium: Memory
-            sizeLimit: 64Mi
+            sizeLimit: 256Mi
         - name: supervisor-log
           emptyDir:
-            sizeLimit: 64Mi
+            sizeLimit: 256Mi
         - name: home
           emptyDir:
             sizeLimit: 512Mi
         - name: tmp
           emptyDir:
-            sizeLimit: 64Mi
+            sizeLimit: 1Gi
         - name: x11-socket
           emptyDir:
             sizeLimit: 16Mi

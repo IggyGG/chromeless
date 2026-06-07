@@ -106,21 +106,23 @@ spec:
     - name: run
       emptyDir:
         medium: Memory
-        sizeLimit: 64Mi
+        sizeLimit: 256Mi
     # /var/log/supervisor: program logs. Bytes-on-disk; small.
     - name: supervisor-log
       emptyDir:
-        sizeLimit: 64Mi
+        sizeLimit: 256Mi
     # /home/cbuser: chromium config + profile + caches. Sized for one
     # session's worth of state.
     - name: home
       emptyDir:
         sizeLimit: 512Mi
-    # /tmp: general-purpose. Nothing in the image puts large files
-    # here; 64Mi is plenty.
+    # /tmp: Chromium and the streamer write bursty scratch/cache data here;
+    # keep this comfortably above the kubelet eviction threshold seen on the
+    # static browserless pool while staying inside the pod ephemeral-storage
+    # budget.
     - name: tmp
       emptyDir:
-        sizeLimit: 64Mi
+        sizeLimit: 1Gi
     # X11 socket dir — Xvfb writes /tmp/.X11-unix/X99. Lives separate
     # from /tmp so we can mount it in containers that need the display
     # without giving them write access to all of /tmp.

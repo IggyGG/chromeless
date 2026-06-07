@@ -78,22 +78,22 @@ spec:
         - name: run
           emptyDir:
             medium: Memory
-            sizeLimit: 64Mi
+            sizeLimit: 256Mi
         - name: supervisor-log
           emptyDir:
-            sizeLimit: 64Mi
+            sizeLimit: 256Mi
         - name: home
           emptyDir:
             sizeLimit: 512Mi
         - name: tmp
           emptyDir:
-            sizeLimit: 64Mi
+            sizeLimit: 1Gi
         - name: x11-socket
           emptyDir:
             sizeLimit: 16Mi
       containers:
         - name: cb-chromium
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-8d52631d4199
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-65d65f0ade50
           imagePullPolicy: Always
           env:
             - name: SESSION_ID
