@@ -22,6 +22,7 @@ package reconciler
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -459,18 +460,55 @@ func applyAssignedSessionEnv(sess *cbv1.BrowserSession, pod *corev1.Pod) {
 }
 
 func nativeSignalingEndpoint(raw string) (host string, tls string, ok bool) {
+	return nativeSignalingEndpointFromLookup(raw, net.LookupHost)
+}
+
+func nativeSignalingEndpointFromLookup(raw string, lookupHost func(string) ([]string, error)) (host string, tls string, ok bool) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return "", "", false
 	}
+	host = u.Host
+	if lookupHost != nil {
+		host = resolveNativeSignalingHost(host, lookupHost)
+	}
 	switch strings.ToLower(u.Scheme) {
 	case "wss", "https":
-		return u.Host, "1", true
+		return host, "1", true
 	case "ws", "http":
-		return u.Host, "0", true
+		return host, "0", true
 	default:
 		return "", "", false
 	}
+}
+
+func resolveNativeSignalingHost(host string, lookupHost func(string) ([]string, error)) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return host
+	}
+
+	name := host
+	port := ""
+	if parsedHost, parsedPort, err := net.SplitHostPort(host); err == nil {
+		name = parsedHost
+		port = parsedPort
+	}
+
+	// Native Chromium has repeatedly failed to resolve Kubernetes service DNS
+	// names even when getent/curl work in the same pod. Keep the BrowserSession
+	// annotation readable, but inject an IP:port into WEBRTC_SIGNALING_HOST for
+	// in-cluster service URLs so the browser process bypasses that resolver path.
+	if strings.HasSuffix(name, ".svc.cluster.local") {
+		if ips, err := lookupHost(name); err == nil && len(ips) > 0 && ips[0] != "" {
+			name = ips[0]
+		}
+	}
+
+	if port == "" {
+		return name
+	}
+	return net.JoinHostPort(name, port)
 }
 
 func upsertEnv(container *corev1.Container, name, value string) {
