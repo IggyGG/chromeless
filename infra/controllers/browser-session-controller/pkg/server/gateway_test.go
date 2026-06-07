@@ -53,6 +53,8 @@ func TestGatewayCreateSessionStampsPatternCAnnotations(t *testing.T) {
 		SignalingSessionID: "cb:11111111-2222-3333-4444-555555555555",
 		SignalingURL:       "ws://triform.triform-wtf.svc.cluster.local:3000/api/webrtc/signaling",
 		SignalingToken:     "browser-jwt",
+		IceServers:         json.RawMessage(`[{"urls":["stun:stun.example.com:3478"]},{"urls":["turn:turn.example.com:3478?transport=udp"],"username":"1700000000:session","credential":"signed"}]`),
+		IceTransportPolicy: "relay",
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -92,6 +94,12 @@ func TestGatewayCreateSessionStampsPatternCAnnotations(t *testing.T) {
 	}
 	if sess.Annotations[cbv1.AnnotationBrowserSignalingToken] != body.SignalingToken {
 		t.Fatalf("signaling token annotation = %q", sess.Annotations[cbv1.AnnotationBrowserSignalingToken])
+	}
+	if sess.Annotations[cbv1.AnnotationBrowserIceServers] != string(body.IceServers) {
+		t.Fatalf("ice servers annotation = %q", sess.Annotations[cbv1.AnnotationBrowserIceServers])
+	}
+	if sess.Annotations[cbv1.AnnotationBrowserIceTransportPolicy] != body.IceTransportPolicy {
+		t.Fatalf("ice transport policy annotation = %q", sess.Annotations[cbv1.AnnotationBrowserIceTransportPolicy])
 	}
 }
 

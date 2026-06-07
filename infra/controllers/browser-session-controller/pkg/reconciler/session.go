@@ -455,6 +455,12 @@ func applyAssignedSessionEnv(sess *cbv1.BrowserSession, pod *corev1.Pod) {
 			upsertEnv(&pod.Spec.Containers[i], "SIGNALING_TOKEN", v)
 			upsertEnv(&pod.Spec.Containers[i], "WEBRTC_SIGNALING_TOKEN", v)
 		}
+		if v := sess.Annotations[cbv1.AnnotationBrowserIceServers]; v != "" {
+			upsertEnv(&pod.Spec.Containers[i], "WEBRTC_ICE_SERVERS", v)
+		}
+		if v := sess.Annotations[cbv1.AnnotationBrowserIceTransportPolicy]; v != "" {
+			upsertEnv(&pod.Spec.Containers[i], "WEBRTC_ICE_TRANSPORT_POLICY", v)
+		}
 		return
 	}
 }
