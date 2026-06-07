@@ -157,6 +157,13 @@ func (g *SessionGateway) handleSessions(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, fmt.Sprintf("update session: %v", err), http.StatusInternalServerError)
 			return
 		}
+		if isTerminalSession(sess) {
+			resetSessionForReuse(sess)
+			if err := g.Client.Status().Update(r.Context(), sess); err != nil {
+				http.Error(w, fmt.Sprintf("reset terminal session: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	ready, err := g.waitForReady(r.Context(), key, cfg.ReadyWait)
@@ -311,6 +318,16 @@ func tenantForSpec(tenant string) string {
 		return cbv1.AnonymousTenant
 	}
 	return tenant
+}
+
+func isTerminalSession(sess *cbv1.BrowserSession) bool {
+	return sess.Status.Phase == cbv1.SessionEnded
+}
+
+func resetSessionForReuse(sess *cbv1.BrowserSession) {
+	sess.Status = cbv1.BrowserSessionStatus{
+		Phase: cbv1.SessionPending,
+	}
 }
 
 var invalidSessionNameChars = regexp.MustCompile(`[^a-z0-9-]+`)
