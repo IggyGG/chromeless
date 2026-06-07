@@ -95,6 +95,100 @@ func TestGatewayCreateSessionStampsPatternCAnnotations(t *testing.T) {
 	}
 }
 
+func TestGatewayRevivesEndedSessionOnMint(t *testing.T) {
+	scheme := gatewayScheme(t)
+	endedAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	startedAt := metav1.NewTime(time.Now().Add(-11 * time.Minute))
+	lastActivityAt := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	existing := &cbv1.BrowserSession{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tf-11111111-2222-3333-4444-555555555555",
+			Namespace: "cb",
+			Annotations: map[string]string{
+				cbv1.AnnotationBrowserSignalingURL:   "ws://old-owner.example/api/webrtc/signaling",
+				cbv1.AnnotationBrowserSignalingToken: "old-token",
+			},
+		},
+		Spec: cbv1.BrowserSessionSpec{
+			TenantID:           "tenant-old",
+			PoolName:           "old-pool",
+			IdleTimeoutSeconds: 600,
+		},
+		Status: cbv1.BrowserSessionStatus{
+			Phase:          cbv1.SessionEnded,
+			StartedAt:      &startedAt,
+			LastActivityAt: &lastActivityAt,
+			EndedAt:        &endedAt,
+			EndReason:      "IdleTimeout",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithStatusSubresource(&cbv1.BrowserSession{}, &cbv1.BrowserSessionPool{}).
+		Build()
+	gw := &SessionGateway{
+		Client: c,
+		Scheme: scheme,
+		Config: GatewayConfig{
+			Namespace:   "cb",
+			DefaultPool: "sw-pool",
+			ReadyWait:   time.Nanosecond,
+		},
+	}
+
+	body := mintRequest{
+		TenantID:           "tenant-new",
+		ElementID:          "11111111-2222-3333-4444-555555555555",
+		IdleTimeoutSeconds: 300,
+		SignalingSessionID: "cb:11111111-2222-3333-4444-555555555555:attempt",
+		SignalingURL:       "ws://new-owner.example/api/webrtc/signaling",
+		SignalingToken:     "new-token",
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	gw.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Phase == string(cbv1.SessionEnded) {
+		t.Fatalf("gateway returned terminal phase: %+v", resp)
+	}
+
+	var got cbv1.BrowserSession
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "cb", Name: existing.Name}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != cbv1.SessionPending {
+		t.Fatalf("phase = %q, want Pending", got.Status.Phase)
+	}
+	if got.Status.EndedAt != nil || got.Status.StartedAt != nil || got.Status.LastActivityAt != nil || got.Status.EndReason != "" {
+		t.Fatalf("terminal status was not cleared: %+v", got.Status)
+	}
+	if got.Spec.TenantID != "tenant-new" || got.Spec.PoolName != "sw-pool" || got.Spec.IdleTimeoutSeconds != 300 {
+		t.Fatalf("spec was not refreshed: %+v", got.Spec)
+	}
+	if got.Annotations[cbv1.AnnotationBrowserSignalingURL] != body.SignalingURL {
+		t.Fatalf("signaling url annotation = %q", got.Annotations[cbv1.AnnotationBrowserSignalingURL])
+	}
+	if got.Annotations[cbv1.AnnotationBrowserSignalingToken] != body.SignalingToken {
+		t.Fatalf("signaling token annotation = %q", got.Annotations[cbv1.AnnotationBrowserSignalingToken])
+	}
+	if got.Annotations[cbv1.AnnotationBrokerSessionID] != body.SignalingSessionID {
+		t.Fatalf("broker session annotation = %q", got.Annotations[cbv1.AnnotationBrokerSessionID])
+	}
+}
+
 func TestResponseFromSessionPrefersDesiredSignalingURL(t *testing.T) {
 	sess := cbv1.BrowserSession{
 		ObjectMeta: metav1.ObjectMeta{
