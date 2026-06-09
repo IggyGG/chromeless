@@ -101,6 +101,8 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
 
   bool stop_called() const { return stop_called_; }
   bool start_called() const { return start_called_; }
+  int start_calls() const { return start_calls_; }
+  int change_target_calls() const { return change_target_calls_; }
 
   // viz::mojom::FrameSinkVideoCapturer:
   void SetFormat(media::VideoPixelFormat /*format*/) override {}
@@ -115,12 +117,15 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
       override {}
   void ChangeTarget(
       const std::optional<viz::VideoCaptureTarget>& /*target*/,
-      uint32_t /*sub_capture_version*/) override {}
+      uint32_t /*sub_capture_version*/) override {
+    ++change_target_calls_;
+  }
   void Start(
       mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumer> consumer,
       viz::mojom::BufferFormatPreference /*pref*/) override {
     consumer_.Bind(std::move(consumer));
     start_called_ = true;
+    ++start_calls_;
   }
   void Stop() override {
     stop_called_ = true;
@@ -160,6 +165,8 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   std::vector<FakeFrameCallbacks*> fake_callbacks_;
   bool start_called_ = false;
   bool stop_called_ = false;
+  int start_calls_ = 0;
+  int change_target_calls_ = 0;
   uint64_t ts_us_ = 0;
 };
 
@@ -320,15 +327,13 @@ TEST_F(FrameSinkCapturerTest, StopForwardsToProducer) {
   EXPECT_TRUE(producer_.stop_called());
 }
 
-TEST_F(FrameSinkCapturerTest, StartIsIdempotent) {
+TEST_F(FrameSinkCapturerTest, StartRetargetsRunningProducerWithoutRebinding) {
   capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
-  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(2, 2)));
   FlushPendingIPC();
-  // FakeProducer flips start_called_ on every Start; we only want to
-  // assert that we observe Start at least once. The relevant
-  // production behaviour is that the capturer never re-issues
-  // configuration — verified at code-review time, not here.
   EXPECT_TRUE(producer_.start_called());
+  EXPECT_EQ(1, producer_.start_calls());
+  EXPECT_EQ(2, producer_.change_target_calls());
 }
 
 }  // namespace

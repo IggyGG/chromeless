@@ -84,7 +84,8 @@ class CloudBrowserFrameSinkCapturer
                  base::TimeDelta min_capture_period);
 
   // Bind our consumer receiver, hand the remote to the producer, and
-  // call producer->Start(...). Idempotent: a second call is a no-op.
+  // call producer->Start(...). A second call retargets the running
+  // producer without rebinding the consumer.
   void Start(viz::VideoCaptureTarget target);
 
   // Tell the producer to stop. Outstanding frames in flight are
