@@ -43,14 +43,16 @@ type SessionGateway struct {
 }
 
 type mintRequest struct {
-	TenantID           string `json:"tenant_id"`
-	ElementID          string `json:"element_id"`
-	PoolName           string `json:"pool_name"`
-	Region             string `json:"region"`
-	IdleTimeoutSeconds int32  `json:"idle_timeout_seconds"`
-	SignalingSessionID string `json:"signaling_session_id"`
-	SignalingURL       string `json:"signaling_url"`
-	SignalingToken     string `json:"signaling_token"`
+	TenantID           string          `json:"tenant_id"`
+	ElementID          string          `json:"element_id"`
+	PoolName           string          `json:"pool_name"`
+	Region             string          `json:"region"`
+	IdleTimeoutSeconds int32           `json:"idle_timeout_seconds"`
+	SignalingSessionID string          `json:"signaling_session_id"`
+	SignalingURL       string          `json:"signaling_url"`
+	SignalingToken     string          `json:"signaling_token"`
+	IceServers         json.RawMessage `json:"ice_servers"`
+	IceTransportPolicy string          `json:"ice_transport_policy"`
 }
 
 type sessionResponse struct {
@@ -157,6 +159,13 @@ func (g *SessionGateway) handleSessions(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, fmt.Sprintf("update session: %v", err), http.StatusInternalServerError)
 			return
 		}
+		if isTerminalSession(sess) {
+			resetSessionForReuse(sess)
+			if err := g.Client.Status().Update(r.Context(), sess); err != nil {
+				http.Error(w, fmt.Sprintf("reset terminal session: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	ready, err := g.waitForReady(r.Context(), key, cfg.ReadyWait)
@@ -168,7 +177,7 @@ func (g *SessionGateway) handleSessions(w http.ResponseWriter, r *http.Request) 
 	if ready.Status.Phase != cbv1.SessionReady {
 		status = http.StatusAccepted
 	}
-	writeJSON(w, status, responseFromSession(ready))
+	writeJSON(w, status, responseFromMintRequest(ready, name, req))
 }
 
 func (g *SessionGateway) handleSessionByID(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +300,12 @@ func browserSessionFromMintRequest(req mintRequest, cfg GatewayConfig, name stri
 		cbv1.AnnotationBrowserSignalingURL:   req.SignalingURL,
 		cbv1.AnnotationBrowserSignalingToken: req.SignalingToken,
 	}
+	if len(req.IceServers) > 0 && string(req.IceServers) != "null" {
+		annotations[cbv1.AnnotationBrowserIceServers] = string(req.IceServers)
+	}
+	if req.IceTransportPolicy != "" {
+		annotations[cbv1.AnnotationBrowserIceTransportPolicy] = req.IceTransportPolicy
+	}
 	return &cbv1.BrowserSession{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
@@ -311,6 +326,16 @@ func tenantForSpec(tenant string) string {
 		return cbv1.AnonymousTenant
 	}
 	return tenant
+}
+
+func isTerminalSession(sess *cbv1.BrowserSession) bool {
+	return sess.Status.Phase == cbv1.SessionEnded
+}
+
+func resetSessionForReuse(sess *cbv1.BrowserSession) {
+	sess.Status = cbv1.BrowserSessionStatus{
+		Phase: cbv1.SessionPending,
+	}
 }
 
 var invalidSessionNameChars = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -343,6 +368,20 @@ func responseFromSession(sess cbv1.BrowserSession) sessionResponse {
 	// desired URL so Triform dials the owner pod that minted this session.
 	if sess.Annotations[cbv1.AnnotationBrowserSignalingURL] != "" {
 		resp.SignalingURL = sess.Annotations[cbv1.AnnotationBrowserSignalingURL]
+	}
+	return resp
+}
+
+func responseFromMintRequest(sess cbv1.BrowserSession, sessionName string, req mintRequest) sessionResponse {
+	resp := responseFromSession(sess)
+	if resp.SessionID == "" {
+		resp.SessionID = sessionName
+	}
+	// The create/update has just accepted this desired URL. The informer cache
+	// used by waitForReady may still return an already-ready object with stale
+	// annotations, so preserve the caller's owner-pinned signaling URL here.
+	if req.SignalingURL != "" {
+		resp.SignalingURL = req.SignalingURL
 	}
 	return resp
 }

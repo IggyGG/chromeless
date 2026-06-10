@@ -321,9 +321,11 @@ func TestSession_TriformPatternCNativeSignalingColdStartsWhenAutostartDisabled(t
 	pool := samplePool("default-pool", "cb", 1)
 	sess := sampleSession("tf-native-aaaaaaaa-bbbb-cccc-dddd-eeeeeeee", "cb", "default-pool", "tenant-x")
 	sess.Annotations = map[string]string{
-		cbv1.AnnotationBrokerSessionID:       "cb:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:c04be",
-		cbv1.AnnotationBrowserSignalingURL:   "wss://triform.wtf/api/webrtc/signaling",
-		cbv1.AnnotationBrowserSignalingToken: "jwt-token",
+		cbv1.AnnotationBrokerSessionID:           "cb:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:c04be",
+		cbv1.AnnotationBrowserSignalingURL:       "wss://triform.wtf/api/webrtc/signaling",
+		cbv1.AnnotationBrowserSignalingToken:     "jwt-token",
+		cbv1.AnnotationBrowserIceServers:         `[{"urls":["stun:stun.example.com:3478"]},{"urls":["turn:turn.example.com:3478?transport=udp"],"username":"1700000000:session","credential":"signed"}]`,
+		cbv1.AnnotationBrowserIceTransportPolicy: "relay",
 	}
 	warm := warmReadyPod("warm-pod-native-no-autostart", "cb", "default-pool")
 	disableStreamerAutostart(warm)
@@ -372,6 +374,33 @@ func TestSession_TriformPatternCNativeSignalingColdStartsWhenAutostartDisabled(t
 	}
 	if env["WEBRTC_SIGNALING_TLS"] != "1" {
 		t.Fatalf("WEBRTC_SIGNALING_TLS = %q", env["WEBRTC_SIGNALING_TLS"])
+	}
+	if env["WEBRTC_ICE_SERVERS"] != sess.Annotations[cbv1.AnnotationBrowserIceServers] {
+		t.Fatalf("WEBRTC_ICE_SERVERS = %q", env["WEBRTC_ICE_SERVERS"])
+	}
+	if env["WEBRTC_ICE_TRANSPORT_POLICY"] != sess.Annotations[cbv1.AnnotationBrowserIceTransportPolicy] {
+		t.Fatalf("WEBRTC_ICE_TRANSPORT_POLICY = %q", env["WEBRTC_ICE_TRANSPORT_POLICY"])
+	}
+}
+
+func TestNativeSignalingEndpointParsesStagingServiceURL(t *testing.T) {
+	host, tls, ok := nativeSignalingEndpointFromLookup(
+		"ws://triform.triform-staging.svc.cluster.local:3000/api/webrtc/signaling",
+		func(name string) ([]string, error) {
+			if name != "triform.triform-staging.svc.cluster.local" {
+				t.Fatalf("unexpected lookup name %q", name)
+			}
+			return []string{"10.105.122.49"}, nil
+		},
+	)
+	if !ok {
+		t.Fatal("expected staging service URL to parse")
+	}
+	if host != "10.105.122.49:3000" {
+		t.Fatalf("host = %q", host)
+	}
+	if tls != "0" {
+		t.Fatalf("tls = %q", tls)
 	}
 }
 

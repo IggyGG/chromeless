@@ -22,6 +22,7 @@ package reconciler
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -111,8 +113,10 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req reconcile.Request
 
 	// Ensure finalizer is present so we get a chance to drain.
 	if !controllerutil.ContainsFinalizer(&sess, SessionFinalizer) {
-		controllerutil.AddFinalizer(&sess, SessionFinalizer)
-		if err := r.Update(ctx, &sess); err != nil {
+		if err := r.updateSession(ctx, &sess, func(latest *cbv1.BrowserSession) error {
+			controllerutil.AddFinalizer(latest, SessionFinalizer)
+			return nil
+		}); err != nil {
 			return reconcile.Result{}, err
 		}
 		// Re-queue; we'll continue on the next reconcile with the
@@ -141,8 +145,9 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req reconcile.Request
 // transitionToPending sets the phase and returns immediately so the
 // next reconcile picks up the assignment.
 func (r *SessionReconciler) transitionToPending(ctx context.Context, sess *cbv1.BrowserSession) (reconcile.Result, error) {
-	sess.Status.Phase = cbv1.SessionPending
-	if err := r.Status().Update(ctx, sess); err != nil {
+	if err := r.updateSessionStatus(ctx, sess, func(latest *cbv1.BrowserSession) {
+		latest.Status.Phase = cbv1.SessionPending
+	}); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{Requeue: true}, nil
@@ -270,34 +275,11 @@ func (r *SessionReconciler) pickWarmPod(ctx context.Context, sess *cbv1.BrowserS
 
 // bindToPod labels the Pod as assigned and updates the session status.
 func (r *SessionReconciler) bindToPod(ctx context.Context, sess *cbv1.BrowserSession, pod *corev1.Pod) (reconcile.Result, error) {
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-	}
-	pod.Labels[cbv1.LabelSessionState] = cbv1.LabelSessionStateAssign
-	pod.Labels[cbv1.LabelSessionOwner] = sess.Name
-	tenant := sess.Spec.TenantID
-	if tenant == "" {
-		tenant = cbv1.AnonymousTenant
-	}
-	pod.Labels[cbv1.LabelSessionTenant] = tenant
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[cbv1.AnnotationSessionID] = string(sess.UID)
-
-	// Cold-start pods are session-owned. Warm pods are owned by their pool so
-	// the pool reconciler sees state changes and replenishes immediately; the
-	// session finalizer still drains them by chromeless.session/owner label.
-	if !hasControllerOwnerRef(pod, "BrowserSessionPool") {
-		if err := controllerutil.SetControllerReference(sess, pod, r.Scheme); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	if err := r.Update(ctx, pod); err != nil {
+	bound, err := r.assignPodToSession(ctx, sess, pod)
+	if err != nil {
 		return reconcile.Result{}, err
 	}
-
-	return r.advanceFromBoundPod(ctx, sess, pod)
+	return r.advanceFromBoundPod(ctx, sess, bound)
 }
 
 func hasControllerOwnerRef(pod *corev1.Pod, kind string) bool {
@@ -312,13 +294,107 @@ func hasControllerOwnerRef(pod *corev1.Pod, kind string) bool {
 	return false
 }
 
+func (r *SessionReconciler) assignPodToSession(ctx context.Context, sess *cbv1.BrowserSession, pod *corev1.Pod) (*corev1.Pod, error) {
+	key := client.ObjectKeyFromObject(pod)
+	latest := pod.DeepCopy()
+	var assigned corev1.Pod
+	first := true
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if !first {
+			if err := r.Get(ctx, key, latest); err != nil {
+				return err
+			}
+		}
+		first = false
+		applyPodAssignment(sess, latest)
+
+		// Cold-start pods are session-owned. Warm pods are owned by their pool so
+		// the pool reconciler sees state changes and replenishes immediately; the
+		// session finalizer still drains them by chromeless.session/owner label.
+		if !hasControllerOwnerRef(latest, "BrowserSessionPool") {
+			if err := controllerutil.SetControllerReference(sess, latest, r.Scheme); err != nil {
+				return err
+			}
+		}
+		if err := r.Update(ctx, latest); err != nil {
+			return err
+		}
+		assigned = *latest
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &assigned, nil
+}
+
+func applyPodAssignment(sess *cbv1.BrowserSession, pod *corev1.Pod) {
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[cbv1.LabelSessionState] = cbv1.LabelSessionStateAssign
+	pod.Labels[cbv1.LabelSessionOwner] = sess.Name
+	tenant := sess.Spec.TenantID
+	if tenant == "" {
+		tenant = cbv1.AnonymousTenant
+	}
+	pod.Labels[cbv1.LabelSessionTenant] = tenant
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[cbv1.AnnotationSessionID] = string(sess.UID)
+}
+
+func (r *SessionReconciler) updateSessionStatus(
+	ctx context.Context,
+	sess *cbv1.BrowserSession,
+	mutate func(*cbv1.BrowserSession),
+) error {
+	key := client.ObjectKeyFromObject(sess)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest cbv1.BrowserSession
+		if err := r.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+		mutate(&latest)
+		if err := r.Status().Update(ctx, &latest); err != nil {
+			return err
+		}
+		*sess = latest
+		return nil
+	})
+}
+
+func (r *SessionReconciler) updateSession(
+	ctx context.Context,
+	sess *cbv1.BrowserSession,
+	mutate func(*cbv1.BrowserSession) error,
+) error {
+	key := client.ObjectKeyFromObject(sess)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest cbv1.BrowserSession
+		if err := r.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+		if err := mutate(&latest); err != nil {
+			return err
+		}
+		if err := r.Update(ctx, &latest); err != nil {
+			return err
+		}
+		*sess = latest
+		return nil
+	})
+}
+
 // advanceFromBoundPod sets the session phase based on the Pod's
 // current readiness. Ready when the Pod is Ready and IP-assigned;
 // Warming otherwise.
 func (r *SessionReconciler) advanceFromBoundPod(ctx context.Context, sess *cbv1.BrowserSession, pod *corev1.Pod) (reconcile.Result, error) {
 	if !podReady(pod) || pod.Status.PodIP == "" {
-		sess.Status.Phase = cbv1.SessionWarming
-		if err := r.Status().Update(ctx, sess); err != nil {
+		if err := r.updateSessionStatus(ctx, sess, func(latest *cbv1.BrowserSession) {
+			latest.Status.Phase = cbv1.SessionWarming
+		}); err != nil {
 			return reconcile.Result{}, err
 		}
 		// Re-queue; Owns(&corev1.Pod{}) means a Pod-status update will
@@ -327,17 +403,18 @@ func (r *SessionReconciler) advanceFromBoundPod(ctx context.Context, sess *cbv1.
 	}
 
 	now := metav1.NewTime(time.Now())
-	sess.Status.Phase = cbv1.SessionReady
-	if sess.Status.StartedAt == nil {
-		sess.Status.StartedAt = &now
-	}
-	sess.Status.LastActivityAt = &now
-	sess.Status.Connection = &cbv1.SessionConnection{
-		SignalingURL: signalingURLForSession(sess),
-		PodName:      pod.Name,
-		PodIP:        pod.Status.PodIP,
-	}
-	if err := r.Status().Update(ctx, sess); err != nil {
+	if err := r.updateSessionStatus(ctx, sess, func(latest *cbv1.BrowserSession) {
+		latest.Status.Phase = cbv1.SessionReady
+		if latest.Status.StartedAt == nil {
+			latest.Status.StartedAt = &now
+		}
+		latest.Status.LastActivityAt = &now
+		latest.Status.Connection = &cbv1.SessionConnection{
+			SignalingURL: signalingURLForSession(latest),
+			PodName:      pod.Name,
+			PodIP:        pod.Status.PodIP,
+		}
+	}); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{}, nil
@@ -378,23 +455,66 @@ func applyAssignedSessionEnv(sess *cbv1.BrowserSession, pod *corev1.Pod) {
 			upsertEnv(&pod.Spec.Containers[i], "SIGNALING_TOKEN", v)
 			upsertEnv(&pod.Spec.Containers[i], "WEBRTC_SIGNALING_TOKEN", v)
 		}
+		if v := sess.Annotations[cbv1.AnnotationBrowserIceServers]; v != "" {
+			upsertEnv(&pod.Spec.Containers[i], "WEBRTC_ICE_SERVERS", v)
+		}
+		if v := sess.Annotations[cbv1.AnnotationBrowserIceTransportPolicy]; v != "" {
+			upsertEnv(&pod.Spec.Containers[i], "WEBRTC_ICE_TRANSPORT_POLICY", v)
+		}
 		return
 	}
 }
 
 func nativeSignalingEndpoint(raw string) (host string, tls string, ok bool) {
+	return nativeSignalingEndpointFromLookup(raw, net.LookupHost)
+}
+
+func nativeSignalingEndpointFromLookup(raw string, lookupHost func(string) ([]string, error)) (host string, tls string, ok bool) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return "", "", false
 	}
+	host = u.Host
+	if lookupHost != nil {
+		host = resolveNativeSignalingHost(host, lookupHost)
+	}
 	switch strings.ToLower(u.Scheme) {
 	case "wss", "https":
-		return u.Host, "1", true
+		return host, "1", true
 	case "ws", "http":
-		return u.Host, "0", true
+		return host, "0", true
 	default:
 		return "", "", false
 	}
+}
+
+func resolveNativeSignalingHost(host string, lookupHost func(string) ([]string, error)) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return host
+	}
+
+	name := host
+	port := ""
+	if parsedHost, parsedPort, err := net.SplitHostPort(host); err == nil {
+		name = parsedHost
+		port = parsedPort
+	}
+
+	// Native Chromium has repeatedly failed to resolve Kubernetes service DNS
+	// names even when getent/curl work in the same pod. Keep the BrowserSession
+	// annotation readable, but inject an IP:port into WEBRTC_SIGNALING_HOST for
+	// in-cluster service URLs so the browser process bypasses that resolver path.
+	if strings.HasSuffix(name, ".svc.cluster.local") {
+		if ips, err := lookupHost(name); err == nil && len(ips) > 0 && ips[0] != "" {
+			name = ips[0]
+		}
+	}
+
+	if port == "" {
+		return name
+	}
+	return net.JoinHostPort(name, port)
 }
 
 func upsertEnv(container *corev1.Container, name, value string) {
@@ -418,8 +538,9 @@ func (r *SessionReconciler) checkIdle(ctx context.Context, sess *cbv1.BrowserSes
 	if last == nil {
 		// Shouldn't happen; treat as start.
 		now := metav1.NewTime(time.Now())
-		sess.Status.LastActivityAt = &now
-		_ = r.Status().Update(ctx, sess)
+		_ = r.updateSessionStatus(ctx, sess, func(latest *cbv1.BrowserSession) {
+			latest.Status.LastActivityAt = &now
+		})
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 	idleFor := time.Since(last.Time)
@@ -428,8 +549,9 @@ func (r *SessionReconciler) checkIdle(ctx context.Context, sess *cbv1.BrowserSes
 		return reconcile.Result{RequeueAfter: timeout - idleFor}, nil
 	}
 
-	sess.Status.Phase = cbv1.SessionDraining
-	if err := r.Status().Update(ctx, sess); err != nil {
+	if err := r.updateSessionStatus(ctx, sess, func(latest *cbv1.BrowserSession) {
+		latest.Status.Phase = cbv1.SessionDraining
+	}); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{Requeue: true}, nil
@@ -454,13 +576,14 @@ func (r *SessionReconciler) completeDrain(ctx context.Context, sess *cbv1.Browse
 	}
 
 	now := metav1.NewTime(time.Now())
-	sess.Status.Phase = cbv1.SessionEnded
-	sess.Status.EndedAt = &now
-	if sess.Status.EndReason == "" {
-		sess.Status.EndReason = "IdleTimeout"
-	}
-	sess.Status.Connection = nil
-	if err := r.Status().Update(ctx, sess); err != nil {
+	if err := r.updateSessionStatus(ctx, sess, func(latest *cbv1.BrowserSession) {
+		latest.Status.Phase = cbv1.SessionEnded
+		latest.Status.EndedAt = &now
+		if latest.Status.EndReason == "" {
+			latest.Status.EndReason = "IdleTimeout"
+		}
+		latest.Status.Connection = nil
+	}); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{}, nil
@@ -479,7 +602,10 @@ func (r *SessionReconciler) finalize(ctx context.Context, sess *cbv1.BrowserSess
 	}
 
 	if controllerutil.RemoveFinalizer(sess, SessionFinalizer) {
-		if err := r.Update(ctx, sess); err != nil {
+		if err := r.updateSession(ctx, sess, func(latest *cbv1.BrowserSession) error {
+			controllerutil.RemoveFinalizer(latest, SessionFinalizer)
+			return nil
+		}); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
