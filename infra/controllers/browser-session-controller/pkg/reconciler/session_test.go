@@ -267,15 +267,10 @@ func TestSession_TriformPatternCColdStartsWhenWarmPodAutostarts(t *testing.T) {
 	}
 }
 
-func TestSession_TriformPatternCUsesWarmPodWhenAutostartDisabled(t *testing.T) {
+func TestSession_NonSignalingSessionUsesWarmPodWhenAutostartDisabled(t *testing.T) {
 	scheme := mustScheme(t)
 	pool := samplePool("default-pool", "cb", 1)
 	sess := sampleSession("tf-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cb", "default-pool", "tenant-x")
-	sess.Annotations = map[string]string{
-		cbv1.AnnotationBrokerSessionID:       "cb:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-		cbv1.AnnotationBrowserSignalingURL:   "ws://triform.triform-wtf.svc.cluster.local:3000/api/webrtc/signaling",
-		cbv1.AnnotationBrowserSignalingToken: "jwt-token",
-	}
 	warm := warmReadyPod("warm-pod-pattern-c-no-autostart", "cb", "default-pool")
 	disableStreamerAutostart(warm)
 	if err := controllerutil.SetControllerReference(pool, warm, scheme); err != nil {
@@ -319,8 +314,64 @@ func TestSession_TriformPatternCUsesWarmPodWhenAutostartDisabled(t *testing.T) {
 	if sg.Status.Connection == nil || sg.Status.Connection.PodName != warm.Name {
 		t.Fatalf("connection = %+v", sg.Status.Connection)
 	}
-	if sg.Status.Connection.SignalingURL != sess.Annotations[cbv1.AnnotationBrowserSignalingURL] {
-		t.Fatalf("signalingURL = %q", sg.Status.Connection.SignalingURL)
+}
+
+func TestSession_TriformPatternCNativeSignalingColdStartsWhenAutostartDisabled(t *testing.T) {
+	scheme := mustScheme(t)
+	pool := samplePool("default-pool", "cb", 1)
+	sess := sampleSession("tf-native-aaaaaaaa-bbbb-cccc-dddd-eeeeeeee", "cb", "default-pool", "tenant-x")
+	sess.Annotations = map[string]string{
+		cbv1.AnnotationBrokerSessionID:       "cb:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:c04be",
+		cbv1.AnnotationBrowserSignalingURL:   "wss://triform.wtf/api/webrtc/signaling",
+		cbv1.AnnotationBrowserSignalingToken: "jwt-token",
+	}
+	warm := warmReadyPod("warm-pod-native-no-autostart", "cb", "default-pool")
+	disableStreamerAutostart(warm)
+	if err := controllerutil.SetControllerReference(pool, warm, scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pool, sess, warm).
+		WithStatusSubresource(&cbv1.BrowserSession{}, &cbv1.BrowserSessionPool{}).
+		Build()
+	r := &SessionReconciler{Client: c, Scheme: scheme, DefaultPool: "default-pool"}
+
+	reconcileTwice(t, r, types.NamespacedName{Namespace: "cb", Name: sess.Name})
+
+	var pods corev1.PodList
+	if err := c.List(context.Background(), &pods, client.InNamespace("cb")); err != nil {
+		t.Fatal(err)
+	}
+	var assigned *corev1.Pod
+	for i := range pods.Items {
+		if pods.Items[i].Labels[cbv1.LabelSessionOwner] == sess.Name {
+			assigned = &pods.Items[i]
+			break
+		}
+	}
+	if assigned == nil {
+		t.Fatalf("expected native signaling session to cold-start an assigned pod; pods=%v", pods.Items)
+	}
+	if assigned.Name == warm.Name {
+		t.Fatalf("native signaling session reused warm pod %q; expected cold-start pod", warm.Name)
+	}
+
+	env := map[string]string{}
+	for _, item := range assigned.Spec.Containers[0].Env {
+		env[item.Name] = item.Value
+	}
+	if env["WEBRTC_SIGNALING_HOST"] != "triform.wtf" {
+		t.Fatalf("WEBRTC_SIGNALING_HOST = %q", env["WEBRTC_SIGNALING_HOST"])
+	}
+	if env["WEBRTC_SIGNALING_SESSION_ID"] != sess.Annotations[cbv1.AnnotationBrokerSessionID] {
+		t.Fatalf("WEBRTC_SIGNALING_SESSION_ID = %q", env["WEBRTC_SIGNALING_SESSION_ID"])
+	}
+	if env["WEBRTC_SIGNALING_TOKEN"] != sess.Annotations[cbv1.AnnotationBrowserSignalingToken] {
+		t.Fatalf("WEBRTC_SIGNALING_TOKEN = %q", env["WEBRTC_SIGNALING_TOKEN"])
+	}
+	if env["WEBRTC_SIGNALING_TLS"] != "1" {
+		t.Fatalf("WEBRTC_SIGNALING_TLS = %q", env["WEBRTC_SIGNALING_TLS"])
 	}
 }
 

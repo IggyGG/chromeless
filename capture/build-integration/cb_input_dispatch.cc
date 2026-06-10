@@ -6,6 +6,9 @@
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -65,6 +68,8 @@ constexpr const char* kKnownInputTypes[] = {
     "touch_start",
 };
 
+constexpr double kMaxSafeJsonInteger = 9007199254740991.0;  // 2^53 - 1.
+
 bool IsKnownInputType(const std::string& type) {
   return std::binary_search(std::begin(kKnownInputTypes),
                             std::end(kKnownInputTypes),
@@ -91,6 +96,31 @@ std::string TruncatedPreview(const std::string& raw) {
     out.append("...");
   }
   return out;
+}
+
+// JSONReader stores numbers that fit Chromium's int slot as int and
+// wider JSON numbers as double. v1 specifies `t` as Date.now() epoch
+// milliseconds, which is wider than int32 but still exactly representable
+// as a JavaScript-safe integer. Accept integral numbers up to that bound
+// so the native decoder matches the public input-channel spec.
+std::optional<int64_t> FindSafeJsonInteger(const base::DictValue& dict,
+                                           const char* key) {
+  if (std::optional<int> int_value = dict.FindInt(key)) {
+    return static_cast<int64_t>(*int_value);
+  }
+
+  std::optional<double> double_value = dict.FindDouble(key);
+  if (!double_value.has_value()) {
+    return std::nullopt;
+  }
+  if (!std::isfinite(*double_value) ||
+      *double_value < -kMaxSafeJsonInteger ||
+      *double_value > kMaxSafeJsonInteger ||
+      std::trunc(*double_value) != *double_value) {
+    return std::nullopt;
+  }
+
+  return static_cast<int64_t>(*double_value);
 }
 
 // Reads the v1 envelope from `raw`. On success populates `out` and
@@ -152,22 +182,17 @@ bool DecodeEnvelope(const std::string& raw,
   }
   out->type = *type_str;
 
-  // `t` / `seq` are JSON numbers; FindInt only takes the int slot.
-  // We accept anything in int range — values that would actually
-  // exceed int (epoch ms past 2038, etc.) are not v1-spec valid
-  // and the client wouldn't send them. v2 will widen this to int64.
-  //
-  // TODO(M4-R1-int64-timestamps): switch to FindDouble + range check
-  // before v=2 of the wire protocol, or define a base::DictValue
-  // int64 accessor upstream.
-  std::optional<int> t = envelope.FindInt("t");
+  // `t` / `seq` are JSON numbers. The public v1 spec defines `t` as
+  // Date.now() epoch-ms, which exceeds Chromium's 32-bit FindInt slot
+  // today, so read it through the safe-integer helper above.
+  std::optional<int64_t> t = FindSafeJsonInteger(envelope, "t");
   if (!t.has_value()) {
     *out_reason = "missing or non-integer 't'";
     return false;
   }
   out->t = *t;
 
-  std::optional<int> seq = envelope.FindInt("seq");
+  std::optional<int64_t> seq = FindSafeJsonInteger(envelope, "seq");
   if (!seq.has_value()) {
     *out_reason = "missing or non-integer 'seq'";
     return false;

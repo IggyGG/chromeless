@@ -518,6 +518,16 @@ source_set("input_dispatch") {
   public_configs = [ ":cb_include_paths" ]
 }
 
+test("cloud_browser_input_dispatch_unittests") {
+  sources = [ "cb_input_dispatch_test.cc" ]
+  deps = [
+    ":input_dispatch",
+    "//base/test:run_all_unittests",
+    "//testing/gtest",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+}
+
 # ---------------------------------------------------------------------
 # Stats relay + WebRTC event emitter (M6 R1 — CV2-33).
 #

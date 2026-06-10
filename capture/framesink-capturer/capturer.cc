@@ -136,6 +136,10 @@ void CloudBrowserFrameSinkCapturer::SetOnFrameCallback(
 void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (started_) {
+    producer_->ChangeTarget(std::move(target),
+                            /*sub_capture_target_version=*/0);
+    LOG(INFO) << "CloudBrowserFrameSinkCapturer already running; "
+              << "retargeted producer to latest FrameSink target";
     return;
   }
 
