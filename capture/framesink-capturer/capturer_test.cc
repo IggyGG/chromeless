@@ -19,21 +19,25 @@
 // design-by-spec.
 
 #include "capture/framesink-capturer/capturer.h"
+#include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
+#include "api/make_ref_counted.h"
+#include "base/functional/bind.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "base/threading/thread.h"
 #include "media/base/video_frame.h"
-#include "mojo/core/embedder/embedder.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "media/mojo/mojom/media_types.mojom.h"
+#include "mojo/core/embedder/embedder.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -103,7 +107,14 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   bool start_called() const { return start_called_; }
 
   // viz::mojom::FrameSinkVideoCapturer:
-  void SetFormat(media::VideoPixelFormat /*format*/) override {}
+  media::VideoPixelFormat last_format() const { return last_format_; }
+  viz::mojom::BufferFormatPreference last_start_pref() const {
+    return last_start_pref_;
+  }
+
+  void SetFormat(media::VideoPixelFormat format) override {
+    last_format_ = format;
+  }
   void SetMinCapturePeriod(base::TimeDelta /*period*/) override {}
   void SetMinSizeChangePeriod(base::TimeDelta /*min_period*/) override {}
   void SetResolutionConstraints(const gfx::Size& /*min*/,
@@ -118,8 +129,9 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
       uint32_t /*sub_capture_version*/) override {}
   void Start(
       mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumer> consumer,
-      viz::mojom::BufferFormatPreference /*pref*/) override {
+      viz::mojom::BufferFormatPreference pref) override {
     consumer_.Bind(std::move(consumer));
+    last_start_pref_ = pref;
     start_called_ = true;
   }
   void Stop() override {
@@ -158,6 +170,9 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   mojo::Remote<viz::mojom::FrameSinkVideoConsumer> consumer_;
   std::vector<std::unique_ptr<FakeFrameCallbacks>> callback_holders_;
   std::vector<FakeFrameCallbacks*> fake_callbacks_;
+  media::VideoPixelFormat last_format_ = media::PIXEL_FORMAT_UNKNOWN;
+  viz::mojom::BufferFormatPreference last_start_pref_ =
+      viz::mojom::BufferFormatPreference::kDefault;
   bool start_called_ = false;
   bool stop_called_ = false;
   uint64_t ts_us_ = 0;
@@ -221,6 +236,32 @@ TEST_F(FrameSinkCapturerTest, StartForwardsToProducer) {
   EXPECT_TRUE(producer_.start_called());
 }
 
+TEST_F(FrameSinkCapturerTest, DefaultStartUsesI420SharedMemoryPath) {
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  EXPECT_EQ(media::PIXEL_FORMAT_I420, producer_.last_format())
+      << "the default runtime path must avoid the NV12 mappable-SharedImage "
+         "GMB lane; GPU-less pods do not have a GBM/shared-context backing "
+         "for first-light capture";
+  EXPECT_EQ(viz::mojom::BufferFormatPreference::kDefault,
+            producer_.last_start_pref())
+      << "I420 should use the shared-memory FrameSinkVideoCapturer path";
+}
+
+TEST_F(FrameSinkCapturerTest, ConfiguredNv12StillRequestsMappableSharedImage) {
+  capturer_->Configure(gfx::Size(1280, 720), media::PIXEL_FORMAT_NV12,
+                       base::Hertz(60));
+
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  EXPECT_EQ(media::PIXEL_FORMAT_NV12, producer_.last_format());
+  EXPECT_EQ(viz::mojom::BufferFormatPreference::kPreferMappableSharedImage,
+            producer_.last_start_pref())
+      << "the future hardware/GMB lane should remain opt-in through Configure";
+}
+
 TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
   capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
   FlushPendingIPC();
@@ -245,6 +286,86 @@ TEST_F(FrameSinkCapturerTest, FrameIsDeliveredAndDoneCalledOnRelease) {
   EXPECT_EQ(1u, stats.frames_delivered);
   EXPECT_EQ(1u, stats.buffers_done);
   EXPECT_EQ(0u, stats.frames_dropped_by_capturer);
+}
+
+TEST_F(FrameSinkCapturerTest, DonePostsBackWhenFrameReleasedOffSequence) {
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  producer_.SendFrame();
+  FlushPendingIPC();
+
+  ASSERT_EQ(1u, delivered_.size());
+  scoped_refptr<media::VideoFrame> frame = std::move(delivered_.front());
+  delivered_.clear();
+  EXPECT_EQ(0, producer_.total_done_calls());
+
+  base::Thread release_thread("cv2-91-frame-release");
+  ASSERT_TRUE(release_thread.Start());
+  base::RunLoop released;
+  release_thread.task_runner()->PostTask(
+      FROM_HERE,
+      base::BindOnce(
+          [](scoped_refptr<media::VideoFrame> f, base::OnceClosure done) {
+            f = nullptr;
+            std::move(done).Run();
+          },
+          std::move(frame), released.QuitClosure()));
+  released.Run();
+  release_thread.Stop();
+
+  FlushPendingIPC();
+  EXPECT_EQ(1, producer_.total_done_calls())
+      << "Mojo Done() must be posted back to the capturer sequence when "
+         "libwebrtc releases the frame on an encoder/network thread";
+  EXPECT_EQ(1u, capturer_->GetStats().buffers_done);
+}
+
+TEST_F(FrameSinkCapturerTest, SetOnFrameCallbackReplacesPlaceholderBeforeStart) {
+  std::vector<scoped_refptr<media::VideoFrame>> rebound_delivered;
+  capturer_->SetOnFrameCallback(base::BindLambdaForTesting(
+      [&](scoped_refptr<media::VideoFrame> f) {
+        rebound_delivered.push_back(std::move(f));
+      }));
+
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  producer_.SendFrame();
+  FlushPendingIPC();
+
+  EXPECT_TRUE(delivered_.empty())
+      << "the constructor callback must be replaceable before Start() so "
+         "placeholder callbacks do not black-hole native WebRTC frames";
+  EXPECT_EQ(1u, rebound_delivered.size());
+}
+
+TEST_F(FrameSinkCapturerTest, VideoTrackSourceRebindsCapturerFrameIngress) {
+  FakeProducer producer;
+  auto producer_remote = producer.BindAndPassRemote();
+  auto capturer = std::make_unique<CloudBrowserFrameSinkCapturer>(
+      std::move(producer_remote),
+      base::BindRepeating([](scoped_refptr<media::VideoFrame>) {
+        ADD_FAILURE() << "placeholder capturer callback fired; "
+                         "CloudBrowserFrameSinkVideoTrackSource should "
+                         "rebind it to OnCapturerFrame";
+      }));
+  auto source =
+      webrtc::make_ref_counted<CloudBrowserFrameSinkVideoTrackSource>(
+          std::move(capturer));
+
+  source->capturer_for_test()->Start(
+      viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+
+  producer.SendFrame();
+  FlushPendingIPC();
+
+  EXPECT_EQ(1u, source->GetStats().frames_received_from_capturer)
+      << "captured frames must enter CloudBrowserFrameSinkVideoTrackSource; "
+         "otherwise the browser peer can negotiate a live video track but "
+         "the portal will decode 0x0 forever";
+  EXPECT_EQ(1u, source->GetStats().frames_published_to_sinks);
 }
 
 TEST_F(FrameSinkCapturerTest, MultipleFramesAllAcked) {

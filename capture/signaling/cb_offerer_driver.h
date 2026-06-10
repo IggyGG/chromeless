@@ -370,6 +370,18 @@ class CbOffererDriver
   // driver and external mutation races the offerer dance — don't.
   webrtc::PeerConnectionInterface* pc() const;
 
+  // Marshaled PeerConnection::GetStats(). The embedder's RTP-stats poll
+  // runs on the UI thread (driven by a RepeatingTimer), where chromium's
+  // per-task DisallowBaseSyncPrimitives is installed; calling pc()->GetStats
+  // directly from there trips the proxy's blocking thread-hop DCHECK and
+  // FATALs the worker (thread_restrictions.cc:166) the instant ICE connects.
+  // Routing through the driver keeps GetStats on signaling_thread_ with the
+  // same [pc = pc_] ref-capture discipline as every other PC proxy call here,
+  // so the scoped_refptr keeps the PC alive across the async stats delivery.
+  // No-op if the PC is gone.
+  void PollOutboundStats(
+      webrtc::scoped_refptr<webrtc::RTCStatsCollectorCallback> callback);
+
   // SignalingClientObserver — inbound from the ws client. Already on
   // the UI thread per the M3 R2 contract.
   //
@@ -432,6 +444,14 @@ class CbOffererDriver
   void HandleByeEnvelope();
   void HandleRequestRenegotiateEnvelope();
   void HandleProbeResultEnvelope(const Envelope& env);
+
+  // Remote ICE can arrive immediately after the portal sends its
+  // answer, before our async SetRemoteDescription(answer) completion
+  // has transitioned the PeerConnection into kIceInFlight. Retain
+  // those candidates and replay them once the remote SDP is applied.
+  void QueueRemoteIceCandidate(const Envelope& env);
+  void FlushPendingRemoteIce();
+  void AddRemoteIcePayload(const IceCandidatePayload& payload);
 
   // Hop landing points — all run on ui_runner_, guarded by
   // weak_factory_'s WeakPtr.
@@ -526,6 +546,8 @@ class CbOffererDriver
 
   // Established on Start(); released on dtor / FailWithReason / bye.
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
+
+  std::vector<IceCandidatePayload> pending_remote_ice_;
 
   OffererState state_ = OffererState::kIdle;
 

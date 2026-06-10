@@ -231,6 +231,38 @@ int32_t Vp9Encoder::Encode(
 
     webrtc::CodecSpecificInfo codec_specific{};
     codec_specific.codecType = webrtc::kVideoCodecVP9;
+    webrtc::CodecSpecificInfoVP9& vp9 =
+        codec_specific.codecSpecific.VP9;
+    const bool is_keyframe =
+        encoded_image._frameType == webrtc::VideoFrameType::kVideoFrameKey;
+
+    // Match Chromium's simple VP9 stream metadata shape: no temporal/SVC
+    // layering, one spatial layer, and keyframe SS data carrying resolution.
+    // Leaving these fields zero-initialized makes libwebrtc packetize frames
+    // as sid=0/tid=0 while the receiver has no active layered stream, causing
+    // every VP9 packet to be rejected before decode.
+    vp9.flexible_mode = false;
+    vp9.temporal_idx = webrtc::kNoTemporalIdx;
+    vp9.temporal_up_switch = true;
+    vp9.inter_layer_predicted = false;
+    vp9.gof_idx = 0;
+    vp9.num_spatial_layers = 1;
+    vp9.first_active_layer = 0;
+    vp9.first_frame_in_picture = true;
+    vp9.spatial_layer_resolution_present = false;
+    vp9.inter_pic_predicted = !is_keyframe;
+    vp9.ss_data_available = is_keyframe;
+    if (vp9.ss_data_available) {
+      vp9.spatial_layer_resolution_present = true;
+      vp9.width[0] = encoded_image._encodedWidth;
+      vp9.height[0] = encoded_image._encodedHeight;
+      vp9.gof.num_frames_in_gof = 1;
+      vp9.gof.temporal_idx[0] = 0;
+      vp9.gof.temporal_up_switch[0] = false;
+      vp9.gof.num_ref_pics[0] = 1;
+      vp9.gof.pid_diff[0][0] = 1;
+    }
+    codec_specific.end_of_picture = true;
 
     auto result = callback_->OnEncodedImage(encoded_image, &codec_specific);
     if (result.error != webrtc::EncodedImageCallback::Result::OK) {

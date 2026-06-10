@@ -265,7 +265,7 @@ spec:
               # Operator accepts loss of test-coverage signal (unittests
               # validate separately later, tracked IMPROVE). Worker-only
               # = zero error sources + ~20-30% faster build.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker"
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings"
             - name: NINJA_PARALLELISM
               # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
               # 36 was conservative. 56 leaves ~8 cores for OS + I/O +

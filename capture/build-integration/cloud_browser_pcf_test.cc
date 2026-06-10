@@ -37,6 +37,7 @@ namespace cloud_browser {
 namespace {
 
 using ::testing::IsSupersetOf;
+using ::testing::ElementsAre;
 using ::testing::UnorderedElementsAre;
 
 // Owns 3 dedicated webrtc::Threads matching the embedder shape — network,
@@ -232,6 +233,28 @@ TEST(CloudBrowserPcfLogTest, FormatsDeterministicCodecLine) {
     EXPECT_EQ(FormatPcfVideoCodecLogLine(codecs),
               "CloudBrowser: PCF video sender codecs = [AV1,H264,VP9]");
   }
+}
+
+TEST(CloudBrowserPcfCodecPreferenceTest, PromotesH264WithVp9Fallback) {
+  std::vector<webrtc::RtpCodecCapability> codecs = {
+      MakeCodec("VP9"), MakeCodec("rtx"), MakeCodec("H264"),
+      MakeCodec("AV1"), MakeCodec("red"), MakeCodec("ulpfec")};
+
+  std::vector<webrtc::RtpCodecCapability> preferred =
+      BuildFirstLightVideoCodecPreferences(codecs);
+
+  EXPECT_THAT(CodecNames(preferred),
+              ElementsAre("H264", "VP9", "rtx", "AV1", "red", "ulpfec"));
+}
+
+TEST(CloudBrowserPcfCodecPreferenceTest, PreservesOrderWhenH264Absent) {
+  std::vector<webrtc::RtpCodecCapability> codecs = {
+      MakeCodec("VP9"), MakeCodec("AV1"), MakeCodec("red")};
+
+  std::vector<webrtc::RtpCodecCapability> preferred =
+      BuildFirstLightVideoCodecPreferences(codecs);
+
+  EXPECT_THAT(CodecNames(preferred), ElementsAre("VP9", "AV1", "red"));
 }
 
 }  // namespace

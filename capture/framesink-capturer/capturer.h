@@ -83,6 +83,11 @@ class CloudBrowserFrameSinkCapturer
                  media::VideoPixelFormat format,
                  base::TimeDelta min_capture_period);
 
+  // Replace the delivery callback before the first Start(). This lets
+  // higher-level owners construct a capturer with a placeholder callback,
+  // then bind the final track-source ingress after ownership is established.
+  void SetOnFrameCallback(OnFrameCallback on_frame);
+
   // Bind our consumer receiver, hand the remote to the producer, and
   // call producer->Start(...). Idempotent: a second call is a no-op.
   void Start(viz::VideoCaptureTarget target);
@@ -134,7 +139,10 @@ class CloudBrowserFrameSinkCapturer
 
   // Configuration cached for Start().
   gfx::Size resolution_{1280, 720};
-  media::VideoPixelFormat format_ = media::PIXEL_FORMAT_NV12;
+  // Default to the CPU/shared-memory path. The NV12 mappable-SharedImage/GMB
+  // lane is an opt-in Configure() mode for deployments with a real GPU buffer
+  // backing; GPU-less pods use I420 for first-light capture.
+  media::VideoPixelFormat format_ = media::PIXEL_FORMAT_I420;
   base::TimeDelta min_capture_period_ = base::Hertz(60);
 
   bool started_ = false;

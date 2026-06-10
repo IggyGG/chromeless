@@ -37,6 +37,22 @@ class CapturingCallback : public webrtc::EncodedImageCallback {
     c.frame_type = encoded_image._frameType;
     if (codec_specific_info) {
       c.codec_type = codec_specific_info->codecType;
+      c.end_of_picture = codec_specific_info->end_of_picture;
+      if (codec_specific_info->codecType == webrtc::kVideoCodecVP9) {
+        const webrtc::CodecSpecificInfoVP9& vp9 =
+            codec_specific_info->codecSpecific.VP9;
+        c.vp9_flexible_mode = vp9.flexible_mode;
+        c.vp9_temporal_idx = vp9.temporal_idx;
+        c.vp9_num_spatial_layers = vp9.num_spatial_layers;
+        c.vp9_first_active_layer = vp9.first_active_layer;
+        c.vp9_first_frame_in_picture = vp9.first_frame_in_picture;
+        c.vp9_spatial_layer_resolution_present =
+            vp9.spatial_layer_resolution_present;
+        c.vp9_ss_data_available = vp9.ss_data_available;
+        c.vp9_inter_pic_predicted = vp9.inter_pic_predicted;
+        c.vp9_width0 = vp9.width[0];
+        c.vp9_height0 = vp9.height[0];
+      }
     }
     captured_.push_back(c);
     return Result(Result::OK);
@@ -46,6 +62,17 @@ class CapturingCallback : public webrtc::EncodedImageCallback {
     size_t size = 0;
     webrtc::VideoFrameType frame_type = webrtc::VideoFrameType::kEmptyFrame;
     webrtc::VideoCodecType codec_type = webrtc::kVideoCodecGeneric;
+    bool end_of_picture = false;
+    bool vp9_flexible_mode = true;
+    int vp9_temporal_idx = 0;
+    size_t vp9_num_spatial_layers = 0;
+    size_t vp9_first_active_layer = 0;
+    bool vp9_first_frame_in_picture = false;
+    bool vp9_spatial_layer_resolution_present = false;
+    bool vp9_ss_data_available = false;
+    bool vp9_inter_pic_predicted = false;
+    size_t vp9_width0 = 0;
+    size_t vp9_height0 = 0;
   };
   const std::vector<Capture>& captured() const { return captured_; }
 
@@ -113,9 +140,25 @@ TEST(Vp9EncoderTest, EncodeProducesPackets) {
   // packet even with kf_mode=DISABLED).
   EXPECT_EQ(webrtc::VideoFrameType::kVideoFrameKey,
             cb.captured().front().frame_type);
+  const auto& first = cb.captured().front();
+  EXPECT_TRUE(first.end_of_picture);
+  EXPECT_FALSE(first.vp9_flexible_mode);
+  EXPECT_EQ(webrtc::kNoTemporalIdx, first.vp9_temporal_idx);
+  EXPECT_EQ(1u, first.vp9_num_spatial_layers);
+  EXPECT_EQ(0u, first.vp9_first_active_layer);
+  EXPECT_TRUE(first.vp9_first_frame_in_picture);
+  EXPECT_TRUE(first.vp9_ss_data_available);
+  EXPECT_TRUE(first.vp9_spatial_layer_resolution_present);
+  EXPECT_EQ(640u, first.vp9_width0);
+  EXPECT_EQ(360u, first.vp9_height0);
   for (const auto& c : cb.captured()) {
     EXPECT_EQ(webrtc::kVideoCodecVP9, c.codec_type);
     EXPECT_GT(c.size, 0u);
+    EXPECT_TRUE(c.end_of_picture);
+    EXPECT_FALSE(c.vp9_flexible_mode);
+    EXPECT_EQ(webrtc::kNoTemporalIdx, c.vp9_temporal_idx);
+    EXPECT_EQ(1u, c.vp9_num_spatial_layers);
+    EXPECT_TRUE(c.vp9_first_frame_in_picture);
   }
 }
 

@@ -98,8 +98,9 @@ auto fsid = render_widget_host_view->GetFrameSinkId();
 //    create a video capturer.
 auto capturer = host_frame_sink_manager_->CreateVideoCapturer();
 
-// 3. Configure it.
-capturer->SetFormat(media::PIXEL_FORMAT_NV12);
+// 3. Configure it. GPU-less pods use I420/shared memory; NV12 is the
+//    opt-in hardware path when a GBM/shared-context backing is present.
+capturer->SetFormat(media::PIXEL_FORMAT_I420);
 capturer->SetMinCapturePeriod(base::Hertz(60));
 capturer->SetResolutionConstraints(target_size, target_size,
                                    /*use_fixed_aspect_ratio=*/true);
@@ -108,7 +109,7 @@ capturer->ChangeTarget(viz::VideoCaptureTarget(fsid),
 
 // 4. Hand it our consumer and start.
 capturer->Start(our_consumer_.BindNewPipeAndPassRemote(),
-                viz::mojom::BufferFormatPreference::kPreferGpuMemoryBuffer);
+                viz::mojom::BufferFormatPreference::kDefault);
 ```
 
 The "resilient wrapper" (`ClientFrameSinkVideoCapturer`) is

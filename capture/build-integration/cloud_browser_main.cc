@@ -8,17 +8,48 @@
 #include <optional>
 #include <variant>
 
+#include "base/check.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/path_service.h"
+#include "capture/build-integration/cloud_browser_content_client.h"
 #include "capture/build-integration/content_browser_client.h"
 #include "components/crash/core/common/crash_key.h"
 #include "content/public/app/initialize_mojo_core.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/resource/resource_scale_factor.h"
+
+namespace {
+
+base::FilePath RequiredResourcePak(const base::FilePath& resource_dir,
+                                   const base::FilePath::CharType* name) {
+  base::FilePath path = resource_dir.Append(name);
+  CHECK(base::PathExists(path))
+      << "required Chromium resource pack missing: " << path.value();
+  return path;
+}
+
+}  // namespace
 
 namespace cloud_browser {
 
 CloudBrowserMainDelegate::CloudBrowserMainDelegate() = default;
 
 CloudBrowserMainDelegate::~CloudBrowserMainDelegate() = default;
+
+content::ContentClient* CloudBrowserMainDelegate::CreateContentClient() {
+  // ContentMain calls this on EVERY process, very early (before
+  // PreSandboxStartup) and keeps the returned pointer for the run's
+  // lifetime. content_client_ is a value member, so the pointer is stable.
+  // Delegating to ResourceBundle is safe even though this fires pre-sandbox
+  // and pre-pak-load: ContentClient only *reads* ResourceBundle lazily, at
+  // GetDataResource call time, which is after PreSandboxStartup has loaded
+  // the pak. Without this bridge the renderer's Blink resource fetch hits
+  // the empty base ContentClient and DCHECKs in css_default_style_sheets.cc.
+  // Mirrors HeadlessContentMainDelegate::CreateContentClient.
+  return &content_client_;
+}
 
 content::ContentBrowserClient*
 CloudBrowserMainDelegate::CreateContentBrowserClient() {
@@ -46,15 +77,34 @@ void CloudBrowserMainDelegate::PreSandboxStartup() {
   // (swiftshader) bypasses the GL paths that touch the ResourceBundle
   // and survives indefinitely.
   //
-  // Minimum-viable init: locale-only, no pak file shipped. If a
-  // future build wants real localized strings, the upgrade path is
-  // to ship cloud_browser.pak (built via GN `repack` template, see
-  // content/shell/BUILD.gn:repack_locale for pattern) and switch to
-  // InitSharedInstanceWithPakPath. Out of scope for CV2-69.
-  ui::ResourceBundle::InitSharedInstanceWithLocale(
-      "en-US",
-      /*delegate=*/nullptr,
-      ui::ResourceBundle::DO_NOT_LOAD_COMMON_RESOURCES);
+  // CV2-89 follow-up: SwiftShader made the renderer path live, and
+  // that path reaches Blink's default stylesheet resources. Locale-only
+  // ResourceBundle init is no longer enough; without the Chromium
+  // resource packs, Blink can DCHECK while constructing the default SVG
+  // stylesheet (css_default_style_sheets.cc).
+  base::FilePath resource_dir;
+  CHECK(base::PathService::Get(base::DIR_ASSETS, &resource_dir))
+      << "base::DIR_ASSETS unavailable";
+
+  ui::ResourceBundle::InitSharedInstanceWithPakPath(RequiredResourcePak(
+      resource_dir, FILE_PATH_LITERAL("headless_lib_strings.pak")));
+  // headless_lib_data.pak is the headless build's scale-INDEPENDENT data
+  // pack (the //headless:pak repack of headless_lib.grd + blink/content
+  // resources) — the headless equivalent of stock Chromium's
+  // `resources.pak`. It carries the Blink UA stylesheets, including
+  // IDR_UASTYLE_SVG_CSS. Those are looked up via the kScaleFactorNone
+  // bucket (e.g. Blink's CSSDefaultStyleSheets default-SVG-stylesheet
+  // construction at css_default_style_sheets.cc), so the pack MUST be
+  // registered at kScaleFactorNone. The prior cv2-89 revision added it at
+  // k100Percent (carried over from the chrome_100_percent.pak line it
+  // replaced); a k100Percent pack does not answer scale-none lookups, so
+  // IDR_UASTYLE_SVG_CSS resolved empty and Blink hit a FATAL DCHECK
+  // (default_svg_style_->UniversalRules().size() == 1u, 0 vs 1) on the
+  // first SVG layout. kScaleFactorNone matches how the original
+  // resources.pak load and upstream headless register this pack.
+  ui::ResourceBundle::GetSharedInstance().AddDataPackFromPath(
+      RequiredResourcePak(resource_dir, FILE_PATH_LITERAL("headless_lib_data.pak")),
+      ui::kScaleFactorNone);
 
   // ---- F3: Crash-key string-table init ---------------------------------
   // Without this, chromium's SET_CRASH_KEY_VALUE call sites crash the

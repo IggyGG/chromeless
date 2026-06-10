@@ -137,6 +137,25 @@ void CbOffererDriver::Start() {
   // bundles the PeerConnectionObserver (and optional allocator /
   // cert_generator / async-resolver, all left at defaults here).
   webrtc::PeerConnectionDependencies pc_dependencies(/*observer=*/this);
+  // CV2-ICE observability: log the EXACT IceServers + transport policy
+  // handed to the PeerConnection right before creation. The Gate 6 ICE
+  // stall is the guest never creating a TurnPort; this confirms whether
+  // the credentialed TURN server actually survives into rtc_config the
+  // BasicPortAllocator sees (urls + has-username + has-credential), vs
+  // being dropped/stripped before allocation.
+  LOG(INFO) << kLogPrefix << "CV2-ICE PC config: type="
+            << static_cast<int>(ice_config_.type)
+            << " servers=" << ice_config_.servers.size();
+  for (const auto& srv : ice_config_.servers) {
+    std::string urls;
+    for (const auto& u : srv.urls) {
+      if (!urls.empty()) urls += ",";
+      urls += u;
+    }
+    LOG(INFO) << kLogPrefix << "CV2-ICE   server urls=[" << urls
+              << "] has_username=" << (!srv.username.empty())
+              << " has_credential=" << (!srv.password.empty());
+  }
   webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::PeerConnectionInterface>>
       pc_or_error = pcf_->CreatePeerConnectionOrError(
           ice_config_, std::move(pc_dependencies));
@@ -184,6 +203,22 @@ OffererState CbOffererDriver::state() const {
 webrtc::PeerConnectionInterface* CbOffererDriver::pc() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return pc_.get();
+}
+
+void CbOffererDriver::PollOutboundStats(
+    webrtc::scoped_refptr<webrtc::RTCStatsCollectorCallback> callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!pc_ || !signaling_thread_ || !callback) {
+    return;
+  }
+  // Same marshaling discipline as CreateOffer / SetLocalDescription /
+  // AddIceCandidate above: hop onto signaling_thread_ so the PC proxy's
+  // blocking dispatch does NOT run under the UI thread's
+  // DisallowBaseSyncPrimitives. Capture [pc = pc_] (a scoped_refptr) so
+  // the PeerConnection stays alive across the async GetStats call even
+  // if teardown races; libwebrtc holds callback alive until OnStatsDelivered.
+  signaling_thread_->PostTask(
+      [pc = pc_, callback]() { pc->GetStats(callback.get()); });
 }
 
 // ---------------------------------------------------------------------
@@ -285,13 +320,28 @@ void CbOffererDriver::OnIceCandidate(
   // IceCandidateInterface::Clone() instead, swap to that — it
   // preserves the username_fragment + tcptype fields the
   // sdp_mid/mline_index/candidate-string ctor drops.
+  // CV2-ICE observability: the deployed build never emits a relay
+  // candidate (Gate 6 ICE stall — guest stuck on host candidates only).
+  // Log every gathered candidate at INFO so the guest chromeless.log
+  // shows its full SDP a-line (typ host / srflx / relay). Seeing only
+  // host/srflx here (and never relay) confirms the TurnPort is never
+  // created; a relay line would mean gathering works and the drop is
+  // downstream.
+  {
+    std::string cand_sdp;
+    candidate->ToString(&cand_sdp);
+    LOG(INFO) << kLogPrefix << "CV2-ICE OnIceCandidate mid="
+              << candidate->sdp_mid()
+              << " mline=" << candidate->sdp_mline_index()
+              << " sdp=[" << cand_sdp << "]";
+  }
   std::unique_ptr<webrtc::IceCandidateInterface> cloned(
       webrtc::CreateIceCandidate(candidate->sdp_mid(),
                                  candidate->sdp_mline_index(),
                                  candidate->candidate()));
   if (!cloned) {
-    VLOG(1) << kLogPrefix
-            << "OnIceCandidate clone failed; dropping candidate";
+    LOG(INFO) << kLogPrefix
+              << "CV2-ICE OnIceCandidate clone failed; dropping candidate";
     return;
   }
   ui_runner_->PostTask(
@@ -302,6 +352,9 @@ void CbOffererDriver::OnIceCandidate(
 
 void CbOffererDriver::OnIceGatheringChange(
     webrtc::PeerConnectionInterface::IceGatheringState new_state) {
+  // CV2-ICE observability: New→Gathering→Complete transitions at INFO.
+  LOG(INFO) << kLogPrefix << "CV2-ICE OnIceGatheringChange state="
+            << static_cast<int>(new_state);
   ui_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(&CbOffererDriver::HopHandleIceGatheringChange,
@@ -660,6 +713,7 @@ void CbOffererDriver::HopHandleSetRemoteDescriptionComplete(
           << (was_renegotiation
                   ? "remote SDP set (renegotiated); ICE in flight"
                   : "remote SDP set (initial); ICE in flight");
+  FlushPendingRemoteIce();
 
   if (was_renegotiation && observer_) {
     observer_->OnRenegotiationCompleted();
@@ -723,6 +777,80 @@ void CbOffererDriver::SendIceEndOfCandidates() {
   }
 }
 
+void CbOffererDriver::QueueRemoteIceCandidate(const Envelope& env) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  const auto* payload = std::get_if<IceCandidatePayload>(&env.data);
+  if (!payload) {
+    FailWithReason("`ice` envelope missing candidate payload");
+    return;
+  }
+  pending_remote_ice_.push_back(*payload);
+  VLOG(1) << kLogPrefix
+          << "queued inbound ICE until remote SDP is applied; pending="
+          << pending_remote_ice_.size() << " state=" << StateName(state_);
+}
+
+void CbOffererDriver::FlushPendingRemoteIce() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (pending_remote_ice_.empty()) {
+    return;
+  }
+  std::vector<IceCandidatePayload> pending;
+  pending.swap(pending_remote_ice_);
+  VLOG(1) << kLogPrefix << "flushing queued inbound ICE; count="
+          << pending.size();
+  for (const IceCandidatePayload& payload : pending) {
+    AddRemoteIcePayload(payload);
+    if (state_ == OffererState::kFailed || state_ == OffererState::kClosed) {
+      return;
+    }
+  }
+}
+
+void CbOffererDriver::AddRemoteIcePayload(
+    const IceCandidatePayload& payload) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (payload.is_end_of_candidates) {
+    // libwebrtc accepts a null candidate to mean end-of-remote-pool.
+    // CV2-69 re-test#3: marshal onto the signaling thread (header
+    // Threading section) — OnEnvelope runs as a posted task.
+    signaling_thread_->PostTask(
+        [pc = pc_]() { pc->AddIceCandidate(nullptr); });
+    return;
+  }
+  webrtc::SdpParseError err;
+  std::unique_ptr<webrtc::IceCandidateInterface> cand(
+      webrtc::CreateIceCandidate(payload.sdp_mid.value_or(""),
+                                 payload.sdp_m_line_index.value_or(0),
+                                 payload.candidate, &err));
+  if (!cand) {
+    FailWithReason(std::string("CreateIceCandidate failed: ") +
+                   err.description);
+    return;
+  }
+  // TODO(M3-R4-add-ice-async): libwebrtc has both a synchronous
+  // AddIceCandidate(const IceCandidateInterface*) and an async
+  // AddIceCandidate(std::unique_ptr, std::function<void(RTCError)>)
+  // form. The async form surfaces add-side failures verbatim and is
+  // preferred; confirm chromium-bundled libwebrtc revision exposes
+  // it during first-build and swap.
+  //
+  // CV2-69 re-test#3: marshal AddIceCandidate onto the signaling
+  // thread (header Threading section) — OnEnvelope runs as a posted
+  // task. The candidate unique_ptr is moved into the task to keep it
+  // alive for the duration of the synchronous AddIceCandidate call;
+  // its bool return is consumed inside the task (false is a soft
+  // error libwebrtc also logs internally).
+  signaling_thread_->PostTask(
+      [pc = pc_, cand = std::move(cand)]() {
+        if (!pc->AddIceCandidate(cand.get())) {
+          VLOG(1) << kLogPrefix
+                  << "AddIceCandidate returned false; ignoring "
+                     "(libwebrtc treats this as a soft error)";
+        }
+      });
+}
+
 // ---------------------------------------------------------------------
 // Inbound dispatch
 // ---------------------------------------------------------------------
@@ -771,18 +899,19 @@ void CbOffererDriver::HandleAnswerEnvelope(const Envelope& env) {
 }
 
 void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
-  if (state_ < OffererState::kAwaitingAnswer) {
-    // TODO(M3-R4-pre-answer-ice-buffer): physics's REPLAYABLE_TYPES
-    // set is offer / answer / request_renegotiate — NOT ice. So pre-
-    // answer ICE from the remote side is something the broker won't
-    // re-order for us. Right now we drop on the floor (the portal
-    // client's libwebrtc only emits ICE after its SetLocalDescription
-    // on the answer, which means our SetRemoteDescription has
-    // already completed). Confirm during M3 R4 integration smoke;
-    // if pre-answer remote ICE turns out to be possible, queue +
-    // flush on SetRemoteDescription completion.
+  if (state_ != OffererState::kIceInFlight) {
+    const bool can_queue_mid_dance =
+        (state_ >= OffererState::kAwaitingAnswer &&
+         state_ <= OffererState::kSettingRemote) ||
+        (was_in_ice_flight_once_ && state_ >= OffererState::kCreatingOffer &&
+         state_ <= OffererState::kSettingRemote);
+    if (can_queue_mid_dance) {
+      QueueRemoteIceCandidate(env);
+      return;
+    }
     VLOG(1) << kLogPrefix
-            << "inbound ICE before answer; dropping (TODO buffer)";
+            << "inbound ICE before local SDP can accept it; dropping, state="
+            << StateName(state_);
     return;
   }
   const auto* payload = std::get_if<IceCandidatePayload>(&env.data);
@@ -790,45 +919,7 @@ void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
     FailWithReason("`ice` envelope missing candidate payload");
     return;
   }
-  if (payload->is_end_of_candidates) {
-    // libwebrtc accepts a null candidate to mean end-of-remote-pool.
-    // CV2-69 re-test#3: marshal onto the signaling thread (header
-    // Threading section) — OnEnvelope runs as a posted task.
-    signaling_thread_->PostTask(
-        [pc = pc_]() { pc->AddIceCandidate(nullptr); });
-    return;
-  }
-  webrtc::SdpParseError err;
-  std::unique_ptr<webrtc::IceCandidateInterface> cand(
-      webrtc::CreateIceCandidate(payload->sdp_mid.value_or(""),
-                                 payload->sdp_m_line_index.value_or(0),
-                                 payload->candidate, &err));
-  if (!cand) {
-    FailWithReason(std::string("CreateIceCandidate failed: ") +
-                   err.description);
-    return;
-  }
-  // TODO(M3-R4-add-ice-async): libwebrtc has both a synchronous
-  // AddIceCandidate(const IceCandidateInterface*) and an async
-  // AddIceCandidate(std::unique_ptr, std::function<void(RTCError)>)
-  // form. The async form surfaces add-side failures verbatim and is
-  // preferred; confirm chromium-bundled libwebrtc revision exposes
-  // it during first-build and swap.
-  //
-  // CV2-69 re-test#3: marshal AddIceCandidate onto the signaling
-  // thread (header Threading section) — OnEnvelope runs as a posted
-  // task. The candidate unique_ptr is moved into the task to keep it
-  // alive for the duration of the synchronous AddIceCandidate call;
-  // its bool return is consumed inside the task (false is a soft
-  // error libwebrtc also logs internally).
-  signaling_thread_->PostTask(
-      [pc = pc_, cand = std::move(cand)]() {
-        if (!pc->AddIceCandidate(cand.get())) {
-          VLOG(1) << kLogPrefix
-                  << "AddIceCandidate returned false; ignoring "
-                     "(libwebrtc treats this as a soft error)";
-        }
-      });
+  AddRemoteIcePayload(*payload);
 }
 
 void CbOffererDriver::HandleByeEnvelope() {
@@ -975,6 +1066,7 @@ void CbOffererDriver::CloseInternal(std::string_view reason,
   }
   state_ = OffererState::kClosed;
   teardown_emitted_ = true;
+  pending_remote_ice_.clear();
   // CV2-69 re-test#4 (Finding B): marshalled PC Close() — see
   // ClosePcOnSignalingThread. CloseInternal is reachable from the
   // posted-task OnEnvelope path (inbound `bye`), so a direct
@@ -1038,6 +1130,7 @@ void CbOffererDriver::FailWithReason(std::string_view reason) {
   LOG(ERROR) << kLogPrefix << "FAIL state=" << StateName(state_)
              << " reason=" << reason;
   state_ = OffererState::kFailed;
+  pending_remote_ice_.clear();
   ClosePcOnSignalingThread();
   if (observer_) {
     observer_->OnFailed(reason);

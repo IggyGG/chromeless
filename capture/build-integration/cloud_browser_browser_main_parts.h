@@ -55,6 +55,7 @@
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+#include "base/timer/timer.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
 // that hold the runtime-wire consumer instances. CbCursorClient (M5
@@ -206,7 +207,9 @@ class CloudBrowserBrowserMainParts
   // the shared active-target handoff for M4 typed input dispatch: the
   // input DataChannel carries input envelopes, but the frame-sink
   // capture command establishes which WebContents those envelopes
-  // should target.
+  // should target. (CV2-95 fix — forwards to
+  // active_webcontents_resolver_.SetActiveCapture(), the single
+  // authority named by cb_active_webcontents_resolver.h.)
   void SetActiveCapture(content::WebContents* web_contents,
                         viz::FrameSinkId frame_sink_id);
 
@@ -220,6 +223,30 @@ class CloudBrowserBrowserMainParts
   // Symmetric counterpart called from PostMainMessageLoopRun. Calls
   // StopRemoteDebuggingServer iff StartDevToolsHttpHandler ran.
   void StopDevToolsHttpHandler();
+
+  // CV2-ICE / Gate-6 compositor fix: force a root-surface redraw every
+  // frame interval. The FrameSinkVideoCapturer issues CopyOutputRequests
+  // that make the offscreen viz Display *draw* but not *swap* when the
+  // root surface has no on-screen damage, so renderer presentation-time
+  // frame_tokens never get a SWAP_ACK present-ack and orphan in Blink's
+  // LayerTreeView presentation-callback deque (no eviction). After ~60
+  // accrue the guest FATAL-DCHECKs at layer_tree_view.cc:574
+  // (callbacks.size() <= kMaxBufferSize). ScheduleFullRedraw() forces
+  // have_damage=true → should_swap=true → the Display swaps the unviewed
+  // software surface and emits the present-acks that drain the deque.
+  // Capture is unaffected (the copy path is independent of swap).
+  void ScheduleCompositorKeepaliveRedraw();
+
+  // CV2 Gate 6 media-RTP observability: poll the PeerConnection's
+  // outbound-rtp stats and LOG(INFO) packets_sent / bytes_sent /
+  // frames_encoded / frames_sent / frame WxH. Started on the first
+  // ICE-connected transition (OnIceConnectionStateChanged). This is the
+  // ONLY way to tell, post-WS-reassembly-fix, whether the guest's encoder
+  // is actually pushing RTP into the relay (packets_sent grows) vs the
+  // media stalling before the wire (packets_sent stays 0) — the guest PC
+  // is native libwebrtc, invisible to CDP/JS getStats, and the native
+  // GetStats relay (M6 R1) is otherwise unwired.
+  void PollOutboundRtpStats();
 
   // Owned global display::Screen instance. chromium fatals on
   // `Check failed: Screen::Get()` from ui/display/display_observer.cc:32
@@ -256,6 +283,19 @@ class CloudBrowserBrowserMainParts
   // when their dtors walk their parent pointer. Process is exiting
   // within seconds; OS reclaims memory and the X11 connection cleanly.
   std::unique_ptr<CbAuraPlatformData> aura_;
+
+  // Drives ScheduleCompositorKeepaliveRedraw() at the capture frame
+  // interval so the offscreen Display keeps swapping and present-acking
+  // (see ScheduleCompositorKeepaliveRedraw). Started in
+  // PreMainMessageLoopRun once aura_ exists; runs for the worker's life
+  // (guests are per-session and short-lived, so idle cost is moot).
+  base::RepeatingTimer compositor_keepalive_timer_;
+
+  // Drives PollOutboundRtpStats() every 2s once ICE connects. Armed once
+  // (guarded by rtp_stats_timer_armed_) on the first kIceConnectionConnected
+  // / kIceConnectionCompleted transition. CV2 Gate 6 media-RTP diagnosis.
+  base::RepeatingTimer rtp_stats_timer_;
+  bool rtp_stats_timer_armed_ = false;
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;

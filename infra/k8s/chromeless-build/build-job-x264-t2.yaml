@@ -198,7 +198,7 @@ spec:
               value: "/sccache"
             - name: CHROMELESS_BUILD_TARGETS
               # 4 targets: worker + 3 unittest suites incl. pcf_unittests.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
             - name: NINJA_PARALLELISM
               value: "36"
             - name: SKIP_FETCH

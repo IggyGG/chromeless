@@ -74,7 +74,7 @@
 //   CloudBrowserMediaVideoFrame{NV12,I420}Buffer (R2). That buffer
 //   holds a scoped_refptr<media::VideoFrame>, which in turn holds
 //   the capturer's BufferHandleScope (a refcounted RAII guard whose
-//   destructor calls Mojo Done() on the FrameCallbacks remote). If a
+//   destructor posts/binds Mojo Done() on the capture sequence). If a
 //   downstream sink (encoder, RTP sender) holds the webrtc::VideoFrame
 //   for longer than a single OnFrame fanout, it ALSO holds the Viz
 //   capture-pool slot the frame came from. Viz's pool has a finite
@@ -100,7 +100,8 @@
 //   2. Assert Done() fires per frame after the sink releases the
 //      webrtc::VideoFrame (sink-side ref drop → buffer wrapper ref
 //      drop → media::VideoFrame ref drop → BufferHandleScope dtor →
-//      Mojo Done()). No pool leak after N frames in steady state.
+//      capture-sequence Mojo Done()). No pool leak after N frames in
+//      steady state.
 //
 // Non-goals (per Plane CV2-38 — explicitly OUT of R3 scope):
 //   * signaling / PeerConnection / track creation — M3.

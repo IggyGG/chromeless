@@ -270,7 +270,7 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
   //    construction dance that used to live here moved to CloudBrowser
   //    BrowserMainParts step 5b — R3's factory
   //    (CreateCloudBrowserFrameSinkVideoTrackSource) owns it now.
-  //    Defaults (1280x720 NV12 @ 60Hz from capturer.h:136-138) apply
+  //    Defaults (1280x720 I420 @ 60Hz from capturer.h:136-141) apply
   //    unless R5's auto-start policy overrides via
   //    track_source->Configure() before we land here.
   //
@@ -285,8 +285,27 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
   track_source->StartCapture(viz::VideoCaptureTarget(frame_sink_id));
 
   web_contents->Focus();
+
+  // CV2-95: tell the active-WebContents resolver which WebContents is now
+  // being captured. This is the call site cb_active_webcontents_resolver.h
+  // names as "the single authority that calls SetActiveCapture()" — and
+  // which, prior to this fix, did not exist ANYWHERE in the tree. Without
+  // it the resolver's active_ WebContents stays null, so the M4 input
+  // dispatchers (R3 mouse … R8 clipboard) all hit their
+  // GetActiveWebContents()==nullptr "dropped — no active WebContents"
+  // branch and silently discard every event. The capture-start path is
+  // exactly where the resolver expects to be told (capture-selection is
+  // M2's call; the resolver is told the answer). The callback routes
+  // through CloudBrowserBrowserMainParts::SetActiveCapture (same
+  // Unretained(main_parts_) lifetime contract as track_source_getter_);
+  // an absent callback simply skips this — capture still runs.
   if (active_capture_callback_) {
     active_capture_callback_.Run(web_contents, frame_sink_id);
+  } else {
+    LOG(WARNING) << "Cb.startFrameSinkCapture: no active-capture callback "
+                    "wired — input dispatch will drop events (no active "
+                    "WebContents). Check CreateDevToolsManagerDelegate "
+                    "against CloudBrowserBrowserMainParts::SetActiveCapture.";
   }
 
   LOG(INFO) << "Cb.startFrameSinkCapture: track-source pass-through started "
