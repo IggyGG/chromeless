@@ -299,8 +299,15 @@ spec:
               value: "x264"
           resources:
             requests:
-              # Burstable QoS — see build-job.yaml header.
-              cpu: "12"
+              # Burstable QoS — see build-job.yaml header. 12 → 4
+              # (2026-06-10): triform-7 reservation pressure hit 90%
+              # (43.5/48 requested; cargoless shards + isolation
+              # builders + longhorn IM) while ACTUAL usage was ~3
+              # cores. 12 → OutOfcpu ×3 = instant BackoffLimitExceeded.
+              # Same fix as triform-8's 2026-05-17 incident: shrink the
+              # request so the pod schedules; the 40-CPU limit keeps
+              # autoninja's real compute envelope unchanged.
+              cpu: "4"
               memory: "96Gi"
             limits:
               cpu: "40"
