@@ -107,6 +107,10 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   bool start_called() const { return start_called_; }
   int start_calls() const { return start_calls_; }
   int change_target_calls() const { return change_target_calls_; }
+  int set_resolution_constraints_calls() const {
+    return set_resolution_constraints_calls_;
+  }
+  gfx::Size last_resolution() const { return last_resolution_; }
 
   // viz::mojom::FrameSinkVideoCapturer:
   media::VideoPixelFormat last_format() const { return last_format_; }
@@ -119,9 +123,12 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   }
   void SetMinCapturePeriod(base::TimeDelta /*period*/) override {}
   void SetMinSizeChangePeriod(base::TimeDelta /*min_period*/) override {}
-  void SetResolutionConstraints(const gfx::Size& /*min*/,
+  void SetResolutionConstraints(const gfx::Size& min,
                                  const gfx::Size& /*max*/,
-                                 bool /*fixed*/) override {}
+                                 bool /*fixed*/) override {
+    ++set_resolution_constraints_calls_;
+    last_resolution_ = min;
+  }
   void SetAutoThrottlingEnabled(bool /*enabled*/) override {}
   void SetAnimationFpsLockIn(bool /*enabled*/,
                               float /*majority_damaged_pixel_min_ratio*/)
@@ -182,6 +189,8 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   bool stop_called_ = false;
   int start_calls_ = 0;
   int change_target_calls_ = 0;
+  int set_resolution_constraints_calls_ = 0;
+  gfx::Size last_resolution_;
   uint64_t ts_us_ = 0;
 };
 
@@ -455,6 +464,29 @@ TEST_F(FrameSinkCapturerTest, StartRetargetsRunningProducerWithoutRebinding) {
   EXPECT_TRUE(producer_.start_called());
   EXPECT_EQ(1, producer_.start_calls());
   EXPECT_EQ(2, producer_.change_target_calls());
+}
+
+// Regression: a retarget (the running-producer Start path) must RE-APPLY the
+// fixed output resolution constraints, not just ChangeTarget(). Without this,
+// the Viz capturer derives frame geometry from the new compositor surface's
+// natural size after a cross-document navigation, producing the corrupt
+// "small flickering capture in the top-left corner" symptom. Assert that the
+// second Start re-asserts SetResolutionConstraints at the pinned resolution.
+TEST_F(FrameSinkCapturerTest, RetargetReappliesResolutionConstraints) {
+  capturer_->Configure(gfx::Size(1280, 720), media::PIXEL_FORMAT_I420,
+                       base::Hertz(60));
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();
+  EXPECT_EQ(1, producer_.set_resolution_constraints_calls());
+
+  // Retarget to a different FrameSink (as physics does on FrameNavigated /
+  // tab-switch). The constraints must be re-applied for the new surface.
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(2, 2)));
+  FlushPendingIPC();
+  EXPECT_EQ(2, producer_.set_resolution_constraints_calls())
+      << "retarget must re-assert SetResolutionConstraints so the new surface "
+         "is captured at the pinned resolution, not its natural size";
+  EXPECT_EQ(gfx::Size(1280, 720), producer_.last_resolution());
 }
 
 }  // namespace

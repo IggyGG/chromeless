@@ -136,10 +136,31 @@ void CloudBrowserFrameSinkCapturer::SetOnFrameCallback(
 void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (started_) {
+    // Re-assert the output format + fixed resolution constraints BEFORE
+    // pointing the running producer at the new FrameSink. A bare
+    // ChangeTarget() leaves the Viz FrameSinkVideoCapturer free to derive
+    // its frame geometry from the *new* compositor surface's natural size
+    // instead of our pinned `resolution_` — which, after a cross-document
+    // navigation to a differently-sized page, produced corrupt frames: a
+    // small capture anchored in the top-left corner that flickered between
+    // the old and new surface (the symptom that surfaced once physics began
+    // re-firing capture on FrameNavigated / tab-switch — M2-R4-MULTI-TAB).
+    // SetFormat / SetMinCapturePeriod / SetResolutionConstraints are
+    // idempotent on the producer and our members are stable across
+    // retargets (Configure() runs once, before the first Start()), so
+    // re-applying them here is safe and forces every retargeted surface to
+    // be scaled into the same fixed 1280x720 fixed-aspect output the
+    // initial Start() established.
+    producer_->SetFormat(format_);
+    producer_->SetMinCapturePeriod(min_capture_period_);
+    producer_->SetResolutionConstraints(resolution_, resolution_,
+                                        /*use_fixed_aspect_ratio=*/true);
     producer_->ChangeTarget(std::move(target),
                             /*sub_capture_target_version=*/0);
     LOG(INFO) << "CloudBrowserFrameSinkCapturer already running; "
-              << "retargeted producer to latest FrameSink target";
+              << "retargeted producer to latest FrameSink target "
+              << "(re-applied format + " << resolution_.ToString()
+              << " resolution constraints)";
     return;
   }
 
