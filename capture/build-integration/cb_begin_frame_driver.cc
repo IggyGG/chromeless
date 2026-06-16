@@ -30,6 +30,14 @@ namespace {
 // regression is visible within a few lines of a 120s soak.
 constexpr base::TimeDelta kDiagnosticInterval = base::Seconds(5);
 
+// Stall-watchdog timeout. If no ack arrives within this of an issue, the
+// pending frame callback was dropped (e.g. a Display reconfiguration from
+// forcing the captured view visible) and the ack-chain has frozen. 1s is ~30x
+// the 33ms frame deadline, so a non-arrived ack here is a genuine drop, not a
+// slow frame — and the Display has long since cleared pending_frame_callback_,
+// making the watchdog's re-issue safe against viz's overlap DCHECK.
+constexpr base::TimeDelta kStallWatchdogTimeout = base::Seconds(1);
+
 
 // Cadence guardrails, expressed as INTERVALS (not rates). NOTE the inversion:
 // the *fastest* allowed rate (60 fps) is the *smallest* interval, hence
@@ -109,6 +117,7 @@ void CbBeginFrameDriver::Stop() {
   }
   running_ = false;
   next_frame_timer_.Stop();
+  stall_watchdog_timer_.Stop();
   diagnostic_timer_.Stop();
   // Drop any in-flight ack: an IssueExternalBeginFrame issued before Stop()
   // may still invoke its completion callback asynchronously. Invalidating the
@@ -180,19 +189,44 @@ void CbBeginFrameDriver::IssueOneBeginFrame() {
   // ack-chained (the next issue happens only from OnBeginFrameAck), we never
   // issue a second time while one is pending, so we cannot trip ui::Compositor's
   // DCHECK(!pending_begin_frame_args_) for the pre-bind window.
+  // Tag this issue with the current epoch. The completion callback carries the
+  // epoch so a LATE ack for a watchdog-abandoned frame (epoch bumped) is
+  // ignored — preventing it from re-arming a second concurrent issue and
+  // tripping viz's overlapping-IssueExternalBeginFrame DCHECK.
+  const uint64_t issue_epoch = issue_epoch_;
   compositor_->IssueExternalBeginFrame(
       args, /*force=*/true,
       base::BindOnce(&CbBeginFrameDriver::OnBeginFrameAck,
-                     weak_factory_.GetWeakPtr()));
+                     weak_factory_.GetWeakPtr(), issue_epoch));
   ++issued_since_report_;
+
+  // Arm the stall watchdog. If OnBeginFrameAck does not fire within
+  // kStallWatchdogTimeout, the callback was dropped and the chain has frozen;
+  // OnStallWatchdog() re-issues to recover. The ack cancels this.
+  stall_watchdog_timer_.Start(FROM_HERE, kStallWatchdogTimeout,
+                              base::BindOnce(&CbBeginFrameDriver::OnStallWatchdog,
+                                             weak_factory_.GetWeakPtr()));
 }
 
-void CbBeginFrameDriver::OnBeginFrameAck(const viz::BeginFrameAck& /*ack*/) {
+void CbBeginFrameDriver::OnBeginFrameAck(uint64_t issue_epoch,
+                                        const viz::BeginFrameAck& /*ack*/) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (!running_) {
     return;
   }
+  // Ignore a late ack for a frame the watchdog already abandoned (epoch bumped):
+  // the watchdog has re-issued, so re-arming here would create a second
+  // concurrent issue. Dropping it is safe — the watchdog's fresh issue owns the
+  // chain now.
+  if (issue_epoch != issue_epoch_) {
+    return;
+  }
   ++acked_since_report_;
+
+  // The ack arrived, so the chain is healthy — cancel the stall watchdog before
+  // re-arming. (If we didn't, a slow-but-not-frozen frame could let the
+  // watchdog and the normal re-arm both schedule an issue.)
+  stall_watchdog_timer_.Stop();
 
   // Hold the target cadence: schedule the next issue for one interval after
   // the PREVIOUS issue, not one interval after now. If frame production took
@@ -210,6 +244,30 @@ void CbBeginFrameDriver::OnBeginFrameAck(const viz::BeginFrameAck& /*ack*/) {
   } else {
     IssueOneBeginFrame();
   }
+}
+
+void CbBeginFrameDriver::OnStallWatchdog() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!running_) {
+    return;
+  }
+  // No ack for kStallWatchdogTimeout => the pending frame callback was dropped
+  // and the ack-chain froze (the 2026-06-16 capture-start Show() stall). The
+  // pending re-arm timer (if any) is moot because the issue it would chain from
+  // never acked; cancel it and re-issue directly to restart the loop. The 1s
+  // gap makes this re-issue safe vs viz's DCHECK(!pending_frame_callback_): the
+  // Display has finished/cleared that frame long ago.
+  //
+  // Bump the epoch FIRST so the abandoned frame's late ack (if it ever arrives)
+  // is dropped by OnBeginFrameAck rather than re-arming a second issue.
+  ++issue_epoch_;
+  next_frame_timer_.Stop();
+  LOG(WARNING) << "CbBeginFrameDriver: stall watchdog fired (no BeginFrame ack "
+                  "in "
+               << kStallWatchdogTimeout.InMilliseconds()
+               << "ms) — pending callback was dropped; re-issuing to restart "
+                  "the ack-chain";
+  IssueOneBeginFrame();
 }
 
 void CbBeginFrameDriver::EmitDiagnostic() {

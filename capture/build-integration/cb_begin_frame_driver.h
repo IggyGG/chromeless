@@ -277,12 +277,18 @@ class CbBeginFrameDriver {
   // ack path via next_frame_timer_.
   void IssueOneBeginFrame();
 
-  // Completion callback for an issued BeginFrame. Runs on this sequence once
-  // the Display has finished the frame (drawn or decided not to). Schedules
-  // the next IssueOneBeginFrame() after the residual delay needed to hold the
-  // target cadence (so a frame that took longer than the interval issues the
-  // next immediately, and a fast frame waits out the remainder).
-  void OnBeginFrameAck(const viz::BeginFrameAck& ack);
+  // Completion callback for an issued BeginFrame. |issue_epoch| is the epoch
+  // captured when the frame was issued; if it no longer matches issue_epoch_
+  // the stall watchdog has since abandoned that frame and the ack is ignored.
+  // Otherwise, runs on this sequence once the Display has finished the frame
+  // (drawn or decided not to) and schedules the next IssueOneBeginFrame() after
+  // the residual delay needed to hold the target cadence.
+  void OnBeginFrameAck(uint64_t issue_epoch, const viz::BeginFrameAck& ack);
+
+  // Fires only if no OnBeginFrameAck arrived within kStallWatchdogTimeout of an
+  // issue — i.e. viz dropped the pending frame callback and the ack-chain
+  // froze. Re-issues to restart the loop. See stall_watchdog_timer_.
+  void OnStallWatchdog();
 
   // ~5s self-report (re-armed by diagnostic_timer_). Logs, in one line:
   //   * issued/acked BeginFrame counts since the last report (proves OUR loop
@@ -312,6 +318,12 @@ class CbBeginFrameDriver {
   // BeginFrameArgs::kStartingFrameNumber (1), so we start at 1.
   uint64_t next_sequence_number_ = 1;
 
+  // Bumped by OnStallWatchdog when it abandons a frozen frame. Each issue
+  // captures the current value; OnBeginFrameAck drops acks whose captured epoch
+  // is stale (the watchdog already re-issued), so an abandoned frame's late ack
+  // cannot re-arm a second concurrent issue.
+  uint64_t issue_epoch_ = 0;
+
   // When the most recent BeginFrame was issued — used to compute the residual
   // delay to the next one so the loop holds |target_frame_interval_| rather
   // than (interval + frame-production-time).
@@ -320,6 +332,24 @@ class CbBeginFrameDriver {
   // Re-arms IssueOneBeginFrame() after OnBeginFrameAck, honoring the residual
   // cadence delay. A one-shot per tick (re-Start()ed each ack).
   base::OneShotTimer next_frame_timer_;
+
+  // STALL WATCHDOG. The ack-chain is re-armed ONLY by OnBeginFrameAck; if viz
+  // ever drops the pending frame callback (observed 2026-06-16 on firecracker:
+  // forcing the captured RenderWidgetHostView + its aura ancestors visible at
+  // capture-start reconfigures the Display and silently discards the in-flight
+  // ExternalBeginFrame callback, so the ack never fires and the loop freezes at
+  // issued=0 — VERDICT=DRIVER-STALLED), the loop would otherwise die forever.
+  // This one-shot, armed on every issue and cancelled by the ack, fires only if
+  // NO ack arrived within kStallWatchdogTimeout (1s — two orders of magnitude
+  // beyond the 33ms frame deadline, so a non-arrived ack at this point means a
+  // genuinely dropped callback, NOT a slow frame). On fire it re-issues to
+  // restart the chain. The long timeout also makes the re-issue safe against
+  // viz's DCHECK(!pending_frame_callback_): after 1s with no
+  // OnDisplayDidFinishFrame, the Display has finished (or been reset past) that
+  // frame and cleared pending_frame_callback_, so a fresh issue does not
+  // overlap. A legitimate frame never takes 1s (force=true acks a static frame
+  // in one composite), so the watchdog never fires in steady state.
+  base::OneShotTimer stall_watchdog_timer_;
 
   // --- diagnostic-only state (see ctor / SetDiagnosticSources) ---
 
