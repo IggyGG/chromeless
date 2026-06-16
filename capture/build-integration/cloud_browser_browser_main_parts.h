@@ -57,6 +57,7 @@
 #include "api/rtc_error.h"                 // CV2-WARM — StartNativeSession return
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"           // CV2-WARM — raw_ptr<AudioDeviceModule>
 #include "base/timer/timer.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
@@ -451,8 +452,9 @@ class CloudBrowserBrowserMainParts
   // needs it, and StartNativeSession may now run AFTER PreMainMessageLoopRun
   // (from a CDP call), so the pointer is promoted to a member instead of a
   // PreMainMessageLoopRun local. Lifetime: owned by pcf_, valid for the
-  // worker's life — same as the original local `adm_debug`.
-  webrtc::AudioDeviceModule* adm_for_audio_lifecycle_ = nullptr;
+  // worker's life — same as the original local `adm_debug`. raw_ptr<> per the
+  // chromium-rawptr plugin (matches CbAudioLifecycle::adm_debug_).
+  raw_ptr<webrtc::AudioDeviceModule> adm_for_audio_lifecycle_ = nullptr;
 
   // CV2-83 — answerer-facing DataChannels, owned by CbDataChannelHost
   // instead of four ad-hoc scoped_refptr members. The host creates the
