@@ -265,6 +265,54 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
     return {};
   }
 
+  // CV2-ICE-v2/v3: force the captured view SHOWING. This is the decisive fix for
+  // sustained capture fps, isolated by the CbBeginFrameDriver self-diagnostic
+  // on live firecracker (2026-06-16): with the external BeginFrame driver
+  // running at 28-30fps and capture correctly targeting this FrameSinkId, the
+  // VERDICT was BURSTING at ~0.6fps with rwhv=HIDDEN — even though
+  // WebContents::GetVisibility() reported VISIBLE. The renderer's cc::Scheduler
+  // gates client_needs_begin_frame_ on the WIDGET/RWHV visibility, NOT the
+  // WebContents visibility: while RenderWidgetHostView::IsShowing() is false the
+  // renderer treats itself as hidden, stops continuous rAF, and only subscribes
+  // to our external BeginFrameSource intermittently (the ~0.6fps burst).
+  //
+  // CRITICAL (branch-heads/7727 render_widget_host_view_aura.cc):
+  // RenderWidgetHostViewAura::IsShowing() returns window_->IsVisible(), which is
+  // HIERARCHY-based (true only if the window AND every aura ancestor up to the
+  // WindowTreeHost root are Show()n). RWHV::Show() calls window_->Show() on the
+  // RWHV's OWN window, but if any ANCESTOR (the WebContentsViewAura content
+  // window, or an intermediate) is hidden, IsVisible() — and thus IsShowing() —
+  // stays false and the renderer stays throttled. WebContents::WasShown() + the
+  // boot native-view Show() did not cover the full chain in this offscreen
+  // setup. So we walk the captured view's aura window to the root and Show()
+  // every hidden ancestor, then Show() the RWHV — guaranteeing IsVisible() flips
+  // true. Each Show() is idempotent (no-op on an already-visible window); the
+  // walk honors the Show()/Hide()-in-pairs contract by only Show()ing windows
+  // that are currently hidden. With IsShowing() true the renderer requests
+  // continuous BeginFrames and each external tick (with
+  // --run-all-compositor-stages-before-draw) yields a fresh frame the capturer
+  // delivers.
+  if (!rwhv->IsShowing()) {
+    int ancestors_shown = 0;
+    // On Aura, RenderWidgetHostView::GetNativeView() returns the RWHV's
+    // aura::Window (gfx::NativeView is aura::Window* here); we hold it as
+    // aura::Window* directly so no extra gfx header dep is needed (ui/aura is
+    // already a dep; ui/gfx/native_widget_types.h is not on this target).
+    for (aura::Window* w = rwhv->GetNativeView(); w; w = w->parent()) {
+      if (!w->IsVisible()) {
+        w->Show();
+        ++ancestors_shown;
+      }
+    }
+    rwhv->Show();
+    LOG(INFO) << "Cb.startFrameSinkCapture: forced captured view SHOWING (was "
+                 "HIDDEN); Show()'d "
+              << ancestors_shown
+              << " hidden aura ancestor window(s) + the RWHV so the renderer "
+                 "requests continuous BeginFrames; IsShowing() now "
+              << rwhv->IsShowing();
+  }
+
   // 3. Drive the boot-constructed capturer at the resolved target via
   //    R3's pass-through StartCapture(). The producer-mojo + capturer
   //    construction dance that used to live here moved to CloudBrowser

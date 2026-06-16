@@ -406,10 +406,30 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // Pre-fix expectation: HasFocus=false, ViewBounds=0x0.
   // Post-fix expectation: HasFocus=true, ViewBounds=non-zero.
   if (auto* rwhv = initial_web_contents_->GetRenderWidgetHostView()) {
+    // CV2-ICE-v3: force the boot view SHOWING (mirrors cb_devtools_agent.cc's
+    // capture-start fix; see its long comment for the full rationale).
+    // RenderWidgetHostViewAura::IsShowing() == window_->IsVisible() is
+    // hierarchy-based, so we Show() every hidden aura ancestor up to the root
+    // plus the RWHV — WasShown() + the boot native-view Show() above do not
+    // cover the full chain in this offscreen setup, leaving the renderer
+    // throttled at ~0.6fps under the external BeginFrame driver (verified by the
+    // driver self-diagnostic on firecracker). Covers the boot-tab-captured case
+    // and primes the view before the first capture-start.
+    if (!rwhv->IsShowing()) {
+      // aura::Window* directly (GetNativeView() returns it on Aura) so no extra
+      // gfx header dep is needed. Show() every hidden ancestor + the RWHV.
+      for (aura::Window* w = rwhv->GetNativeView(); w; w = w->parent()) {
+        if (!w->IsVisible()) {
+          w->Show();
+        }
+      }
+      rwhv->Show();
+    }
     LOG(INFO) << "CloudBrowserBrowserMainParts: boot WebContents post-Focus "
                  "RWHV bounds="
               << rwhv->GetViewBounds().ToString()
-              << " hasFocus=" << rwhv->HasFocus() << " visibility="
+              << " hasFocus=" << rwhv->HasFocus()
+              << " isShowing=" << rwhv->IsShowing() << " visibility="
               << static_cast<int>(initial_web_contents_->GetVisibility());
   } else {
     LOG(WARNING) << "CloudBrowserBrowserMainParts: boot WebContents has "
