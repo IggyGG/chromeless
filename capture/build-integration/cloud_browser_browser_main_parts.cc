@@ -30,6 +30,7 @@
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/threading/thread_restrictions.h"  // CV2-WARM — H1 ScopedAllowBaseSyncPrimitives
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "capture/audio/cb_audio_lifecycle.h"
@@ -525,7 +526,12 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm =
       worker_thread_->BlockingCall(
           [] { return CreateCloudBrowserDefaultAudioDeviceModule(); });
-  webrtc::AudioDeviceModule* adm_debug = adm.get();
+  // CV2-WARM — promote the ADM raw pointer to a member so StartNativeSession
+  // can reach it when invoked LATER from a Cb.startNativeSession CDP call
+  // (warm-snapshot restore), not just inline here at boot. Non-owning; pcf_
+  // (constructed just below with std::move(adm)) keeps it alive. Captured
+  // before the std::move so adm.get() is still valid.
+  adm_for_audio_lifecycle_ = adm.get();
   pcf_ = CreateCloudBrowserPcf(network_thread_.get(), worker_thread_.get(),
                                signaling_thread_.get(), env, std::move(adm));
   CHECK(pcf_) << "CreateCloudBrowserPcf returned null — the browser-process "
@@ -621,20 +627,84 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // unset; in that case skip the signaling subsystem (worker stays
   // a CDP-only target, preserves pre-CV2-69 deployment-without-
   // signaling-envs behavior).
-  std::optional<cloud_browser::signaling::WsClientConfig> ws_config =
-      cloud_browser::signaling::LoadConfigFromEnv();
-  if (!ws_config) {
+  //
+  // CV2-WARM — the bring-up that previously ran inline here now lives in
+  // StartNativeSession(). The boot path calls it ONLY when the signaling env
+  // is set (byte-identical to the historical env-set behavior). When the env
+  // is UNSET, we DO NOT early-return-exit: we fall through to the same
+  // RESULT_CODE_NORMAL_EXIT at the end of this method, which means "proceed
+  // into the main message loop and stay alive" (BrowserMainLoop only exits
+  // early on a code OTHER than RESULT_CODE_NORMAL_EXIT). That keeps the worker
+  // running as a warm CDP-only target so a later Cb.startNativeSession CDP
+  // call (after a warm-snapshot restore) can bring the session up with
+  // per-session params. The peer members stay nullptr until then — a
+  // snapshot frozen in this state bakes ZERO WebRTC network state (no WS, no
+  // PeerConnection, no relay sockets, no DTLS).
+  if (std::optional<cloud_browser::signaling::WsClientConfig> ws_config =
+          cloud_browser::signaling::LoadConfigFromEnv()) {
+    // LoadIceConfigFromEnv defaults to a single stun:stun.l.google.com entry
+    // when WEBRTC_ICE_SERVERS is unset (cb_ice_config contract: never nullopt).
+    std::optional<cloud_browser::signaling::IceConfig> ice_cfg =
+        cloud_browser::signaling::LoadIceConfigFromEnv();
+    CHECK(ice_cfg)
+        << "CV2-69: LoadIceConfigFromEnv() returned nullopt — contract "
+           "violation (default-STUN fallback should never miss). Inspect "
+           "cb_ice_config.cc for env-parse regression.";
+    LOG(INFO) << "CV2-69 signaling: env config present, starting native "
+                 "session at boot. host=" << ws_config->host
+              << " session=" << ws_config->session_id
+              << " tls=" << (ws_config->use_tls ? "wss" : "ws");
+    NativeSessionConfig cfg{std::move(*ws_config), std::move(*ice_cfg)};
+    webrtc::RTCError started = StartNativeSession(cfg);
+    if (!started.ok()) {
+      LOG(ERROR) << "CV2-WARM: boot-path StartNativeSession failed: "
+                 << started.message()
+                 << " — worker stays alive on the CDP path.";
+    }
+  } else {
     LOG(WARNING) << "CV2-69: WEBRTC_SIGNALING_HOST / WEBRTC_SIGNALING_"
-                    "SESSION_ID unset — native signaling subsystem "
-                    "disabled. Worker runs as CDP-only target. To "
-                    "enable, set WEBRTC_SIGNALING_HOST=<host[:port]> "
+                    "SESSION_ID unset — native signaling subsystem not "
+                    "started at boot. Worker runs as a warm CDP-only target "
+                    "awaiting Cb.startNativeSession. To start at boot instead, "
+                    "set WEBRTC_SIGNALING_HOST=<host[:port]> "
                     "+ WEBRTC_SIGNALING_SESSION_ID=<cb:elem:attempt> "
                     "+ WEBRTC_SIGNALING_TLS=0 (for plain ws://).";
-    return content::RESULT_CODE_NORMAL_EXIT;
   }
-  LOG(INFO) << "CV2-69 signaling: dialing host=" << ws_config->host
-            << " session=" << ws_config->session_id
-            << " tls=" << (ws_config->use_tls ? "wss" : "ws");
+
+  return content::RESULT_CODE_NORMAL_EXIT;
+}
+
+// CV2-WARM — see header. Bring up the full native signaling session from
+// |cfg|. Extracted verbatim from the historical inline PreMainMessageLoopRun
+// block (F5 step 2 .. F6 step 7) with two changes: (1) reads ws/ice from
+// |cfg| instead of env; (2) wraps the body in ScopedAllowBaseSyncPrimitives so
+// the synchronous signaling_thread_->BlockingCall (audio transceiver) is legal
+// when this runs from a CDP HandleCommand task (per-task DisallowBaseSync-
+// Primitives is active there). The scope is a no-op on the env-boot path.
+webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
+    const NativeSessionConfig& cfg) {
+  // Idempotency guard — reject a second bring-up without mutating state.
+  if (native_session_started_) {
+    return webrtc::RTCError(webrtc::RTCErrorType::INVALID_STATE,
+                            "native session already started");
+  }
+
+  // H1 — allow synchronous webrtc::Thread::BlockingCall hops below. On the
+  // CDP path this lifts the task's DisallowBaseSyncPrimitives (without it the
+  // audio-transceiver BlockingCall DCHECK-FATALs); on the env-boot path the
+  // disallow isn't set, so this is a benign no-op. Scopes the whole bring-up
+  // because offerer_driver_->Start() / AddTransceiver / CreateOutboundChannels
+  // may also perform internal proxy blocking hops. We use the ...ForTesting
+  // variant — the non-suffixed ScopedAllowBaseSyncPrimitives is gated behind a
+  // hardcoded friend allowlist in thread_restrictions.h that the embedder is
+  // not on; the ForTesting variant is the same scope without that gate (same
+  // choice the CreateBrowserContext override makes with
+  // ScopedAllowBlockingForTesting, cb_devtools_agent.cc).
+  base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync_primitives;
+
+  LOG(INFO) << "CV2-WARM StartNativeSession: host=" << cfg.ws.host
+            << " session=" << cfg.ws.session_id
+            << " tls=" << (cfg.ws.use_tls ? "wss" : "ws");
 
   // F5 step 2 — NetworkContext for the WS dial. Standard chromium
   // plumbing: browser_context_->StoragePartition->NetworkContext.
@@ -652,39 +722,34 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // (main_parts) — see header comment block on the construction-
   // order rationale. The ctor does NOT dial; Connect() at step 6
   // opens the wire after the offerer driver is ready.
+  //
+  // CV2-WARM — config now comes from |cfg.ws| (boot path moved the env value
+  // in; CDP path built it from params), not a moved-from env optional. Copy:
+  // |cfg| is the caller's const&, and the struct is small.
   ws_client_ = std::make_unique<cloud_browser::signaling::SignalingWsClient>(
-      network_context, std::move(*ws_config),
+      network_context, cfg.ws,
       /*observer=*/this);
 
-  // F5 step 4 — Load ICE config (M3 R3). Defaults to a single
-  // stun:stun.l.google.com:19302 entry when WEBRTC_ICE_SERVERS is
-  // unset (mirrors streamer.js DEFAULT_ICE_SERVERS). Note: renamed
-  // from LoadConfigFromEnv to LoadIceConfigFromEnv as part of
-  // CV2-69 to disambiguate from the same-namespace function in
-  // cb_signaling_ws_client.h.
-  std::optional<cloud_browser::signaling::IceConfig> ice_cfg =
-      cloud_browser::signaling::LoadIceConfigFromEnv();
-  CHECK(ice_cfg)
-      << "CV2-69: LoadIceConfigFromEnv() returned nullopt — contract "
-         "violation (default-STUN fallback should never miss). Inspect "
-         "cb_ice_config.cc for env-parse regression.";
+  // F5 step 4 — ICE config from |cfg.ice| (CV2-WARM — was
+  // LoadIceConfigFromEnv() inline; that read now happens in the boot-path
+  // caller / the CDP param builder, so both feed the same IceConfig here).
   LOG(INFO)
-      << "CV2-69 ICE: " << ice_cfg->summary.stun << " stun, "
-      << ice_cfg->summary.turn << " turn, " << ice_cfg->summary.other
+      << "CV2-69 ICE: " << cfg.ice.summary.stun << " stun, "
+      << cfg.ice.summary.turn << " turn, " << cfg.ice.summary.other
       << " other; transport_policy="
-      << (ice_cfg->transport_policy ==
+      << (cfg.ice.transport_policy ==
                   webrtc::PeerConnectionInterface::IceTransportsType::kRelay
               ? "relay"
               : "all");
 
   webrtc::PeerConnectionInterface::RTCConfiguration rtc_config;
-  rtc_config.servers = std::move(ice_cfg->servers);
-  rtc_config.type = ice_cfg->transport_policy;
+  rtc_config.servers = cfg.ice.servers;
+  rtc_config.type = cfg.ice.transport_policy;
 
   audio_lifecycle_ = std::make_unique<audio::CbAudioLifecycle>(
       /*downstream=*/this,
       /*observer=*/nullptr, base::SequencedTaskRunner::GetCurrentDefault(),
-      adm_debug);
+      adm_for_audio_lifecycle_);
 
   // F5 step 5 — Construct R4 CbOffererDriver. observer is the M5.5
   // audio lifecycle, which forwards downstream to main_parts after it
@@ -851,7 +916,10 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
 
   // ============== END CV2-69 / CV2-83 native peer setup ==============
 
-  return content::RESULT_CODE_NORMAL_EXIT;
+  // CV2-WARM — mark started so a second StartNativeSession (env boot then a
+  // stray CDP call, or two CDP calls) is rejected with INVALID_STATE above.
+  native_session_started_ = true;
+  return webrtc::RTCError::OK();
 }
 
 void CloudBrowserBrowserMainParts::WillRunMainMessageLoop(

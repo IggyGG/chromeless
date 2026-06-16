@@ -52,7 +52,9 @@
 
 #include <memory>
 
+#include "api/audio/audio_device.h"       // CV2-WARM — adm_for_audio_lifecycle_
 #include "api/peer_connection_interface.h"
+#include "api/rtc_error.h"                 // CV2-WARM — StartNativeSession return
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
 #include "base/timer/timer.h"
@@ -69,6 +71,7 @@
 #include "capture/build-integration/cb_file_upload_relay.h"
 #include "capture/build-integration/cb_input_dispatch.h"
 #include "capture/build-integration/cb_input_dispatch_composite.h"
+#include "capture/signaling/cb_ice_config.h"        // CV2-WARM — NativeSessionConfig::ice
 #include "capture/signaling/cb_offerer_driver.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
@@ -106,6 +109,18 @@ class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
 class CbCursorXyJoin;
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
+
+// CV2-WARM — per-session signaling config consumed by StartNativeSession().
+// Bundles the two existing aggregates the boot path reads from env
+// (WsClientConfig + IceConfig) so the env path and the runtime CDP path
+// (Cb.startNativeSession) build the SAME struct and feed ONE bring-up code
+// path. Constructed either from LoadConfigFromEnv()+LoadIceConfigFromEnv()
+// at boot, or from Cb.startNativeSession CDP params after a warm-snapshot
+// restore (see cv2-warm-snapshot-cold-start design).
+struct NativeSessionConfig {
+  signaling::WsClientConfig ws;
+  signaling::IceConfig ice;
+};
 
 // CV2-69 (M55-R5-merge-with-m3-r4-r6) — inherits BOTH
 // SignalingClientObserver and OffererDriverObserver. As the
@@ -213,6 +228,24 @@ class CloudBrowserBrowserMainParts
   // authority named by cb_active_webcontents_resolver.h.)
   void SetActiveCapture(content::WebContents* web_contents,
                         viz::FrameSinkId frame_sink_id);
+
+  // CV2-WARM — bring up the full native signaling session (WS client,
+  // offerer driver, DataChannel host, input/cursor/clipboard/file relays,
+  // sendonly audio + video transceivers) from |cfg|. This is the body that
+  // PreMainMessageLoopRun historically ran inline when WEBRTC_SIGNALING_*
+  // env was set; it is now a method so the Cb.startNativeSession CDP handler
+  // can invoke it AFTER a warm-snapshot restore with per-session params,
+  // instead of the cold-boot config-drive path.
+  //
+  // Idempotent: returns RTCError::OK() on the first success and sets
+  // native_session_started_; a second call returns INVALID_STATE without
+  // mutating state. MUST run on the UI thread. Callable from two contexts:
+  //   (1) PreMainMessageLoopRun bootstrap (base sync primitives allowed), or
+  //   (2) a CDP HandleCommand task (per-task DisallowBaseSyncPrimitives is
+  //       active) — which is why the body wraps its synchronous
+  //       signaling_thread_->BlockingCall hops in ScopedAllowBaseSyncPrimitives
+  //       (H1). The env-boot path is unaffected by that scope (no-op there).
+  webrtc::RTCError StartNativeSession(const NativeSessionConfig& cfg);
 
  private:
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
@@ -407,6 +440,19 @@ class CloudBrowserBrowserMainParts
   // a plain unique_ptr-owned object.
   std::unique_ptr<cloud_browser::signaling::CbOffererDriver> offerer_driver_;
   webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
+
+  // CV2-WARM — set true once StartNativeSession() succeeds. Guards against a
+  // double bring-up (env boot then a stray Cb.startNativeSession, or two CDP
+  // calls). Checked-and-set within one UI-thread task, so no lock is needed.
+  bool native_session_started_ = false;
+
+  // CV2-WARM — non-owning ADM pointer captured at PCF construction (the
+  // worker_thread_ BlockingCall in PreMainMessageLoopRun). audio_lifecycle_
+  // needs it, and StartNativeSession may now run AFTER PreMainMessageLoopRun
+  // (from a CDP call), so the pointer is promoted to a member instead of a
+  // PreMainMessageLoopRun local. Lifetime: owned by pcf_, valid for the
+  // worker's life — same as the original local `adm_debug`.
+  webrtc::AudioDeviceModule* adm_for_audio_lifecycle_ = nullptr;
 
   // CV2-83 — answerer-facing DataChannels, owned by CbDataChannelHost
   // instead of four ad-hoc scoped_refptr members. The host creates the

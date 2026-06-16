@@ -44,6 +44,7 @@
 #include <string>
 #include <vector>
 
+#include "api/rtc_error.h"  // CV2-WARM — Cb.startNativeSession callback return
 #include "base/containers/span.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
@@ -62,12 +63,17 @@ class DevToolsAgentHostClientChannel;
 class WebContents;
 }  // namespace content
 
+namespace crdtp {
+class Dispatchable;  // CV2-WARM — HandleStartNativeSession param (CBOR dispatch)
+}  // namespace crdtp
+
 class GURL;
 
 namespace cloud_browser {
 
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
+struct NativeSessionConfig;  // CV2-WARM — cloud_browser_browser_main_parts.h
 
 // Routes the Cb.startFrameSinkCapture CDP method into the
 // browser-process-owned CloudBrowserFrameSinkVideoTrackSource (held by
@@ -134,13 +140,23 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // SAME Unretained(main_parts_) lifetime contract as
   // track_source_getter. A null/empty callback simply skips the
   // SetActiveCapture call (capture still starts) rather than UAFing.
+  // |start_native_session_callback| (CV2-WARM) brings up the native WebRTC
+  // signaling session at Cb.startNativeSession DISPATCH time with per-session
+  // params, instead of the cold-boot env path. It is
+  // base::BindRepeating(&CloudBrowserBrowserMainParts::StartNativeSession,
+  // base::Unretained(main_parts_)) — same Unretained(main_parts_) lifetime
+  // contract as track_source_getter_ (main_parts out-lives the delegate's
+  // useful window; the callback only runs inside an active CDP session). A
+  // null/empty callback yields a ServerError on the wire rather than a UAF.
   explicit CbDevToolsManagerDelegate(
       content::BrowserContext* default_browser_context = nullptr,
       aura::Window* aura_context_window = nullptr,
       base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
           track_source_getter = {},
       base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
-          active_capture_callback = {});
+          active_capture_callback = {},
+      base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
+          start_native_session_callback = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -233,6 +249,16 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       content::DevToolsAgentHostClientChannel* channel,
       std::string* out_error);
 
+  // CV2-WARM — implementation of Cb.startNativeSession. Parses the per-session
+  // signaling params out of |dispatchable|'s CBOR Params(), builds a
+  // NativeSessionConfig, and invokes start_native_session_callback_. Returns
+  // the CBOR response payload ({"started":true,"sessionId":"..."}) on success;
+  // on a missing param / already-started / unwired callback, populates
+  // |out_error| and returns an empty vector (caller emits CreateErrorResponse).
+  std::vector<uint8_t> HandleStartNativeSession(
+      const crdtp::Dispatchable& dispatchable,
+      std::string* out_error);
+
   // Lazy resolver for the browser-process video track source
   // (ChromelessV2 M2 R3/R4). Run() at Cb.startFrameSinkCapture dispatch
   // time — NOT snapshotted at construction (see the ctor doc for the
@@ -255,6 +281,13 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // main_parts forwards to CbActiveWebContentsResolver::SetActiveCapture.
   base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
       active_capture_callback_;
+
+  // CV2-WARM — brings up the native signaling session at Cb.startNativeSession
+  // dispatch time. base::BindRepeating(&CloudBrowserBrowserMainParts::
+  // StartNativeSession, base::Unretained(main_parts_)). Same lifetime contract
+  // as track_source_getter_. Null/empty → ServerError on the wire.
+  base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
+      start_native_session_callback_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser

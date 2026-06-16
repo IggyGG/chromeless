@@ -38,8 +38,10 @@
 
 #include "capture/build-integration/cb_devtools_agent.h"
 
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "base/threading/thread_restrictions.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
@@ -49,8 +51,13 @@
 #include "url/gurl.h"
 
 #include "base/functional/callback.h"
+#include "base/json/json_reader.h"   // CV2-WARM — Cb.startNativeSession params
 #include "base/logging.h"
+#include "base/values.h"             // CV2-WARM — base::Value::Dict params
+#include "capture/build-integration/cloud_browser_browser_main_parts.h"  // CV2-WARM — NativeSessionConfig
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
+#include "capture/signaling/cb_ice_config.h"          // CV2-WARM — ICE builders
+#include "capture/signaling/cb_signaling_ws_client.h"  // CV2-WARM — WsClientConfig
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/surfaces/video_capture_target.h"
 #include "content/public/browser/devtools_agent_host.h"
@@ -60,8 +67,10 @@
 #include "content/public/browser/web_contents.h"
 #include "third_party/inspector_protocol/crdtp/cbor.h"
 #include "third_party/inspector_protocol/crdtp/dispatch.h"
+#include "third_party/inspector_protocol/crdtp/json.h"  // CV2-WARM — ConvertCBORToJSON
 #include "third_party/inspector_protocol/crdtp/serializable.h"
 #include "third_party/inspector_protocol/crdtp/span.h"
+#include "third_party/inspector_protocol/crdtp/status.h"  // CV2-WARM — crdtp::Status
 #include "ui/aura/window.h"
 
 namespace cloud_browser {
@@ -72,6 +81,10 @@ namespace {
 // SpanEquals against the Dispatchable's Method() without an extra
 // std::string round-trip per command.
 constexpr char kStartFrameSinkCaptureMethod[] = "Cb.startFrameSinkCapture";
+
+// CV2-WARM — bring up the native signaling session at runtime (post warm-
+// snapshot restore) with per-session params, instead of the cold-boot env.
+constexpr char kStartNativeSessionMethod[] = "Cb.startNativeSession";
 
 // Encodes {"started": true, "frameSinkId": "<n:m>"} as a CBOR map
 // inside a length-prefixed envelope. Matches the shape every
@@ -89,6 +102,26 @@ std::vector<uint8_t> EncodeStartResponse(const std::string& frame_sink_id_str) {
   // "frameSinkId": "<n:m>"
   crdtp::cbor::EncodeString8(crdtp::SpanFrom("frameSinkId"), &out);
   crdtp::cbor::EncodeString8(crdtp::SpanFrom(frame_sink_id_str), &out);
+
+  out.push_back(crdtp::cbor::EncodeStop());
+  envelope.EncodeStop(&out);
+  return out;
+}
+
+// CV2-WARM — encodes {"started": true, "sessionId": "<id>"} as a CBOR map
+// inside a length-prefixed envelope (same shape as EncodeStartResponse).
+std::vector<uint8_t> EncodeStartNativeSessionResponse(
+    const std::string& session_id) {
+  std::vector<uint8_t> out;
+  crdtp::cbor::EnvelopeEncoder envelope;
+  envelope.EncodeStart(&out);
+  out.push_back(crdtp::cbor::EncodeIndefiniteLengthMapStart());
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("started"), &out);
+  out.push_back(crdtp::cbor::EncodeTrue());
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("sessionId"), &out);
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom(session_id), &out);
 
   out.push_back(crdtp::cbor::EncodeStop());
   envelope.EncodeStop(&out);
@@ -114,9 +147,12 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     base::RepeatingCallback<CloudBrowserFrameSinkVideoTrackSource*()>
         track_source_getter,
     base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
-        active_capture_callback)
+        active_capture_callback,
+    base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
+        start_native_session_callback)
     : track_source_getter_(std::move(track_source_getter)),
       active_capture_callback_(std::move(active_capture_callback)),
+      start_native_session_callback_(std::move(start_native_session_callback)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
   // NOTE: we deliberately do NOT Run() the getter here. CV2-69
@@ -181,8 +217,11 @@ void CbDevToolsManagerDelegate::HandleCommand(
     return;
   }
 
-  if (!crdtp::SpanEquals(dispatchable.Method(),
-                         crdtp::SpanFrom(kStartFrameSinkCaptureMethod))) {
+  const bool is_frame_sink_capture = crdtp::SpanEquals(
+      dispatchable.Method(), crdtp::SpanFrom(kStartFrameSinkCaptureMethod));
+  const bool is_native_session = crdtp::SpanEquals(
+      dispatchable.Method(), crdtp::SpanFrom(kStartNativeSessionMethod));
+  if (!is_frame_sink_capture && !is_native_session) {
     // Not ours — fall through to chromium's dispatcher.
     std::move(callback).Run(message);
     return;
@@ -193,7 +232,9 @@ void CbDevToolsManagerDelegate::HandleCommand(
 
   std::string error;
   std::vector<uint8_t> ok_payload =
-      HandleStartFrameSinkCapture(channel, &error);
+      is_frame_sink_capture
+          ? HandleStartFrameSinkCapture(channel, &error)
+          : HandleStartNativeSession(dispatchable, &error);
 
   std::unique_ptr<crdtp::Serializable> response;
   if (!ok_payload.empty()) {
@@ -360,6 +401,109 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
             << "capture on " << frame_sink_id.ToString();
 
   return EncodeStartResponse(frame_sink_id.ToString());
+}
+
+std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
+    const crdtp::Dispatchable& dispatchable,
+    std::string* out_error) {
+  DCHECK(out_error);
+
+  // 0. The callback must be wired (BindRepeating to MainParts::
+  //    StartNativeSession). A null/empty callback is a wiring bug — surface a
+  //    ServerError rather than silently no-op.
+  if (!start_native_session_callback_) {
+    *out_error =
+        "Cb.startNativeSession: no start-native-session callback wired (check "
+        "CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate "
+        "against CloudBrowserBrowserMainParts::StartNativeSession)";
+    return {};
+  }
+
+  // 1. Decode the params. Dispatchable::Params() is a crdtp::span<uint8_t> of
+  //    CBOR (the params sub-blob of the command envelope). Convert it to a JSON
+  //    string (crdtp::json::ConvertCBORToJSON) and parse with base::JSONReader
+  //    — robust typed access without a hand-rolled CBOR map walker. An absent
+  //    Params() (empty span) means "no params" → all-default, which then fails
+  //    the required-field check below.
+  crdtp::span<uint8_t> params = dispatchable.Params();
+  std::optional<base::Value> parsed;
+  if (params.size() > 0) {
+    std::string json;
+    crdtp::Status status = crdtp::json::ConvertCBORToJSON(params, &json);
+    if (!status.ok()) {
+      *out_error = "Cb.startNativeSession: params CBOR→JSON conversion failed";
+      return {};
+    }
+    parsed = base::JSONReader::Read(json);
+  }
+  const base::Value::Dict* dict =
+      parsed && parsed->is_dict() ? &parsed->GetDict() : nullptr;
+  if (!dict) {
+    *out_error =
+        "Cb.startNativeSession: missing or non-object params (required: "
+        "signalingHost, signalingSessionId)";
+    return {};
+  }
+
+  // 2. Required signaling identity.
+  const std::string* signaling_host = dict->FindString("signalingHost");
+  const std::string* signaling_session_id =
+      dict->FindString("signalingSessionId");
+  if (!signaling_host || signaling_host->empty()) {
+    *out_error = "Cb.startNativeSession: missing required param signalingHost";
+    return {};
+  }
+  if (!signaling_session_id || signaling_session_id->empty()) {
+    *out_error =
+        "Cb.startNativeSession: missing required param signalingSessionId";
+    return {};
+  }
+
+  // 3. Build the WsClientConfig (mirrors LoadConfigFromEnv's output shape).
+  signaling::WsClientConfig ws;
+  ws.host = *signaling_host;
+  ws.session_id = *signaling_session_id;
+  if (const std::string* token = dict->FindString("signalingToken")) {
+    ws.token = *token;
+  }
+  // useTls defaults true (matches WsClientConfig::use_tls default), only the
+  // explicit false from the isolator forces plain ws://.
+  ws.use_tls = dict->FindBool("useTls").value_or(true);
+
+  // 4. Build the IceConfig from the iceServers JSON + transport policy,
+  //    reusing the SAME parsers the env path uses so the two paths are
+  //    semantically identical. iceServers arrives as the streamer.js JSON
+  //    string (the isolator already stores ice_servers_json as a string and
+  //    passes it through verbatim); absent/unparsable → default single-STUN.
+  signaling::IceConfig ice;
+  std::optional<std::vector<webrtc::PeerConnectionInterface::IceServer>>
+      servers;
+  if (const std::string* ice_servers_json = dict->FindString("iceServers")) {
+    servers = signaling::ParseIceServersJson(*ice_servers_json);
+  }
+  ice.servers =
+      servers.has_value() ? std::move(*servers) : signaling::BuildDefaultIceServers();
+  if (const std::string* policy = dict->FindString("iceTransportPolicy")) {
+    ice.transport_policy = signaling::ParseIceTransportPolicy(*policy);
+  }  // else leaves the IceConfig default (kAll).
+  ice.summary = signaling::SummariseIceServers(ice.servers);
+
+  // 5. Bring up the session on the UI thread (we are already on it — this is a
+  //    posted HandleCommand task). StartNativeSession wraps its blocking hops
+  //    in ScopedAllowBaseSyncPrimitives (H1) so the per-task disallow does not
+  //    FATAL. The RTCError is mapped to a ServerError on failure (e.g.
+  //    INVALID_STATE when a session is already started).
+  NativeSessionConfig cfg{std::move(ws), std::move(ice)};
+  webrtc::RTCError result = start_native_session_callback_.Run(cfg);
+  if (!result.ok()) {
+    *out_error =
+        std::string("Cb.startNativeSession: ") + result.message();
+    return {};
+  }
+
+  LOG(INFO) << "Cb.startNativeSession: native session brought up for session="
+            << *signaling_session_id << " host=" << *signaling_host;
+  return EncodeStartNativeSessionResponse(*signaling_session_id);
 }
 
 
