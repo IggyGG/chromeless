@@ -6,6 +6,7 @@
 #include "capture/signaling/cb_signaling_ws_client.h"
 
 #include <cstdlib>
+#include <queue>
 #include <utility>
 
 #include "base/containers/span.h"
@@ -455,37 +456,41 @@ void SignalingWsClient::OnDataFrame(
     return;
   }
 
-  // Binary frames are not part of the signaling contract. Physics
-  // sends text only; surfaces here only if a broker-side bug or
-  // adversarial client mis-sends — drop with an error.
+  // Signaling is text-only. A TEXT frame opens a message; CONTINUATION
+  // extends it; anything else (BINARY) is a contract violation.
   if (type != network::mojom::WebSocketMessageType::TEXT &&
       type != network::mojom::WebSocketMessageType::CONTINUATION) {
     FailWithError("unexpected non-text frame on signaling channel");
     return;
   }
 
-  // First fragment of a (possibly multi-fragment) message.
-  if (type == network::mojom::WebSocketMessageType::TEXT) {
-    inbound_buffer_.clear();
-    inbound_type_ = type;
+  // Frame-sequencing sanity (mirrors WebSocketChannel's own check): a TEXT
+  // frame must not arrive mid-message, and a CONTINUATION must not arrive
+  // without an open message. Defence-in-depth — the network service fails
+  // the channel first; this guards against a buggy/abusive producer.
+  const bool is_text = (type == network::mojom::WebSocketMessageType::TEXT);
+  if (is_text == receiving_message_) {
+    FailWithError(is_text ? "TEXT frame while a message is still open"
+                          : "CONTINUATION frame with no message open");
+    return;
   }
-  inbound_remaining_ += data_len;
+  receiving_message_ = !fin;  // open until the fin frame closes it
 
-  // Read pump — drain whatever bytes are currently in the readable
-  // pipe. The pipe-watcher re-arms us on additional data.
-  OnReadable(MOJO_RESULT_OK);
+  // Record the frame; DO NOT touch the pipe here — the bytes are drained in
+  // order by ConsumePendingFrames(), which reads EXACTLY this frame's length.
+  // A new message's OnDataFrame can arrive before the prior message's bytes
+  // have drained, so a single running counter would conflate them.
+  pending_frames_.push(InboundFrame{fin, type, data_len});
 
-  // |fin| signals "this is the last fragment". When we've also
-  // drained all announced bytes, decode + dispatch.
-  if (fin && inbound_remaining_ == 0) {
-    std::optional<Envelope> env = Decode(inbound_buffer_);
-    if (!env.has_value()) {
-      FailWithError("R1 Decode() rejected inbound frame");
-      return;
-    }
-    observer_->OnEnvelope(*env);
-    inbound_buffer_.clear();
-  }
+  // Temporary CV2 Gate 6 instrumentation (revert LOG(INFO)→VLOG(1) after the
+  // reassembly fix is confirmed across runs).
+  LOG(INFO) << "cb_signaling: OnDataFrame fin=" << fin
+            << " type=" << (is_text ? "TEXT" : "CONT")
+            << " data_len=" << data_len
+            << " queued_frames=" << pending_frames_.size()
+            << " msg_buffered=" << inbound_message_.size();
+
+  ConsumePendingFrames();
 }
 
 void SignalingWsClient::OnDropChannel(bool was_clean,
@@ -499,6 +504,11 @@ void SignalingWsClient::OnDropChannel(bool was_clean,
   handshake_client_receiver_.reset();
   readable_.reset();
   writable_.reset();
+  // Reset inbound reassembly so a (hypothetical) reconnect on the same object
+  // starts clean. std::queue has no clear(); swap-with-empty is the idiom.
+  std::queue<InboundFrame>().swap(pending_frames_);
+  inbound_message_.clear();
+  receiving_message_ = false;
 
   if (prev == State::kIdle || prev == State::kClosed) {
     return;
@@ -527,44 +537,107 @@ void SignalingWsClient::OnClosingHandshake() {
 // Internal helpers
 // --------------------------------------------------------------------
 
-void SignalingWsClient::OnReadable(MojoResult /*result*/) {
+void SignalingWsClient::OnReadable(MojoResult result) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (state_ != State::kOpen || !readable_.is_valid() ||
-      inbound_remaining_ == 0) {
+  if (state_ != State::kOpen || !readable_.is_valid()) {
+    return;
+  }
+  if (result != MOJO_RESULT_OK) {
+    // A pipe-side failure also surfaces via the client_receiver_ disconnect
+    // (→ OnDropChannel); treat a watcher error as channel loss.
+    FailWithError("readable pipe watcher signalled error");
+    return;
+  }
+  ConsumePendingFrames();
+}
+
+void SignalingWsClient::ConsumePendingFrames() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (state_ != State::kOpen || !readable_.is_valid()) {
     return;
   }
 
-  // Read in bounded chunks. Signaling envelopes are tiny but a
-  // multi-MB defensive ceiling prevents an adversarial peer from
-  // pinning the read loop forever.
-  //
-  // TODO(M3-R2-read-cap): plumb a configurable max envelope size +
-  // enforce it. For draft scope, the ceiling is implicit in
-  // chromium's WebSocket frame size limit (configured at the
-  // network service); good enough for first-compile.
-  while (inbound_remaining_ > 0) {
-    // chromium 7727 Mojo: BeginReadData is now
-    // (MojoBeginReadDataFlags flags, base::span<const uint8_t>& buffer)
-    // — the old (void**, uint32_t*, flags) form is gone.
+  // Drain queued frames strictly in order, reading EXACTLY each frame's
+  // remaining length. A frame whose bytes have not all arrived is left at the
+  // front (its data_length decremented by what we read) and the watcher
+  // re-arms; the next OnReadable resumes precisely where we stopped. This is
+  // the blink::WebSocketChannelImpl::ConsumePendingDataFrames shape — it can
+  // never conflate back-to-back messages because no read ever crosses a frame
+  // boundary. FinishFrame() may re-enter Send()/Disconnect() via the observer;
+  // Disconnect() flips state_ to kClosing and the loop guard stops cleanly.
+  while (!pending_frames_.empty() && state_ == State::kOpen) {
+    InboundFrame& frame = pending_frames_.front();
+
+    // Empty frame (only legal for a fin frame): nothing to read, dispatch.
+    if (frame.data_length == 0) {
+      const bool fin = frame.fin;
+      pending_frames_.pop();
+      FinishFrame(fin);
+      continue;
+    }
+
     base::span<const uint8_t> buffer;
-    MojoResult res =
+    const MojoResult begin_result =
         readable_->BeginReadData(MOJO_READ_DATA_FLAG_NONE, buffer);
-    if (res == MOJO_RESULT_SHOULD_WAIT) {
-      // No more bytes right now — chromium will re-fire OnDataFrame
-      // / the pipe-readable watcher when more arrive.
+    if (begin_result == MOJO_RESULT_SHOULD_WAIT) {
+      // No bytes available yet — the watcher re-fires OnReadable when more
+      // arrive. The front frame (and any behind it) stays intact.
       return;
     }
-    if (res != MOJO_RESULT_OK) {
+    if (begin_result == MOJO_RESULT_FAILED_PRECONDITION) {
+      // Pipe closed; client_receiver_ disconnect delivers OnDropChannel.
+      return;
+    }
+    if (begin_result != MOJO_RESULT_OK) {
       FailWithError("readable pipe error during BeginReadData");
       return;
     }
-    const size_t take =
-        std::min<uint64_t>(buffer.size(), inbound_remaining_);
-    inbound_buffer_.append(
+
+    if (buffer.size() >= frame.data_length) {
+      // All of this frame's bytes are present. Consume EXACTLY data_length —
+      // never the bytes belonging to the next frame/message behind it.
+      const size_t take = static_cast<size_t>(frame.data_length);
+      inbound_message_.append(
+          reinterpret_cast<const char*>(buffer.data()), take);
+      readable_->EndReadData(take);
+      const bool fin = frame.fin;
+      pending_frames_.pop();
+      FinishFrame(fin);
+      continue;
+    }
+
+    // Only part of this frame's bytes have arrived. Take what's here, shrink
+    // the front record, and wait for the rest (still THIS frame — the read
+    // never crosses into the next).
+    const size_t take = buffer.size();
+    inbound_message_.append(
         reinterpret_cast<const char*>(buffer.data()), take);
-    inbound_remaining_ -= take;
     readable_->EndReadData(take);
+    frame.data_length -= take;
+    // Loop: BeginReadData again in case more of this frame is already
+    // buffered; otherwise the next BeginReadData returns SHOULD_WAIT.
   }
+}
+
+void SignalingWsClient::FinishFrame(bool fin) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!fin) {
+    // Mid-message fragment — keep accumulating into inbound_message_.
+    return;
+  }
+  // Final fragment: decode the fully-assembled payload, then reset for the
+  // next message. inbound_message_ holds EXACTLY one message's bytes (every
+  // frame was length-bounded), so Decode never sees partial/concatenated JSON.
+  receiving_message_ = false;
+  LOG(INFO) << "cb_signaling: message assembled bytes="
+            << inbound_message_.size() << " — decoding";
+  std::optional<Envelope> env = Decode(inbound_message_);
+  inbound_message_.clear();
+  if (!env.has_value()) {
+    FailWithError("R1 Decode() rejected inbound frame");
+    return;
+  }
+  observer_->OnEnvelope(*env);
 }
 
 bool SignalingWsClient::WriteTextFrame(std::string_view payload) {
@@ -615,6 +688,11 @@ void SignalingWsClient::FailWithError(std::string_view reason) {
   handshake_client_receiver_.reset();
   readable_.reset();
   writable_.reset();
+  // Reset inbound reassembly so a (hypothetical) reconnect on the same object
+  // starts clean. std::queue has no clear(); swap-with-empty is the idiom.
+  std::queue<InboundFrame>().swap(pending_frames_);
+  inbound_message_.clear();
+  receiving_message_ = false;
   LOG(WARNING) << "cb_signaling: error: " << reason;
   observer_->OnError(reason);
 }

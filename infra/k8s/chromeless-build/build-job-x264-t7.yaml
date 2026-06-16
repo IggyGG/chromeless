@@ -142,7 +142,7 @@ spec:
               # SKIP_CDP_VALIDATION fix on cv2/m2's script never ran
               # because /workspace had main's older script. Build #5
               # attempts 1 + 2 both hit STEP 10 exit 127.
-              value: "cv2/m2-track-source-deps"
+              value: "cv2/wave-3-integration"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -211,15 +211,15 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              # cv2/m2-track-source-deps for build #5: warm-cache lane.
-              # M1 already validated end-to-end on build #3
-              # (cloud_browser_worker linked + packaged + staged) but
-              # that Job consumed all 3 backoffLimit attempts at STEP
-              # 10's kubectl-not-found infra bug. triform-7 is now idle
-              # with warm sccache + chromium-src; rerunning here against
-              # cv2/m2 validates M2 R1 (track-source webrtc deps) on
-              # warm cache in ~10 min vs t2's ~70-90 min cold path.
-              value: "cv2/m2-track-source-deps"
+              # cv2/wave-3-integration (2026-06-10): the unified CV2
+              # guest lineage — cv2-95 (ContentClient + compositor
+              # drain + GetStats threading + active-WebContents
+              # resolver) merged with the codex retarget lineage
+              # (cursor DC + remote-ICE queue + epoch-ms input +
+              # framesink retarget) and the controller signaling-cache
+              # PRs. Produces cr7727-14bce02697b7 for the rootfs bake
+              # that replaces the stale cr7727-3ad9123b6859 pin.
+              value: "cv2/wave-3-integration"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
@@ -265,23 +265,19 @@ spec:
               # Operator accepts loss of test-coverage signal (unittests
               # validate separately later, tracked IMPROVE). Worker-only
               # = zero error sources + ~20-30% faster build.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker"
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings"
             - name: NINJA_PARALLELISM
               # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
               # 36 was conservative. 56 leaves ~8 cores for OS + I/O +
               # sccache-S3 client. ~25% off the ninja phase.
               value: "56"
             - name: SKIP_FETCH
-              # "" for THIS build only: build #6 v3 (8rq9z) ran an
-              # over-aggressive `git clean -fdx` rootwide and deleted
-              # gclient-fetched binaries (buildtools/linux64/gn,
-              # third_party/llvm-build/*, etc.) which are ignored by
-              # .gitignore but legitimately downloaded by gclient
-              # runhooks. SKIP_FETCH=1 won't re-fetch them — only a
-              # full gclient sync will. After this build succeeds
-              # (~15 min cold sync + ~7 min autoninja warm), flip back
-              # to "1" for subsequent runs.
-              value: ""
+              # "1" — triform-7 tree verified warm 2026-06-10
+              # (buildtools/linux64/gn + third_party/llvm-build both
+              # present; the build #6 v3 git-clean damage was healed by
+              # that build's full sync). Step 3's branch-heads reset
+              # (cd429b1) self-heals patch state without a re-fetch.
+              value: "1"
             - name: STUB_MODE
               value: ""
             - name: SKIP_CDP_VALIDATION
@@ -303,8 +299,15 @@ spec:
               value: "x264"
           resources:
             requests:
-              # Burstable QoS — see build-job.yaml header.
-              cpu: "12"
+              # Burstable QoS — see build-job.yaml header. 12 → 4
+              # (2026-06-10): triform-7 reservation pressure hit 90%
+              # (43.5/48 requested; cargoless shards + isolation
+              # builders + longhorn IM) while ACTUAL usage was ~3
+              # cores. 12 → OutOfcpu ×3 = instant BackoffLimitExceeded.
+              # Same fix as triform-8's 2026-05-17 incident: shrink the
+              # request so the pod schedules; the 40-CPU limit keeps
+              # autoninja's real compute envelope unchanged.
+              cpu: "4"
               memory: "96Gi"
             limits:
               cpu: "40"

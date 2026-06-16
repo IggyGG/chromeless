@@ -237,7 +237,7 @@ T113's expected default.
 | `CHROMELESS_REPO` | `/workspace` | Our repo root. Read-only emptyDir mount populated by the bootstrap initContainer. |
 | `CHROMELESS_WORK_ROOT` | `/work` | Work-tree root. Holds `src/chromium/` (Chromium checkout), `artifacts/` (output binaries), `logs/` (timestamped log files). hostPath: `/var/lib/longhorn/chromeless-build/chromium-src` on triform-8. |
 | `CHROMIUM_BRANCH_NUMBER` | `7727` | Plain integer, NOT `refs/branch-heads/...`. Script constructs the full ref. M147 stable; verify on chromiumdash before each roll. |
-| `CHROMELESS_BUILD_TARGETS` | `cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests` | autoninja targets. |
+| `CHROMELESS_BUILD_TARGETS` | `cloud_browser_worker cloud_browser_encoder_unittests cloud_browser_framesink_capturer_unittests headless:resource_pack_data headless:resource_pack_strings` | autoninja targets, including the resource packs staged into the runtime image. |
 | `SCCACHE_DIR` | `/sccache` | Local-disk cache (sccache PVC mount). |
 | `SCCACHE_CACHE_SIZE` | `80G` | sccache eviction trigger. |
 | `SCCACHE_IDLE_TIMEOUT` | `0` | Keep sccache server alive for full build. |

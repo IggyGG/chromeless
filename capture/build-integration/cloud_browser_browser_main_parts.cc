@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "api/audio/audio_device.h"
 #include "api/environment/environment.h"
@@ -18,6 +19,10 @@
 #include "api/peer_connection_interface.h"
 #include "api/rtp_parameters.h"
 #include "api/rtp_transceiver_interface.h"
+#include "api/scoped_refptr.h"
+#include "api/stats/rtc_stats_collector_callback.h"
+#include "api/stats/rtc_stats_report.h"
+#include "api/stats/rtcstats_objects.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback_helpers.h"
@@ -25,10 +30,13 @@
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
+#include "base/timer/timer.h"
 #include "capture/audio/cb_audio_lifecycle.h"
 #include "capture/audio/cb_audio_options.h"
 #include "capture/audio/cb_audio_track.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
+#include "capture/build-integration/cb_begin_frame_driver.h"  // CV2-ICE
 #include "capture/build-integration/cb_cursor_xy_join.h"
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
 #include "capture/build-integration/cloud_browser_browser_context.h"
@@ -70,6 +78,7 @@
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/compositor/compositor.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/gfx/geometry/rect.h"
@@ -143,6 +152,21 @@ uint16_t ReadRemoteDebuggingPort() {
     return 0;
   }
   return static_cast<uint16_t>(parsed);
+}
+
+std::string FormatCodecPreferenceNamesForLog(
+    const std::vector<webrtc::RtpCodecCapability>& codecs) {
+  std::string out = "[";
+  bool first = true;
+  for (const auto& codec : codecs) {
+    if (!first) {
+      out += ",";
+    }
+    out += codec.name;
+    first = false;
+  }
+  out += "]";
+  return out;
 }
 
 // Reads --remote-debugging-address from the command line. Returns
@@ -358,14 +382,54 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   initial_web_contents_->WasShown();
   initial_web_contents_->Focus();
 
+  // CV2-ICE: start the BeginFrame driver. This is THE primary fix for the
+  // ~0.5 fps capture starvation. The FrameSinkVideoCapturer is a pull
+  // consumer that does NOT request BeginFrames, and cb-chromium has no real
+  // vsync on Xvfb, so without a driven BeginFrameSource the captured renderer
+  // only commits CompositorFrames on content damage and viz idle-refreshes
+  // the last surface ~once/second. The driver issues external BeginFrames on
+  // the root compositor at the target rate; the viz frame-sink hierarchy
+  // propagates them to the captured renderer (a hierarchy child of the root
+  // compositor frame sink), driving Blink to produce new frames the capturer
+  // can deliver. Each tick's draw+swap also emits the present-acks that drain
+  // Blink's LayerTreeView presentation-callback deque, so this also subsumes
+  // the former ScheduleCompositorKeepaliveRedraw keepalive (which never drove
+  // the renderer). 30 fps is the documented target — NOT 60: each tick is an
+  // unviewed software composite + blit on the GPU-less worker, so the CPU
+  // cost scales with the rate. See cb_begin_frame_driver.h.
+  begin_frame_driver_ = std::make_unique<CbBeginFrameDriver>(
+      aura_->host()->compositor(),
+      /*target_frame_interval=*/base::Hertz(30));
+  begin_frame_driver_->Start();
+
   // BUGS-529 diagnostic — confirms the smoking-gun pattern is closed.
   // Pre-fix expectation: HasFocus=false, ViewBounds=0x0.
   // Post-fix expectation: HasFocus=true, ViewBounds=non-zero.
   if (auto* rwhv = initial_web_contents_->GetRenderWidgetHostView()) {
+    // CV2-ICE-v3: force the boot view SHOWING (mirrors cb_devtools_agent.cc's
+    // capture-start fix; see its long comment for the full rationale).
+    // RenderWidgetHostViewAura::IsShowing() == window_->IsVisible() is
+    // hierarchy-based, so we Show() every hidden aura ancestor up to the root
+    // plus the RWHV — WasShown() + the boot native-view Show() above do not
+    // cover the full chain in this offscreen setup, leaving the renderer
+    // throttled at ~0.6fps under the external BeginFrame driver (verified by the
+    // driver self-diagnostic on firecracker). Covers the boot-tab-captured case
+    // and primes the view before the first capture-start.
+    if (!rwhv->IsShowing()) {
+      // aura::Window* directly (GetNativeView() returns it on Aura) so no extra
+      // gfx header dep is needed. Show() every hidden ancestor + the RWHV.
+      for (aura::Window* w = rwhv->GetNativeView(); w; w = w->parent()) {
+        if (!w->IsVisible()) {
+          w->Show();
+        }
+      }
+      rwhv->Show();
+    }
     LOG(INFO) << "CloudBrowserBrowserMainParts: boot WebContents post-Focus "
                  "RWHV bounds="
               << rwhv->GetViewBounds().ToString()
-              << " hasFocus=" << rwhv->HasFocus() << " visibility="
+              << " hasFocus=" << rwhv->HasFocus()
+              << " isShowing=" << rwhv->IsShowing() << " visibility="
               << static_cast<int>(initial_web_contents_->GetVisibility());
   } else {
     LOG(WARNING) << "CloudBrowserBrowserMainParts: boot WebContents has "
@@ -505,16 +569,9 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "browser-process video track source construction.";
 
   // R3 takes std::unique_ptr<CloudBrowserFrameSinkCapturer>, not the
-  // raw mojo::Remote. Wrap the producer + a no-op OnFrameCallback
-  // into a capturer first. Note: per R3's docstring at
-  // cb_framesink_video_track_source.cc:38-72, R3 cannot rebind the
-  // capturer's OnFrameCallback to its own OnCapturerFrame ingress
-  // (capturer.h has no SetOnFrameCallback hook today). For the
-  // current M2 R1-R4 landing, we pass base::DoNothing as the callback
-  // — capture won't actually flow until M2 R5 (CV2-40) re-arch ships
-  // either (A) a capturer SetOnFrameCallback hook or (B) a factory
-  // that builds capturer+R3 atomically with the right binding. Build
-  // structurally complete; M2 R5 is the runtime-correctness gate.
+  // raw mojo::Remote. Wrap the producer with a placeholder callback:
+  // CloudBrowserFrameSinkVideoTrackSource immediately rebinds the
+  // capturer to its OnCapturerFrame ingress before capture can Start().
   auto capturer = std::make_unique<CloudBrowserFrameSinkCapturer>(
       std::move(producer), base::DoNothing());
 
@@ -526,6 +583,23 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "returned null — Cb.startFrameSinkCapture would fail with "
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
+
+  // CV2-ICE diag: now that the capturer + resolver both exist, wire them into
+  // the BeginFrame driver as DIAGNOSTIC-ONLY observation sources (they do NOT
+  // drive frames). This lets the driver's ~5s self-report name WHERE a
+  // BeginFrame dies — specifically whether the captured renderer is actually
+  // producing frames under our ticks (capturer frames_received delta) vs. the
+  // ticks fanning out to a renderer that never subscribed (the 2026-06-16
+  // RENDERER-STARVED failure mode). capturer_for_test() returns the non-owning
+  // capturer pointer; its lifetime is tied to cb_track_source_, which
+  // PostMainMessageLoopRun tears down (cb_track_source_=nullptr) strictly
+  // AFTER begin_frame_driver_.reset(), so the raw pointer the driver holds
+  // stays valid for the driver's whole life.
+  if (begin_frame_driver_) {
+    begin_frame_driver_->SetDiagnosticSources(
+        &active_webcontents_resolver_,
+        cb_track_source_ ? cb_track_source_->capturer_for_test() : nullptr);
+  }
 
   // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) F5 + F6 ==============
   //
@@ -735,10 +809,7 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   // F6 step 7 — Add the M2 R3 video sendonly transceiver. THIS is
   // what triggers OnRenegotiationNeeded → CreateOffer → first
   // offer envelope onto the wire. Without this mutation, Start()
-  // alone leaves the PC idle. Note: actual frames don't flow until
-  // M2 R5 wires the FrameSinkCapturer's OnFrameCallback to the
-  // adapter's OnCapturerFrame ingress; Phase A signaling completes
-  // anyway (offer + ICE + DC handshake doesn't require frames).
+  // alone leaves the PC idle.
   video_track_ = pcf_->CreateVideoTrack(cb_track_source_, "cb-video-0");
   if (!video_track_) {
     LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — "
@@ -757,6 +828,22 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
                     "may not fire and no SDP offer will emit. Worker "
                     "stays alive on CDP path.";
     } else {
+      std::vector<webrtc::RtpCodecCapability> video_codec_preferences =
+          BuildFirstLightVideoCodecPreferences(
+              pcf_->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO)
+                  .codecs);
+      webrtc::RTCError codec_preference_result =
+          tx_result.value()->SetCodecPreferences(video_codec_preferences);
+      if (!codec_preference_result.ok()) {
+        LOG(ERROR) << "CV2-91: SetCodecPreferences(video) failed: "
+                   << codec_preference_result.message()
+                   << " — proceeding with libwebrtc default order; VP9 may "
+                      "negotiate first and starve decoded-frame first-light.";
+      } else {
+        LOG(INFO) << "CV2-91: video transceiver codec preferences applied: "
+                  << FormatCodecPreferenceNamesForLog(
+                         video_codec_preferences);
+      }
       LOG(INFO) << "CV2-69: video sendonly transceiver added; awaiting "
                    "OnRenegotiationNeeded → CreateOffer → wire emission.";
     }
@@ -877,13 +964,24 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // precedent: drop the longer-lived holder first so its dtors don't
   // walk into already-freed shorter-lived state).
   //
-  // ChromelessV2 M2 R4 (CV2-39): drop the video track source FIRST,
-  // before pcf_. The track source's broadcaster carries sink
-  // registrations the M3 peer tracks installed via libwebrtc's
-  // AddOrUpdateSink; tearing pcf_ first would invalidate those
-  // weak refs while the broadcaster still expects to deliver
-  // pending OnFrame() calls. Same drop-the-consumer-before-its-
-  // producer rationale as the pcf_-before-threads ordering below.
+  // CV2-ICE — stop the BeginFrame driver FIRST, before cb_track_source_ (and
+  // thus its capturer) goes away. The driver holds a raw ui::Compositor* into
+  // aura_ AND raw diagnostic pointers into the resolver + the capturer owned by
+  // cb_track_source_. reset() runs Stop(), which stops the ~5s diagnostic timer
+  // (so it can't fire and deref a freed capturer) and invalidates the in-flight
+  // BeginFrame ack WeakPtr (so the loop can't re-enter). Doing this before the
+  // capturer/track-source/WebContents/aura teardown guarantees the driver never
+  // ticks into, or reports on, freed/half-torn state. (aura_ is intentionally
+  // leaked at the bottom of this fn, but the driver must still stop ticking the
+  // compositor before the WebContents frame-sink hierarchy it drives unwinds.)
+  begin_frame_driver_.reset();
+
+  // ChromelessV2 M2 R4 (CV2-39): drop the video track source, before pcf_.
+  // The track source's broadcaster carries sink registrations the M3 peer
+  // tracks installed via libwebrtc's AddOrUpdateSink; tearing pcf_ first would
+  // invalidate those weak refs while the broadcaster still expects to deliver
+  // pending OnFrame() calls. Same drop-the-consumer-before-its-producer
+  // rationale as the pcf_-before-threads ordering below.
   cb_track_source_ = nullptr;
 
   // pcf_.reset() drops the strong ref the factory holds against the
@@ -1021,6 +1119,76 @@ void CloudBrowserBrowserMainParts::OnIceConnectionStateChanged(
     webrtc::PeerConnectionInterface::IceConnectionState state) {
   LOG(INFO) << "CV2-69 offerer_driver: ICE connection state -> "
             << static_cast<int>(state);
+
+  // CV2 Gate 6 media-RTP diagnosis: once ICE connects, start polling the
+  // outbound-rtp stats so the serial log shows whether the guest encoder
+  // is actually pushing RTP into the (now-paired) relay transport. Armed
+  // once; the RepeatingTimer is owned by `this` and torn down with it.
+  if (!rtp_stats_timer_armed_ &&
+      (state ==
+           webrtc::PeerConnectionInterface::IceConnectionState::
+               kIceConnectionConnected ||
+       state ==
+           webrtc::PeerConnectionInterface::IceConnectionState::
+               kIceConnectionCompleted)) {
+    rtp_stats_timer_armed_ = true;
+    LOG(INFO) << "CV2-RTP: ICE connected — starting outbound-rtp stats poll";
+    PollOutboundRtpStats();  // immediate first sample
+    rtp_stats_timer_.Start(
+        FROM_HERE, base::Seconds(2),
+        base::BindRepeating(
+            &CloudBrowserBrowserMainParts::PollOutboundRtpStats,
+            base::Unretained(this)));
+  }
+}
+
+namespace {
+// One-shot stats sink: logs the guest's outbound-rtp counters, then
+// self-releases (libwebrtc holds a ref across the async GetStats call).
+class CbOutboundRtpStatsLogger : public webrtc::RTCStatsCollectorCallback {
+ public:
+  void OnStatsDelivered(
+      const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report)
+      override {
+    bool any = false;
+    for (const webrtc::RTCOutboundRtpStreamStats* s :
+         report->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>()) {
+      any = true;
+      const std::string kind = s->kind.value_or("?");
+      LOG(INFO) << "CV2-RTP outbound[" << kind << "]"
+                << " packets_sent=" << s->packets_sent.value_or(0)
+                << " bytes_sent=" << s->bytes_sent.value_or(0)
+                << " frames_encoded=" << s->frames_encoded.value_or(0)
+                << " frames_sent=" << s->frames_sent.value_or(0)
+                << " fps=" << s->frames_per_second.value_or(0.0) << " "
+                << s->frame_width.value_or(0) << "x"
+                << s->frame_height.value_or(0)
+                << " target_bitrate=" << s->target_bitrate.value_or(0.0)
+                << " qlim=" << s->quality_limitation_reason.value_or("?");
+    }
+    if (!any) {
+      LOG(INFO) << "CV2-RTP outbound: (no outbound-rtp stream stats yet)";
+    }
+  }
+};
+}  // namespace
+
+void CloudBrowserBrowserMainParts::PollOutboundRtpStats() {
+  if (!offerer_driver_) {
+    return;
+  }
+  // GetStats' callback delivery is async + thread-safe, but the
+  // PeerConnection *proxy* dispatch does a blocking thread-hop to the
+  // signaling thread. This poll runs on the UI thread (driven by
+  // rtp_stats_timer_, armed from OnIceConnectionStateChanged which
+  // CbOffererDriver delivers on the UI thread via its ui_runner_),
+  // where chromium installs a per-task DisallowBaseSyncPrimitives — so
+  // calling pc()->GetStats() directly from here trips the DCHECK and
+  // FATALs the worker the instant ICE connects (thread_restrictions.cc:166).
+  // Route through the driver, which marshals onto signaling_thread_ with
+  // a scoped_refptr capture that keeps the PC alive across the async call.
+  auto sink = webrtc::make_ref_counted<CbOutboundRtpStatsLogger>();
+  offerer_driver_->PollOutboundStats(sink);
 }
 
 void CloudBrowserBrowserMainParts::OnRenegotiationStarted(

@@ -104,6 +104,34 @@ if [ -z "${CHROMIUM_START_URL:-}" ]; then
     CHROMIUM_START_URL="about:blank"
 fi
 
+# CV2-ICE: BeginFrame-driven capture flags (read cb_begin_frame_driver.h for the
+# full why). The video pipeline drives frame production by issuing external
+# BeginFrames at 30fps on the root compositor (the FrameSinkVideoCapturer is
+# pull-mode and Xvfb has no real vsync, so without a driven source the captured
+# renderer idles at ~0.5fps). Two flags make that loop actually produce frames:
+#
+#   --disable-new-content-rendering-timeout
+#       The 4s new-content timeout would otherwise force a stale/blank surface
+#       after a cross-document navigation, fighting the externally-paced frames;
+#       disabling it lets the paced BeginFrames own frame production end-to-end.
+#
+#   --run-all-compositor-stages-before-draw   (LayerTreeSettings::
+#       wait_for_all_pipeline_stages_before_draw). DECISIVE for this fix.
+#       Without it, the renderer's cc::SchedulerStateMachine skips the
+#       main-thread stages (BeginMainFrame/commit/activate) whenever
+#       ShouldSendBeginMainFrame() sees no damage — so a delivered external
+#       BeginFrame on a momentarily-quiescent frame produces nothing and capture
+#       stalls between damage events. With it, the renderer runs the FULL
+#       pipeline on EVERY BeginFrame it receives, so once the (visible,
+#       subscribed) renderer is on our external source, each 33ms tick
+#       deterministically yields a fresh CompositorFrame the capturer delivers.
+#       This is the canonical headless-deterministic-capture configuration
+#       (the same setting web-tests / headless screenshotting rely on).
+#       NOTE: it does NOT, by itself, make an IDLE renderer (no rAF, no damage,
+#       so client_needs_begin_frame_=false → support not subscribed to our
+#       source) start producing — that gate is renderer-controlled and is why
+#       the captured tab must be WasShown()+Focus()'d (cb_devtools_agent.cc) and
+#       why a truly static page still needs encoder-side hold-and-repeat for CFR.
 # shellcheck disable=SC2086  # fake_media_arg is intentionally word-split
 "${CHROMELESS_BROWSER_BIN}" \
   --no-sandbox \
@@ -120,6 +148,8 @@ fi
   --use-gl=angle \
   --use-angle=swiftshader-webgl \
   --disable-gpu-vsync \
+  --disable-new-content-rendering-timeout \
+  --run-all-compositor-stages-before-draw \
   --window-size=1920,1080 \
   --window-position=0,0 \
   --autoplay-policy=no-user-gesture-required \

@@ -105,6 +105,12 @@ RUN chmod +x /usr/local/bin/chromeless && \
 # to the binary's directory. Without it the worker exits at startup
 # with `Check failed: result. ` from base/i18n/icu_util.cc:306.
 #
+# headless_lib_{data,strings}.pak are also load-bearing once the renderer
+# path is alive. Blink's default CSS/SVG stylesheet setup reads common
+# resources through ui::ResourceBundle; shipping only ICU leaves the
+# renderer able to boot far enough to crash in css_default_style_sheets.cc
+# when those resources are missing.
+#
 # libEGL.so / libGLESv2.so / libvk_swiftshader.so / libvulkan.so.1
 # ship the Angle + SwiftShader bits the worker uses for `--use-gl=angle
 # --use-angle=swiftshader-webgl`; without them the GL backend can't
@@ -115,6 +121,8 @@ RUN chmod +x /usr/local/bin/chromeless && \
 # binary in /usr/local/bin/ so chromium's default PathService
 # resolution finds them without an extra `--icu-data-dir` flag.
 COPY icudtl.dat            /usr/local/bin/icudtl.dat
+COPY headless_lib_data.pak /usr/local/bin/headless_lib_data.pak
+COPY headless_lib_strings.pak /usr/local/bin/headless_lib_strings.pak
 COPY libEGL.so             /usr/local/bin/libEGL.so
 COPY libGLESv2.so          /usr/local/bin/libGLESv2.so
 COPY libvk_swiftshader.so  /usr/local/bin/libvk_swiftshader.so

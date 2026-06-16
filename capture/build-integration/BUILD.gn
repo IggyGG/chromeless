@@ -251,6 +251,7 @@ source_set("framesink_capture") {
     # NV12BufferInterface / I420BufferInterface / I420Buffer::Create /
     # rtc::TimeMicros() needed by R2's video_frame_conversion.cc.
     # Same pattern as :encoder_factory above.
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
 
     "//ui/gfx/geometry",
   ]
@@ -515,6 +516,16 @@ source_set("input_dispatch") {
   ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
+}
+
+test("cloud_browser_input_dispatch_unittests") {
+  sources = [ "cb_input_dispatch_test.cc" ]
+  deps = [
+    ":input_dispatch",
+    "//base/test:run_all_unittests",
+    "//testing/gtest",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
 }
 
 # ---------------------------------------------------------------------
@@ -1018,6 +1029,16 @@ source_set("embedder") {
     # necessary but not sufficient on their own.
     "cb_aura_platform_data.cc",
     "cb_aura_platform_data.h",
+    # CV2-ICE — external-BeginFrame driver. Drives the root compositor (and via
+    # the viz hierarchy the captured renderer) at the target fps. Part 1 of the
+    # ~0.5fps capture-starvation fix; pairs with
+    # --run-all-compositor-stages-before-draw (launch flag) + captured-tab
+    # visibility. Its ~5s self-report reads the resolver + capturer
+    # (:active_webcontents_resolver / :framesink_capture, both already in deps)
+    # and content::RenderWidgetHost{,View} (//content/public/browser) purely to
+    # log WHERE a BeginFrame dies. See cb_begin_frame_driver.h.
+    "cb_begin_frame_driver.cc",
+    "cb_begin_frame_driver.h",
     "cb_devtools_agent.cc",
     "cb_devtools_agent.h",
     "cb_focus_client.cc",
@@ -1035,6 +1056,8 @@ source_set("embedder") {
     "cloud_browser_browser_context.h",
     "cloud_browser_browser_main_parts.cc",
     "cloud_browser_browser_main_parts.h",
+    "cloud_browser_content_client.cc",
+    "cloud_browser_content_client.h",
     "cloud_browser_main.cc",
     "cloud_browser_main.h",
     "content_browser_client.cc",
@@ -1139,11 +1162,21 @@ source_set("embedder") {
     # the headless versions.
     "//ui/aura",
     "//ui/base",
+    # cb_begin_frame_driver.cc + cb_aura_platform_data.cc use ui::Compositor
+    # (IssueExternalBeginFrame / use_external_begin_frame_control() and the
+    # WindowTreeHostPlatform CreateCompositor external-begin-frame path — the
+    # CV2-ICE ~0.5fps capture-starvation fix). The direct
+    # #include "ui/compositor/compositor.h" needs the direct dep.
+    "//ui/compositor",
     # cloud_browser_browser_main_parts.cc creates a CbHeadlessScreen
     # (display::ScreenBase subclass) so chromium's Screen::Get() returns
     # non-null AND aura's pre-SetCursor gate (IsWindowUnderCursor) does
     # not short-circuit cursor routing — see cb_headless_screen.h.
     "//ui/display",
+    # cloud_browser_content_client.cc includes ui/gfx/image/image.h for the
+    # gfx::Image& return type of GetNativeImageNamed (gn check requires the
+    # direct dep for the directly-included header).
+    "//ui/gfx",
     "//ui/gfx/geometry",
     # PlatformWindowInitProperties — passed to aura::WindowTreeHost::
     # Create() to give the host an initial bounds.

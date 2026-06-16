@@ -29,8 +29,8 @@
 //      propagates timestamp / rotation / color-space onto a
 //      webrtc::VideoFrame value. Returns absl::nullopt on:
 //        * unknown / unsupported pixel format (counter incremented via
-//          out-param); R2 supports NV12 (capturer default,
-//          PIXEL_FORMAT_NV12) and I420 (PIXEL_FORMAT_I420) only.
+//          out-param); R2 supports I420 (capturer default,
+//          PIXEL_FORMAT_I420) and NV12 (PIXEL_FORMAT_NV12) only.
 //        * zero-area visible_rect (degenerate frame; counter incremented).
 //
 //   4. RebaseMediaTimestampToWebrtcMicros(media_ts)

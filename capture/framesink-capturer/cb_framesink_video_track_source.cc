@@ -36,37 +36,9 @@ CloudBrowserFrameSinkVideoTrackSource::CloudBrowserFrameSinkVideoTrackSource(
   //     OnFrameCallback invocations are possible.
   //   * So the callback can never fire after *this is gone.
   if (capturer_) {
-    // NOTE: capturer.h's CloudBrowserFrameSinkCapturer takes the
-    // OnFrameCallback in its constructor, NOT via a setter. The
-    // constructor signature today is:
-    //   CloudBrowserFrameSinkCapturer(Remote producer, OnFrameCallback);
-    //
-    // For R3's draft we accept a capturer that the caller built
-    // WITHOUT a real callback (or with a placeholder) and we do not
-    // attempt to rebind here — there is no public rebind hook on
-    // the capturer. The clean integration path is:
-    //
-    //   (A) capturer.h grows a SetOnFrameCallback(OnFrameCallback)
-    //       method that asserts not-yet-Started, OR
-    //   (B) the factory below takes the capturer-construction inputs
-    //       and constructs the capturer with our bound callback in
-    //       one shot.
-    //
-    // TODO(M2-R3-capturer-rebind): pick (A) or (B) during R4 wiring.
-    // (A) is the smaller surface; (B) is the "factory owns both halves"
-    // pattern that R4's construction-site task already needs to do.
-    //
-    // For R3 DRAFT: this constructor is correct for case (B) where
-    // the caller passes us a capturer they constructed with our
-    // bound callback already — that case is testable today by
-    // exposing OnCapturerFrame via a friend test (see test plan).
-    //
-    // The line below is the rebind we would emit if capturer.h
-    // supported it. Left commented as a forcing function:
-    //
-    // capturer_->SetOnFrameCallback(base::BindRepeating(
-    //     &CloudBrowserFrameSinkVideoTrackSource::OnCapturerFrame,
-    //     base::Unretained(this)));
+    capturer_->SetOnFrameCallback(base::BindRepeating(
+        &CloudBrowserFrameSinkVideoTrackSource::OnCapturerFrame,
+        base::Unretained(this)));
   }
 }
 

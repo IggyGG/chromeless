@@ -13,11 +13,16 @@
 
 #include "base/check.h"
 #include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/location.h"
 #include "base/logging.h"
+#include "base/task/sequenced_task_runner.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
 
@@ -46,23 +51,50 @@ class CloudBrowserFrameSinkCapturer::BufferHandleScope
           callbacks,
       base::RepeatingClosure on_done_metric)
       : callbacks_(std::move(callbacks)),
-        on_done_metric_(std::move(on_done_metric)) {}
+        on_done_metric_(std::move(on_done_metric)),
+        callback_task_runner_(base::SequencedTaskRunner::GetCurrentDefault()) {
+    DCHECK(callback_task_runner_);
+  }
 
  private:
   friend class base::RefCountedThreadSafe<BufferHandleScope>;
   ~BufferHandleScope() {
-    // Ack the buffer back to the producer; this is what unblocks the
-    // pool. Mojo's Remote<> takes care of the wire send.
-    if (callbacks_.is_bound()) {
-      callbacks_->Done();
+    // Ack the buffer back to the producer on the same sequence that received
+    // the PendingRemote. Encoder/libwebrtc frame release can happen on a
+    // worker thread, and a bound Mojo Remote must not be touched there.
+    if (!callbacks_.is_valid()) {
+      return;
     }
-    if (!on_done_metric_.is_null()) {
-      on_done_metric_.Run();
+
+    if (callback_task_runner_->RunsTasksInCurrentSequence()) {
+      RunDone(std::move(callbacks_), std::move(on_done_metric_));
+      return;
+    }
+
+    callback_task_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&BufferHandleScope::RunDone, std::move(callbacks_),
+                       std::move(on_done_metric_)));
+  }
+
+  static void RunDone(
+      mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
+          callbacks,
+      base::RepeatingClosure on_done_metric) {
+    mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> remote(
+        std::move(callbacks));
+    if (remote.is_bound()) {
+      remote->Done();
+    }
+    if (!on_done_metric.is_null()) {
+      on_done_metric.Run();
     }
   }
 
-  mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks_;
+  mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
+      callbacks_;
   base::RepeatingClosure on_done_metric_;
+  scoped_refptr<base::SequencedTaskRunner> callback_task_runner_;
 };
 
 // ---------------------------------------------------------------------
@@ -91,9 +123,44 @@ void CloudBrowserFrameSinkCapturer::Configure(
   min_capture_period_ = min_capture_period;
 }
 
+void CloudBrowserFrameSinkCapturer::SetOnFrameCallback(
+    OnFrameCallback on_frame) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(!on_frame.is_null());
+  DCHECK(!started_) << "SetOnFrameCallback must be called before Start.";
+  DCHECK(!consumer_.is_bound())
+      << "SetOnFrameCallback must not run while a consumer pipe is bound.";
+  on_frame_ = std::move(on_frame);
+}
+
 void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (started_) {
+    // Re-assert the output format + fixed resolution constraints BEFORE
+    // pointing the running producer at the new FrameSink. A bare
+    // ChangeTarget() leaves the Viz FrameSinkVideoCapturer free to derive
+    // its frame geometry from the *new* compositor surface's natural size
+    // instead of our pinned `resolution_` — which, after a cross-document
+    // navigation to a differently-sized page, produced corrupt frames: a
+    // small capture anchored in the top-left corner that flickered between
+    // the old and new surface (the symptom that surfaced once physics began
+    // re-firing capture on FrameNavigated / tab-switch — M2-R4-MULTI-TAB).
+    // SetFormat / SetMinCapturePeriod / SetResolutionConstraints are
+    // idempotent on the producer and our members are stable across
+    // retargets (Configure() runs once, before the first Start()), so
+    // re-applying them here is safe and forces every retargeted surface to
+    // be scaled into the same fixed 1280x720 fixed-aspect output the
+    // initial Start() established.
+    producer_->SetFormat(format_);
+    producer_->SetMinCapturePeriod(min_capture_period_);
+    producer_->SetResolutionConstraints(resolution_, resolution_,
+                                        /*use_fixed_aspect_ratio=*/true);
+    producer_->ChangeTarget(std::move(target),
+                            /*sub_capture_target_version=*/0);
+    LOG(INFO) << "CloudBrowserFrameSinkCapturer already running; "
+              << "retargeted producer to latest FrameSink target "
+              << "(re-applied format + " << resolution_.ToString()
+              << " resolution constraints)";
     return;
   }
 
@@ -106,10 +173,9 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
                           /*sub_capture_target_version=*/0);
 
   // 2. Bind our consumer receiver and hand the remote to the producer.
-  //    kPreferMappableSharedImage is the right pick when the format is
-  //    NV12 — it lets the producer hand us a MappableSharedImage-backed
-  //    handle, enabling the zero-copy GPU path. For I420 / ARGB we
-  //    fall back to shared-memory.
+  //    kPreferMappableSharedImage is only safe for the explicitly configured
+  //    NV12 lane; GPU-less pods default to I420 so Viz gives us CPU shared
+  //    memory instead of a GBM/shared-context-backed frame.
   const auto buffer_pref =
       (format_ == media::PIXEL_FORMAT_NV12)
           ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage

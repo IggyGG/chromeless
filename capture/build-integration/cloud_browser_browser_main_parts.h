@@ -55,6 +55,7 @@
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
+#include "base/timer/timer.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
 // that hold the runtime-wire consumer instances. CbCursorClient (M5
@@ -100,6 +101,7 @@ class CbDataChannelHost;
 }  // namespace signaling
 
 class CbAuraPlatformData;
+class CbBeginFrameDriver;  // CV2-ICE — drives renderer frame production
 class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
 class CbCursorXyJoin;
 class CloudBrowserBrowserContext;
@@ -206,7 +208,9 @@ class CloudBrowserBrowserMainParts
   // the shared active-target handoff for M4 typed input dispatch: the
   // input DataChannel carries input envelopes, but the frame-sink
   // capture command establishes which WebContents those envelopes
-  // should target.
+  // should target. (CV2-95 fix — forwards to
+  // active_webcontents_resolver_.SetActiveCapture(), the single
+  // authority named by cb_active_webcontents_resolver.h.)
   void SetActiveCapture(content::WebContents* web_contents,
                         viz::FrameSinkId frame_sink_id);
 
@@ -220,6 +224,17 @@ class CloudBrowserBrowserMainParts
   // Symmetric counterpart called from PostMainMessageLoopRun. Calls
   // StopRemoteDebuggingServer iff StartDevToolsHttpHandler ran.
   void StopDevToolsHttpHandler();
+
+  // CV2 Gate 6 media-RTP observability: poll the PeerConnection's
+  // outbound-rtp stats and LOG(INFO) packets_sent / bytes_sent /
+  // frames_encoded / frames_sent / frame WxH. Started on the first
+  // ICE-connected transition (OnIceConnectionStateChanged). This is the
+  // ONLY way to tell, post-WS-reassembly-fix, whether the guest's encoder
+  // is actually pushing RTP into the relay (packets_sent grows) vs the
+  // media stalling before the wire (packets_sent stays 0) — the guest PC
+  // is native libwebrtc, invisible to CDP/JS getStats, and the native
+  // GetStats relay (M6 R1) is otherwise unwired.
+  void PollOutboundRtpStats();
 
   // Owned global display::Screen instance. chromium fatals on
   // `Check failed: Screen::Get()` from ui/display/display_observer.cc:32
@@ -256,6 +271,29 @@ class CloudBrowserBrowserMainParts
   // when their dtors walk their parent pointer. Process is exiting
   // within seconds; OS reclaims memory and the X11 connection cleanly.
   std::unique_ptr<CbAuraPlatformData> aura_;
+
+  // CV2-ICE — drives the offscreen root compositor (and, via the viz
+  // frame-sink hierarchy, the captured renderer) at the target fps by issuing
+  // external BeginFrames on aura_->host()->compositor(). This is THE fix for
+  // the ~0.5 fps capture starvation: the FrameSinkVideoCapturer is a pull
+  // consumer and does NOT request BeginFrames, and there is no real vsync on
+  // Xvfb, so without a driven BeginFrameSource the captured renderer idles at
+  // viz's 1s refresh. The driver's draw+swap each tick ALSO emits the
+  // present-acks that drain Blink's presentation-callback deque, so it
+  // subsumes the former ScheduleCompositorKeepaliveRedraw keepalive (which
+  // only drove the root UI compositor and never the renderer's frame sink).
+  // See cb_begin_frame_driver.h.
+  //
+  // Holds a raw ui::Compositor* into aura_, so it MUST be destroyed before
+  // aura_ — declared AFTER aura_ (reverse-order destruction) AND explicitly
+  // reset() in PostMainMessageLoopRun before aura_.release().
+  std::unique_ptr<CbBeginFrameDriver> begin_frame_driver_;
+
+  // Drives PollOutboundRtpStats() every 2s once ICE connects. Armed once
+  // (guarded by rtp_stats_timer_armed_) on the first kIceConnectionConnected
+  // / kIceConnectionCompleted transition. CV2 Gate 6 media-RTP diagnosis.
+  base::RepeatingTimer rtp_stats_timer_;
+  bool rtp_stats_timer_armed_ = false;
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;

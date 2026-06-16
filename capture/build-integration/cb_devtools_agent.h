@@ -124,6 +124,16 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // aura_context_window_ raw snapshots already rely on. A null/empty
   // getter, or a getter that returns nullptr, yields a ServerError
   // envelope rather than a UAF.
+  // |active_capture_callback| notifies main_parts at Cb.startFrameSink
+  // Capture DISPATCH time (CV2-95) after a successful StartCapture,
+  // carrying the resolved (web_contents, frame_sink_id). main_parts
+  // forwards it to CbActiveWebContentsResolver::SetActiveCapture —
+  // closing the gap where the M4 input dispatchers'
+  // GetActiveWebContents() always returned nullptr (no call site
+  // populated the resolver) and every input event was dropped. Uses the
+  // SAME Unretained(main_parts_) lifetime contract as
+  // track_source_getter. A null/empty callback simply skips the
+  // SetActiveCapture call (capture still starts) rather than UAFing.
   explicit CbDevToolsManagerDelegate(
       content::BrowserContext* default_browser_context = nullptr,
       aura::Window* aura_context_window = nullptr,
@@ -239,9 +249,10 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       track_source_getter_;
 
   // Notifies main_parts after Cb.startFrameSinkCapture successfully
-  // resolves a WebContents + FrameSinkId. This is the M4 resolver
-  // handoff: input DataChannel dispatchers need the same active
-  // capture target that the frame-sink capturer just started using.
+  // resolves a WebContents + FrameSinkId (CV2-95). This is the M4
+  // resolver handoff: input DataChannel dispatchers need the same active
+  // capture target that the frame-sink capturer just started using;
+  // main_parts forwards to CbActiveWebContentsResolver::SetActiveCapture.
   base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
       active_capture_callback_;
 
