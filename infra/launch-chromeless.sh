@@ -104,6 +104,14 @@ if [ -z "${CHROMIUM_START_URL:-}" ]; then
     CHROMIUM_START_URL="about:blank"
 fi
 
+# CV2-ICE: --disable-new-content-rendering-timeout pairs with the
+# browser-process external-BeginFrame driver (CbBeginFrameDriver). The video
+# pipeline drives frame production by issuing external BeginFrames at 30fps
+# (the FrameSinkVideoCapturer is pull-mode and Xvfb has no real vsync, so
+# without a driven source the captured renderer idles at ~0.5fps). The 4s
+# new-content rendering timeout would otherwise force a stale/blank surface
+# after a cross-document navigation, fighting the externally-paced frames;
+# disabling it lets the paced BeginFrames own frame production end-to-end.
 # shellcheck disable=SC2086  # fake_media_arg is intentionally word-split
 "${CHROMELESS_BROWSER_BIN}" \
   --no-sandbox \
@@ -120,6 +128,7 @@ fi
   --use-gl=angle \
   --use-angle=swiftshader-webgl \
   --disable-gpu-vsync \
+  --disable-new-content-rendering-timeout \
   --window-size=1920,1080 \
   --window-position=0,0 \
   --autoplay-policy=no-user-gesture-required \

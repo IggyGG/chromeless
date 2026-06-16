@@ -1029,6 +1029,12 @@ source_set("embedder") {
     # necessary but not sufficient on their own.
     "cb_aura_platform_data.cc",
     "cb_aura_platform_data.h",
+    # CV2-ICE — external-BeginFrame driver. THE fix for ~0.5 fps capture
+    # starvation: drives the root compositor (and via the viz hierarchy the
+    # captured renderer) at the target fps so the pull-mode
+    # FrameSinkVideoCapturer gets new frames. See cb_begin_frame_driver.h.
+    "cb_begin_frame_driver.cc",
+    "cb_begin_frame_driver.h",
     "cb_devtools_agent.cc",
     "cb_devtools_agent.h",
     "cb_focus_client.cc",
@@ -1152,9 +1158,11 @@ source_set("embedder") {
     # the headless versions.
     "//ui/aura",
     "//ui/base",
-    # cloud_browser_browser_main_parts.cc calls aura_->host()->compositor()
-    # ->ScheduleFullRedraw() (the Gate-6 presentation-callback drain fix);
-    # the direct #include "ui/compositor/compositor.h" needs the direct dep.
+    # cb_begin_frame_driver.cc + cb_aura_platform_data.cc use ui::Compositor
+    # (IssueExternalBeginFrame / use_external_begin_frame_control() and the
+    # WindowTreeHostPlatform CreateCompositor external-begin-frame path — the
+    # CV2-ICE ~0.5fps capture-starvation fix). The direct
+    # #include "ui/compositor/compositor.h" needs the direct dep.
     "//ui/compositor",
     # cloud_browser_browser_main_parts.cc creates a CbHeadlessScreen
     # (display::ScreenBase subclass) so chromium's Screen::Get() returns

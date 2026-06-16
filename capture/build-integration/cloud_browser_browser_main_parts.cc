@@ -36,6 +36,7 @@
 #include "capture/audio/cb_audio_options.h"
 #include "capture/audio/cb_audio_track.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
+#include "capture/build-integration/cb_begin_frame_driver.h"  // CV2-ICE
 #include "capture/build-integration/cb_cursor_xy_join.h"
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
 #include "capture/build-integration/cloud_browser_browser_context.h"
@@ -238,23 +239,6 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
             << frame_sink_id.ToString();
 }
 
-void CloudBrowserBrowserMainParts::ScheduleCompositorKeepaliveRedraw() {
-  // Force the offscreen root UI compositor to redraw so the viz Display
-  // swaps and emits presentation-feedback (SWAP_ACK) for the renderer's
-  // per-frame frame_tokens. Without this, FrameSinkVideoCapturer copy
-  // requests draw-but-don't-swap the steady-state offscreen surface, so
-  // those frame_tokens never present-ack and their Blink presentation-
-  // time callbacks orphan in LayerTreeView's no-eviction deque, FATAL-
-  // DCHECKing at layer_tree_view.cc:574 (>60) ~2.5min into a session.
-  if (!aura_) {
-    return;
-  }
-  ui::Compositor* compositor = aura_->host()->compositor();
-  if (compositor) {
-    compositor->ScheduleFullRedraw();
-  }
-}
-
 namespace {
 
 // Internal default display geometry. Matches the Xvfb resolution the
@@ -398,19 +382,25 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   initial_web_contents_->WasShown();
   initial_web_contents_->Focus();
 
-  // CV2-ICE / Gate-6: start the compositor keepalive redraw. The
-  // FrameSinkVideoCapturer draws-but-doesn't-swap the offscreen Display
-  // when the root surface has no on-screen damage, orphaning Blink's
-  // per-frame presentation-time callbacks until they FATAL-DCHECK at 60
-  // (layer_tree_view.cc:574). Forcing a full redraw at the capture frame
-  // interval keeps the Display swapping + present-acking so the deque
-  // drains. ~60fps (16ms) covers the capturer's max rate; the cost is an
-  // unviewed software blit. See ScheduleCompositorKeepaliveRedraw.
-  compositor_keepalive_timer_.Start(
-      FROM_HERE, base::Milliseconds(16),
-      base::BindRepeating(
-          &CloudBrowserBrowserMainParts::ScheduleCompositorKeepaliveRedraw,
-          base::Unretained(this)));
+  // CV2-ICE: start the BeginFrame driver. This is THE primary fix for the
+  // ~0.5 fps capture starvation. The FrameSinkVideoCapturer is a pull
+  // consumer that does NOT request BeginFrames, and cb-chromium has no real
+  // vsync on Xvfb, so without a driven BeginFrameSource the captured renderer
+  // only commits CompositorFrames on content damage and viz idle-refreshes
+  // the last surface ~once/second. The driver issues external BeginFrames on
+  // the root compositor at the target rate; the viz frame-sink hierarchy
+  // propagates them to the captured renderer (a hierarchy child of the root
+  // compositor frame sink), driving Blink to produce new frames the capturer
+  // can deliver. Each tick's draw+swap also emits the present-acks that drain
+  // Blink's LayerTreeView presentation-callback deque, so this also subsumes
+  // the former ScheduleCompositorKeepaliveRedraw keepalive (which never drove
+  // the renderer). 30 fps is the documented target — NOT 60: each tick is an
+  // unviewed software composite + blit on the GPU-less worker, so the CPU
+  // cost scales with the rate. See cb_begin_frame_driver.h.
+  begin_frame_driver_ = std::make_unique<CbBeginFrameDriver>(
+      aura_->host()->compositor(),
+      /*target_frame_interval=*/base::Hertz(30));
+  begin_frame_driver_->Start();
 
   // BUGS-529 diagnostic — confirms the smoking-gun pattern is closed.
   // Pre-fix expectation: HasFocus=false, ViewBounds=0x0.
@@ -964,6 +954,14 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
     network_thread_->Stop();
     network_thread_.reset();
   }
+
+  // CV2-ICE — stop the BeginFrame driver BEFORE the WebContents and the
+  // (intentionally leaked) aura_ go away. The driver holds a raw
+  // ui::Compositor* into aura_ and issues BeginFrames into the frame-sink
+  // hierarchy that the renderer's WebContents is part of; tearing those down
+  // first would leave the driver ticking into freed/half-torn state. reset()
+  // runs Stop() (invalidates the in-flight ack WeakPtr) then frees the driver.
+  begin_frame_driver_.reset();
 
   // Drop the WebContents BEFORE the BrowserContext — the WebContents
   // holds raw pointers into the context's storage partition, so

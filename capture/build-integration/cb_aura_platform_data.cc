@@ -16,10 +16,12 @@
 #include "ui/aura/client/cursor_client.h"
 #include "ui/aura/client/default_capture_client.h"
 #include "ui/aura/client/focus_client.h"
+#include "ui/aura/client/window_types.h"
 #include "ui/aura/env.h"
 #include "ui/aura/layout_manager.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
+#include "ui/aura/window_tree_host_platform.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/platform_window/platform_window_init_properties.h"
 #include "ui/wm/core/default_activation_client.h"
@@ -70,6 +72,71 @@ class FillLayout : public aura::LayoutManager {
   bool has_bounds_;
 };
 
+// WindowTreeHostPlatform subclass that creates its ui::Compositor with
+// use_external_begin_frame_control=true.
+//
+// WHY a subclass (and why we cannot just call WindowTreeHost::Create):
+// use_external_begin_frame_control is a CONST argument to the ui::Compositor
+// constructor — it cannot be flipped after the compositor exists. On the
+// ozone path, the concrete host is aura::WindowTreeHostPlatform, whose PUBLIC
+// constructor (window_tree_host_platform.cc) hard-codes
+// CreateCompositor(false, /*use_external_begin_frame_control=*/false, ...)
+// BEFORE CreateAndSetPlatformWindow(). InitHost() does NOT create the
+// compositor on this path — the public ctor already did. So to enable the
+// flag we must intercept compositor creation at CONSTRUCTION time.
+//
+// WindowTreeHostPlatform exposes a PROTECTED ctor that takes the root Window
+// and intentionally does NOT create a compositor ("subclasses must call
+// CreateCompositor() at the appropriate time"). We use it to replicate the
+// public ctor verbatim, changing ONLY the second CreateCompositor argument to
+// true. Ordering is identical to upstream: CreateCompositor() first, then
+// CreateAndSetPlatformWindow() — which synchronously brings up the ozone-X11
+// window and dispatches OnAcceleratedWidgetAvailable(xid). Because the
+// compositor already exists by then, the base OnAcceleratedWidgetAvailable
+// wires SetAcceleratedWidget(xid) exactly as the stock path does. The caller
+// then runs the normal InitHost() (which only does UpdateRootWindowSize +
+// InitCompositor on this path).
+//
+// This is the same external-begin-frame-control model headless uses, but
+// adapted to a REAL ozone-X11 platform window (headless subclasses
+// WindowTreeHost directly with a null widget; we keep the real X11 window so
+// hit-testing / cursor routing / the BUGS-529 focus chain are unchanged).
+//
+// See cb_begin_frame_driver.h for why external begin frame control is needed
+// at all (the capturer does not drive the renderer; without a driven
+// BeginFrameSource the captured renderer idles at viz's 1s refresh ≈0.5 fps).
+class CbExternalBeginFrameWindowTreeHost : public aura::WindowTreeHostPlatform {
+ public:
+  explicit CbExternalBeginFrameWindowTreeHost(
+      ui::PlatformWindowInitProperties properties)
+      // Protected ctor: hands the root Window to the base WindowTreeHost and
+      // does NOT create a compositor. Construct the Window exactly as
+      // WindowTreeHost::Create does.
+      : aura::WindowTreeHostPlatform(std::make_unique<aura::Window>(
+            nullptr,
+            aura::client::WINDOW_TYPE_UNKNOWN)) {
+    // Replicate aura::WindowTreeHostPlatform's public ctor, with the single
+    // change of use_external_begin_frame_control false -> true. We deliberately
+    // do NOT touch size_in_pixels_ here (it is private to the base and is set
+    // by CreateAndSetPlatformWindow below from properties.bounds — the public
+    // ctor's separate assignment is redundant with that). The host's bounds
+    // are additionally force-propagated by CbAuraPlatformData via
+    // SetBoundsInPixels right after InitHost(), as before.
+    CreateCompositor(/*force_software_compositor=*/false,
+                     /*use_external_begin_frame_control=*/true,
+                     properties.enable_compositing_based_throttling,
+                     properties.compositor_memory_limit_mb);
+    CreateAndSetPlatformWindow(std::move(properties));
+  }
+
+  CbExternalBeginFrameWindowTreeHost(
+      const CbExternalBeginFrameWindowTreeHost&) = delete;
+  CbExternalBeginFrameWindowTreeHost& operator=(
+      const CbExternalBeginFrameWindowTreeHost&) = delete;
+
+  ~CbExternalBeginFrameWindowTreeHost() override = default;
+};
+
 }  // namespace
 
 CbAuraPlatformData::CbAuraPlatformData(const gfx::Size& initial_size) {
@@ -81,7 +148,19 @@ CbAuraPlatformData::CbAuraPlatformData(const gfx::Size& initial_size) {
   ui::PlatformWindowInitProperties properties;
   properties.bounds = gfx::Rect(initial_size);
 
-  host_ = aura::WindowTreeHost::Create(std::move(properties));
+  // Use our WindowTreeHostPlatform subclass instead of
+  // aura::WindowTreeHost::Create() so the root UI compositor is created with
+  // use_external_begin_frame_control=true. That is the precondition for
+  // CbBeginFrameDriver to drive frame production via
+  // ui::Compositor::IssueExternalBeginFrame — which is what actually advances
+  // the captured renderer at the target fps (see cb_begin_frame_driver.h for
+  // the renderer-vs-root-compositor rationale). The const flag must be set at
+  // compositor-construction time; WindowTreeHost::Create hard-codes it false,
+  // hence the subclass. InitHost() below performs the same
+  // UpdateRootWindowSize + InitCompositor it always did (it does NOT re-create
+  // the compositor on the platform path).
+  host_ = std::make_unique<CbExternalBeginFrameWindowTreeHost>(
+      std::move(properties));
   host_->InitHost();
   host_->window()->Show();
 

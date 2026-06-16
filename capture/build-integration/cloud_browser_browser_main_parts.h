@@ -101,6 +101,7 @@ class CbDataChannelHost;
 }  // namespace signaling
 
 class CbAuraPlatformData;
+class CbBeginFrameDriver;  // CV2-ICE — drives renderer frame production
 class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
 class CbCursorXyJoin;
 class CloudBrowserBrowserContext;
@@ -224,19 +225,6 @@ class CloudBrowserBrowserMainParts
   // StopRemoteDebuggingServer iff StartDevToolsHttpHandler ran.
   void StopDevToolsHttpHandler();
 
-  // CV2-ICE / Gate-6 compositor fix: force a root-surface redraw every
-  // frame interval. The FrameSinkVideoCapturer issues CopyOutputRequests
-  // that make the offscreen viz Display *draw* but not *swap* when the
-  // root surface has no on-screen damage, so renderer presentation-time
-  // frame_tokens never get a SWAP_ACK present-ack and orphan in Blink's
-  // LayerTreeView presentation-callback deque (no eviction). After ~60
-  // accrue the guest FATAL-DCHECKs at layer_tree_view.cc:574
-  // (callbacks.size() <= kMaxBufferSize). ScheduleFullRedraw() forces
-  // have_damage=true → should_swap=true → the Display swaps the unviewed
-  // software surface and emits the present-acks that drain the deque.
-  // Capture is unaffected (the copy path is independent of swap).
-  void ScheduleCompositorKeepaliveRedraw();
-
   // CV2 Gate 6 media-RTP observability: poll the PeerConnection's
   // outbound-rtp stats and LOG(INFO) packets_sent / bytes_sent /
   // frames_encoded / frames_sent / frame WxH. Started on the first
@@ -284,12 +272,22 @@ class CloudBrowserBrowserMainParts
   // within seconds; OS reclaims memory and the X11 connection cleanly.
   std::unique_ptr<CbAuraPlatformData> aura_;
 
-  // Drives ScheduleCompositorKeepaliveRedraw() at the capture frame
-  // interval so the offscreen Display keeps swapping and present-acking
-  // (see ScheduleCompositorKeepaliveRedraw). Started in
-  // PreMainMessageLoopRun once aura_ exists; runs for the worker's life
-  // (guests are per-session and short-lived, so idle cost is moot).
-  base::RepeatingTimer compositor_keepalive_timer_;
+  // CV2-ICE — drives the offscreen root compositor (and, via the viz
+  // frame-sink hierarchy, the captured renderer) at the target fps by issuing
+  // external BeginFrames on aura_->host()->compositor(). This is THE fix for
+  // the ~0.5 fps capture starvation: the FrameSinkVideoCapturer is a pull
+  // consumer and does NOT request BeginFrames, and there is no real vsync on
+  // Xvfb, so without a driven BeginFrameSource the captured renderer idles at
+  // viz's 1s refresh. The driver's draw+swap each tick ALSO emits the
+  // present-acks that drain Blink's presentation-callback deque, so it
+  // subsumes the former ScheduleCompositorKeepaliveRedraw keepalive (which
+  // only drove the root UI compositor and never the renderer's frame sink).
+  // See cb_begin_frame_driver.h.
+  //
+  // Holds a raw ui::Compositor* into aura_, so it MUST be destroyed before
+  // aura_ — declared AFTER aura_ (reverse-order destruction) AND explicitly
+  // reset() in PostMainMessageLoopRun before aura_.release().
+  std::unique_ptr<CbBeginFrameDriver> begin_frame_driver_;
 
   // Drives PollOutboundRtpStats() every 2s once ICE connects. Armed once
   // (guarded by rtp_stats_timer_armed_) on the first kIceConnectionConnected
