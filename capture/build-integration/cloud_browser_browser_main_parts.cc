@@ -564,6 +564,23 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
 
+  // CV2-ICE diag: now that the capturer + resolver both exist, wire them into
+  // the BeginFrame driver as DIAGNOSTIC-ONLY observation sources (they do NOT
+  // drive frames). This lets the driver's ~5s self-report name WHERE a
+  // BeginFrame dies — specifically whether the captured renderer is actually
+  // producing frames under our ticks (capturer frames_received delta) vs. the
+  // ticks fanning out to a renderer that never subscribed (the 2026-06-16
+  // RENDERER-STARVED failure mode). capturer_for_test() returns the non-owning
+  // capturer pointer; its lifetime is tied to cb_track_source_, which
+  // PostMainMessageLoopRun tears down (cb_track_source_=nullptr) strictly
+  // AFTER begin_frame_driver_.reset(), so the raw pointer the driver holds
+  // stays valid for the driver's whole life.
+  if (begin_frame_driver_) {
+    begin_frame_driver_->SetDiagnosticSources(
+        &active_webcontents_resolver_,
+        cb_track_source_ ? cb_track_source_->capturer_for_test() : nullptr);
+  }
+
   // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) F5 + F6 ==============
   //
   // Native WebRTC peer wiring — bootstraps the runtime peer that
@@ -927,13 +944,24 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // precedent: drop the longer-lived holder first so its dtors don't
   // walk into already-freed shorter-lived state).
   //
-  // ChromelessV2 M2 R4 (CV2-39): drop the video track source FIRST,
-  // before pcf_. The track source's broadcaster carries sink
-  // registrations the M3 peer tracks installed via libwebrtc's
-  // AddOrUpdateSink; tearing pcf_ first would invalidate those
-  // weak refs while the broadcaster still expects to deliver
-  // pending OnFrame() calls. Same drop-the-consumer-before-its-
-  // producer rationale as the pcf_-before-threads ordering below.
+  // CV2-ICE — stop the BeginFrame driver FIRST, before cb_track_source_ (and
+  // thus its capturer) goes away. The driver holds a raw ui::Compositor* into
+  // aura_ AND raw diagnostic pointers into the resolver + the capturer owned by
+  // cb_track_source_. reset() runs Stop(), which stops the ~5s diagnostic timer
+  // (so it can't fire and deref a freed capturer) and invalidates the in-flight
+  // BeginFrame ack WeakPtr (so the loop can't re-enter). Doing this before the
+  // capturer/track-source/WebContents/aura teardown guarantees the driver never
+  // ticks into, or reports on, freed/half-torn state. (aura_ is intentionally
+  // leaked at the bottom of this fn, but the driver must still stop ticking the
+  // compositor before the WebContents frame-sink hierarchy it drives unwinds.)
+  begin_frame_driver_.reset();
+
+  // ChromelessV2 M2 R4 (CV2-39): drop the video track source, before pcf_.
+  // The track source's broadcaster carries sink registrations the M3 peer
+  // tracks installed via libwebrtc's AddOrUpdateSink; tearing pcf_ first would
+  // invalidate those weak refs while the broadcaster still expects to deliver
+  // pending OnFrame() calls. Same drop-the-consumer-before-its-producer
+  // rationale as the pcf_-before-threads ordering below.
   cb_track_source_ = nullptr;
 
   // pcf_.reset() drops the strong ref the factory holds against the
@@ -954,14 +982,6 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
     network_thread_->Stop();
     network_thread_.reset();
   }
-
-  // CV2-ICE — stop the BeginFrame driver BEFORE the WebContents and the
-  // (intentionally leaked) aura_ go away. The driver holds a raw
-  // ui::Compositor* into aura_ and issues BeginFrames into the frame-sink
-  // hierarchy that the renderer's WebContents is part of; tearing those down
-  // first would leave the driver ticking into freed/half-torn state. reset()
-  // runs Stop() (invalidates the in-flight ack WeakPtr) then frees the driver.
-  begin_frame_driver_.reset();
 
   // Drop the WebContents BEFORE the BrowserContext — the WebContents
   // holds raw pointers into the context's storage partition, so

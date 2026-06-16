@@ -11,12 +11,25 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/strings/string_number_conversions.h"
+#include "capture/build-integration/cb_active_webcontents_resolver.h"
+#include "capture/framesink-capturer/capturer.h"
 #include "components/viz/common/frame_sinks/begin_frame_args.h"
+#include "components/viz/common/surfaces/frame_sink_id.h"
+#include "content/public/browser/render_widget_host.h"
+#include "content/public/browser/render_widget_host_view.h"
+#include "content/public/browser/web_contents.h"
 #include "ui/compositor/compositor.h"
 
 namespace cloud_browser {
 
 namespace {
+
+// Cadence of the driver's self-report. Decoupled from the BeginFrame interval:
+// long enough that the log isn't spammy, short enough that a stuck-at-0.15fps
+// regression is visible within a few lines of a 120s soak.
+constexpr base::TimeDelta kDiagnosticInterval = base::Seconds(5);
+
 
 // Cadence guardrails, expressed as INTERVALS (not rates). NOTE the inversion:
 // the *fastest* allowed rate (60 fps) is the *smallest* interval, hence
@@ -75,6 +88,17 @@ void CbBeginFrameDriver::Start() {
   LOG(INFO) << "CbBeginFrameDriver: starting external BeginFrame loop at "
             << (1.0 / target_frame_interval_.InSecondsF()) << " fps target ("
             << target_frame_interval_.InMillisecondsF() << "ms interval)";
+
+  // Arm the ~5s self-report. Reset the per-interval counters so the first
+  // report reflects only post-Start activity. base::Unretained is safe: the
+  // timer is a member, so it cannot outlive `this`, and Stop()/dtor stop it.
+  issued_since_report_ = 0;
+  acked_since_report_ = 0;
+  last_reported_frames_received_ = 0;
+  diagnostic_timer_.Start(FROM_HERE, kDiagnosticInterval,
+                          base::BindRepeating(&CbBeginFrameDriver::EmitDiagnostic,
+                                              base::Unretained(this)));
+
   IssueOneBeginFrame();
 }
 
@@ -85,12 +109,21 @@ void CbBeginFrameDriver::Stop() {
   }
   running_ = false;
   next_frame_timer_.Stop();
+  diagnostic_timer_.Stop();
   // Drop any in-flight ack: an IssueExternalBeginFrame issued before Stop()
   // may still invoke its completion callback asynchronously. Invalidating the
   // WeakPtr makes that late OnBeginFrameAck a no-op so we don't re-arm after
   // teardown.
   weak_factory_.InvalidateWeakPtrs();
   LOG(INFO) << "CbBeginFrameDriver: stopped external BeginFrame loop";
+}
+
+void CbBeginFrameDriver::SetDiagnosticSources(
+    WebContentsResolver* resolver,
+    CloudBrowserFrameSinkCapturer* capturer) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  diag_resolver_ = resolver;
+  diag_capturer_ = capturer;
 }
 
 void CbBeginFrameDriver::IssueOneBeginFrame() {
@@ -151,6 +184,7 @@ void CbBeginFrameDriver::IssueOneBeginFrame() {
       args, /*force=*/true,
       base::BindOnce(&CbBeginFrameDriver::OnBeginFrameAck,
                      weak_factory_.GetWeakPtr()));
+  ++issued_since_report_;
 }
 
 void CbBeginFrameDriver::OnBeginFrameAck(const viz::BeginFrameAck& /*ack*/) {
@@ -158,6 +192,7 @@ void CbBeginFrameDriver::OnBeginFrameAck(const viz::BeginFrameAck& /*ack*/) {
   if (!running_) {
     return;
   }
+  ++acked_since_report_;
 
   // Hold the target cadence: schedule the next issue for one interval after
   // the PREVIOUS issue, not one interval after now. If frame production took
@@ -175,6 +210,91 @@ void CbBeginFrameDriver::OnBeginFrameAck(const viz::BeginFrameAck& /*ack*/) {
   } else {
     IssueOneBeginFrame();
   }
+}
+
+void CbBeginFrameDriver::EmitDiagnostic() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  // --- our own loop liveness (necessary but NOT sufficient — the part-1
+  //     driver showed healthy issue/ack here while producing 0 fps) ---
+  const uint64_t issued = issued_since_report_;
+  const uint64_t acked = acked_since_report_;
+  issued_since_report_ = 0;
+  acked_since_report_ = 0;
+  const double issued_fps = issued / kDiagnosticInterval.InSecondsF();
+
+  // --- captured-renderer attachment + visibility (the subscription
+  //     precondition: an idle/hidden renderer will not observe our source) ---
+  std::string renderer_state = "resolver=unavailable";
+  if (diag_resolver_) {
+    content::WebContents* wc = diag_resolver_->GetActiveWebContents();
+    if (!wc) {
+      renderer_state = "no-active-capture (no WebContents being captured)";
+    } else {
+      std::string fsid_str = "fsid=?";
+      std::string vis_str = "rwhv=none";
+      if (content::RenderWidgetHostView* rwhv =
+              wc->GetRenderWidgetHostView()) {
+        vis_str = rwhv->IsShowing() ? "rwhv=SHOWING" : "rwhv=HIDDEN";
+        if (content::RenderWidgetHost* rwh = rwhv->GetRenderWidgetHost()) {
+          fsid_str = "fsid=" + rwh->GetFrameSinkId().ToString();
+        }
+      }
+      // Visibility::VISIBLE is the precondition for the renderer's cc::Scheduler
+      // to keep raising client_needs_begin_frame_ (rAF runs only on a visible
+      // doc). HIDDEN here would explain 0 production regardless of our ticks.
+      renderer_state =
+          "captured " + fsid_str + " " + vis_str + " wc_visibility=" +
+          base::NumberToString(static_cast<int>(wc->GetVisibility()));
+    }
+  }
+
+  // --- GROUND TRUTH: is the captured renderer actually producing frames under
+  //     our ticks? frames_received is the capturer's count of OnFrameCaptured
+  //     deliveries from viz. issued>>0 with frames_delta≈0 == BeginFrame dying
+  //     at the renderer observer-subscription gate (the 2026-06-16 bug). ---
+  std::string capture_state = "capturer=unavailable";
+  bool capturer_present = false;
+  uint64_t captured_delta = 0;
+  if (diag_capturer_) {
+    capturer_present = true;
+    const uint64_t now_received = diag_capturer_->GetStats().frames_received;
+    captured_delta = (now_received >= last_reported_frames_received_)
+                         ? (now_received - last_reported_frames_received_)
+                         : 0;
+    last_reported_frames_received_ = now_received;
+    const double capture_fps = captured_delta / kDiagnosticInterval.InSecondsF();
+    capture_state = "frames_received +" + base::NumberToString(captured_delta) +
+                    " (" + base::NumberToString(capture_fps) +
+                    " fps captured), total=" + base::NumberToString(now_received);
+  }
+
+  // Single greppable line. The VERDICT field makes the failure mode explicit so
+  // a reader (or a log-scraping harness) needn't cross-reference the wire. It
+  // keys off the per-window CAPTURED delta (ground truth), not the total, so it
+  // reflects current behaviour rather than history.
+  const char* verdict;
+  if (!capturer_present) {
+    verdict = "UNKNOWN(no-capturer-handle)";
+  } else if (issued == 0) {
+    verdict = "DRIVER-STALLED(issued=0)";  // our own loop is dead
+  } else if (captured_delta == 0) {
+    // issued>>0 but nothing captured this window: BeginFrame is dying at the
+    // renderer's observer-subscription gate (renderer idle / hidden / static,
+    // so client_needs_begin_frame_=false and the support never subscribed to
+    // our source). This is the 2026-06-16 failure, now self-evident in-log.
+    verdict = "RENDERER-STARVED(ticks-not-reaching-renderer-or-renderer-idle)";
+  } else if (issued >= 4 * captured_delta) {
+    // We issue ~30/s but capture is materially below that: the renderer is
+    // subscribing only intermittently (the ~30s-burst shape), not sustaining.
+    verdict = "BURSTING(capture<<issued: renderer subscribing intermittently)";
+  } else {
+    verdict = "PRODUCING";
+  }
+
+  LOG(INFO) << "CbBeginFrameDriver[diag]: issued=" << issued << " ("
+            << issued_fps << " fps) acked=" << acked << " | " << renderer_state
+            << " | " << capture_state << " | VERDICT=" << verdict;
 }
 
 }  // namespace cloud_browser

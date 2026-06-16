@@ -39,24 +39,104 @@
 //     a root-compositor ScheduleFullRedraw() does not drive the renderer's
 //     frame sink.
 //
-// THE FIX: drive BeginFrames ourselves. ui::Compositor::IssueExternalBeginFrame
-// posts a BeginFrame into the Display's ExternalBeginFrameSourceMojo, which
-// REPLACES the Display's default BeginFrameSource and is registered on the
-// root frame sink. FrameSinkManagerImpl::RegisterBeginFrameSource +
-// RecursivelyAttachBeginFrameSource propagate that source down the frame-sink
-// hierarchy. The captured renderer's frame sink is a hierarchy CHILD of the
-// root aura compositor's frame sink (DelegatedFrameHost::AttachToCompositor →
-// ui::Compositor::AddChildFrameSink → HostFrameSinkManager::
-// RegisterFrameSinkHierarchy(root, renderer)), so a single external
-// BeginFrame on the root ticks the renderer's cc::Scheduler exactly like a
-// vsync would. For an animating page the renderer commits + submits a new
-// CompositorFrame → surface damage → the Display draws+swaps → the
-// FrameSinkVideoCapturer's OnFrameDamaged fires → a NEW captured frame
-// reaches the encoder. This same draw+swap also emits the present-acks that
-// drain Blink's LayerTreeView presentation-callback deque, so this driver
-// SUBSUMES the old ScheduleCompositorKeepaliveRedraw keepalive (which only
-// drove the root UI compositor and existed to avoid the
-// layer_tree_view.cc:574 FATAL-DCHECK at ~2.5min).
+// THE FIX (part 1 of 3): drive BeginFrames ourselves.
+// ui::Compositor::IssueExternalBeginFrame posts a BeginFrame into the Display's
+// ExternalBeginFrameSourceMojo, which REPLACES the Display's default
+// BeginFrameSource and is registered on the root frame sink.
+// FrameSinkManagerImpl::RegisterBeginFrameSource + RecursivelyAttachBeginFrame
+// Source propagate that source DOWN the frame-sink hierarchy. The captured
+// renderer's frame sink IS a hierarchy CHILD of the root aura compositor's
+// frame sink (DelegatedFrameHost::AttachToCompositor → ui::Compositor::
+// AddChildFrameSink → HostFrameSinkManager::RegisterFrameSinkHierarchy(root,
+// renderer)), and RecursivelyAttachBeginFrameSource verifiably calls
+// support->SetBeginFrameSource(our_external_source) on EVERY descendant
+// support — so our external source IS the source set on the renderer's
+// CompositorFrameSinkSupport. (Re-verified against branch-heads/7727:
+// frame_sink_manager_impl.cc RecursivelyAttachBeginFrameSource walks
+// mapping.children and calls SetBeginFrameSource per node; the renderer is a
+// non-root sink with no source of its own.)
+//
+// ===================================================================
+// THE BUG THIS FIX ALONE DID NOT CLOSE — the observer-subscription gate
+// ===================================================================
+//
+// 2026-06-16, MEASURED ON LIVE STAGING: the part-1 driver above (commit
+// 2e5d147), built+baked+rolled and confirmed-in-binary, DID NOT lift fps.
+// fps_decoded_mean stayed at 0.15 with the exact pre-fix ~30s-burst signature.
+// Root cause, re-verified against branch-heads/7727 viz source:
+//
+//   SetBeginFrameSource(source) does NOT make the support OBSERVE the source.
+//   compositor_frame_sink_support.cc only calls begin_frame_source_->
+//   AddObserver(this) from StartObservingBeginFrameSource(), reached ONLY when
+//       needs_begin_frame_ = (client_needs_begin_frame_ ||
+//                             !frame_timing_details_.empty() ||
+//                             !pending_surfaces_.empty() ||
+//                             layer_context_wants_begin_frames_)
+//   is true. For an IDLE captured renderer all four terms are false, so the
+//   renderer's support is NOT in our ExternalBeginFrameSource's observers_ set.
+//   ExternalBeginFrameSource::OnBeginFrame iterates observers_ — with the
+//   renderer absent, our 30 Hz ticks fan out to ZERO renderer observers and
+//   the renderer produces nothing. (Our ack still fires every tick because
+//   force=true routes display_->SetNeedsOneBeginFrame and the Display path
+//   acks independent of any renderer observer — which is exactly why the
+//   part-1 driver SPUN happily while delivering 0 fps. The ack-chain liveness
+//   MASKED the dead renderer.) The ~30s bursts are the renderer's
+//   intensive-timer / non-rAF damage events (and viz's kMaxRefreshDelay=1s
+//   idle refresh) briefly re-subscribing the support, not our driver working.
+//
+// client_needs_begin_frame_ is set by the RENDERER's cc::Scheduler via the
+// SetNeedsBeginFrame mojo call, which it raises only while it has pending
+// animation/damage. Critically, requestAnimationFrame itself is GATED on
+// receiving BeginFrames AND on the document being visible — Chromium stops rAF
+// for hidden/occluded/out-of-view content (M52+). There is NO browser-process
+// API to force a child frame sink to observe begin frames it did not request:
+// HostFrameSinkManager exposes no RegisterBeginFrameSource (that lives on the
+// viz-process FrameSinkManagerImpl), and ui::Compositor/RenderWidgetHostImpl
+// expose no "force continuous renderer production" hook. The CDP mechanism
+// that DOES bypass the gate — HeadlessExperimental.beginFrame, which "sends
+// screenshotting BeginFrames even if needsBeginFrames is false" by injecting
+// at the renderer's own widget compositor — is unavailable on our binary
+// (spike-beginframe/findings.md: the domain is chrome-headless-shell-only).
+//
+// ===================================================================
+// THE FIX (parts 2 + 3) — make each delivered tick a full frame, and keep
+// the captured renderer subscribed
+// ===================================================================
+//
+// Part 2 (launch flag, infra/launch-chromeless.sh):
+//   --run-all-compositor-stages-before-draw sets LayerTreeSettings::
+//   wait_for_all_pipeline_stages_before_draw. With it, the renderer's
+//   cc::SchedulerStateMachine runs BeginMainFrame + commit + activate + draw
+//   on EVERY BeginFrame instead of skipping the main-thread stages when
+//   ShouldSendBeginMainFrame() sees no damage. So once the renderer IS
+//   subscribed, each of our external ticks deterministically produces a
+//   complete, fresh CompositorFrame the capturer can deliver — the canonical
+//   headless-deterministic-capture configuration.
+//
+// Part 3 (visibility, already in cb_devtools_agent.cc CreateNewTarget +
+//   Cb.startFrameSinkCapture): the captured WebContents is WasShown()+Focus()'d
+//   so the renderer treats the document as VISIBLE — the precondition for its
+//   cc::Scheduler to keep raising client_needs_begin_frame_ (rAF runs only on a
+//   visible doc). This driver additionally LOGs (see the diagnostic API below)
+//   whether the captured renderer is actually producing frames, so a future
+//   regression where the page is NOT visible/animating is self-explaining in
+//   the serial log instead of silently degrading to 0.15 fps.
+//
+// HONEST RESIDUAL: parts 1-3 sustain capture at the target fps for a VISIBLE,
+// ANIMATING page (rAF / CSS animation / continuous damage). They do NOT, and
+// architecturally CANNOT from the browser process alone, force a genuinely
+// STATIC page (no rAF, nothing dirty) to emit fresh frames every 33ms — the
+// renderer legitimately has nothing new to draw and unsubscribes. For a true
+// constant-frame-rate wire on a static page, the encoder/track-source layer
+// must hold-and-repeat the last frame (the capturer does not synthesize
+// duplicates). That CFR-repeat is tracked separately; this driver's job is to
+// guarantee that an animating page's frames are not throttled below its own
+// production rate, and to make the BeginFrame path observable.
+//
+// This driver still SUBSUMES the old ScheduleCompositorKeepaliveRedraw: each
+// tick's root draw+swap emits the present-acks that drain Blink's LayerTreeView
+// presentation-callback deque (the layer_tree_view.cc:574 FATAL-DCHECK at
+// ~2.5min), which the keepalive existed to prevent.
 //
 // ===================================================================
 // PACING — why this is ack-chained, not a free-running RepeatingTimer
@@ -120,6 +200,9 @@ struct BeginFrameAck;
 
 namespace cloud_browser {
 
+class WebContentsResolver;
+class CloudBrowserFrameSinkCapturer;
+
 class CbBeginFrameDriver {
  public:
   // |compositor| is the root aura UI compositor (CbAuraPlatformData's
@@ -130,6 +213,19 @@ class CbBeginFrameDriver {
   // target is 30 fps → ~33.3ms — NOT 60; the redraw cost is paid in software
   // on a GPU-less worker, see the .cc CPU note). The value is clamped to a
   // sane range in the ctor.
+  //
+  // |resolver| and |capturer| are DIAGNOSTIC-ONLY, may be nullptr, and are NOT
+  // used to drive frames — they exist so the driver's ~5s self-report can name
+  // WHERE the BeginFrame dies (see SetDiagnosticSources). |resolver| resolves
+  // the currently-captured WebContents → its RenderWidgetHost → FrameSinkId so
+  // the log can show whether a renderer is even attached and which sink it is.
+  // |capturer| exposes the running frame counters (frames_received /
+  // frames_delivered) so the log can show whether the captured renderer is
+  // actually PRODUCING frames under our ticks, vs. the ticks fanning out to a
+  // renderer that never subscribed (the 2026-06-16 failure mode). Both are
+  // raw, non-owning; main_parts owns them and orders teardown so the driver is
+  // reset before either. If null, the diagnostic degrades gracefully (it logs
+  // the ack/issue cadence it CAN see and notes the source is unavailable).
   CbBeginFrameDriver(ui::Compositor* compositor,
                      base::TimeDelta target_frame_interval);
 
@@ -166,6 +262,14 @@ class CbBeginFrameDriver {
 
   bool running() const { return running_; }
 
+  // Wire the diagnostic-only observation sources (see ctor doc). Safe to call
+  // before or after Start(); the periodic self-report starts with Start() and
+  // reads whatever is wired at report time (so main_parts can construct the
+  // driver early and attach the capturer/resolver once they exist). Passing
+  // nullptr for either clears it. Does NOT affect frame production in any way.
+  void SetDiagnosticSources(WebContentsResolver* resolver,
+                            CloudBrowserFrameSinkCapturer* capturer);
+
  private:
   // Issue exactly one external BeginFrame (force=true) with the next
   // monotonically-increasing sequence number, binding OnBeginFrameAck as the
@@ -179,6 +283,23 @@ class CbBeginFrameDriver {
   // target cadence (so a frame that took longer than the interval issues the
   // next immediately, and a fast frame waits out the remainder).
   void OnBeginFrameAck(const viz::BeginFrameAck& ack);
+
+  // ~5s self-report (re-armed by diagnostic_timer_). Logs, in one line:
+  //   * issued/acked BeginFrame counts since the last report (proves OUR loop
+  //     is live — the part-1 driver spun fine here while producing 0 fps, so
+  //     this number alone is NOT success);
+  //   * whether a renderer is even attached to capture, its FrameSinkId, and
+  //     whether the captured WebContents' RWHV reports visible (the
+  //     precondition for the renderer to keep requesting BeginFrames);
+  //   * the capturer's frames_received delta — the GROUND TRUTH of whether the
+  //     captured renderer is actually producing frames under our ticks. If
+  //     issued>>0 but frames_received≈0, the BeginFrame is dying at the
+  //     renderer's observer-subscription gate (renderer idle / not subscribed),
+  //     which is the exact 2026-06-16 failure and is now self-evident in-log
+  //     instead of requiring a wire-side harness to infer.
+  // This is the deliverable's "make the next measurement self-explaining about
+  // which layer drops the tick" requirement.
+  void EmitDiagnostic();
 
   SEQUENCE_CHECKER(sequence_checker_);
 
@@ -199,6 +320,26 @@ class CbBeginFrameDriver {
   // Re-arms IssueOneBeginFrame() after OnBeginFrameAck, honoring the residual
   // cadence delay. A one-shot per tick (re-Start()ed each ack).
   base::OneShotTimer next_frame_timer_;
+
+  // --- diagnostic-only state (see ctor / SetDiagnosticSources) ---
+
+  // Non-owning observation handles. Either may be null. Read only by
+  // EmitDiagnostic; never used to drive frames.
+  raw_ptr<WebContentsResolver> diag_resolver_ = nullptr;
+  raw_ptr<CloudBrowserFrameSinkCapturer> diag_capturer_ = nullptr;
+
+  // Repeating ~5s self-report. Armed in Start(), stopped in Stop().
+  base::RepeatingTimer diagnostic_timer_;
+
+  // Counters since the last EmitDiagnostic(), so the report shows a RATE
+  // (issued/acked per interval) rather than an ever-growing total. Reset each
+  // report.
+  uint64_t issued_since_report_ = 0;
+  uint64_t acked_since_report_ = 0;
+
+  // Capturer frames_received at the last report, to compute the per-interval
+  // delta (the ground-truth "is the renderer producing under our ticks").
+  uint64_t last_reported_frames_received_ = 0;
 
   // Invalidated by Stop()/dtor so a late ack callback for an in-flight
   // BeginFrame (delivered async by the compositor) cannot re-enter the loop

@@ -1029,10 +1029,14 @@ source_set("embedder") {
     # necessary but not sufficient on their own.
     "cb_aura_platform_data.cc",
     "cb_aura_platform_data.h",
-    # CV2-ICE — external-BeginFrame driver. THE fix for ~0.5 fps capture
-    # starvation: drives the root compositor (and via the viz hierarchy the
-    # captured renderer) at the target fps so the pull-mode
-    # FrameSinkVideoCapturer gets new frames. See cb_begin_frame_driver.h.
+    # CV2-ICE — external-BeginFrame driver. Drives the root compositor (and via
+    # the viz hierarchy the captured renderer) at the target fps. Part 1 of the
+    # ~0.5fps capture-starvation fix; pairs with
+    # --run-all-compositor-stages-before-draw (launch flag) + captured-tab
+    # visibility. Its ~5s self-report reads the resolver + capturer
+    # (:active_webcontents_resolver / :framesink_capture, both already in deps)
+    # and content::RenderWidgetHost{,View} (//content/public/browser) purely to
+    # log WHERE a BeginFrame dies. See cb_begin_frame_driver.h.
     "cb_begin_frame_driver.cc",
     "cb_begin_frame_driver.h",
     "cb_devtools_agent.cc",
