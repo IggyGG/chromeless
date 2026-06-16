@@ -421,27 +421,30 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
 
   // 1. Decode the params. Dispatchable::Params() is a crdtp::span<uint8_t> of
   //    CBOR (the params sub-blob of the command envelope). Convert it to a JSON
-  //    string (crdtp::json::ConvertCBORToJSON) and parse with base::JSONReader
-  //    — robust typed access without a hand-rolled CBOR map walker. An absent
-  //    Params() (empty span) means "no params" → all-default, which then fails
-  //    the required-field check below.
+  //    string (crdtp::json::ConvertCBORToJSON) and parse it into a dict with
+  //    base::JSONReader::ReadDict — robust typed access without a hand-rolled
+  //    CBOR map walker. ReadDict parses + extracts the top-level object in one
+  //    call (returns nullopt if the JSON isn't an object), so we don't name the
+  //    dict type directly (it differs across chromium revs) nor depend on
+  //    JSONReader::Read's option-arg defaults. An absent Params() (empty span)
+  //    means "no params" → nullopt → fails the required-field check below.
   crdtp::span<uint8_t> params = dispatchable.Params();
-  std::optional<base::Value> parsed;
+  std::string params_json;
   if (params.size() > 0) {
-    std::string json;
-    crdtp::Status status = crdtp::json::ConvertCBORToJSON(params, &json);
+    crdtp::Status status = crdtp::json::ConvertCBORToJSON(params, &params_json);
     if (!status.ok()) {
       *out_error = "Cb.startNativeSession: params CBOR→JSON conversion failed";
       return {};
     }
-    parsed = base::JSONReader::Read(json);
   }
-  const base::Value::Dict* dict =
-      parsed && parsed->is_dict() ? &parsed->GetDict() : nullptr;
+  // ReadDict returns std::optional<Dict> (the dict type, whatever its spelling
+  // in this chromium rev) — nullopt on empty input, parse failure, or a
+  // non-object top-level. `auto` avoids naming the type.
+  auto dict = base::JSONReader::ReadDict(params_json);
   if (!dict) {
     *out_error =
-        "Cb.startNativeSession: missing or non-object params (required: "
-        "signalingHost, signalingSessionId)";
+        "Cb.startNativeSession: missing, malformed, or non-object params "
+        "(required: signalingHost, signalingSessionId)";
     return {};
   }
 
