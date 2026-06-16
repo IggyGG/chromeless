@@ -437,10 +437,12 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
       return {};
     }
   }
-  // ReadDict returns std::optional<Dict> (the dict type, whatever its spelling
-  // in this chromium rev) — nullopt on empty input, parse failure, or a
-  // non-object top-level. `auto` avoids naming the type.
-  auto dict = base::JSONReader::ReadDict(params_json);
+  // ReadDict(json, options) returns std::optional<Dict> (the dict type,
+  // whatever its spelling in this chromium rev) — nullopt on empty input,
+  // parse failure, or a non-object top-level. `auto` avoids naming the type.
+  // JSON_PARSE_RFC = strict (no comments/trailing commas); our input is
+  // machine-generated from CBOR so RFC is exactly right.
+  auto dict = base::JSONReader::ReadDict(params_json, base::JSON_PARSE_RFC);
   if (!dict) {
     *out_error =
         "Cb.startNativeSession: missing, malformed, or non-object params "
