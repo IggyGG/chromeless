@@ -92,6 +92,11 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
       track_source_getter;
   base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
       active_capture_callback;
+  // CV2-WARM — bring up the native signaling session at Cb.startNativeSession
+  // dispatch time (post warm-snapshot restore). Same Unretained(main_parts_)
+  // lifetime contract as the two callbacks above.
+  base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
+      start_native_session_callback;
   if (main_parts_) {
     track_source_getter = base::BindRepeating(
         &CloudBrowserBrowserMainParts::cb_track_source,
@@ -99,10 +104,14 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
     active_capture_callback = base::BindRepeating(
         &CloudBrowserBrowserMainParts::SetActiveCapture,
         base::Unretained(main_parts_));
+    start_native_session_callback = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::StartNativeSession,
+        base::Unretained(main_parts_));
   }
   return std::make_unique<CbDevToolsManagerDelegate>(
       default_context, aura_context, std::move(track_source_getter),
-      std::move(active_capture_callback));
+      std::move(active_capture_callback),
+      std::move(start_native_session_callback));
 }
 
 }  // namespace cloud_browser
