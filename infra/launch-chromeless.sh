@@ -157,6 +157,9 @@ fi
   --auto-select-desktop-capture-source="Entire screen" \
   --auto-accept-this-tab-capture \
   --enable-usermedia-screen-capturing \
+  --enable-logging=stderr \
+  --v="${CHROMELESS_CHROME_VLOG:-0}" \
+  --vmodule="${CHROMELESS_CHROME_VMODULE:-cb_offerer_driver=1,cb_ice_config=1,cb_devtools_agent=1}" \
   ${fake_media_arg} \
   --app="${CHROMIUM_START_URL}" &
 
