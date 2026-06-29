@@ -360,6 +360,20 @@ spec:
               value: "0"
             - name: SCCACHE_CACHE_SIZE
               value: "80G"
+            # SKIP_CDP_VALIDATION=1 short-circuits ONLY STEP 10 (the in-pod
+            # cluster CDP smoke test). The chromeless-build pod runs from the
+            # cb-build-runner image (debian-slim, NO kubectl), so STEP 10's
+            # `kubectl apply -f chromeless-cdp-validation.yaml` exits 127 →
+            # the step dies → the pod burns a backoffLimit retry AND rebuilds,
+            # even though the worker binary was already built+packaged+staged
+            # at STEPS 6-9 (observed here 2026-06-29: every incarnation reached
+            # "STEP 10 cdp validation START ... applying ...cdp-validation.yaml"
+            # then restarted). The binary is validated by the in-build unit
+            # suites (STEP 7, incl. the idle-refresh capturer tests) and, more
+            # importantly, by the downstream animejs WebRTC re-validation after
+            # the bake+roll — NOT by this broken-in-this-context step. Skip it.
+            - name: SKIP_CDP_VALIDATION
+              value: "1"
           resources:
             requests:
               # Burstable QoS — see build-job.yaml header. Request was

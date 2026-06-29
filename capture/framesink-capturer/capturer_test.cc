@@ -231,8 +231,19 @@ class FrameSinkCapturerTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    capturer_.reset();
+    // Release delivered frames BEFORE destroying the capturer. Each delivered
+    // media::VideoFrame holds a refcounted BufferHandleScope whose destructor
+    // runs on_done_metric_ = BindRepeating(++s->buffers_done, &stats_) — a raw
+    // pointer into the capturer's own stats_ member (capturer.cc:281). If the
+    // capturer (and its stats_) is destroyed FIRST, releasing a still-held
+    // frame fires that closure against freed memory → partition_alloc
+    // "Detected dangling raw_ptr in unretained" FATAL. Tests that consume their
+    // frames mid-body (delivered_.clear()) never hit this; the idle-refresh
+    // tests that legitimately leave frames queued at teardown did. Ordering the
+    // releases correctly is the fix — production is unaffected (libwebrtc
+    // releases each frame while the capturer is live).
     delivered_.clear();
+    capturer_.reset();
   }
 
   void OnFrame(scoped_refptr<media::VideoFrame> f) {
@@ -518,8 +529,19 @@ class FrameSinkCapturerIdleRefreshTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    capturer_.reset();
+    // Release delivered frames BEFORE destroying the capturer. Each delivered
+    // media::VideoFrame holds a refcounted BufferHandleScope whose destructor
+    // runs on_done_metric_ = BindRepeating(++s->buffers_done, &stats_) — a raw
+    // pointer into the capturer's own stats_ member (capturer.cc:281). If the
+    // capturer (and its stats_) is destroyed FIRST, releasing a still-held
+    // frame fires that closure against freed memory → partition_alloc
+    // "Detected dangling raw_ptr in unretained" FATAL. Tests that consume their
+    // frames mid-body (delivered_.clear()) never hit this; the idle-refresh
+    // tests that legitimately leave frames queued at teardown did. Ordering the
+    // releases correctly is the fix — production is unaffected (libwebrtc
+    // releases each frame while the capturer is live).
     delivered_.clear();
+    capturer_.reset();
   }
 
   void OnFrame(scoped_refptr<media::VideoFrame> f) {
