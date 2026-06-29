@@ -122,7 +122,15 @@ spec:
         # container so a single chown covers both hostPath dirs in
         # one shot.
         - name: bootstrap-our-repo
-          image: registry.triform.cloud/chromeless/chromeless-build-runner:0.1.4
+          # CV2-rehome: the chromeless/chromeless-build-runner repo path was
+          # pruned from the registry (NAME_UNKNOWN). The canonical, byte-
+          # identical runner image now lives at cloud-browser-webrtc/
+          # cb-build-runner:0.1.4 (same Dockerfile: Debian-bookworm + pinned
+          # depot_tools --depth 200 + sccache v0.8.2 + builder uid 1000;
+          # config blob verified identical 2026-06-29). Re-point rather than
+          # rebuild: this is the exact image that built all live cr7727 tags,
+          # so no depot_tools `main` version-skew is introduced.
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.4
           command:
             - sh
             - -euxc
@@ -171,11 +179,12 @@ spec:
             # Track main by default; set to a tag/SHA for reproducible
             # builds (`kubectl set env job/chromeless-build OUR_REPO_REF=v0.2.0`).
             - name: OUR_REPO_REF
-              # cv2/m2-track-source-deps for build #4: validates M2 R1
-              # (track-source webrtc deps in patches/0003) on top of
-              # integration/native-peer's M1 base (bf3de29 namespace fix).
-              # Flip back to "main" after M2 validation merges to main.
-              value: "cv2/m2-track-source-deps"
+              # cv2/idle-refresh-capturer (commit d95478c): the FrameSink
+              # idle-refresh hold-and-repeat fix so idle/static pages
+              # (animejs.com) stream WebRTC video. Compiles capture/framesink-
+              # capturer/capturer.{h,cc} from source (symlinked via build.sh
+              # step 2) + runs the 5 new capturer unit tests in-build.
+              value: "cv2/idle-refresh-capturer"
             # Creds for cloning private/internal Forgejo repos. The
             # forgejo-credentials Secret holds username + password
             # (Forgejo PAT). Same Secret pattern used by flux-system
@@ -213,7 +222,8 @@ spec:
               mountPath: /workspace
       containers:
         - name: build
-          image: registry.triform.cloud/chromeless/chromeless-build-runner:0.1.4
+          # CV2-rehome: canonical runner image (see bootstrap-our-repo note).
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.4
           imagePullPolicy: IfNotPresent
           # Invoke T113's script directly from the cloned repo. The
           # earlier brief proposed /work/src/build/chromeless-build.sh as the
@@ -237,11 +247,10 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              # cv2/m2-track-source-deps for build #4: validates M2 R1
-              # (track-source webrtc deps in patches/0003) on top of
-              # integration/native-peer's M1 base (bf3de29 namespace fix).
-              # Flip back to "main" after M2 validation merges to main.
-              value: "cv2/m2-track-source-deps"
+              # cv2/idle-refresh-capturer (commit d95478c) — see bootstrap
+              # initContainer note. Diagnostic only here; the initContainer
+              # has already synced /workspace to this ref.
+              value: "cv2/idle-refresh-capturer"
             # T113 expects branch number, NOT a full ref. M147 stable
             # tracks 147.0.7727.x — branch 7727. Verify on
             # chromiumdash.appspot.com/branches before each roll.
@@ -314,6 +323,20 @@ spec:
               # bursts into idle CPU when peers leave it.
               cpu: "6"
               memory: "96Gi"
+              # Ephemeral-storage REQUEST decoupled from the limit (2026-06-29).
+              # The build's real I/O (chromium-src checkout + sccache + out/)
+              # all lands on triform-8 hostPath volumes (/work, /sccache) — NOT
+              # the container's writable layer / emptyDir, which counts as
+              # ephemeral. So the build's actual ephemeral footprint is just
+              # log spillover (tens of MiB). The previous manifest set ONLY the
+              # 8Gi limit, which K8s mirrors into an implicit 8Gi request; on a
+              # triform-8 whose ephemeral is ~96% RESERVED (but only ~6% USED —
+              # 87Gi truly free on the 98Gi kubelet fs), that 8Gi request made
+              # the Pod unschedulable (Insufficient ephemeral-storage). A 1Gi
+              # request fits the free reservation headroom while the 8Gi limit
+              # below still allows runtime burst. Root-cause fix, not a bypass:
+              # the request was overprovisioned scratch the build never uses.
+              ephemeral-storage: "1Gi"
             limits:
               cpu: "40"
               memory: "192Gi"
