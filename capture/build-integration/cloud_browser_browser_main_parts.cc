@@ -590,6 +590,36 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
 
+  // CV2 idle-refresh: enable the capturer's constant-frame-rate hold-and-repeat
+  // so WebRTC keeps streaming the last painted frame when the captured renderer
+  // goes IDLE and stops committing CompositorFrames. THE DEFECT (byte-proven on
+  // staging 2026-06-25): idle / sporadic-animation content (e.g. animejs.com
+  // between animations) produced ZERO frames — guest serial VERDICT=RENDERER-
+  // STARVED, frames_received +0 — while continuously-damaging content (scrolling
+  // pages, the portal UI) streamed fine at ~29fps. Root cause: the
+  // FrameSinkVideoCapturer is a PULL consumer and the BeginFrame driver's ticks
+  // do not reach an idle renderer's cc::Scheduler (cb_begin_frame_driver.h:60-99
+  // + 125-134 explicitly defer the static-page cure to "the encoder/track-source
+  // layer [must] hold-and-repeat the last frame"). The capturer now runs an
+  // idle-refresh deadline that calls the producer's RequestRefreshFrame() — viz
+  // re-delivers the last composited surface (no renderer repaint) as a normal
+  // OnFrameCaptured, advancing frames_received so the wire shows real fps.
+  //
+  // 100ms (10fps) is the deadline. SAFE FOR THE PRODUCING PATH: every delivered
+  // frame re-arms the deadline, so any page painting faster than 10fps never
+  // lets it fire — the documented producing cases run ~29fps (34ms inter-frame),
+  // a >2.9x margin under the 100ms deadline, so they issue ZERO refreshes and
+  // are bit-for-bit unchanged. Only a genuinely idle page (no natural frame for
+  // 100ms) gets the steady 10fps hold-and-repeat, which is imperceptible for
+  // static content (same pixels) and snaps back to full fps the instant the
+  // page paints again. Set here (not at capture-start) because it is stored and
+  // only takes effect once capturer_->Start() runs; the capturer is reached via
+  // capturer_for_test() exactly as the BeginFrame-driver diagnostic wiring below
+  // already does. BAKE-GATED: needs a cb-chromium rootfs rebuild to deploy.
+  if (auto* idle_capturer = cb_track_source_->capturer_for_test()) {
+    idle_capturer->SetIdleRefreshPeriod(base::Hertz(10));
+  }
+
   // CV2-ICE diag: now that the capturer + resolver both exist, wire them into
   // the BeginFrame driver as DIAGNOSTIC-ONLY observation sources (they do NOT
   // drive frames). This lets the driver's ~5s self-report name WHERE a
