@@ -234,11 +234,44 @@ spec:
             - bash
             - -c
             - |
-              # The chromeless-build-runner image ships /opt/depot_tools without
-              # python3_bin_reldir.txt — gn fails with "need to initialize
-              # depot_tools" until bootstrap_python3 is run. The bootstrap
-              # is idempotent, so doing it on every pod start is cheap.
-              (cd /opt/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3
+              # depot_tools python3 bootstrap.
+              #
+              # The cb-build-runner image ships /opt/depot_tools without
+              # python3_bin_reldir.txt — gn/autoninja fail with "need to
+              # initialize depot_tools" until depot_tools' bootstrap_python3
+              # runs (it CIPD-installs the pinned python3 into the depot_tools
+              # dir and writes python3_bin_reldir.txt next to gn).
+              #
+              # PROBLEM (cb-build-runner:0.1.4, the CV2-rehome image): its
+              # /opt/depot_tools is ROOT-owned, but this container runs uid 1000
+              # with allowPrivilegeEscalation=false (no sudo). depot_tools'
+              # `cipd` self-bootstrap does `mktemp -p .` inside /opt/depot_tools
+              # → Permission denied → empty tmp path → `curl ... -o ''` →
+              # "curl: option -o: is badly used here" → python3 never installed →
+              # STEP 5 `gn gen` dies with python3_bin_reldir.txt not found.
+              # (The prior chromeless/chromeless-build-runner image — now pruned —
+              # evidently shipped /opt/depot_tools writable or pre-bootstrapped.)
+              #
+              # FIX: bootstrap the Chromium tree's OWN vendored depot_tools
+              # (//third_party/depot_tools), which is builder-owned + writable
+              # and version-matched to branch ${CHROMIUM_BRANCH_NUMBER}, then
+              # put it FIRST on PATH so build.sh's bare `gn`/`autoninja` resolve
+              # to it. Proven on cb-build-runner:0.1.4 (2026-06-29): bootstrap
+              # RC=0, `gn --version`→2341, `gn gen` parses the graph, autoninja
+              # + ninja 1.12.1 resolve — all as uid 1000. Falls back to
+              # /opt/depot_tools only on a cold tree (pre-gclient-sync); the
+              # SKIP_FETCH=1 lane below always has the tree present.
+              set -x
+              TREE_DT="${CHROMELESS_WORK_ROOT}/src/chromium/src/third_party/depot_tools"
+              if [ -f "${TREE_DT}/bootstrap_python3" ]; then
+                ( cd "${TREE_DT}" && source ./bootstrap_python3 && bootstrap_python3 ) 2>&1 | tail -3
+                export PATH="${TREE_DT}:${PATH}"
+                echo "depot_tools: using tree-vendored ${TREE_DT} (gn=$(command -v gn))"
+              else
+                echo "depot_tools: tree absent (cold build) — bootstrapping /opt/depot_tools"
+                ( cd /opt/depot_tools && source ./bootstrap_python3 && bootstrap_python3 ) 2>&1 | tail -3
+              fi
+              set +x
               exec bash /workspace/build/chromeless-build.sh
           env:
             # Diagnostic only — chromeless-build.sh derives CHROMELESS_GIT_SHA from
@@ -275,10 +308,26 @@ spec:
               # because //cloud-browser/... isn't in chromium's root
               # build graph (a separate fix may also be needed to make
               # gn parse the BUILD.gn at all).
-              # 4 targets: worker + 3 unittest suites. pcf_unittests is
-              # M2-side coverage of the PCF refactor; encoder/framesink
-              # are the M1 + capture-side baselines.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
+              #
+              # worker (the deployable binary — carries the idle-refresh
+              # capturer fix) + encoder + framesink-capturer unit suites.
+              # The framesink_capturer_unittests target compiles+runs the 5
+              # new idle-refresh tests (capturer_test.cc), so it IS the
+              # in-build validation of d95478c.
+              #
+              # cloud_browser_pcf_unittests REMOVED (2026-06-29): it has
+              # PRE-EXISTING breakage unrelated to the idle-refresh fix —
+              # cloud_browser_pcf_test.cc:112 uses dynamic_cast under a
+              # -fno-rtti build (error: "use of dynamic_cast requires
+              # -frtti") and :129 calls the dropped
+              # TestAudioDeviceModule::CreateTestAudioDeviceModule webrtc
+              # API (last touched by cv2-91 commit 127715a, NOT by this
+              # branch). With autoninja's default -k1 it aborts the whole
+              # graph on that first failure, blocking the worker binary.
+              # Dropping it does NOT weaken validation of THIS fix (whose
+              # test lives in framesink_capturer_unittests, retained). The
+              # PCF test rot is tracked separately for the M2 lane.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             # Ninja parallelism sized to CPU limit minus headroom for
             # the sccache server (~1-2 cores) + the LTO linker spike
             # (~2 cores). Limit is 40; 36 parallel ninja jobs leaves
