@@ -383,6 +383,30 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   initial_web_contents_->WasShown();
   initial_web_contents_->Focus();
 
+  // CV2 capture-keepalive (RCA 2026-06-30) — THE fix for the ~50% cold-guest
+  // RENDERER-STARVED defect. WasShown() above makes the page "visible", but an
+  // offscreen cb-chromium renderer with no on-screen surface still applies
+  // "hidden rendering" optimizations: its cc::Scheduler stops raising
+  // client_needs_begin_frame_, so it never subscribes to our external
+  // BeginFrame source and emits ZERO CompositorFrames — even while the driver
+  // issues+acks BeginFrames at 29fps (measured: frames_received=0,
+  // VERDICT=RENDERER-STARVED, on ~50% of cold guests, content- and
+  // concurrency-independent, solo-guest-reproducible). web_contents.h is
+  // explicit that the capturer count is THE mechanism that disables those
+  // optimizations: "renderers will be configured to produce compositor frames
+  // regardless of their 'backgrounded' or on-screen occlusion state." The
+  // existing WasShown() comment below even *claims* "framesink capture force
+  // the renderer to keep producing output via separate capturer refcounts" —
+  // but that refcount was never actually taken (IncrementCapturerCount was
+  // absent from the whole capture path). Take it now and hold it for the
+  // worker's lifetime via the member ScopedClosureRunner (released before
+  // initial_web_contents_ is torn down). gfx::Size() = don't force a capture
+  // size (the FrameSinkVideoCapturer drives sizing); stay_hidden=false (we ARE
+  // shown); stay_awake=true (keep the renderer non-throttled); is_activity=true.
+  capture_keepalive_handle_ = initial_web_contents_->IncrementCapturerCount(
+      gfx::Size(), /*stay_hidden=*/false, /*stay_awake=*/true,
+      /*is_activity=*/true);
+
   // CV2-ICE: start the BeginFrame driver. This is THE primary fix for the
   // ~0.5 fps capture starvation. The FrameSinkVideoCapturer is a pull
   // consumer that does NOT request BeginFrames, and cb-chromium has no real

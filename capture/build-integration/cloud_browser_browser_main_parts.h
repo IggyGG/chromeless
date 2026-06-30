@@ -332,6 +332,22 @@ class CloudBrowserBrowserMainParts
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;
 
+  // CV2 capture-keepalive (RCA 2026-06-30). The WebContents capturer-count
+  // handle. WITHOUT it the renderer applies "hidden rendering" optimizations
+  // and stops emitting CompositorFrames when not visibly on-screen — even
+  // though we drive external BeginFrames and call WasShown(). web_contents.h
+  // (M140) is explicit: "Both internal-to-content and embedders must increment
+  // the capturer count while capturing ... renderers will be configured to
+  // produce compositor frames regardless of their 'backgrounded' or on-screen
+  // occlusion state." This was the ~50% cold-guest RENDERER-STARVED defect
+  // (BeginFrames issued+acked at 29fps but frames_received=0): the external
+  // BeginFrame source reaches the renderer only when it has SUBSCRIBED, and an
+  // un-pinned renderer drops its subscription. Holding this handle for the
+  // session keeps the renderer producing. ScopedClosureRunner releases the
+  // count on destruction; declared AFTER initial_web_contents_ so reverse-order
+  // member destruction drops the handle while the WebContents is still alive.
+  base::ScopedClosureRunner capture_keepalive_handle_;
+
   // ChromelessV2 M1 — browser-process PeerConnectionFactory + the 3
   // dedicated rtc::Threads it runs on. The PCF replaces the renderer-
   // side libwebrtc PCF that the M0 streamer.js path constructed; in
