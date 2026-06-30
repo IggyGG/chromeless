@@ -863,6 +863,40 @@ void CbOffererDriver::HandleOfferEnvelope(const Envelope& /*env*/) {
 }
 
 void CbOffererDriver::HandleAnswerEnvelope(const Envelope& env) {
+  // CV2-ICE duplicate-answer tolerance (RCA 2026-06-30). Physics' cross-
+  // pod answer delivery is NOT deduplicated: the SAME answer is routinely
+  // re-delivered to the browser-offerer. Observed on a single live
+  // session: two byte-identical 3494-byte `answer` envelopes assembled
+  // 6ms apart. The first lands in kAwaitingAnswer and drives
+  // kAwaitingAnswer → kSettingRemote (SetRemoteDescription posted to the
+  // signaling thread, below); the duplicate then arrives while that SRD
+  // is still in flight (state_ == kSettingRemote) or already complete
+  // (state_ == kIceInFlight).
+  //
+  // The v1 contract makes the browser the SOLE offerer with exactly one
+  // answer per offer, so a second answer in either of those states is a
+  // benign re-delivery — drop it idempotently. Treating it as a hard
+  // failure (the prior behaviour) called FailWithReason → teardown from
+  // THIS posted-task context, where chromium's per-task
+  // DisallowBaseSyncPrimitives is installed; the teardown's blocking
+  // proxy hop tripped a FATAL `!tls_base_sync_primitives_disallowed`
+  // DCHECK that ABORTED the guest browser process. A dead guest never
+  // answers the client's STUN binding checks → client respR=0 → ICE
+  // checking→disconnected→failed → framesDecoded=0 (the reported
+  // "fleet-wide ICE-connectivity degradation").
+  //
+  // Renegotiation is unaffected: it BEGINS only from kIceInFlight and
+  // re-enters kAwaitingAnswer before its fresh answer is due, so a
+  // legitimately-new answer is always consumed in kAwaitingAnswer;
+  // kSettingRemote/kIceInFlight are reachable only once an answer for the
+  // current offer is already applying or applied.
+  if (state_ == OffererState::kSettingRemote ||
+      state_ == OffererState::kIceInFlight) {
+    VLOG(1) << kLogPrefix
+            << "duplicate/late `answer` envelope dropped (answer already "
+               "applying or applied), state=" << StateName(state_);
+    return;
+  }
   if (state_ != OffererState::kAwaitingAnswer) {
     FailWithReason("`answer` envelope in unexpected state");
     return;
