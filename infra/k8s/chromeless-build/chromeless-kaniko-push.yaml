@@ -149,17 +149,17 @@ spec:
               cpu: "1"
               memory: "1Gi"
               # Explicit ephemeral REQUEST decoupled from the 8Gi limit
-              # (2026-06-29). Setting only the limit makes K8s mirror an
-              # implicit 8Gi request; triform-8 is ~95% ephemeral-RESERVED
-              # (though ~85Gi is actually free), so an 8Gi request makes the
-              # kaniko pod OutOfephemeral-storage at admission. Kaniko mounts
-              # the build context as a read-only hostPath (NOT ephemeral); its
-              # ephemeral use is just scratch for extracting the debian-slim
-              # base layer + assembling the cloud_browser_worker layer (a few
-              # hundred MB). 2Gi request fits the reservation headroom while
-              # the 8Gi limit keeps runtime burst. Same overprovisioned-scratch
-              # fix as build-job.yaml's ephemeral decoupling.
-              ephemeral-storage: "2Gi"
+              # (2026-06-29, tightened 2026-07-02). Setting only the limit
+              # makes K8s mirror an implicit 8Gi request; the build nodes run
+              # ~97% ephemeral-RESERVED (triform-7: 88.2Gi requested / 92.3Gi
+              # allocatable = ~2.06Gi headroom, so even a 2Gi request lost the
+              # admission race by 90MB). Kaniko mounts the build context as a
+              # read-only hostPath (NOT ephemeral); its ephemeral use is just
+              # scratch for extracting the debian-slim base layer + assembling
+              # the cloud_browser_worker layer (a few hundred MB). 512Mi is
+              # the schedulability floor; the 8Gi limit keeps runtime burst.
+              # Same fix as build-job-x264-t7.yaml's ephemeral decoupling.
+              ephemeral-storage: "512Mi"
             limits:
               cpu: "4"
               memory: "4Gi"
