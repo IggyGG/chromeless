@@ -324,6 +324,16 @@ class CbBeginFrameDriver {
   // cannot re-arm a second concurrent issue.
   uint64_t issue_epoch_ = 0;
 
+  // False until the first-ever BeginFrame ack arrives. In that boot window a
+  // watchdog fire almost always means the viz external-begin-frame controller
+  // is not bound yet (GPU channel still initializing on a cold microVM), and
+  // ui::Compositor holds our first issue in pending_begin_frame_args_ for
+  // replay-on-bind — so the watchdog must NOT re-issue (a second pre-bind
+  // issue corrupts the bind/create sequence; observed live as viz FATAL
+  // `!has_created_frame_sink_manager_`, viz_main_impl.cc:342). See
+  // OnStallWatchdog's boot-window guard.
+  bool first_ack_received_ = false;
+
   // When the most recent BeginFrame was issued — used to compute the residual
   // delay to the next one so the loop holds |target_frame_interval_| rather
   // than (interval + frame-production-time).

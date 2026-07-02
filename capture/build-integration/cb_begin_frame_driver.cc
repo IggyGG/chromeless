@@ -221,6 +221,7 @@ void CbBeginFrameDriver::OnBeginFrameAck(uint64_t issue_epoch,
   if (issue_epoch != issue_epoch_) {
     return;
   }
+  first_ack_received_ = true;
   ++acked_since_report_;
 
   // The ack arrived, so the chain is healthy — cancel the stall watchdog before
@@ -249,6 +250,29 @@ void CbBeginFrameDriver::OnBeginFrameAck(uint64_t issue_epoch,
 void CbBeginFrameDriver::OnStallWatchdog() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (!running_) {
+    return;
+  }
+  // CV2 2026-07-02 boot-window guard. Before the FIRST ack ever arrives, a
+  // missing ack usually means the viz external-begin-frame controller is not
+  // bound yet (GPU channel still initializing — routinely >1s on cold
+  // microVM boots). In that window ui::Compositor has our first issue
+  // STASHED in pending_begin_frame_args_ for replay-on-bind; issuing a
+  // SECOND frame here is exactly the double-issue the IssueOneBeginFrame
+  // comment promises never happens, and it corrupts the bind/create
+  // sequence (observed live on the e3994cf fleet as the GPU process dying
+  // on `Check failed: !has_created_frame_sink_manager_`,
+  // viz_main_impl.cc:342 — ~1-2 of 12 boots, connected-but-0-frames).
+  // The stashed frame will replay + ack once the controller binds, which
+  // restarts the chain without our help — so just re-arm and wait.
+  if (!first_ack_received_) {
+    LOG(WARNING) << "CbBeginFrameDriver: stall watchdog fired before the "
+                    "first-ever BeginFrame ack — controller likely unbound "
+                    "(boot window); NOT re-issuing (the stashed frame replays "
+                    "on bind), re-arming watchdog";
+    stall_watchdog_timer_.Start(
+        FROM_HERE, kStallWatchdogTimeout,
+        base::BindOnce(&CbBeginFrameDriver::OnStallWatchdog,
+                       weak_factory_.GetWeakPtr()));
     return;
   }
   // No ack for kStallWatchdogTimeout => the pending frame callback was dropped
