@@ -310,6 +310,18 @@ spec:
               # autoninja's real compute envelope unchanged.
               cpu: "4"
               memory: "96Gi"
+              # Explicit ephemeral REQUEST decoupled from the 8Gi limit
+              # (2026-07-02, same class as chromeless-kaniko-push.yaml's
+              # 2026-06-29 fix). A limit with no request makes K8s mirror
+              # an implicit 8Gi request; triform-7 is ~99% ephemeral-
+              # RESERVED (87.1Gi requested / 88Gi allocatable = 0.92Gi
+              # headroom) so anything ≥1Gi fails admission with
+              # OutOfephemeral-storage. All heavy I/O (chromium tree,
+              # out/, sccache, artifacts) lives on the /work hostPath —
+              # container-ephemeral use is just apt scratch + logs, and
+              # the 8Gi LIMIT still governs burst. 512Mi is purely the
+              # schedulability floor.
+              ephemeral-storage: "512Mi"
             limits:
               cpu: "40"
               memory: "192Gi"
