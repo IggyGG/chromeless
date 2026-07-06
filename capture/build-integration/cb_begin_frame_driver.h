@@ -324,6 +324,41 @@ class CbBeginFrameDriver {
   // cannot re-arm a second concurrent issue.
   uint64_t issue_epoch_ = 0;
 
+  // False until the first-ever BeginFrame ack arrives. In that boot window a
+  // watchdog fire almost always means the viz external-begin-frame controller
+  // is not bound yet (GPU channel still initializing on a cold microVM), and
+  // ui::Compositor holds our first issue in pending_begin_frame_args_ for
+  // replay-on-bind — so the watchdog must NOT re-issue (a second pre-bind
+  // issue corrupts the bind/create sequence; observed live as viz FATAL
+  // `!has_created_frame_sink_manager_`, viz_main_impl.cc:342). See
+  // OnStallWatchdog's boot-window guard.
+  bool first_ack_received_ = false;
+
+  // Consecutive stall-watchdog fires with NO intervening OnBeginFrameAck.
+  // Reset to 0 by every ack. This is the WARM-RESTORE generalization of the
+  // `first_ack_received_` boot-window guard: `first_ack_received_` is a
+  // one-way latch that only suppresses the pre-FIRST-ack unbound window, but
+  // the GPU channel can go transiently UNBOUND AGAIN after acks have already
+  // flowed — most notably on a warm-snapshot restore (`CV2-WARM
+  // StartNativeSession`), which re-establishes the GPU channel and re-runs the
+  // FrameSinkManager create sequence. In that second unbound window a watchdog
+  // re-issue is the SAME double-issue that crashes the GPU process
+  // (viz_main_impl.cc:342 `!has_created_frame_sink_manager_`), but
+  // `first_ack_received_` is already true so the boot-window guard is bypassed.
+  // We cannot distinguish "controller transiently unbound (WAIT — the stashed
+  // frame replays on rebind)" from "controller bound but a pending callback was
+  // genuinely dropped mid-stream (RE-ISSUE — the 2026-06-16 capture-start
+  // Show() stall)" from a single missed ack — but we CAN distinguish them by
+  // waiting one watchdog cycle: an unbound window resolves itself (the rebind
+  // replays our stashed frame → an ack arrives → this counter resets to 0),
+  // whereas a genuine mid-stream freeze stays frozen (a SECOND consecutive fire
+  // with still no ack). So the watchdog WAITS on the first fire and only
+  // re-issues once >= kWatchdogFiresBeforeReissue fires have accrued with no
+  // ack. Costs at most one extra kStallWatchdogTimeout (~1s) of recovery
+  // latency for a genuine freeze; buys crash-immunity for every unbound-window
+  // re-issue (cold OR warm).
+  int watchdog_fires_without_ack_ = 0;
+
   // When the most recent BeginFrame was issued — used to compute the residual
   // delay to the next one so the loop holds |target_frame_interval_| rather
   // than (interval + frame-production-time).

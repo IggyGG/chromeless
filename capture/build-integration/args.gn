@@ -16,6 +16,16 @@ is_debug                 = false
 is_official_build        = false   # `true` is for shipping artifacts;
                                     # ours is a server worker.
 is_component_build       = false   # one binary, simpler deploy.
+# CV2 2026-06-30: dcheck_always_on defaults to !is_official_build in
+# Chromium, so with is_official_build=false the guest renderer ships with
+# FATAL DCHECKs ACTIVE. Proven in staging: 7/7 cb-chromium guests across the
+# fleet SIGABRT'd on `DCHECK failed: default_svg_style_->...`
+# (css_default_style_sheets.cc:185) while rendering — a non-fatal assertion
+# production Chrome tolerates — producing 0 frames and tearing down the
+# WebRTC FrameSink session ("native FrameSink capture failed to start").
+# Force it off so guests don't abort on debug-only assertions; keep
+# is_official_build false for build speed.
+dcheck_always_on         = false
 
 # ---- Symbols / size --------------------------------------------------
 symbol_level             = 1       # crash-grade only; level-2 ~doubles

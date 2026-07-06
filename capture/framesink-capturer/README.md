@@ -61,6 +61,40 @@ The error paths (null `VideoFrameInfo`, wrap failure) drop the scope
 locally — the destructor still fires, the buffer still gets acked,
 no pool starvation.
 
+## Idle refresh (constant-frame-rate hold-and-repeat)
+
+`FrameSinkVideoCapturer` is a **pull** consumer: `OnFrameCaptured`
+fires only when the captured renderer commits a *new, damaging*
+`CompositorFrame`. An **idle / static page** (e.g. `animejs.com`
+sitting between animations) commits nothing, and the external
+`CbBeginFrameDriver` ticks do **not** reach an idle renderer's
+`cc::Scheduler` (see `../build-integration/cb_begin_frame_driver.h`).
+So without intervention an idle page streams **zero** frames — the
+byte-proven staging defect (`VERDICT=RENDERER-STARVED`,
+`frames_received +0`), while continuously-damaging content (scrolling,
+the portal UI) streamed fine at ~29fps.
+
+The capturer closes this with an **idle-refresh deadline**, opt-in via
+`SetIdleRefreshPeriod(period)` (wired on in
+`../build-integration/cloud_browser_browser_main_parts.cc` step 5b at
+10fps):
+
+- Every delivered frame — natural **or** refresh-driven — re-arms a
+  one-shot deadline `period` into the future.
+- An **animating** page delivers frames faster than `period`, so the
+  deadline never fires → **zero** `RequestRefreshFrame` calls → the
+  producing path is bit-for-bit unchanged.
+- An **idle** page lets the deadline fire; we call the producer's
+  `RequestRefreshFrame()`, which re-delivers the *last composited
+  surface* (no renderer repaint) as a normal `OnFrameCaptured`. That
+  advances `frames_received` and re-arms the deadline, settling into a
+  steady `period`-cadence hold-and-repeat until the page paints again.
+
+`FrameSinkCapturerStats.idle_refreshes_requested` counts the issued
+refreshes so a log/metric scrape can attribute `frames_received`
+deltas to refresh re-delivery vs. natural paint. See the **IDLE
+REFRESH** comment block in `capturer.h` for the full rationale.
+
 ## Build
 
 Compiled into `source_set("framesink_capture")` in

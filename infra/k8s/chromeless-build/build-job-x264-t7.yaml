@@ -142,7 +142,7 @@ spec:
               # SKIP_CDP_VALIDATION fix on cv2/m2's script never ran
               # because /workspace had main's older script. Build #5
               # attempts 1 + 2 both hit STEP 10 exit 127.
-              value: "cv2/wave-3-integration"
+              value: "cv2/idle-refresh-capturer"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -211,15 +211,16 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              # cv2/wave-3-integration (2026-06-10): the unified CV2
-              # guest lineage — cv2-95 (ContentClient + compositor
-              # drain + GetStats threading + active-WebContents
-              # resolver) merged with the codex retarget lineage
-              # (cursor DC + remote-ICE queue + epoch-ms input +
-              # framesink retarget) and the controller signaling-cache
-              # PRs. Produces cr7727-14bce02697b7 for the rootfs bake
-              # that replaces the stale cr7727-3ad9123b6859 pin.
-              value: "cv2/wave-3-integration"
+              # cv2/idle-refresh-capturer (2026-07-02): the deploy
+              # lineage — wave-3 base (ContentClient + pak-scale +
+              # compositor drain + retarget) PLUS warm-snapshot
+              # Cb.startNativeSession, D18b answer tolerance/buffer,
+              # idle-refresh hold-and-repeat, IncrementCapturerCount
+              # capture-keepalive, dcheck_always_on=false, and the
+              # CB_UA_RESOURCE renderer resource-path probe. Provenance
+              # gate: built binary MUST contain "no track-source getter"
+              # and MUST NOT contain "no video track source".
+              value: "cv2/idle-refresh-capturer"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
@@ -309,6 +310,18 @@ spec:
               # autoninja's real compute envelope unchanged.
               cpu: "4"
               memory: "96Gi"
+              # Explicit ephemeral REQUEST decoupled from the 8Gi limit
+              # (2026-07-02, same class as chromeless-kaniko-push.yaml's
+              # 2026-06-29 fix). A limit with no request makes K8s mirror
+              # an implicit 8Gi request; triform-7 is ~99% ephemeral-
+              # RESERVED (87.1Gi requested / 88Gi allocatable = 0.92Gi
+              # headroom) so anything ≥1Gi fails admission with
+              # OutOfephemeral-storage. All heavy I/O (chromium tree,
+              # out/, sccache, artifacts) lives on the /work hostPath —
+              # container-ephemeral use is just apt scratch + logs, and
+              # the 8Gi LIMIT still governs burst. 512Mi is purely the
+              # schedulability floor.
+              ephemeral-storage: "512Mi"
             limits:
               cpu: "40"
               memory: "192Gi"

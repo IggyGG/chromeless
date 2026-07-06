@@ -80,7 +80,10 @@ RUN git clone --depth 200 \
       https://chromium.googlesource.com/chromium/tools/depot_tools.git \
       /opt/depot_tools \
     && cd /opt/depot_tools \
-    && git checkout "${DEPOT_TOOLS_REF}"
+    && git checkout "${DEPOT_TOOLS_REF}" \
+    && DEPOT_TOOLS_UPDATE=1 PATH="/opt/depot_tools:${PATH}" \
+        ./gclient --version \
+    && test -f /opt/depot_tools/python3_bin_reldir.txt
 
 # sccache: musl release tarball from upstream. Verified by extracting
 # to a tmp dir and installing only the binary; no install scripts run.

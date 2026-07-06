@@ -685,6 +685,28 @@ void CbOffererDriver::HopHandleSetLocalDescriptionComplete(
   }
   state_ = OffererState::kAwaitingAnswer;
   VLOG(1) << kLogPrefix << "local SDP set; awaiting answer";
+
+  // CV2-ICE early-answer drain (RCA 2026-06-30, kSettingLocal gap). If the
+  // cross-pod answer beat our SetLocalDescription and was buffered above,
+  // apply it now: we are freshly in kAwaitingAnswer, exactly the state
+  // HandleAnswerEnvelope's happy path expects. Synthesize a minimal
+  // `answer` Envelope from the buffered SDP and re-enter — it drives the
+  // normal kAwaitingAnswer → kSettingRemote SetRemoteDescription. Clear
+  // the buffer first so the re-entry can't recurse.
+  if (pending_early_answer_sdp_.has_value()) {
+    std::string sdp = std::move(*pending_early_answer_sdp_);
+    pending_early_answer_sdp_.reset();
+    VLOG(1) << kLogPrefix
+            << "draining buffered early `answer` now that local SDP is set";
+    // HandleAnswerEnvelope reads only env.data (std::get_if<SdpPayload>);
+    // type/from are set for struct validity + wire-contract parity (the
+    // answer originates from the client peer).
+    Envelope replay;
+    replay.type = EnvelopeType::kAnswer;
+    replay.from = PeerRole::kClient;
+    replay.data = SdpPayload{/*sdp_type=*/"answer", /*sdp=*/std::move(sdp)};
+    HandleAnswerEnvelope(replay);
+  }
 }
 
 void CbOffererDriver::HopHandleSetRemoteDescriptionComplete(
@@ -863,6 +885,65 @@ void CbOffererDriver::HandleOfferEnvelope(const Envelope& /*env*/) {
 }
 
 void CbOffererDriver::HandleAnswerEnvelope(const Envelope& env) {
+  // CV2-ICE duplicate-answer tolerance (RCA 2026-06-30). Physics' cross-
+  // pod answer delivery is NOT deduplicated: the SAME answer is routinely
+  // re-delivered to the browser-offerer. Observed on a single live
+  // session: two byte-identical 3494-byte `answer` envelopes assembled
+  // 6ms apart. The first lands in kAwaitingAnswer and drives
+  // kAwaitingAnswer → kSettingRemote (SetRemoteDescription posted to the
+  // signaling thread, below); the duplicate then arrives while that SRD
+  // is still in flight (state_ == kSettingRemote) or already complete
+  // (state_ == kIceInFlight).
+  //
+  // The v1 contract makes the browser the SOLE offerer with exactly one
+  // answer per offer, so a second answer in either of those states is a
+  // benign re-delivery — drop it idempotently. Treating it as a hard
+  // failure (the prior behaviour) called FailWithReason → teardown from
+  // THIS posted-task context, where chromium's per-task
+  // DisallowBaseSyncPrimitives is installed; the teardown's blocking
+  // proxy hop tripped a FATAL `!tls_base_sync_primitives_disallowed`
+  // DCHECK that ABORTED the guest browser process. A dead guest never
+  // answers the client's STUN binding checks → client respR=0 → ICE
+  // checking→disconnected→failed → framesDecoded=0 (the reported
+  // "fleet-wide ICE-connectivity degradation").
+  //
+  // Renegotiation is unaffected: it BEGINS only from kIceInFlight and
+  // re-enters kAwaitingAnswer before its fresh answer is due, so a
+  // legitimately-new answer is always consumed in kAwaitingAnswer;
+  // kSettingRemote/kIceInFlight are reachable only once an answer for the
+  // current offer is already applying or applied.
+  if (state_ == OffererState::kSettingRemote ||
+      state_ == OffererState::kIceInFlight) {
+    VLOG(1) << kLogPrefix
+            << "duplicate/late `answer` envelope dropped (answer already "
+               "applying or applied), state=" << StateName(state_);
+    return;
+  }
+  // CV2-ICE early-answer buffer (RCA 2026-06-30, kSettingLocal gap). On
+  // the cross-pod physics path the answer can arrive BEFORE our own
+  // SetLocalDescription completes — state_ still kCreatingOffer /
+  // kSettingLocal, strictly EARLIER than kAwaitingAnswer. This is the
+  // legitimate first answer, not a redundant duplicate: BUFFER it (do not
+  // drop, do not fail) and replay it from
+  // HopHandleSetLocalDescriptionComplete once we reach kAwaitingAnswer.
+  // Prior behaviour fell through to FailWithReason → teardown from this
+  // posted-task context → guest SIGABRT → respR=0 (the deterministic
+  // cross-pod "no video"). Validate the payload up front so a malformed
+  // early answer still fails fast rather than buffering garbage.
+  if (state_ == OffererState::kCreatingOffer ||
+      state_ == OffererState::kSettingLocal) {
+    const auto* early = std::get_if<SdpPayload>(&env.data);
+    if (!early || early->sdp.empty()) {
+      FailWithReason("`answer` envelope missing SDP payload");
+      return;
+    }
+    pending_early_answer_sdp_ = early->sdp;
+    VLOG(1) << kLogPrefix
+            << "early `answer` buffered (arrived before local SDP set), "
+               "state=" << StateName(state_)
+            << "; will apply on SetLocalDescription completion";
+    return;
+  }
   if (state_ != OffererState::kAwaitingAnswer) {
     FailWithReason("`answer` envelope in unexpected state");
     return;

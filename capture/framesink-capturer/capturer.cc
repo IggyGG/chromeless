@@ -17,6 +17,7 @@
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
@@ -133,6 +134,27 @@ void CloudBrowserFrameSinkCapturer::SetOnFrameCallback(
   on_frame_ = std::move(on_frame);
 }
 
+void CloudBrowserFrameSinkCapturer::SetIdleRefreshPeriod(
+    base::TimeDelta period) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // Clamp negatives to zero so "off" has a single canonical representation
+  // (a negative deadline would be nonsensical to pass to timer.Start anyway).
+  idle_refresh_period_ = period.is_positive() ? period : base::TimeDelta();
+  if (!idle_refresh_period_.is_positive()) {
+    // Disabling: cancel any pending deadline so we stop re-delivering.
+    idle_refresh_timer_.Stop();
+    LOG(INFO) << "CloudBrowserFrameSinkCapturer: idle-refresh DISABLED";
+    return;
+  }
+  LOG(INFO) << "CloudBrowserFrameSinkCapturer: idle-refresh enabled @ "
+            << idle_refresh_period_.InMillisecondsF()
+            << "ms deadline (hold-and-repeat last frame when the captured "
+               "renderer goes idle)";
+  // If capture is already running, arm immediately so an already-idle page
+  // starts getting refreshed without waiting for a (never-coming) next frame.
+  ArmIdleRefreshDeadline();
+}
+
 void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (started_) {
@@ -161,6 +183,10 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
               << "retargeted producer to latest FrameSink target "
               << "(re-applied format + " << resolution_.ToString()
               << " resolution constraints)";
+    // A retarget can land on a renderer that is already idle (e.g. a static
+    // page after a tab-switch). Re-arm so the idle deadline still fires even
+    // if the new surface never produces a natural frame.
+    ArmIdleRefreshDeadline();
     return;
   }
 
@@ -190,6 +216,13 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   }
   producer_->Start(consumer_.BindNewPipeAndPassRemote(), buffer_pref);
   started_ = true;
+
+  // Arm the idle-refresh deadline (no-op unless SetIdleRefreshPeriod enabled
+  // it). If the very first thing the captured page does is sit idle — exactly
+  // the animejs.com-between-animations case — the deadline fires and we
+  // RequestRefreshFrame() the boot surface, so the wire never stays at 0fps
+  // waiting for a natural frame that may not come for seconds.
+  ArmIdleRefreshDeadline();
 }
 
 void CloudBrowserFrameSinkCapturer::Stop() {
@@ -202,6 +235,9 @@ void CloudBrowserFrameSinkCapturer::Stop() {
   // BufferHandleScopes still call Done() through their own RAII path.
   producer_->Stop();
   started_ = false;
+  // Stop re-delivering: a stopped producer's RequestRefreshFrame would be a
+  // no-op at best (and we don't want a refresh racing the OnStopped drain).
+  idle_refresh_timer_.Stop();
 }
 
 FrameSinkCapturerStats CloudBrowserFrameSinkCapturer::GetStats() const {
@@ -221,6 +257,19 @@ void CloudBrowserFrameSinkCapturer::OnFrameCaptured(
         callbacks) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   ++stats_.frames_received;
+
+  // A frame arrived — the captured renderer is NOT idle right now (this frame
+  // is either a natural paint or a re-delivery of the last surface that our
+  // own idle deadline requested). Either way, push the idle deadline out one
+  // full period. This is the property that makes the fix INERT on the working
+  // PRODUCING path: an animating page delivers frames faster than the period,
+  // so the deadline is always re-armed before it can fire and we never issue a
+  // single RequestRefreshFrame. Only when natural production stops for a whole
+  // period does OnIdleRefreshDeadline get to run. Re-arm BEFORE the wrap so
+  // even a wrap-failure frame (a real arrival viz produced) counts as activity
+  // — a refresh can't fix a wrap failure, so issuing one on top would be
+  // pointless churn. No-op unless idle-refresh was enabled.
+  ArmIdleRefreshDeadline();
 
   if (!info) {
     LOG(WARNING) << "OnFrameCaptured: null VideoFrameInfo";
@@ -286,6 +335,75 @@ void CloudBrowserFrameSinkCapturer::OnLog(const std::string& message) {
 void CloudBrowserFrameSinkCapturer::OnStopped() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   started_ = false;
+  // Producer has fully drained and stopped: no more frames will arrive, so a
+  // pending idle deadline (if any) must be cancelled — its RequestRefreshFrame
+  // would be sent to a stopped producer.
+  idle_refresh_timer_.Stop();
+}
+
+// ---------------------------------------------------------------------
+// Idle-refresh deadline — see the IDLE REFRESH class doc in capturer.h.
+// ---------------------------------------------------------------------
+
+void CloudBrowserFrameSinkCapturer::ArmIdleRefreshDeadline() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // Feature off, or capture not running → nothing to arm. (When off this is
+  // the early-out that makes every OnFrameCaptured re-arm call free.)
+  if (!idle_refresh_period_.is_positive() || !started_) {
+    return;
+  }
+  // base::OneShotTimer::Start cancels any pending fire and re-schedules — so
+  // calling this on every delivered frame simply pushes the deadline out,
+  // exactly the re-arm idiom CbBeginFrameDriver uses. base::Unretained(this) is
+  // safe: idle_refresh_timer_ is a member, cannot outlive *this, and Stop()/the
+  // dtor stop it before *this dies.
+  idle_refresh_timer_.Start(
+      FROM_HERE, idle_refresh_period_,
+      base::BindOnce(&CloudBrowserFrameSinkCapturer::OnIdleRefreshDeadline,
+                     base::Unretained(this)));
+}
+
+void CloudBrowserFrameSinkCapturer::OnIdleRefreshDeadline() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // We only get here if a whole idle_refresh_period_ elapsed with no
+  // OnFrameCaptured re-arming the deadline: the captured renderer is idle and
+  // has produced nothing. Ask the producer to RE-DELIVER the last composited
+  // surface. Per the viz mojom contract this delivers a frame of CURRENT
+  // content even though the source is not generating new compositor frames —
+  // it does NOT force the renderer to repaint (cheap, correct for static
+  // content) and it arrives as a normal OnFrameCaptured, which:
+  //   (a) advances frames_received (the ground-truth counter the BeginFrame
+  //       driver scrapes — so the wire shows real, non-zero capture fps), and
+  //   (b) re-arms THIS deadline from inside OnFrameCaptured, settling into a
+  //       steady period-cadence hold-and-repeat until the page paints again.
+  //
+  // LOAD-BEARING viz CONTRACT this rests on: a refresh-delivered frame carries
+  // a FRESH capture timestamp (VideoCaptureOracle stamps it from current
+  // capture time, not the stale content time), so each re-delivery has a
+  // distinct, monotonically-increasing info->timestamp. video_frame_conversion
+  // rebases that into the webrtc frame's timestamp_us (see
+  // video_frame_conversion.cc RebaseMediaTimestampToWebrtcMicros), so the
+  // encoder sees advancing timestamps and does NOT dedupe the repeated content
+  // — it emits real (heavily-compressed, since pixels are identical) frames at
+  // our cadence. This is the SAME mechanism viz's own idle refresh_frame_retry_
+  // timer_ uses at its 1s fallback rate (the ~0.5fps baseline the BeginFrame
+  // driver header cites); we simply drive it explicitly at a faster, reliable
+  // cadence instead of relying on viz's internal heuristic timer to fire.
+  // Guard on started_ in case a Stop()/OnStopped raced the timer fire.
+  if (!started_ || !idle_refresh_period_.is_positive()) {
+    return;
+  }
+  ++stats_.idle_refreshes_requested;
+  producer_->RequestRefreshFrame();
+
+  // Re-arm a fallback deadline NOW rather than relying solely on the refreshed
+  // frame coming back to re-arm us. RequestRefreshFrame is best-effort: viz can
+  // legitimately drop it (e.g. no aggregated surface yet at boot, or a frame
+  // already in flight). Without this fallback, a dropped refresh would leave NO
+  // pending deadline and the hold-and-repeat cadence would die after one miss.
+  // If the refresh DOES come back, OnFrameCaptured's re-arm simply supersedes
+  // this one (Start() cancels-and-reschedules) — so we never double-fire.
+  ArmIdleRefreshDeadline();
 }
 
 // ---------------------------------------------------------------------

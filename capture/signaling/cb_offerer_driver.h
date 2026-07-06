@@ -167,6 +167,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -548,6 +549,19 @@ class CbOffererDriver
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
 
   std::vector<IceCandidatePayload> pending_remote_ice_;
+
+  // CV2-ICE early-answer buffer (RCA 2026-06-30, kSettingLocal gap).
+  // On the cross-pod physics path the `answer` envelope can arrive
+  // BEFORE our own SetLocalDescription completes — i.e. while state_ is
+  // still kCreatingOffer / kSettingLocal, strictly EARLIER in the enum
+  // than kAwaitingAnswer. The prior dup-tolerance guard only covered the
+  // too-LATE window (kSettingRemote / kIceInFlight); a too-EARLY answer
+  // fell through to FailWithReason → teardown → guest SIGABRT (respR=0).
+  // This is the legitimate first answer, NOT a redundant duplicate, so
+  // it must be BUFFERED (not dropped) and replayed once SLD completes and
+  // we reach kAwaitingAnswer. HopHandleSetLocalDescriptionComplete drains
+  // it. Holds the SDP only (the answer payload); empty == none buffered.
+  std::optional<std::string> pending_early_answer_sdp_;
 
   OffererState state_ = OffererState::kIdle;
 
