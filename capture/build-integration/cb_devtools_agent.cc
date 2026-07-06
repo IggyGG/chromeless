@@ -38,6 +38,7 @@
 
 #include "capture/build-integration/cb_devtools_agent.h"
 
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -86,6 +87,18 @@ constexpr char kStartFrameSinkCaptureMethod[] = "Cb.startFrameSinkCapture";
 // snapshot restore) with per-session params, instead of the cold-boot env.
 constexpr char kStartNativeSessionMethod[] = "Cb.startNativeSession";
 
+// CV2-CAPTURE-STATS — read-only poll of the FrameSink video-frame-production
+// counter. The isolator polls this while deciding whether to publish a warm-
+// snapshot golden: a HEALTHY renderer has frames_received_from_capturer
+// growing (> 0), whereas a wedged RENDERER-STARVED renderer sits flat at 0
+// (the FrameSinkVideoCapturer is a pull-consumer — with no BeginFrame/vsync
+// the compositor never produces, so the counter never advances). Publishing a
+// golden captured from a starved renderer POISONS every cold-start restored
+// from it (permanently-frozen 0x0 video), so the gate must be able to tell the
+// two apart BEFORE the snapshot is taken. This method exposes exactly that
+// counter and nothing else — no side effects, no capture start.
+constexpr char kGetCaptureStatsMethod[] = "Cb.getCaptureStats";
+
 // Encodes {"started": true, "frameSinkId": "<n:m>"} as a CBOR map
 // inside a length-prefixed envelope. Matches the shape every
 // auto-generated DomainHandler emits via inspector_protocol.
@@ -122,6 +135,38 @@ std::vector<uint8_t> EncodeStartNativeSessionResponse(
 
   crdtp::cbor::EncodeString8(crdtp::SpanFrom("sessionId"), &out);
   crdtp::cbor::EncodeString8(crdtp::SpanFrom(session_id), &out);
+
+  out.push_back(crdtp::cbor::EncodeStop());
+  envelope.EncodeStop(&out);
+  return out;
+}
+
+// CV2-CAPTURE-STATS — encodes {"framesReceived": <n>} as a CBOR map inside a
+// length-prefixed envelope (same shape as EncodeStartResponse). This is the
+// FrameSink video-frame-production counter the warm-golden publish gate polls.
+//
+// Encoder caveat: crdtp's cbor.h (third_party/inspector_protocol/crdtp/cbor.h,
+// resolved from the chromium tree — not vendored here) exposes only
+// EncodeInt32 for integral CBOR values; there is no unsigned/int64 primitive
+// (the only other numeric encoder, EncodeDouble, would surface the count as a
+// JSON float on the JSON-transcoding client path). The source counter is a
+// uint64_t, but for any realistic warmup window it fits in int32 with room to
+// spare (INT32_MAX ≈ 2.1e9 frames = ~800 days at 30fps), so we saturate to
+// INT32_MAX before encoding rather than take a lossy wrap. The gate only reads
+// this as "0 vs growing", so saturation is immaterial to the decision.
+std::vector<uint8_t> EncodeCaptureStatsResponse(uint64_t frames_received) {
+  std::vector<uint8_t> out;
+  crdtp::cbor::EnvelopeEncoder envelope;
+  envelope.EncodeStart(&out);
+  out.push_back(crdtp::cbor::EncodeIndefiniteLengthMapStart());
+
+  // "framesReceived": <n>  (saturated to int32 — see caveat above)
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("framesReceived"), &out);
+  const int32_t frames_i32 =
+      frames_received > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())
+          ? std::numeric_limits<int32_t>::max()
+          : static_cast<int32_t>(frames_received);
+  crdtp::cbor::EncodeInt32(frames_i32, &out);
 
   out.push_back(crdtp::cbor::EncodeStop());
   envelope.EncodeStop(&out);
@@ -221,7 +266,9 @@ void CbDevToolsManagerDelegate::HandleCommand(
       dispatchable.Method(), crdtp::SpanFrom(kStartFrameSinkCaptureMethod));
   const bool is_native_session = crdtp::SpanEquals(
       dispatchable.Method(), crdtp::SpanFrom(kStartNativeSessionMethod));
-  if (!is_frame_sink_capture && !is_native_session) {
+  const bool is_get_capture_stats = crdtp::SpanEquals(
+      dispatchable.Method(), crdtp::SpanFrom(kGetCaptureStatsMethod));
+  if (!is_frame_sink_capture && !is_native_session && !is_get_capture_stats) {
     // Not ours — fall through to chromium's dispatcher.
     std::move(callback).Run(message);
     return;
@@ -231,10 +278,14 @@ void CbDevToolsManagerDelegate::HandleCommand(
   const int call_id = dispatchable.CallId();
 
   std::string error;
-  std::vector<uint8_t> ok_payload =
-      is_frame_sink_capture
-          ? HandleStartFrameSinkCapture(channel, &error)
-          : HandleStartNativeSession(dispatchable, &error);
+  std::vector<uint8_t> ok_payload;
+  if (is_frame_sink_capture) {
+    ok_payload = HandleStartFrameSinkCapture(channel, &error);
+  } else if (is_native_session) {
+    ok_payload = HandleStartNativeSession(dispatchable, &error);
+  } else {  // is_get_capture_stats
+    ok_payload = HandleGetCaptureStats(channel, &error);
+  }
 
   std::unique_ptr<crdtp::Serializable> response;
   if (!ok_payload.empty()) {
@@ -401,6 +452,43 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
             << "capture on " << frame_sink_id.ToString();
 
   return EncodeStartResponse(frame_sink_id.ToString());
+}
+
+std::vector<uint8_t> CbDevToolsManagerDelegate::HandleGetCaptureStats(
+    content::DevToolsAgentHostClientChannel* /*channel*/,
+    std::string* out_error) {
+  DCHECK(out_error);
+
+  // CV2-CAPTURE-STATS — read-only capture-health probe for the warm-golden
+  // publish gate. Resolve the browser-process video track source exactly the
+  // way HandleStartFrameSinkCapture does (lazy getter at dispatch time — the
+  // ctor fires before step 5b builds cb_track_source_, so a ctor snapshot is
+  // always null; CV2-69 construction-order fix). A null getter or null result
+  // → structured ServerError on the wire, never a UAF.
+  CloudBrowserFrameSinkVideoTrackSource* track_source =
+      track_source_getter_ ? track_source_getter_.Run() : nullptr;
+  if (!track_source) {
+    *out_error =
+        "Cb.getCaptureStats: no CloudBrowserFrameSinkVideoTrackSource resolved "
+        "at dispatch (check CloudBrowserBrowserMainParts::cb_track_source() — "
+        "it must be non-null by PreMainMessageLoopRun step 5b; getter wired via "
+        "CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate)";
+    return {};
+  }
+
+  // GetStats() is a lock-free plain copy of the monotonic counters
+  // (cb_framesink_video_track_source.cc:83-89) — safe to read off the capturer
+  // sequence. frames_received_from_capturer is the capturer→ingress delivery
+  // count: > 0 and growing ⇒ the renderer is PRODUCING; flat at 0 ⇒ RENDERER-
+  // STARVED (do NOT publish a golden from this VM).
+  const uint64_t frames = track_source->GetStats().frames_received_from_capturer;
+
+  // Load-bearing marker for the deploy strings-gate: `grep -a CV2-CAPTURE-STATS
+  // <binary>` proves the build carries this method. Also a useful liveness
+  // breadcrumb in the guest serial log when the isolator polls the gate.
+  LOG(INFO) << "CV2-CAPTURE-STATS: Cb.getCaptureStats framesReceived=" << frames;
+
+  return EncodeCaptureStatsResponse(frames);
 }
 
 std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
