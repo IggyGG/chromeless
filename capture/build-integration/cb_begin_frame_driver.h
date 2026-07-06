@@ -184,6 +184,7 @@
 
 #include <cstdint>
 
+#include "base/functional/callback.h"  // CV2-GPU-DEATH — base::RepeatingClosure
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
@@ -269,6 +270,17 @@ class CbBeginFrameDriver {
   // nullptr for either clears it. Does NOT affect frame production in any way.
   void SetDiagnosticSources(WebContentsResolver* resolver,
                             CloudBrowserFrameSinkCapturer* capturer);
+
+  // CV2-GPU-DEATH: wire the permanent-renderer-death callback. Invoked at most
+  // once per driver instance, on the sequence, the first time
+  // consecutive_zero_production_ticks_ reaches kZeroProductionTicksBeforeDeath
+  // (30s of continuous zero frame production despite an active capture target —
+  // the run11 "ack-loop healthy, renderer produces nothing, forever" signature
+  // that no watchdog-timing fix can address). main_parts wires this to signal
+  // the session unhealthy (kSessionUnhealthy envelope) so physics re-pins a
+  // fresh guest, then self-terminates. Passing a null closure clears it. Safe to
+  // call before or after Start(). Does NOT affect frame production.
+  void SetPermanentDeathCallback(base::RepeatingClosure on_permanent_death);
 
  private:
   // Issue exactly one external BeginFrame (force=true) with the next
@@ -405,6 +417,30 @@ class CbBeginFrameDriver {
   // Capturer frames_received at the last report, to compute the per-interval
   // delta (the ground-truth "is the renderer producing under our ticks").
   uint64_t last_reported_frames_received_ = 0;
+
+  // CV2-GPU-DEATH: consecutive EmitDiagnostic() ticks (5s apart) with
+  // captured_delta==0 — i.e. NO frame reached the capturer this window,
+  // regardless of whether the verdict was RENDERER-STARVED or
+  // DRIVER-STALLED(issued=0) (both mean "nothing captured"; they differ only in
+  // WHERE the tick died). Reset to 0 on any tick with captured_delta>0
+  // (PRODUCING/BURSTING). This is INDEPENDENT of watchdog_fires_without_ack_:
+  // that counter is ~1s granularity and resets on every ack (measures ack-CHAIN
+  // liveness); this is ~5s granularity and resets only on a delivered frame
+  // (measures RENDERER PRODUCTION). run11 (EID 019f3554) proves the ack-chain
+  // fully recovers post-GPU-reinit while this stays 0 forever — the only
+  // substrate that can see that failure.
+  int consecutive_zero_production_ticks_ = 0;
+
+  // CV2-GPU-DEATH: one-way latch — true once the permanent-death callback has
+  // fired for this driver instance, so a later tick cannot re-invoke it while
+  // the process is acting on the signal.
+  bool permanent_death_signaled_ = false;
+
+  // CV2-GPU-DEATH: invoked at most once per driver instance, the first time
+  // consecutive_zero_production_ticks_ reaches kZeroProductionTicksBeforeDeath.
+  // Wired by main_parts (SetPermanentDeathCallback) so this driver stays scoped
+  // to DETECTION only; main_parts owns the RESPONSE (signal unhealthy + exit).
+  base::RepeatingClosure on_permanent_death_;
 
   // Invalidated by Stop()/dtor so a late ack callback for an in-flight
   // BeginFrame (delivered async by the compositor) cannot re-enter the loop

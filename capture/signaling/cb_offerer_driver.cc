@@ -195,6 +195,19 @@ void CbOffererDriver::Close(std::string_view reason) {
   CloseInternal(reason, "embedder");
 }
 
+void CbOffererDriver::CloseUnhealthy(std::string_view reason) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // CV2-GPU-DEATH: the guest self-detected permanent renderer/GPU death. Emit
+  // the session_unhealthy envelope FIRST (best-effort; ws_client_ may already
+  // be gone) so physics releases this element's registry entry and re-pins a
+  // fresh guest, THEN run the normal teardown. Distinct from Close() so that a
+  // user-initiated close (guest is fine) does not blacklist the allocation.
+  if (ws_client_) {
+    SendSessionUnhealthyEnvelope();
+  }
+  CloseInternal(reason, "gpu-permanent-death");
+}
+
 OffererState CbOffererDriver::state() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return state_;
@@ -275,6 +288,14 @@ void CbOffererDriver::OnEnvelope(const Envelope& env) {
       break;
     case EnvelopeType::kProbeResult:
       HandleProbeResultEnvelope(env);
+      break;
+    case EnvelopeType::kSessionUnhealthy:
+      // CV2-GPU-DEATH: this is an OUTBOUND-only type (guest→physics). The
+      // guest never legitimately receives it; a peer sending it here is a
+      // misuse. Ignore (do NOT treat as bye — that would tear down a healthy
+      // session on a stray frame).
+      LOG(WARNING) << "CbOffererDriver: ignoring inbound session_unhealthy "
+                      "(outbound-only type; guest does not consume it)";
       break;
   }
 }
@@ -1166,6 +1187,19 @@ bool CbOffererDriver::SendByeEnvelope() {
   // env.data default-constructed.
   Envelope env;
   env.type = EnvelopeType::kBye;
+  env.from = PeerRole::kBrowser;
+  // env.data left default — monostate, encoder omits the wire field.
+  return ws_client_->Send(env);
+}
+
+bool CbOffererDriver::SendSessionUnhealthyEnvelope() {
+  // CV2-GPU-DEATH: like the bye envelope, session_unhealthy omits the `data`
+  // field entirely (monostate). The type alone tells physics to release this
+  // element's isolation-registry entry so the next allocate_or_reuse mints a
+  // fresh guest. Sent BEFORE the bye in the CloseUnhealthy() teardown so the
+  // recycle signal reaches physics even if the close races the WS shutdown.
+  Envelope env;
+  env.type = EnvelopeType::kSessionUnhealthy;
   env.from = PeerRole::kBrowser;
   // env.data left default — monostate, encoder omits the wire field.
   return ws_client_->Send(env);

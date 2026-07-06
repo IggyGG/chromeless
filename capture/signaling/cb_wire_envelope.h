@@ -30,15 +30,19 @@
 //   probe_result       : opaque object (receive-only — the browser
 //                        peer never emits this; physics-side test code
 //                        and the portal client are the only producers).
+//   session_unhealthy  : the `data` field is OMITTED entirely (like bye).
+//                        Send-only from the browser peer (CV2-GPU-DEATH):
+//                        signals permanent renderer/GPU death so physics
+//                        recycles this element's guest allocation.
 //
 // # Source-pinning
 //
-// The six tags above are the COMPLETE accept-list. Any other tag
+// The seven tags above are the COMPLETE accept-list. Any other tag
 // (`sdp_offer`, `candidate`, `hello`, `restart_ice`, etc.) MUST be
 // rejected at decode time so the contract cannot drift unobserved.
 // Anchors:
 //   * physics/src/api/handlers/webrtc_signaling.rs:29  (doc-comment
-//     ABNF of the same six tags)
+//     ABNF of the same tags)
 //   * physics/src/api/handlers/webrtc_signaling.rs:124-155
 //     (SignalingEnvelope serde-tagged enum, lockstep with this header)
 //   * physics/src/api/handlers/webrtc_signaling.rs:233
@@ -70,7 +74,7 @@
 namespace cloud_browser {
 namespace signaling {
 
-// The six permitted envelope tags. Wire encoding matches the string
+// The permitted envelope tags. Wire encoding matches the string
 // names below (lowercase, underscore-separated for the multi-word
 // tags) — locked by physics/src/api/handlers/webrtc_signaling.rs's
 // `#[serde(tag = "type", rename_all = "snake_case")]`.
@@ -81,6 +85,15 @@ enum class EnvelopeType {
   kBye,
   kRequestRenegotiate,
   kProbeResult,
+  // CV2-GPU-DEATH: the guest signals its own permanent renderer/GPU death
+  // (run11-class: ack-loop healthy, capturer produces nothing for 30s+) so
+  // physics releases the isolation-registry entry for this element and the
+  // NEXT allocate_or_reuse mints a FRESH guest. Wire tag "session_unhealthy".
+  // Carries NO payload (monostate, `data` omitted) — like kBye; the type alone
+  // is the signal. Distinct from kBye so physics can tell "user closed the
+  // tab, guest is fine" from "guest self-detected permanent death, recycle it".
+  // Lockstep with physics webrtc_signaling.rs SignalingEnvelope serde enum.
+  kSessionUnhealthy,
 };
 
 // Decode-side: returns the EnvelopeType matching `tag` or nullopt if
@@ -208,7 +221,7 @@ std::optional<std::string> Encode(const Envelope& env);
 //   * non-JSON input (parse failure)
 //   * JSON that isn't a top-level object
 //   * missing `type` or `from` field
-//   * `type` not one of the six pinned tags (THIS IS LOAD-BEARING —
+//   * `type` not one of the pinned tags (THIS IS LOAD-BEARING —
 //     `sdp_offer` and friends MUST be rejected; the negative test
 //     pins this)
 //   * `from` not one of "browser" / "client"
