@@ -57,9 +57,9 @@
 #include "api/rtc_error.h"                 // CV2-WARM — StartNativeSession return
 #include "api/scoped_refptr.h"
 #include "base/functional/callback.h"
-#include "base/functional/callback_helpers.h"  // CV2 — base::ScopedClosureRunner (capture_keepalive_handle_)
 #include "base/memory/raw_ptr.h"           // CV2-WARM — raw_ptr<AudioDeviceModule>
 #include "base/timer/timer.h"
+#include "base/functional/callback_helpers.h"  // CV2 — base::ScopedClosureRunner (capture_keepalive_handle_); placed after base/timer to avoid an add/add textual collision with the CV2-WARM raw_ptr.h include (functionally order-independent)
 #include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
 // that hold the runtime-wire consumer instances. CbCursorClient (M5
