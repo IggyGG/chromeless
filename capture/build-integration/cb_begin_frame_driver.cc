@@ -40,17 +40,37 @@ constexpr base::TimeDelta kStallWatchdogTimeout = base::Seconds(1);
 
 // How many CONSECUTIVE stall-watchdog fires (each kStallWatchdogTimeout apart)
 // with NO intervening BeginFrame ack must accrue before OnStallWatchdog
-// actually re-issues. The first fire always WAITS (re-arm only): a single
-// missed ack cannot be distinguished between "controller transiently unbound —
-// the stashed frame will replay on rebind, so waiting fixes it for free" and
-// "controller bound but a pending callback was genuinely dropped mid-stream".
-// Re-issuing into the unbound case is the double-issue that crashes the GPU
-// process (viz_main_impl.cc:342 `!has_created_frame_sink_manager_`), so we
-// never re-issue on the first fire. A genuine mid-stream freeze survives the
-// wait (a SECOND fire with still no ack) and is then recovered by the re-issue.
-// 2 => wait one full cycle then re-issue: crash-immune on any unbound window
-// (cold boot OR warm-restore) at a cost of <=1s extra freeze-recovery latency.
-constexpr int kWatchdogFiresBeforeReissue = 2;
+// actually re-issues. Every fire before this WAITS (re-arm only).
+//
+// A missed ack has two causes that the driver cannot tell apart instantly:
+//   (1) the viz external-begin-frame controller is transiently UNBOUND — the
+//       GPU channel is (re)establishing on a cold boot OR a warm-snapshot
+//       restore. ui::Compositor stashes our issue and REPLAYS it on rebind,
+//       which then acks and clears this counter. This case SELF-HEALS if we
+//       simply wait; re-issuing into it is the double-issue that crashes the
+//       GPU process on viz_main_impl.cc:342 `!has_created_frame_sink_manager_`.
+//   (2) a genuine mid-stream freeze (the 2026-06-16 capture-start Show()
+//       Display reconfigure dropped the pending callback). The controller is
+//       bound + healthy, the ack just never comes, and re-issuing is the only
+//       recovery. This case does NOT self-heal — the wait never ends.
+//
+// The DISCRIMINATOR is elapsed time: a warm-restore rebind completes within a
+// few seconds (measured 2026-07-06: usually <1s, occasionally 2-5s under load),
+// after which the stashed frame acks and resets this counter. A genuine freeze
+// never acks. So waiting LONG ENOUGH to outlast any plausible rebind, then
+// re-issuing, serves case (2) without ever re-issuing into case (1).
+//
+// 2026-07-06 CORRECTION: the prior value of 2 (wait 1s, re-issue at 2s) was
+// INSIDE the warm-restore rebind window — a rebind slower than 2s still saw the
+// re-issue fire into the unbound controller and crash (guest-serial proven,
+// N=12 staging: ~2/12 sessions had a >2s rebind and crashed exactly here).
+// 15 => wait ~15s before assuming a genuine freeze — comfortably beyond any
+// observed warm-restore rebind, so a rebind ALWAYS self-heals first and never
+// reaches the re-issue. A true 15s freeze is already a hard failure; recovering
+// it at 15s (vs 2s) is still well within the client's connect budget, and
+// genuine freezes are rare — so the added latency costs nothing real while the
+// crash-immunity covers the entire rebind tail.
+constexpr int kWatchdogFiresBeforeReissue = 15;
 
 
 // Cadence guardrails, expressed as INTERVALS (not rates). NOTE the inversion:
