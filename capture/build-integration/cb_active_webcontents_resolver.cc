@@ -6,7 +6,9 @@
 #include "cloud-browser/capture/build-integration/cb_active_webcontents_resolver.h"
 
 #include "base/check.h"
+#include "base/location.h"
 #include "base/logging.h"
+#include "base/task/sequenced_task_runner.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
@@ -152,11 +154,39 @@ void CbActiveWebContentsResolver::RenderViewHostChanged(
   (void)old_host;
   (void)new_host;
 
+  // Whether a capture was live on this WC before the swap — read BEFORE
+  // the invalidation below clears active_fsid_. We require both an active
+  // capture target (active_) AND a currently-valid FSID: active_ alone
+  // can be set with an already-invalidated FSID in the brief window
+  // between a prior swap and its posted re-arm, and re-arming again from
+  // there is harmless but redundant (the pending re-arm already live-walks
+  // to the newest sink). Gating on both keeps one swap → one re-arm.
+  const bool had_active_capture = active_ != nullptr && active_fsid_.is_valid();
+
   if (active_fsid_.is_valid()) {
     LOG(INFO) << "CbActiveWebContentsResolver: RenderViewHostChanged, "
                  "invalidating stale capture FSID "
               << active_fsid_.ToString();
     active_fsid_ = viz::FrameSinkId();
+  }
+
+  // CV2-CAPTURE-REARM: the cross-document nav that swapped the RWH also
+  // gave the WebContents a fresh FrameSinkId that the capturer is NOT
+  // pointed at — it is still bound to the now-dead pre-nav sink, so it
+  // receives no frames (renderer-starved, VERDICT=RENDERER-STARVED, no
+  // video). The capturer cannot observe this (content-agnostic by
+  // design); we can, so ask the owner to re-resolve the new FSID and
+  // re-arm. POST rather than call inline: at RenderViewHostChanged the
+  // new RWH is swapping in and its RenderWidgetHostView / FrameSinkId
+  // may not be the WebContents' live primary yet. A same-turn PostTask
+  // on the UI thread runs after the swap settles, so the owner's
+  // WC→RWHV→RWH→GetFrameSinkId walk resolves the correct post-nav sink.
+  if (had_active_capture && recapture_on_rvh_swap_) {
+    LOG(INFO) << "CbActiveWebContentsResolver: RenderViewHostChanged on the "
+                 "captured WebContents — scheduling capture re-arm onto the "
+                 "new RenderWidgetHost's FrameSinkId";
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, recapture_on_rvh_swap_);
   }
 }
 

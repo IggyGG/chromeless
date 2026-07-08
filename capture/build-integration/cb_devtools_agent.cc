@@ -414,14 +414,15 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(
   //    unless R5's auto-start policy overrides via
   //    track_source->Configure() before we land here.
   //
-  // TODO(M2-R4-MULTI-TAB): the boot-time one-capturer model means
-  // Cb.startFrameSinkCapture invocations for a DIFFERENT WebContents
-  // (different FrameSinkId) hit capturer.h:87's idempotent Start
-  // no-op path and silently miss the new target. The M0 e2e gate
-  // only ever drives one start, so this is fine for the R4 unblock;
-  // the multi-tab story belongs to a later R# under CV2-39's
-  // "auto-start policy (R5)" non-goal carve-out (which already names
-  // R5 as the lifecycle owner).
+  // Re-invoking StartCapture with a DIFFERENT FrameSinkId (a new
+  // WebContents, or the same WebContents after a cross-document
+  // navigation swapped its RenderWidgetHost) RE-TARGETS the running
+  // capturer: CloudBrowserFrameSinkCapturer::Start's already-started
+  // branch (capturer.cc:138-164) re-applies the pinned format/resolution
+  // and calls producer_->ChangeTarget(new_fsid). It is a no-op ONLY when
+  // the target is unchanged. So this call is safe to repeat and is the
+  // mechanism CloudBrowserBrowserMainParts::RearmCaptureAfterRvhSwap uses
+  // to self-heal capture after a nav's RWH swap (CV2-CAPTURE-REARM).
   track_source->StartCapture(viz::VideoCaptureTarget(frame_sink_id));
 
   web_contents->Focus();

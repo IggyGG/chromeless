@@ -25,6 +25,7 @@
 #include "api/stats/rtcstats_objects.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
+#include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/run_loop.h"
@@ -52,6 +53,7 @@
 #include "capture/signaling/cb_offerer_driver.h"       // CV2-69
 #include "capture/signaling/cb_signaling_ws_client.h"  // CV2-69
 #include "capture/signaling/cb_wire_envelope.h"        // CV2-69
+#include "components/viz/common/surfaces/video_capture_target.h"
 #include "components/viz/host/host_frame_sink_manager.h"
 #include "content/browser/compositor/surface_utils.h"  // nogncheck — same
 #include "content/public/browser/browser_thread.h"     // CV2-75
@@ -94,6 +96,15 @@ namespace {
 // Listen backlog for the DevTools HTTP server socket. Matches the
 // constants used by content_shell + headless.
 constexpr int kBackLog = 10;
+
+// CV2-CAPTURE-REARM: bounded retry for re-resolving the post-nav
+// FrameSinkId when a cross-doc navigation's new RenderWidgetHostView is
+// not yet attached at re-arm time (terminal-nav case — no later swap to
+// retrigger us). ~5 attempts × 50 ms ≈ 250 ms covers a just-committed
+// nav's view attach without busy-looping; small enough to be
+// imperceptible, bounded so a genuinely gone target can't spin forever.
+constexpr int kRecaptureRvhSwapAttempts = 5;
+constexpr int kRecaptureRetryDelayMs = 50;
 
 // TCP server-socket factory bound to <address>:<port>. The address
 // comes from --remote-debugging-address (default 127.0.0.1).
@@ -238,6 +249,96 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
   LOG(INFO) << "CV2-81: active input target set from "
                "Cb.startFrameSinkCapture, fsid="
             << frame_sink_id.ToString();
+}
+
+void CloudBrowserBrowserMainParts::RearmCaptureAfterRvhSwap(int attempts_left) {
+  // CV2-CAPTURE-REARM. Posted from
+  // CbActiveWebContentsResolver::RenderViewHostChanged after a
+  // cross-document navigation swapped the captured WebContents'
+  // RenderWidgetHost (invalidating the FrameSinkId the capturer is bound
+  // to). Re-resolve the WebContents' current primary-main-frame
+  // FrameSinkId and re-arm the capturer against it, so frames flow from
+  // the post-nav renderer instead of the dead pre-nav sink.
+  if (!cb_track_source_) {
+    // Capture stack already torn down (PostMainMessageLoopRun). Nothing
+    // to re-arm.
+    return;
+  }
+  content::WebContents* wc =
+      active_webcontents_resolver_.GetActiveWebContents();
+  if (!wc) {
+    // Capture was cleared (tab closed / renderer crash) between the swap
+    // and this posted task. A future Cb.startFrameSinkCapture re-arms.
+    return;
+  }
+
+  // WC → RWHV → RWH → FrameSinkId, walking live each time (mirrors the
+  // Cb.startFrameSinkCapture resolution in cb_devtools_agent.cc). Each
+  // link can be transiently null while the new RWH finishes swapping in.
+  // For a TERMINAL navigation (the last swap of a sequence) there is no
+  // subsequent RenderViewHostChanged to re-trigger us and physics may
+  // not re-issue Cb.startFrameSinkCapture — so instead of bailing and
+  // hoping, re-post ourselves with a short delay a bounded number of
+  // times. If we exhaust the budget, give up quietly (the capturer stays
+  // on the prior sink; a later nav / capture-start still recovers).
+  auto retry_or_give_up = [&](const char* stage) {
+    if (attempts_left > 0) {
+      LOG(INFO) << "CV2-CAPTURE-REARM: post-nav " << stage
+                << " not ready yet; retrying re-arm (" << attempts_left
+                << " attempt(s) left)";
+      base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE,
+          base::BindOnce(
+              &CloudBrowserBrowserMainParts::RearmCaptureAfterRvhSwap,
+              base::Unretained(this), attempts_left - 1),
+          base::Milliseconds(kRecaptureRetryDelayMs));
+    } else {
+      LOG(WARNING) << "CV2-CAPTURE-REARM: gave up re-arming after RVH swap — "
+                   << stage
+                   << " never resolved; capturer left on the prior sink until "
+                      "the next navigation or Cb.startFrameSinkCapture";
+    }
+  };
+
+  content::RenderWidgetHostView* rwhv = wc->GetRenderWidgetHostView();
+  if (!rwhv) {
+    retry_or_give_up("RenderWidgetHostView");
+    return;
+  }
+  content::RenderWidgetHost* rwh = rwhv->GetRenderWidgetHost();
+  if (!rwh) {
+    retry_or_give_up("RenderWidgetHost");
+    return;
+  }
+  const viz::FrameSinkId new_fsid = rwh->GetFrameSinkId();
+  if (!new_fsid.is_valid()) {
+    retry_or_give_up("FrameSinkId");
+    return;
+  }
+
+  // Force the (post-nav) view SHOWING so the renderer requests continuous
+  // BeginFrames — the same gating that Cb.startFrameSinkCapture applies,
+  // because a fresh RWH after nav starts HIDDEN in this offscreen setup
+  // and would otherwise stay throttled even with capture re-armed. Walk
+  // the aura ancestor chain (see the detailed rationale in
+  // cb_devtools_agent.cc HandleStartFrameSinkCapture).
+  if (!rwhv->IsShowing()) {
+    for (aura::Window* w = rwhv->GetNativeView(); w; w = w->parent()) {
+      if (!w->IsVisible()) {
+        w->Show();
+      }
+    }
+    rwhv->Show();
+  }
+
+  LOG(INFO) << "CV2-CAPTURE-REARM: re-arming capture after RenderViewHost "
+               "swap onto new FrameSinkId "
+            << new_fsid.ToString();
+  cb_track_source_->StartCapture(viz::VideoCaptureTarget(new_fsid));
+  // Refresh the resolver's active target so its diagnostic FSID +
+  // input-dispatch view track the new sink (and a subsequent swap's
+  // had_active_capture gate reads valid).
+  active_webcontents_resolver_.SetActiveCapture(wc, new_fsid);
 }
 
 namespace {
@@ -660,6 +761,28 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
         &active_webcontents_resolver_,
         cb_track_source_ ? cb_track_source_->capturer_for_test() : nullptr);
   }
+
+  // CV2-CAPTURE-REARM: self-heal capture across a cross-document
+  // navigation's RenderWidgetHost swap. On a cold-boot session the guest
+  // starts on about:blank, capture is armed on that page's FrameSinkId,
+  // then the (physics-driven or in-page) navigation to real content
+  // swaps the RenderViewHost — invalidating the sink the capturer is
+  // bound to. Nothing re-points the capturer at the new sink, so it
+  // starves (VERDICT=RENDERER-STARVED, frames_encoded=0, no video). Warm-
+  // restored golden sessions dodge this (they resume already-on-content
+  // with no about:blank→nav transition), which is why cold-boot is the
+  // sole path that froze. The resolver observes the swap but is content-
+  // layer glue with no capturer handle; we own both, so we hand it a
+  // closure that re-resolves the WebContents' NEW primary-main-frame
+  // FrameSinkId and re-arms the capturer against it. base::Unretained is
+  // safe: the resolver is a value member of this main_parts and the
+  // closure only runs while it (and thus |this|) is alive — the resolver
+  // outlives the message loop; PostMainMessageLoopRun clears
+  // cb_track_source_ AFTER the run loop stops, and the closure null-checks
+  // it regardless.
+  active_webcontents_resolver_.SetRecaptureOnRvhSwapCallback(
+      base::BindRepeating(&CloudBrowserBrowserMainParts::RearmCaptureAfterRvhSwap,
+                          base::Unretained(this), kRecaptureRvhSwapAttempts));
 
   // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) F5 + F6 ==============
   //
