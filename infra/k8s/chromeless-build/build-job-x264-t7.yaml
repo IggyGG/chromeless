@@ -142,7 +142,13 @@ spec:
               # SKIP_CDP_VALIDATION fix on cv2/m2's script never ran
               # because /workspace had main's older script. Build #5
               # attempts 1 + 2 both hit STEP 10 exit 127.
-              value: "cv2/idle-refresh-capturer"
+              # 2026-07-08 (#116): re-pinned cv2/idle-refresh-capturer →
+              # main. main ⊇ cv2/idle-refresh-capturer (main is 8 commits
+              # ahead, idle-refresh fully contained via PR #37 merge) AND
+              # adds the capture-rearm fix b3359fb (FrameSink self-heal
+              # across cross-doc nav RVH swap — the cold-boot frozen-video
+              # root cause). Build script is byte-identical between refs.
+              value: "main"
             - name: FORGEJO_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -211,16 +217,20 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              # cv2/idle-refresh-capturer (2026-07-02): the deploy
-              # lineage — wave-3 base (ContentClient + pak-scale +
-              # compositor drain + retarget) PLUS warm-snapshot
+              # main (2026-07-08, #116): the deploy lineage — the full
+              # cv2/idle-refresh-capturer stack (wave-3 base: ContentClient
+              # + pak-scale + compositor drain + retarget; PLUS warm-snapshot
               # Cb.startNativeSession, D18b answer tolerance/buffer,
               # idle-refresh hold-and-repeat, IncrementCapturerCount
-              # capture-keepalive, dcheck_always_on=false, and the
-              # CB_UA_RESOURCE renderer resource-path probe. Provenance
-              # gate: built binary MUST contain "no track-source getter"
-              # and MUST NOT contain "no video track source".
-              value: "cv2/idle-refresh-capturer"
+              # capture-keepalive, dcheck_always_on=false, CB_UA_RESOURCE
+              # renderer resource-path probe) merged to main via PR #37,
+              # PLUS the capture-rearm fix b3359fb (FrameSink self-heal
+              # across cross-doc nav RVH swap). main ⊇ idle-refresh
+              # (8 ahead, 0 behind). MUST stay in sync with the init
+              # container's OUR_REPO_REF above. Provenance gate: built
+              # binary MUST contain "no track-source getter" and MUST NOT
+              # contain "no video track source".
+              value: "main"
             - name: CHROMIUM_BRANCH_NUMBER
               value: "7727"
             - name: CHROMELESS_REPO
