@@ -71,6 +71,7 @@
 #ifndef CLOUD_BROWSER_CAPTURE_BUILD_INTEGRATION_CB_ACTIVE_WEBCONTENTS_RESOLVER_H_
 #define CLOUD_BROWSER_CAPTURE_BUILD_INTEGRATION_CB_ACTIVE_WEBCONTENTS_RESOLVER_H_
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -199,6 +200,22 @@ class CbActiveWebContentsResolver : public WebContentsResolver,
   // dispatch doesn't consume it.
   viz::FrameSinkId active_frame_sink_id() const { return active_fsid_; }
 
+  // CV2-CAPTURE-REARM: install the callback the resolver invokes when it
+  // observes a RenderViewHostChanged on the actively-captured WebContents
+  // (cross-document navigation swaps the RenderWidgetHost + its
+  // FrameSinkId, orphaning the capturer on the now-dead pre-nav sink →
+  // renderer-starved, no frames). The FrameSink capturer is deliberately
+  // content-agnostic (it only knows FrameSinkIds) and cannot observe the
+  // swap; this resolver already does, but must NOT depend on the capturer
+  // type. So the owner (CloudBrowserBrowserMainParts) supplies a closure
+  // that re-resolves the active WebContents' NEW FrameSinkId and re-arms
+  // capture against it. Optional: if unset (tests, or a build with no
+  // capturer wired), the resolver just invalidates the stale FSID as
+  // before. Idempotent to install; last writer wins.
+  void SetRecaptureOnRvhSwapCallback(base::RepeatingClosure cb) {
+    recapture_on_rvh_swap_ = std::move(cb);
+  }
+
   // Test seam — flush the active state without going through the CDP
   // path. Used by cb_active_webcontents_resolver_test.cc to verify the
   // null-after-clear contract independent of the delegate wiring.
@@ -254,6 +271,12 @@ class CbActiveWebContentsResolver : public WebContentsResolver,
   // diagnostics + the soft mismatch warning; production dispatch
   // routes via the WC's live RWH walk, not this FSID.
   viz::FrameSinkId active_fsid_;
+
+  // CV2-CAPTURE-REARM: invoked from RenderViewHostChanged when a capture
+  // is active, so the owner re-resolves the post-nav FrameSinkId and
+  // re-arms the capturer. Empty by default (no-op → legacy behaviour:
+  // invalidate only). See SetRecaptureOnRvhSwapCallback.
+  base::RepeatingClosure recapture_on_rvh_swap_;
 };
 
 }  // namespace cloud_browser

@@ -111,9 +111,11 @@ void CloudBrowserFrameSinkVideoTrackSource::StartCapture(
   // form was rejected; see CV2-40).
   //
   // For the current R4-only landing: delegate straight to the
-  // underlying capturer's Start. capturer_->Start is idempotent
-  // (per capturer.h:87 contract: "Idempotent: a second call is a
-  // no-op"), so multiple devtools-driven invocations are safe.
+  // underlying capturer's Start. Start is a no-op only for a repeat of
+  // the SAME target; a different FrameSinkId re-targets the running
+  // capturer (capturer.cc:138-164 ChangeTarget), so multiple
+  // devtools-driven invocations — including capture re-arm after a
+  // navigation's RenderWidgetHost swap — are safe and effective.
   if (!capturer_) {
     // Header-only / test-bypass case. No-op.
     return;

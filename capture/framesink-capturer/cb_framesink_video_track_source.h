@@ -275,8 +275,11 @@ class CloudBrowserFrameSinkVideoTrackSource : public webrtc::VideoTrackSource {
   // straight to capturer_->Start(target) so the devtools start path
   // works end-to-end.
   //
-  // Idempotent in capturer_->Start's contract: second call with same
-  // target is a no-op.
+  // Per capturer_->Start's contract: a second call with the SAME target
+  // is a no-op, but a call with a DIFFERENT FrameSinkId RE-TARGETS the
+  // running capturer (ChangeTarget) — this is how capture follows a
+  // cross-document navigation's RenderWidgetHost swap. Safe to call
+  // repeatedly.
   //
   // No-op if capturer_ is null (header-only / test bypass case).
   void StartCapture(viz::VideoCaptureTarget target);
