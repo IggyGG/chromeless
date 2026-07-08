@@ -215,6 +215,25 @@ class CloudBrowserBrowserMainParts
                         viz::FrameSinkId frame_sink_id);
 
  private:
+  // CV2-CAPTURE-REARM: re-arm the FrameSink capturer after a
+  // cross-document navigation swapped the captured WebContents'
+  // RenderWidgetHost (and thus its FrameSinkId). Invoked (via a posted
+  // task) from CbActiveWebContentsResolver::RenderViewHostChanged when a
+  // capture was active. Re-resolves the WebContents' current
+  // primary-main-frame FrameSinkId and calls cb_track_source_->
+  // StartCapture() on it, then refreshes the resolver's active target.
+  // No-op if capture torn down or the track source is gone.
+  //
+  // |attempts_left|: if the WebContents' new RWHV/RWH/FrameSinkId is not
+  // resolvable yet (a terminal navigation whose fresh renderer hasn't
+  // attached its view by this task turn — no subsequent RVH swap will
+  // retrigger us, and physics may not re-issue Cb.startFrameSinkCapture),
+  // re-post ourselves with a short delay up to |attempts_left| times so a
+  // just-committed nav still lands capture on its sink. Runs on the UI
+  // thread. See cb_active_webcontents_resolver.h
+  // SetRecaptureOnRvhSwapCallback.
+  void RearmCaptureAfterRvhSwap(int attempts_left);
+
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
   // and starts content::DevToolsAgentHost::StartRemoteDebuggingServer
   // bound at 127.0.0.1:<port>. Idempotent — only called once from
