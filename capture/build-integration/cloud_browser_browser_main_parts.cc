@@ -30,6 +30,7 @@
 #include "base/logging.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/functional/bind.h"  // CV2-GPU-DEATH — BindRepeating/BindOnce
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/thread_restrictions.h"  // CV2-WARM — H1 ScopedAllowBaseSyncPrimitives
 #include "base/time/time.h"
@@ -961,6 +962,20 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
   offerer_driver_->Start();
   ws_client_->Connect();
 
+  // CV2-GPU-DEATH: wire the BeginFrame driver's permanent-renderer-death
+  // callback now that offerer_driver_ exists. The driver fires this (on this
+  // same main sequence) after 30s of continuous zero frame production despite
+  // an active capture target — the run11-class failure the =15 watchdog fix
+  // cannot address (ack-loop healthy, renderer produces nothing, forever).
+  // base::Unretained is safe: begin_frame_driver_ is owned by main_parts and
+  // reset in PostMainMessageLoopRun strictly before `this` is destroyed, so the
+  // callback cannot outlive main_parts.
+  if (begin_frame_driver_) {
+    begin_frame_driver_->SetPermanentDeathCallback(base::BindRepeating(
+        &CloudBrowserBrowserMainParts::OnGpuPermanentDeath,
+        base::Unretained(this)));
+  }
+
   // CV2-83 / cb_dc_host adoption — create and bind the native
   // DataChannels before adding media transceivers. The first media
   // AddTransceiver triggers the offer; the DCs must already exist so
@@ -1460,6 +1475,49 @@ void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {
   // path. A future R# may add a Cb.shutdown CDP method here.
   LOG(ERROR) << "CV2-69 offerer_driver: unrecoverable failure, reason="
              << reason;
+}
+
+// CV2-GPU-DEATH: the BeginFrame driver reported permanent renderer/GPU death
+// (run11-class: ack-loop healthy, capturer produced nothing for 30s+). This is
+// UNRECOVERABLE in-process — run11 shows the GPU process already crashed+reinit
+// and the renderer still never recovered; a fresh WebContents in the same
+// browser process inherits the same wedged GPU singleton. The only cure is a
+// brand-new guest, so: (1) tell physics to recycle THIS element's allocation
+// via CloseUnhealthy() (emits the session_unhealthy envelope → registry.release
+// → next allocate_or_reuse mints a fresh guest), then (2) exit cleanly so the
+// dead microVM's resources are freed promptly rather than lingering as a
+// "connected but producing nothing" peer. Runs on the main sequence (the
+// driver posts it here), so direct offerer_driver_ access is safe.
+void CloudBrowserBrowserMainParts::OnGpuPermanentDeath() {
+  LOG(ERROR) << "CV2-GPU-DEATH: main_parts received permanent-death signal from "
+                "BeginFrame driver — signalling session-unhealthy to physics "
+                "and self-terminating for a fresh-guest re-pin";
+
+  if (offerer_driver_) {
+    // CV2-GPU-DEATH review Finding #2: PrepareForTeardown MUST run before the
+    // driver close — cb_audio_lifecycle.h documents that OnClosed fires after
+    // pc_ is dropped, so skipping this routes into the "embedder forgot"
+    // fallback (a WARNING + non-graceful stop that opens a PulseAudio
+    // orphan-stream window). Mirror the normal PostMainMessageLoopRun teardown.
+    if (audio_lifecycle_) {
+      audio_lifecycle_->PrepareForTeardown("gpu-permanent-death");
+    }
+    // Emits session_unhealthy (best-effort) + tears down the PC. Distinct from
+    // Close() so physics recycles rather than treating this as a clean bye.
+    offerer_driver_->CloseUnhealthy("gpu-permanent-death");
+  }
+
+  // Quit the main message loop on a short delay so the session_unhealthy
+  // envelope has a chance to flush over the WS before the process tears down.
+  // quit_main_message_loop_ is the parked run-loop QuitClosure (see
+  // WillRunMainMessageLoop); running it drives the LIFO PostMainMessageLoopRun
+  // teardown. Guard against a double-fire: the driver's own one-way latch
+  // (permanent_death_signaled_) already ensures OnGpuPermanentDeath runs at most
+  // once, but check the closure is still non-null defensively.
+  if (quit_main_message_loop_) {
+    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, std::move(quit_main_message_loop_), base::Seconds(1));
+  }
 }
 // ============== END CV2-69 observer overrides ==============
 

@@ -181,6 +181,16 @@ class CloudBrowserBrowserMainParts
   void OnClosed(std::string_view reason) override;  // offerer-driver path
   void OnFailed(std::string_view reason) override;
 
+  // CV2-GPU-DEATH: wired to begin_frame_driver_->SetPermanentDeathCallback().
+  // Fired (on the main sequence) when the BeginFrame driver detects permanent
+  // renderer/GPU death (30s+ of zero frame production, run11-class). Signals
+  // physics to recycle this element (offerer_driver_->CloseUnhealthy() →
+  // session_unhealthy envelope → registry.release) then quits the main message
+  // loop so the dead microVM's resources free promptly and a fresh guest boots
+  // on the next allocate_or_reuse. NOT an observer override — a plain callback
+  // target.
+  void OnGpuPermanentDeath();
+
   // Public read-only accessor for the default BrowserContext. Returns
   // nullptr until PreMainMessageLoopRun has executed (the context is
   // constructed there). Used by CloudBrowserContentBrowserClient to
