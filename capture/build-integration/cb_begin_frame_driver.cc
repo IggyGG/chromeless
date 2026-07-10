@@ -72,6 +72,22 @@ constexpr base::TimeDelta kStallWatchdogTimeout = base::Seconds(1);
 // crash-immunity covers the entire rebind tail.
 constexpr int kWatchdogFiresBeforeReissue = 15;
 
+// CV2-GPU-DEATH: consecutive EmitDiagnostic() ticks (kDiagnosticInterval=5s
+// apart) with captured_delta==0 before declaring the renderer/GPU pipeline
+// permanently dead and signalling the session unhealthy for a physics re-pin.
+// 6 ticks = 30s. Rationale for the margin: the =15 watchdog's own worst-case
+// tolerated rebind is 15s (kWatchdogFiresBeforeReissue * kStallWatchdogTimeout);
+// a legitimate rebind that resolves at the full 15s produces a catch-up burst
+// (captured_delta>0) that resets this counter no later than tick 3, well before
+// tick 6 — so this NEVER false-positives on a slow-but-recovering guest. It only
+// fires on the run11 signature: ack-loop outwardly healthy (issued≈acked≈29fps,
+// watchdog_fires_without_ack_ back to 0 post-GPU-reinit) yet captured_delta==0
+// on every tick, forever. Guest-serial-proven: run11 EID 019f3554, 27+
+// consecutive zero-production ticks over 2+ minutes with no exception. A
+// false-positive recycle of a would-have-recovered guest is strictly worse than
+// a 15-20s-late recycle of a doomed one, so we err generous.
+constexpr int kZeroProductionTicksBeforeDeath = 6;
+
 
 // Cadence guardrails, expressed as INTERVALS (not rates). NOTE the inversion:
 // the *fastest* allowed rate (60 fps) is the *smallest* interval, hence
@@ -167,6 +183,12 @@ void CbBeginFrameDriver::SetDiagnosticSources(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   diag_resolver_ = resolver;
   diag_capturer_ = capturer;
+}
+
+void CbBeginFrameDriver::SetPermanentDeathCallback(
+    base::RepeatingClosure on_permanent_death) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  on_permanent_death_ = std::move(on_permanent_death);
 }
 
 void CbBeginFrameDriver::IssueOneBeginFrame() {
@@ -468,6 +490,53 @@ void CbBeginFrameDriver::EmitDiagnostic() {
   LOG(INFO) << "CbBeginFrameDriver[diag]: issued=" << issued << " ("
             << issued_fps << " fps) acked=" << acked << " | " << renderer_state
             << " | " << capture_state << " | VERDICT=" << verdict;
+
+  // --- CV2-GPU-DEATH: permanent-renderer-death detection ---
+  // Key off the ground-truth per-window CAPTURED delta, not the verdict string:
+  // both RENDERER-STARVED and DRIVER-STALLED share captured_delta==0 (nothing
+  // reached the capturer), and keying on the number is immune to future verdict
+  // wording changes. A single delivered frame (a slow-but-recovering guest, or a
+  // legitimate rebind catching up) resets the streak.
+  //
+  // ARM GATE (CV2-GPU-DEATH review Finding #1): detection is armed ONLY once
+  // on_permanent_death_ is wired — which happens in StartNativeSession(), the
+  // same moment a real WebRTC session (and its capture) begins. This is load-
+  // bearing, NOT just an optimization: diag_capturer_ is non-null from process
+  // boot (SetDiagnosticSources runs early + unconditionally), but on the warm-
+  // CDP-only boot path StartNativeSession()/capture-start arrive an arbitrarily
+  // later CDP dispatch. Without this gate, captured_delta==0 every tick during
+  // that idle window would burn consecutive_zero_production_ticks_ up to the
+  // threshold and latch permanent_death_signaled_ true BEFORE the callback ever
+  // exists — permanently self-disabling the feature for the process's life
+  // (the counter/latch never reset). Resetting the streak while unarmed keeps
+  // the 30s window measured from when capture actually began, not from boot.
+  if (capturer_present && on_permanent_death_) {
+    if (captured_delta == 0) {
+      ++consecutive_zero_production_ticks_;
+    } else {
+      consecutive_zero_production_ticks_ = 0;
+    }
+
+    if (consecutive_zero_production_ticks_ >= kZeroProductionTicksBeforeDeath &&
+        !permanent_death_signaled_) {
+      permanent_death_signaled_ = true;
+      LOG(ERROR)
+          << "CV2-GPU-DEATH: " << consecutive_zero_production_ticks_
+          << " consecutive diagnostic ticks ("
+          << (consecutive_zero_production_ticks_ *
+              kDiagnosticInterval.InSeconds())
+          << "s) with zero captured frames despite an active capture target "
+             "(captured_delta==0 every tick) — renderer/GPU pipeline is "
+             "permanently dead for this session; signalling session-unhealthy "
+             "and self-terminating so physics re-pins a fresh guest";
+      on_permanent_death_.Run();
+    }
+  } else {
+    // Unarmed (no death callback yet, or no capturer handle): keep the streak
+    // at 0 so the 30s window is measured from when detection actually arms
+    // (capture start), never from process boot. See the ARM GATE note above.
+    consecutive_zero_production_ticks_ = 0;
+  }
 }
 
 }  // namespace cloud_browser

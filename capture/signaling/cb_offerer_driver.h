@@ -362,6 +362,15 @@ class CbOffererDriver
   // NOT wait for the broker's ack before transitioning to kClosed.
   void Close(std::string_view reason);
 
+  // CV2-GPU-DEATH: like Close(), but first emits a session_unhealthy envelope
+  // so physics releases this element's isolation-registry entry (the next
+  // allocate_or_reuse mints a FRESH guest instead of reusing this dead one).
+  // Called by main_parts when the BeginFrame driver reports permanent
+  // renderer/GPU death (run11-class: ack-loop healthy, zero production for
+  // 30s+). Distinct from Close() so a user-initiated close does not trigger a
+  // recycle. Safe from posted-task contexts (same teardown as Close()).
+  void CloseUnhealthy(std::string_view reason);
+
   // State accessor for tests + the embedder's readiness gate.
   OffererState state() const;
 
@@ -490,6 +499,10 @@ class CbOffererDriver
   // Returns false if the ws Send rejected — caller logs but proceeds
   // with teardown regardless.
   bool SendByeEnvelope();
+
+  // CV2-GPU-DEATH: emit the session_unhealthy envelope (monostate payload,
+  // `data` omitted like bye). Called from CloseUnhealthy() before teardown.
+  bool SendSessionUnhealthyEnvelope();
 
   // R6: renegotiation orchestrator. Three call sites converge here:
   // RequestRenegotiation(), HopHandleRenegotiationNeeded() (post-

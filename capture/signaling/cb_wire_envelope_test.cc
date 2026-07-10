@@ -152,11 +152,12 @@ testing::AssertionResult JsonSemanticEq(std::string_view a,
 // Tag <-> string
 // ---------------------------------------------------------------------
 
-TEST(CbWireEnvelopeTagTest, AllSixTagsRoundTrip) {
+TEST(CbWireEnvelopeTagTest, AllTagsRoundTrip) {
   for (auto type : {EnvelopeType::kOffer, EnvelopeType::kAnswer,
                     EnvelopeType::kIce, EnvelopeType::kBye,
                     EnvelopeType::kRequestRenegotiate,
-                    EnvelopeType::kProbeResult}) {
+                    EnvelopeType::kProbeResult,
+                    EnvelopeType::kSessionUnhealthy}) {
     std::string_view tag = TagToString(type);
     EXPECT_THAT(TagFromString(tag), Optional(type)) << "tag=" << tag;
   }
@@ -254,6 +255,15 @@ TEST(CbWireEnvelopeDecodeTest, RealProbeResultDecodes) {
   EXPECT_THAT(probe->raw.FindInt("rtt_ms"), Optional(38));
 }
 
+TEST(CbWireEnvelopeDecodeTest, RealSessionUnhealthyDecodes) {
+  // CV2-GPU-DEATH: no data field, like bye. Type alone is the signal.
+  auto env = Decode(R"({"type":"session_unhealthy","from":"browser"})");
+  ASSERT_TRUE(env);
+  EXPECT_EQ(env->type, EnvelopeType::kSessionUnhealthy);
+  EXPECT_EQ(env->from, PeerRole::kBrowser);
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(env->data));
+}
+
 // ---------------------------------------------------------------------
 // Negative test — load-bearing rejection
 // ---------------------------------------------------------------------
@@ -283,6 +293,14 @@ TEST(CbWireEnvelopeDecodeTest, RejectsByeWithDataField) {
   // bye carries NO data field on the wire — even null is a violation.
   EXPECT_EQ(Decode(R"({"type":"bye","from":"browser","data":null})"),
             std::nullopt);
+}
+
+TEST(CbWireEnvelopeDecodeTest, RejectsSessionUnhealthyWithDataField) {
+  // CV2-GPU-DEATH: session_unhealthy carries NO data field, like bye —
+  // a present `data` (even null) is a contract violation.
+  EXPECT_EQ(
+      Decode(R"({"type":"session_unhealthy","from":"browser","data":null})"),
+      std::nullopt);
 }
 
 TEST(CbWireEnvelopeDecodeTest, RejectsOfferWithWrongInnerType) {
@@ -330,6 +348,19 @@ TEST(CbWireEnvelopeRoundTripTest, RealBye) {
   // a monostate kBye would be a contract violation physics would
   // reject).
   EXPECT_TRUE(JsonSemanticEq(*out, kRealByeEnvelope));
+  EXPECT_EQ(out->find("\"data\""), std::string::npos);
+}
+
+TEST(CbWireEnvelopeRoundTripTest, RealSessionUnhealthy) {
+  // CV2-GPU-DEATH: like RealBye — confirm the absence of `data` survives the
+  // encode round-trip (Encode emitting "data":null for a monostate
+  // session_unhealthy would be a contract violation physics would reject).
+  constexpr char kEnv[] = R"({"type":"session_unhealthy","from":"browser"})";
+  auto env = Decode(kEnv);
+  ASSERT_TRUE(env);
+  auto out = Encode(*env);
+  ASSERT_TRUE(out);
+  EXPECT_TRUE(JsonSemanticEq(*out, kEnv));
   EXPECT_EQ(out->find("\"data\""), std::string::npos);
 }
 
