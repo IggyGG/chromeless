@@ -11,8 +11,18 @@ the upstream release contains it.
 **Project:** `longhorn/longhorn-manager`
 **Found against:** v1.7.2 (the version running in this cluster)
 **Still present on:** master `b0ca62b7` (relocated, see below)
-**Status:** NOT yet submitted upstream — needs a github.com account with push
-access. `gh` on this machine is authenticated only against Forgejo.
+
+**Status: SUBMITTED UPSTREAM (2026-07-29).**
+
+- Issue: https://github.com/longhorn/longhorn/issues/13623
+- PR: https://github.com/longhorn/longhorn-manager/pull/5056 (against `master`;
+  DCO signed off, mergeable)
+
+The PR targets `master`, where the code now lives in
+`app/recurringjob/volume.go`. The patch file in this directory is the
+**v1.7.2-shaped** version (`app/recurring_job.go`), kept because that is the
+release this cluster runs — useful if a backport is needed before an upstream
+release carries the fix.
 
 ### What it fixes
 
