@@ -53,10 +53,19 @@ const { RTCPeerConnection, RTCIceCandidate, RTCSessionDescription } = wrtc;
 const BROKER_URL = process.env.BROKER_URL
   || "ws://localhost:8080/api/webrtc/signaling/cv2-phase-a-001";
 const TIMEOUT_MS = parseInt(process.env.PROBE_TIMEOUT_MS || "60000", 10);
-// Match cloud_browser_browser_main_parts.cc:609/619/629/643 — the four
-// labels the worker creates on the PC. "files" (not "file-upload") is
-// the hard-fixed Trap #1 from the v3 narrative.
-const EXPECTED_LABELS = Object.freeze(["input", "cursor", "clipboard", "files"]);
+// Labels the worker creates on the PC (see DefaultOutboundLabels() in
+// capture/signaling/cb_dc_host.cc). "files" (not "file-upload") is the
+// hard-fixed Trap #1 from the v3 narrative.
+//
+// This is asserted as a SUBSET (`every`), not an exact match, so adding a
+// channel guest-side never breaks the probe. "control" carries the
+// browser-UI request/response traffic (JS dialogs, permissions, file
+// chooser, cert errors); it is listed here so a build that silently stops
+// opening it is caught by the post-build smoke rather than by a user
+// hitting a confirm() that never resolves.
+const EXPECTED_LABELS = Object.freeze([
+  "input", "cursor", "clipboard", "files", "control",
+]);
 
 // ───────── log helper (single-line JSON, mirrors broker's slog) ─────────
 
