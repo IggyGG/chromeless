@@ -9,9 +9,12 @@
 //
 // The drag path is the spec's "native equivalent" of the Go input-bridge/
 // main.go CDP dispatcher's drag-and-drop arm, but driven through chromium's
-// internal `content::RenderWidgetHostImpl::DragTargetDrag{Enter,Over,Leave}`
-// and `DragTargetDrop` APIs (with a `content::DropData` payload) instead of
-// `Input.dispatchDragEvent`. The two paths are intentionally semantically
+// `content::RenderWidgetHost::DragTargetDrag{Enter,Over,Leave}` and
+// `DragTargetDrop` APIs (with a `content::DropData` payload) instead of
+// `Input.dispatchDragEvent`. Note these are PUBLIC virtuals on
+// RenderWidgetHost at 7727 (render_widget_host.h:306-344), not
+// RenderWidgetHostImpl-only as this header previously claimed — the .cc
+// needs no impl cast and no cb_friends visibility entry. The two paths are intentionally semantically
 // parity-aligned — the same envelope sequence MUST produce the same
 // observable DOM event sequence (`dragenter` / `dragover` / `drop` /
 // `dragend`) in either backend. See capture/input-bridge/main.go's
@@ -41,7 +44,7 @@
 //
 // R7 scope (CV2-47):
 //   * drag_start / drag_over / drop / drag_end native dispatch via the
-//     RenderWidgetHostImpl::DragTarget{Enter,Over,Leave,Drop} surface
+//     RenderWidgetHost::DragTarget{Enter,Over,Leave,Drop} surface
 //   * per-active-drag state: drag-id (single in v1), source-coords,
 //     current-target widget-point, cached DropData payload, type-list,
 //     coarse phase (kIdle / kActive / kAwaitingEnd)

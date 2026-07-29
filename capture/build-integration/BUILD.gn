@@ -914,13 +914,20 @@ source_set("input_dispatch_drag") {
     # R3's WebContentsResolver forward-declared interface + the
     # CbInputDispatchMouse pointer for held-modifier read access.
     ":input_dispatch_mouse",
-    # RenderWidgetHostImpl::DragTarget* (cast from public
-    # RenderWidgetHost, same pattern as M4 R3 mouse + R6 touch),
-    # content::DropData, blink::WebDragOperation* via the
-    # content-public re-export path.
+    # RenderWidgetHost::DragTarget{DragEnter,DragOver,DragLeave,Drop} +
+    # FilterDropData. Unlike the M4 R3 mouse / R6 touch paths, these are
+    # PUBLIC virtuals on content::RenderWidgetHost at 7727
+    # (render_widget_host.h:306-344), so no content/browser include and no
+    # cb_friends visibility entry are needed here. Also content::DropData
+    # and blink::DragOperationsMask via the content-public re-export.
     "//content/public/browser",
     # blink::mojom::DragOperation enum for kDragOperationCopyV1.
     "//third_party/blink/public/mojom:mojom_platform",
+    # ui::FileInfo — the element type of content::DropData::filenames
+    # (drop_data.h:106). BuildDropData constructs one per "file" item, so
+    # the definition (not just the forward decl content-public gives us) is
+    # required: ui/base/clipboard/file_info.h.
+    "//ui/base",
     "//url",
   ]
   configs += [ ":cb_include_paths" ]               # T17.
