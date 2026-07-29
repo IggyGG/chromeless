@@ -249,6 +249,22 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       content::DevToolsAgentHostClientChannel* channel,
       std::string* out_error);
 
+  // CV2-CAPTURE-STATS — implementation of the read-only Cb.getCaptureStats
+  // method. Resolves the browser-process video track source (same lazy getter
+  // as HandleStartFrameSinkCapture) and returns the CBOR response payload
+  // ({"framesReceived": <n>}) carrying the FrameSink video-frame-production
+  // counter (CloudBrowserFrameSinkVideoTrackSourceStats::
+  // frames_received_from_capturer). The isolator polls this to gate warm-
+  // snapshot golden publication: growing ⇒ healthy PRODUCING renderer, flat 0
+  // ⇒ wedged RENDERER-STARVED renderer (publishing a golden from which would
+  // poison every cold-start restored from it). No side effects — does NOT
+  // start capture. |channel| is unused (the counter is process-global, not
+  // per-WebContents). On an unwired/null track source, populates |out_error|
+  // and returns an empty vector (caller emits CreateErrorResponse).
+  std::vector<uint8_t> HandleGetCaptureStats(
+      content::DevToolsAgentHostClientChannel* channel,
+      std::string* out_error);
+
   // CV2-WARM — implementation of Cb.startNativeSession. Parses the per-session
   // signaling params out of |dispatchable|'s CBOR Params(), builds a
   // NativeSessionConfig, and invokes start_native_session_callback_. Returns
