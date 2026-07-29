@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "base/threading/thread_restrictions.h"
+#include "capture/build-integration/cb_web_contents_delegate.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
@@ -730,6 +731,13 @@ CbDevToolsManagerDelegate::CreateNewTarget(
   // call + the parenting context) are required for renderer-side
   // input to land. The 9703db5 patch did the WasShown / Focus half;
   // this patch closes the parenting half.
+  // Same delegate the boot WebContents gets. Without it, a tab created
+  // through CDP would have working input and pixels but no popups, no JS
+  // dialogs, no file chooser and no fullscreen — a subtly different
+  // browser depending on how the tab was born. Attach before WasShown/
+  // Focus so first-script dialogs land correctly.
+  web_contents->SetDelegate(GetCloudBrowserWebContentsDelegate());
+
   web_contents->WasShown();
   web_contents->Focus();
 

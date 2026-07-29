@@ -40,8 +40,11 @@
 #include "capture/audio/cb_audio_track.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cb_begin_frame_driver.h"  // CV2-ICE
+#include "capture/build-integration/cb_control_channel.h"
 #include "capture/build-integration/cb_cursor_xy_join.h"
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
+#include "capture/build-integration/cb_javascript_dialog_manager.h"
+#include "capture/build-integration/cb_web_contents_delegate.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
 #include "capture/cursor/cb_cursor_dc_emitter.h"
@@ -449,6 +452,19 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   CHECK(initial_web_contents_)
       << "WebContents::Create returned null — chromium browser process "
       << "is misconfigured (renderer host process not yet up?).";
+
+  // Attach the WebContentsDelegate BEFORE WasShown/Focus/LoadURL below, so
+  // that a page which calls confirm() or window.open() in its very first
+  // script already has somewhere for those to go. Without a delegate,
+  // content's defaults silently drop all of it (see the class comment).
+  //
+  // The delegate is a process-lifetime singleton, not owned here: content
+  // holds it as a raw back-pointer and DevToolsManager outlives main_parts,
+  // so an owned delegate would be freed while live WebContents still point
+  // at it — the same hazard that makes aura_ a deliberate leak.
+  GetCloudBrowserWebContentsDelegate()->SetSessionContext(
+      aura_->host()->window(), /*control_channel=*/nullptr);
+  initial_web_contents_->SetDelegate(GetCloudBrowserWebContentsDelegate());
 
   // WebContents::WasShown() below makes Chromium treat the page as visible, but
   // it does not show the Aura container window created by WebContentsViewAura.
@@ -1040,9 +1056,32 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
         std::move(file_upload_ws_), dc_host_.get());
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
                            file_upload_relay_.get());
-    LOG(INFO) << "CV2-75: \"files\" DC observer = "
-                 "CbFileUploadRelay (WS disabled / url=off, "
-                 "outbound dc_host enabled)";
+    // Honesty fix: this used to claim "outbound dc_host enabled", which
+    // read as working. It is not — CbFileUploadRelay's WS backend is a
+    // stub (TODO(M6-R3-ws-backend)) and it is constructed with url="off",
+    // so the relay is permanently disabled() and inbound frames are
+    // dropped before they reach it. Say so, so nobody debugs a file
+    // upload against a log line that implies the path is live.
+    LOG(WARNING) << "CV2-75: \"files\" DC observer = CbFileUploadRelay, but "
+                    "its WS backend is NOT implemented (url=off) — file "
+                    "transfer is INERT on this channel";
+
+    // Browser-fidelity wave 1 — the ask-a-human channel. Must be bound
+    // before any WebContents can run script, since the very first thing a
+    // page does may be a confirm().
+    control_channel_ = std::make_unique<CbControlChannel>(
+        dc_host_.get(), content::GetUIThreadTaskRunner({}));
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kControl,
+                           control_channel_.get());
+    // Publish the channel to the process-lifetime WebContentsDelegate,
+    // which forwards it to the dialog manager it owns. The delegate
+    // outlives the session; the channel does not, which is why this is
+    // injected per session and cleared in PostMainMessageLoopRun rather
+    // than owned over there. Re-uses the aura context set at boot.
+    GetCloudBrowserWebContentsDelegate()->SetSessionContext(
+        aura_root_window(), control_channel_.get());
+    LOG(INFO) << "CV2-fidelity: \"control\" DC observer = CbControlChannel "
+                 "(JS dialogs routed to the viewer)";
   }
 
   if (offerer_driver_->pc()) {
@@ -1161,6 +1200,29 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // OnStateChange / OnMessage callback that races libwebrtc's
   // internal teardown lands on freed memory. UnregisterObserver MUST
   // outlive the consumer dtor.
+  // Control channel first — it is the only consumer that owns callbacks
+  // belonging to OTHER objects (renderer JS threads blocked inside
+  // RunJavaScriptDialog). Three steps, and the order is load-bearing:
+  //
+  //   1. Detach the process-lifetime WebContentsDelegate's pointer, so a
+  //      dialog raised during the rest of teardown takes the no-channel
+  //      default path instead of dereferencing a half-destroyed channel.
+  //   2. Resolve every in-flight request with its default. Skipping this
+  //      leaves renderer JS threads blocked forever — and CbControlChannel's
+  //      dtor deliberately will NOT do it for us, because by then the
+  //      consumers owning those callbacks may already be gone.
+  //   3. Unbind, then destroy.
+  GetCloudBrowserWebContentsDelegate()->SetSessionContext(
+      /*aura_context=*/nullptr, /*control_channel=*/nullptr);
+  if (control_channel_) {
+    control_channel_->CancelAllPending();
+  }
+  if (dc_host_) {
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kControl,
+                           nullptr);
+  }
+  control_channel_.reset();
+
   if (dc_host_) {
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
                            nullptr);

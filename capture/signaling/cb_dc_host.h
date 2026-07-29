@@ -396,10 +396,10 @@ class CbDataChannelHost {
   // if the channel isn't kOpen, or the libwebrtc error from
   // DataChannelInterface::Send otherwise.
   //
-  // TODO(M3-R5-backpressure): expose BufferedAmount() / a
-  // GetBufferedAmount(label) accessor for M5 R3+ to back off cursor
-  // emit when the SCTP buffer balloons. R1 ships fire-and-forget;
-  // M5 R3 will add the gate.
+  // Note this is fire-and-forget with respect to the SCTP buffer. Callers
+  // that emit in bulk must gate on GetBufferedAmount(label) — see its
+  // comment below. (That accessor is what the old
+  // TODO(M3-R5-backpressure) here asked for.)
   SendResult Send(CbDcLabel label, std::string_view text);
 
   // Async text-frame emit. Posts the actual DataChannel send onto

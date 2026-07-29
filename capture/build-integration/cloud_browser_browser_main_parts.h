@@ -107,6 +107,7 @@ class CbDataChannelHost;
 
 class CbAuraPlatformData;
 class CbBeginFrameDriver;  // CV2-ICE — drives renderer frame production
+class CbControlChannel;    // browser-fidelity wave 1 — ask-a-human channel
 class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
 class CbCursorXyJoin;
 class CloudBrowserBrowserContext;
@@ -587,6 +588,15 @@ class CloudBrowserBrowserMainParts
   std::unique_ptr<CbFileUploadBridgeWsClient> file_upload_ws_;
   std::unique_ptr<CbFileUploadRelay> file_upload_relay_;
   // ============== END CV2-75 ==============
+
+  // Browser-fidelity wave 1 — the ask-a-human channel (kControl DC).
+  // Owned here because its lifetime is the SESSION's, while its consumer
+  // (the JS dialog manager, hanging off the process-lifetime
+  // WebContentsDelegate singleton) outlives the session. The delegate is
+  // handed a raw pointer via SetSessionContext and MUST have it cleared in
+  // PostMainMessageLoopRun before this unique_ptr drops, or a dialog
+  // raised during teardown would dereference freed memory.
+  std::unique_ptr<CbControlChannel> control_channel_;
 
   bool devtools_http_handler_started_ = false;
 
