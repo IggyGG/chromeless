@@ -43,28 +43,43 @@ jobs:
         with:
           node-version: "20"
 
-      # Build cached via gha so re-runs are fast.
-      - name: Build images
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: infra/Dockerfile
-          tags: chromeless:dev
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # OSS-W1: the e2e stack needs a real cloud_browser_worker image. The
+      # browser is a from-source Chromium build (4-8h cold — see
+      # build/chromeless-build.sh) that cannot be produced on a GHA runner,
+      # and this project does not publish images, so the image must be
+      # supplied. Set the CHROMELESS_IMAGE repository variable to enable
+      # this workflow; unset, it reports a notice and passes.
+      #
+      # This replaces a build of infra/Dockerfile — the legacy
+      # stock-Chromium + getDisplayMedia image, unbuildable since the M7
+      # native-peer migration deleted capture/streamer-page/.
+      - name: Check for a supplied worker image
+        id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — e2e skipped. Set it to a cloud_browser_worker image to enable."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: docker compose up
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           docker compose -f infra/compose.yaml --profile observability up -d --wait
 
       - name: Show service status
-        if: always()
+        if: always() && steps.probe.outputs.present == 'true'
         run: |
           docker compose -f infra/compose.yaml ps
           docker ps -a
 
       - name: Install Playwright + deps
+        if: steps.probe.outputs.present == 'true'
         working-directory: tests/e2e
         run: |
           npm install --no-audit --no-fund
@@ -72,6 +87,7 @@ jobs:
 
       - name: Run Playwright specs
         id: playwright
+        if: steps.probe.outputs.present == 'true'
         working-directory: tests/e2e
         env:
           # The compose stack publishes ports as documented in
@@ -101,7 +117,7 @@ jobs:
           retention-days: 14
 
       - name: Capture container logs on failure
-        if: failure()
+        if: failure() && steps.probe.outputs.present == 'true'
         run: |
           mkdir -p ./compose-logs
           for c in $(docker compose -f infra/compose.yaml ps -q); do

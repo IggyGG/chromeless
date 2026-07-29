@@ -5,14 +5,20 @@
 # work doesn't pin runners.
 #
 # Job map:
-#   lint        hadolint Dockerfile, gofmt+vet signaling, tsc client
-#   build-image docker build infra/Dockerfile, push layer cache to gha
-#   smoke       runs tests/smoke/container-boot.sh if present (T9 gates)
+#   lint        hadolint runtime Dockerfile, gofmt+vet signaling,
+#               tsc + vitest client
+#   smoke       runs tests/smoke/container-boot.sh against a supplied
+#               worker image (opt-in via the CHROMELESS_IMAGE repo var)
 #   docs        lychee link check across markdown
 #
-# Wall-time target: <10 min total. We split lint and build-image so a
-# typo in a Go file doesn't block image builds and vice versa, and the
-# Docker layer cache is shared between build-image and smoke via gha.
+# Wall-time target: <10 min total.
+#
+# OSS-W1 note: there is no image-build job. The browser is a from-source
+# Chromium build (4-8h cold — see build/chromeless-build.sh) that cannot be
+# produced on a GHA runner. The previous `build-image` job built
+# infra/Dockerfile, the legacy stock-Chromium + getDisplayMedia image, which
+# had been unbuildable since the M7 native-peer migration deleted
+# capture/streamer-page/ while the Dockerfile still COPYd it.
 
 name: CI
 
@@ -35,11 +41,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Dockerfile lint
+      # Dockerfile lint.
+      #
+      # OSS-W1: retargeted from the deleted infra/Dockerfile (legacy
+      # stock-Chromium image) to the real runtime image definition.
+      #
+      # OSS-W2: run via the container image rather than
+      # `uses: hadolint/hadolint-action`, which 404s on Forgejo's action
+      # mirror. Forgejo resolves every `uses:` before running ANY step, so
+      # that one unresolvable action killed the whole Lint job — the log
+      # shows "skipping post step for 'hadolint'; step was not executed"
+      # followed immediately by "Job failed". Nothing in Lint ever ran.
       - name: hadolint
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: infra/Dockerfile
+        run: |
+          docker run --rm -i hadolint/hadolint:latest \
+            hadolint - < build/Dockerfile.runtime
+
+      # OSS-W2: static include check for the Chromium embedder. capture/
+      # only compiles inside a full Chromium checkout (4-8 h), so a missing
+      # #include otherwise surfaces hours later in the build lane — or not
+      # at all, if the lane isn't watched. Runs in ~1 s with no Chromium.
+      # Also runs the linter's own self-tests, so a broken linter fails
+      # loudly rather than silently passing everything.
+      - name: C++ include lint
+        run: |
+          python3 tools/lint/test_cxx_include_lint.py
+          python3 tools/lint/cxx_include_lint.py capture
+
+      # OSS-W2: every `uses:` must resolve on the CI host's action mirror.
+      # Forgejo git-clones them all BEFORE running any step, so one missing
+      # action fails the whole job regardless of its `if:`. This caused the
+      # majority of this repo's historical CI failures.
+      - name: Workflow actions lint
+        run: python3 tools/lint/workflow_actions_lint.py
 
       # Go signaling server: gofmt + vet
       - name: Set up Go
@@ -62,23 +96,31 @@ jobs:
         working-directory: signaling
         run: go vet ./...
 
-      # Client: TypeScript typecheck. ESLint is run only when the project
-      # actually has a config file — webrtc-dev hasn't added one yet, so
-      # we skip cleanly with a notice instead of failing.
+      # Client: TypeScript typecheck + unit tests. ESLint is run only when
+      # the project actually has a config file, so we skip cleanly with a
+      # notice instead of failing.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          # cache: npm requires a lockfile; client/ doesn't have one yet,
-          # so leave caching off until package-lock.json lands.
+          cache: npm
+          cache-dependency-path: client/package-lock.json
 
       - name: Install client deps
         working-directory: client
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: TypeScript check
         working-directory: client
         run: npm run typecheck
+
+      # OSS-W1: the client carries 14 vitest suites (~200 assertions over
+      # the input/cursor/clipboard/file-upload/stats/sdp/reconnect/auth/
+      # turn/probe/simulcast/codec modules) that CI never ran — only
+      # `typecheck` was wired, so every one of those tests was ungated.
+      - name: Client unit tests
+        working-directory: client
+        run: npm test
 
       - name: ESLint (if configured)
         working-directory: client
@@ -89,66 +131,52 @@ jobs:
             echo "::notice::No ESLint config in client/ — skipping. Add eslint.config.js to enable."
           fi
 
-  build-image:
-    name: Build container image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build chromeless:ci
-        uses: docker/build-push-action@v5
-        with:
-          # Context is repo root: the Dockerfile COPYs both
-          # capture/streamer-page/ (T28) and infra/*, so it needs the
-          # whole tree in build context.
-          context: .
-          file: infra/Dockerfile
-          tags: chromeless:ci
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   smoke:
     name: Container smoke test
     runs-on: ubuntu-latest
-    needs: build-image
     steps:
       - uses: actions/checkout@v4
 
-      # T9 owns tests/smoke/container-boot.sh. Until that lands, skip the
-      # whole job with a clear notice rather than fail. Once T9 ships,
-      # this branch is taken automatically — no workflow edit required.
-      - name: Probe for smoke script
+      # OSS-W1: the smoke needs a real cloud_browser_worker image, and there
+      # is no way to produce one here — the browser is a from-source Chromium
+      # build (4-8h cold; see build/chromeless-build.sh) that cannot run on a
+      # 4-vCPU GHA runner, and this project does not publish images.
+      #
+      # So the job is opt-in: set the CHROMELESS_IMAGE repository variable to
+      # an image your own build produced and the smoke runs against it.
+      # Unset, the job reports a notice and passes.
+      #
+      # This replaces a `build-image` job that built infra/Dockerfile — the
+      # legacy stock-Chromium + getDisplayMedia image, which had been
+      # unbuildable since the M7 native-peer migration deleted
+      # capture/streamer-page/ (the Dockerfile still COPYd it). That job had
+      # been failing on every run; it is deleted rather than repaired
+      # because the image contained none of the product.
+      - name: Check for a supplied worker image
         id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
-          if [ -f tests/smoke/container-boot.sh ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::tests/smoke/container-boot.sh not present (T9 pending) — smoke test skipped."
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — container smoke skipped. Set it to a cloud_browser_worker image to enable."
+          elif [ ! -f tests/smoke/container-boot.sh ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::tests/smoke/container-boot.sh missing — container smoke skipped."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Buildx
+      - name: Pull the worker image
         if: steps.probe.outputs.present == 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: Restore image (uses build-image's cache)
-        if: steps.probe.outputs.present == 'true'
-        uses: docker/build-push-action@v5
-        with:
-          # Context is repo root: the Dockerfile COPYs both
-          # capture/streamer-page/ (T28) and infra/*, so it needs the
-          # whole tree in build context.
-          context: .
-          file: infra/Dockerfile
-          tags: chromeless:ci
-          load: true
-          cache-from: type=gha
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: docker pull "${CHROMELESS_IMAGE}"
 
       - name: Run smoke
         if: steps.probe.outputs.present == 'true'
+        env:
+          SMOKE_IMAGE_TAG: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           chmod +x tests/smoke/container-boot.sh
           ./tests/smoke/container-boot.sh
@@ -159,15 +187,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # OSS-W2: run lychee from its container rather than
+      # `uses: lycheeverse/lychee-action`, which 404s on Forgejo's action
+      # mirror and therefore failed this job before any step executed.
+      #
+      # --no-progress keeps logs short. --max-concurrency caps load on
+      # third-party hosts. Glob limited to repo markdown.
       - name: lychee link check
-        uses: lycheeverse/lychee-action@v2
-        with:
-          # --no-progress keeps logs short. --max-concurrency caps load
-          # on third-party hosts. Glob limited to repo markdown.
-          args: >-
-            --verbose
-            --no-progress
-            --max-concurrency 4
-            --exclude-path node_modules
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w lycheeverse/lychee:latest \
+            --verbose \
+            --no-progress \
+            --max-concurrency 4 \
+            --exclude-path node_modules \
+            --exclude-path .claude \
             './**/*.md'
-          fail: true

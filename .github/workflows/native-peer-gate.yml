@@ -13,10 +13,14 @@
 #     targeting `main` (so the M7 squash-merge MUST come in green-strict).
 #     Every assertion must PASS; NYI is a FAIL.
 #
-# Both jobs depend on `build-image` (chromeless:ci) — they reuse the gha
-# Docker layer cache populated by ci.yml's build-image job. When run in a
-# Forgejo workflow that doesn't share that cache, they build chromeless:ci
-# from infra/Dockerfile in the same job.
+# OSS-W1: both jobs need a real cloud_browser_worker image, supplied via the
+# CHROMELESS_IMAGE repository variable. They previously depended on a
+# `build-image` job that built infra/Dockerfile — the legacy stock-Chromium +
+# getDisplayMedia image, which had been unbuildable since the M7 native-peer
+# migration deleted capture/streamer-page/ while the Dockerfile still COPYd
+# it, and which in any case contained none of the native-peer surface these
+# gates assert on. With CHROMELESS_IMAGE unset both jobs report a notice and
+# pass, so the gate is opt-in rather than permanently red.
 #
 # Branch-protection (required-check): Forgejo's "required status checks"
 # rule lives outside the repo. Operators set
@@ -42,38 +46,8 @@ permissions:
   contents: read
 
 jobs:
-  build-image:
-    name: Build chromeless:ci for gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build chromeless:ci (gha layer cache)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: infra/Dockerfile
-          load: true
-          tags: chromeless:ci
-          cache-from: type=gha,scope=chromeless-ci
-          cache-to: type=gha,scope=chromeless-ci,mode=max
-
-      - name: Save chromeless:ci as artifact (shared with gate jobs)
-        run: |
-          docker save chromeless:ci -o /tmp/chromeless-ci.tar
-          ls -lh /tmp/chromeless-ci.tar
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: chromeless-ci-image
-          path: /tmp/chromeless-ci.tar
-          retention-days: 1
-
   native-peer-gate-scaffold:
     name: native-peer-gate-scaffold (permissive)
-    needs: [build-image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,26 +56,39 @@ jobs:
         with:
           node-version: "20"
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: chromeless-ci-image
-          path: /tmp/
+      - name: Check for a supplied worker image
+        id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — gate skipped. Set it to a cloud_browser_worker image to enable."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Load chromeless:ci into local daemon
-        run: docker load -i /tmp/chromeless-ci.tar
+      - name: Pull the worker image
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: docker pull "${CHROMELESS_IMAGE}"
 
       - name: Run gate (scaffold)
-        run: node verification/native-peer-gate.mjs --scaffold --image=chromeless:ci > gate-output.json
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: node verification/native-peer-gate.mjs --scaffold --image="${CHROMELESS_IMAGE}" > gate-output.json
         # Scaffold permits NYI per the gate-blocking schedule; expected to be
         # green for the whole M0..M6 window (and after M7 if implementation
         # holds).
 
       - name: Print gate JSON
-        if: always()
+        if: always() && steps.probe.outputs.present == 'true'
         run: cat gate-output.json || true
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.probe.outputs.present == 'true'
         with:
           name: native-peer-gate-scaffold-output
           path: gate-output.json
@@ -109,7 +96,6 @@ jobs:
 
   native-peer-gate-strict:
     name: native-peer-gate-strict (M7 gate)
-    needs: [build-image]
     runs-on: ubuntu-latest
     # Strict runs on PRs targeting main (so the M7 squash-merge MUST be
     # green-strict) AND on pushes to integration/native-peer (operator
@@ -124,23 +110,36 @@ jobs:
         with:
           node-version: "20"
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: chromeless-ci-image
-          path: /tmp/
+      - name: Check for a supplied worker image
+        id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — strict gate skipped. Set it to a cloud_browser_worker image to enable."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Load chromeless:ci into local daemon
-        run: docker load -i /tmp/chromeless-ci.tar
+      - name: Pull the worker image
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: docker pull "${CHROMELESS_IMAGE}"
 
       - name: Run gate (strict)
-        run: node verification/native-peer-gate.mjs --strict --image=chromeless:ci > gate-strict-output.json
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: node verification/native-peer-gate.mjs --strict --image="${CHROMELESS_IMAGE}" > gate-strict-output.json
 
       - name: Print gate JSON
-        if: always()
+        if: always() && steps.probe.outputs.present == 'true'
         run: cat gate-strict-output.json || true
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.probe.outputs.present == 'true'
         with:
           name: native-peer-gate-strict-output
           path: gate-strict-output.json
