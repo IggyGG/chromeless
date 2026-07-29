@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"strings"
@@ -245,5 +246,120 @@ func TestCheckRevoked_NilClaims(t *testing.T) {
 	revoked, err := checkRevoked(context.Background(), nil, quietLogger())
 	if revoked || err != nil {
 		t.Errorf("nil claims: revoked=%v err=%v want false/nil", revoked, err)
+	}
+}
+
+// --- region scoping (aud) --------------------------------------------------
+//
+// `processRegion` was initialised at startup but never consulted, so an
+// aud-scoped token was accepted by a server in ANY region — the claim was
+// inert and the integration test asserting a 1008 close had been failing.
+
+func TestRegionPermitted(t *testing.T) {
+	cases := []struct {
+		name   string
+		aud    []string
+		region string
+		want   bool
+	}{
+		// Opt-in: no claim means no constraint.
+		{"no aud, region set", nil, "us-east-1", true},
+		{"empty aud, region set", []string{}, "us-east-1", true},
+		// A server that doesn't know its own region can't enforce; failing
+		// closed here would break every single-region deployment.
+		{"aud set, region unset", []string{"eu-west-1"}, "", true},
+		{"aud set, region unspecified", []string{"eu-west-1"}, regionUnspecified, true},
+		// The actual check.
+		{"match", []string{"us-east-1"}, "us-east-1", true},
+		{"match among several", []string{"eu-west-1", "us-east-1"}, "us-east-1", true},
+		{"mismatch", []string{"eu-west-1", "eu-central-1"}, "us-east-1", false},
+		{"whitespace tolerated", []string{" us-east-1 "}, "us-east-1", true},
+		// Region names are compared exactly — no prefix or case folding.
+		{"case sensitive", []string{"US-EAST-1"}, "us-east-1", false},
+		{"not a prefix match", []string{"us-east"}, "us-east-1", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := regionPermitted(c.aud, c.region); got != c.want {
+				t.Errorf("regionPermitted(%v, %q) = %v, want %v",
+					c.aud, c.region, got, c.want)
+			}
+		})
+	}
+}
+
+func TestVerifyToken_RegionScoping(t *testing.T) {
+	priv := resetAuthForTest(t)
+	freezeTime(t, 1_700_000_000)
+
+	prevRegion := processRegion
+	t.Cleanup(func() { processRegion = prevRegion })
+
+	mint := func(aud []string) string {
+		return signToken(priv, Claims{
+			Sub: "tenant-a", Sid: "sess-1", Role: "client",
+			Iat: 1_700_000_000 - 60,
+			Exp: 1_700_000_000 + 60,
+			Nbf: 1_700_000_000 - 60,
+			Aud: aud,
+		})
+	}
+
+	processRegion = "us-east-1"
+
+	if _, err := verifyToken(mint([]string{"us-east-1"}), "sess-1", "client"); err != nil {
+		t.Errorf("matching region should verify: %v", err)
+	}
+	if _, err := verifyToken(mint(nil), "sess-1", "client"); err != nil {
+		t.Errorf("unscoped token should verify: %v", err)
+	}
+	if _, err := verifyToken(mint([]string{"eu-west-1"}), "sess-1", "client"); err == nil {
+		t.Error("region mismatch should be rejected")
+	}
+
+	// An unspecified server region cannot enforce.
+	processRegion = regionUnspecified
+	if _, err := verifyToken(mint([]string{"eu-west-1"}), "sess-1", "client"); err != nil {
+		t.Errorf("region-unspecified server should accept a scoped token: %v", err)
+	}
+}
+
+// RFC 7519 §4.1.3 permits a bare string for a single audience. A
+// third-party issuer emitting that shape must not be reported as malformed.
+func TestClaims_AudAcceptsStringOrArray(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want []string
+	}{
+		{"array", `{"sub":"t","aud":["a","b"]}`, []string{"a", "b"}},
+		{"bare string", `{"sub":"t","aud":"a"}`, []string{"a"}},
+		{"absent", `{"sub":"t"}`, nil},
+		{"null", `{"sub":"t","aud":null}`, nil},
+		{"empty array", `{"sub":"t","aud":[]}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got Claims
+			if err := json.Unmarshal([]byte(c.json), &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(got.Aud) != len(c.want) {
+				t.Fatalf("aud = %v, want %v", got.Aud, c.want)
+			}
+			for i := range c.want {
+				if got.Aud[i] != c.want[i] {
+					t.Fatalf("aud = %v, want %v", got.Aud, c.want)
+				}
+			}
+			if got.Sub != "t" {
+				t.Errorf("sibling field lost: sub = %q", got.Sub)
+			}
+		})
+	}
+
+	var bad Claims
+	if err := json.Unmarshal([]byte(`{"sub":"t","aud":42}`), &bad); err == nil {
+		t.Error("numeric aud should be rejected")
 	}
 }

@@ -113,6 +113,18 @@ func devIssuerHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "jti gen: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Optional region scoping: `?aud=eu-west-1,eu-central-1` mints a token
+	// only usable by signaling servers whose CHROMELESS_REGION is in the
+	// list. Omitted → an unscoped token, valid in any region.
+	var aud []string
+	if raw := strings.TrimSpace(q.Get("aud")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				aud = append(aud, p)
+			}
+		}
+	}
+
 	c := Claims{
 		Sub:  tenant,
 		Sid:  sid,
@@ -121,6 +133,7 @@ func devIssuerHandler(w http.ResponseWriter, r *http.Request) {
 		Nbf:  now.Add(-30 * time.Second).Unix(),
 		Exp:  now.Add(devTokenTTL).Unix(),
 		Jti:  jti,
+		Aud:  aud,
 	}
 	tok := signToken(globalDevIssuer.priv, c)
 	w.Header().Set("Content-Type", "application/json")

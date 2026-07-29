@@ -63,6 +63,71 @@ type Claims struct {
 	// per-token revocation. Optional: pre-T89 tokens omit it; the
 	// denylist still works as tenant-wide.
 	Jti string `json:"jti,omitempty"`
+	// Aud — the regions this token is valid in. Optional and omitted by
+	// default; when present, a server whose CHROMELESS_REGION is not in
+	// the list rejects the connection with close code 1008.
+	//
+	// Encoded as a JSON array. RFC 7519 §4.1.3 also permits a bare
+	// string for a single audience, which UnmarshalJSON below accepts.
+	Aud []string `json:"aud,omitempty"`
+}
+
+// UnmarshalJSON accepts the RFC 7519 §4.1.3 shorthand where a single
+// audience may be a bare string rather than a one-element array. Without
+// this, a spec-legal `"aud":"eu-west-1"` from a third-party issuer would
+// fail to unmarshal and be reported as malformed claims.
+func (c *Claims) UnmarshalJSON(data []byte) error {
+	type rawClaims Claims // avoid recursing into this method
+	var probe struct {
+		*rawClaims
+		Aud json.RawMessage `json:"aud,omitempty"`
+	}
+	probe.rawClaims = (*rawClaims)(c)
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	c.Aud = nil
+	if len(probe.Aud) == 0 || string(probe.Aud) == "null" {
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(probe.Aud, &list); err == nil {
+		c.Aud = list
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(probe.Aud, &single); err != nil {
+		return errors.New("aud must be a string or array of strings")
+	}
+	c.Aud = []string{single}
+	return nil
+}
+
+// regionPermitted reports whether a token bearing `aud` may be used on
+// this server.
+//
+// The rules, in order:
+//   - No `aud` claim  → permitted. Region scoping is opt-in; tokens minted
+//     before it existed, and deployments that do not use it, must keep
+//     working unchanged.
+//   - Server region unspecified (CHROMELESS_REGION unset) → permitted. A
+//     server that does not know its own region cannot meaningfully enforce
+//     the claim, and failing closed here would break every single-region
+//     deployment the moment someone started minting scoped tokens.
+//   - Otherwise → the server's region must appear in `aud`.
+func regionPermitted(aud []string, serverRegion string) bool {
+	if len(aud) == 0 {
+		return true
+	}
+	if serverRegion == "" || serverRegion == regionUnspecified {
+		return true
+	}
+	for _, a := range aud {
+		if strings.TrimSpace(a) == serverRegion {
+			return true
+		}
+	}
+	return false
 }
 
 // authConfig is mutated only by initAuth(); read-only after init.
@@ -196,6 +261,14 @@ func verifyToken(token, expectedSid, expectedRole string) (*Claims, error) {
 	if c.Role != expectedRole {
 		mAuthFailures.WithLabelValues("role_mismatch").Inc()
 		return nil, fmt.Errorf("role mismatch: token=%q caller=%q", c.Role, expectedRole)
+	}
+	// Region scoping. `processRegion` was initialised at startup but never
+	// consulted, so an `aud`-scoped token was accepted by a server in any
+	// region — the claim was inert. See regionPermitted for the opt-in rules.
+	if !regionPermitted(c.Aud, processRegion) {
+		mAuthFailures.WithLabelValues("region_mismatch").Inc()
+		return nil, fmt.Errorf("region mismatch: token aud=%v, server region=%q",
+			c.Aud, processRegion)
 	}
 	return &c, nil
 }
