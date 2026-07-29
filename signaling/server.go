@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -143,12 +144,64 @@ const (
 	// candidates. 32 leaves headroom for ICE restarts mid-buffer
 	// without unbounded growth.
 	iceReplayMaxPerSender = 32
-	// iceReplayMaxAge is the age cap on replayed ICE. Much shorter
-	// than typical TURN allocation TTL (~10 min) so we never replay a
-	// candidate whose underlying allocation has lapsed; longer than
-	// any realistic Phase-1 demo session-start latency.
-	iceReplayMaxAge = 60 * time.Second
+	// defaultICEReplayMaxAge is the default age cap on replayed ICE.
+	// Bounded well under typical TURN allocation TTL (~10 min) so we never
+	// replay a candidate whose underlying allocation has lapsed.
+	//
+	// OSS-W0: raised 60s → 300s. The original 60s was justified as "longer
+	// than any realistic Phase-1 demo session-start latency" — an assumption
+	// that microVM/cold-node deployments invalidate. On firecracker, guest
+	// boot + reconnect can push client registration past 60s, at which point
+	// EVERY buffered guest candidate ages out and is dropped. The peer then
+	// sees remoteCandidates=0 and sits in iceConnectionState=checking forever,
+	// surfacing as 0x0 video with nothing in the logs to explain it. Triform's
+	// broker independently converged on 300s for exactly this reason; anyone
+	// on slow-boot infrastructure (firecracker, gVisor, cold k8s nodes pulling
+	// images) hits it identically. 300s remains comfortably under the ~600s
+	// TURN allocation TTL, so the staleness guarantee is preserved.
+	defaultICEReplayMaxAge = 300 * time.Second
+
+	// iceReplayMaxAgeEnv overrides defaultICEReplayMaxAge, in seconds.
+	// Values <= 0, unparsable values, and values above the TURN-allocation
+	// safety ceiling are ignored (the default is kept and a warning logged).
+	iceReplayMaxAgeEnv = "CHROMELESS_ICE_REPLAY_MAX_AGE_S"
+
+	// iceReplayMaxAgeCeiling is the hard upper bound on the configured age.
+	// Past this we would routinely replay candidates whose TURN allocation
+	// has lapsed, which is worse than replaying nothing.
+	iceReplayMaxAgeCeiling = 600 * time.Second
 )
+
+// iceReplayMaxAge is the effective age cap, resolved once at init from
+// iceReplayMaxAgeEnv. A var (not a const) so deployments on slow-boot
+// infrastructure can tune it without a rebuild.
+var iceReplayMaxAge = resolveICEReplayMaxAge(os.Getenv)
+
+// resolveICEReplayMaxAge reads the override and validates it. Takes a getenv
+// func so tests can exercise it without mutating process env.
+func resolveICEReplayMaxAge(getenv func(string) string) time.Duration {
+	raw := strings.TrimSpace(getenv(iceReplayMaxAgeEnv))
+	if raw == "" {
+		return defaultICEReplayMaxAge
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs <= 0 {
+		slog.Warn("ignoring invalid ICE replay max age override",
+			slog.String("env", iceReplayMaxAgeEnv),
+			slog.String("value", raw),
+			slog.Duration("using", defaultICEReplayMaxAge))
+		return defaultICEReplayMaxAge
+	}
+	d := time.Duration(secs) * time.Second
+	if d > iceReplayMaxAgeCeiling {
+		slog.Warn("ICE replay max age override exceeds the TURN-allocation ceiling; clamping",
+			slog.String("env", iceReplayMaxAgeEnv),
+			slog.Duration("requested", d),
+			slog.Duration("ceiling", iceReplayMaxAgeCeiling))
+		return iceReplayMaxAgeCeiling
+	}
+	return d
+}
 
 // replayableTypes lists the envelope types whose most-recent value is
 // buffered for a future-joining peer. The slice doubles as the replay
