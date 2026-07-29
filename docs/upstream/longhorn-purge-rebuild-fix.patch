@@ -1,0 +1,180 @@
+From 1ebfd7f1345d2f8e23ad49950970d26c252500f6 Mon Sep 17 00:00:00 2001
+From: iggys-macbook-pro-2-cv2-compositor <iggy@triform.ai>
+Date: Wed, 29 Jul 2026 17:32:56 +0200
+Subject: [PATCH] fix(recurring-job): don't abort the whole run when a replica
+ is rebuilding
+
+purgeSnapshots returns ActionSnapshotPurge's error verbatim. When the
+engine refuses because a replica is mid-rebuild:
+
+  cannot purge snapshots because tcp://<replica>:<port> is rebuilding
+
+that error propagates through doSnapshotCleanup -> startVolumeJob -> the
+errgroup in recurringJob(), and RecurringJobCmd() turns any non-nil
+result into logrus.Fatal. The process exits, so EVERY volume that had
+not yet been processed is silently skipped for that tick.
+
+A rebuild is transient and self-resolving -- the next run would purge
+the volume fine. But on a cluster large enough that some replica is
+usually rebuilding, the sweep can go for hours without ever completing.
+Snapshots marked for removal never coalesce, replica directories grow
+far past their volume's nominal size (observed: a 75Gi volume occupying
+141.8 GB, actualSize ~2x nominal), and the node eventually hits
+DiskPressure and starts evicting pods.
+
+Observed on a v1.7.2 cluster: snapshot-cleanup-hourly failing on and off
+for hours left 1805.7 GB unpurged across 92 snapshots; the node reached
+82% disk and DiskPressure, which evicted a database pod ~503 times and
+took the service that depended on it down for ~2.5 days. Nothing in the
+failure pointed at snapshots -- kubelet's image GC reported "freed 0
+bytes" because images were only 28 GB of the 683 GB used.
+
+Raising `concurrency` does not help: the workers share one process, so
+any worker's Fatal kills the run regardless.
+
+Skip the volume instead. This also makes the function self-consistent:
+the purge-status poll immediately below ALREADY tolerates per-replica
+purge errors, logging them as warnings and returning nil. Only the
+initial trigger was fatal.
+
+Matched on the message because the engine surfaces this as a generic
+Unknown gRPC code through the proxy -- there is no typed error or
+distinct status code to key on. The substring is deliberately narrow so
+real failures (timeouts, missing volumes, connection errors) still fail
+the job loudly.
+
+Verified on linux/amd64: `go build ./app/...` and `go vet ./app/...`
+clean; the new test passes, and fails when the matcher is reverted to
+pre-fix behaviour.
+
+Still present on master (b0ca62b7) after the app/recurringjob refactor,
+at app/recurringjob/volume.go:345-349 -- the same one-line change
+applies there.
+---
+ app/recurring_job.go      | 42 +++++++++++++++++++++++++++++
+ app/recurring_job_test.go | 57 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 99 insertions(+)
+ create mode 100644 app/recurring_job_test.go
+
+diff --git a/app/recurring_job.go b/app/recurring_job.go
+index 1dd2296e..20545e60 100644
+--- a/app/recurring_job.go
++++ b/app/recurring_job.go
+@@ -499,9 +499,51 @@ func (job *Job) eventCreate(eventType, eventReason, message string) error {
+ 	return nil
+ }
+ 
++// isTransientPurgeRejection reports whether err is the engine refusing to
++// start a purge because a replica is currently rebuilding.
++//
++// The engine guards ActionSnapshotPurge with a rebuild check and answers:
++//
++//	failed to purge snapshots: rpc error: code = Unknown desc =
++//	tcp://<replica>:<port>: cannot purge snapshots because
++//	tcp://<replica>:<port> is rebuilding
++//
++// That is a temporary, self-resolving condition, not a fault: the next
++// scheduled run purges the volume once the rebuild finishes. It is matched on
++// the message because the engine surfaces it as a generic Unknown gRPC code
++// through the proxy, so there is no typed error or distinct status code to key
++// on. The substring is stable and deliberately narrow.
++func isTransientPurgeRejection(err error) bool {
++	if err == nil {
++		return false
++	}
++	return strings.Contains(err.Error(), "is rebuilding")
++}
++
+ func (job *Job) purgeSnapshots(volume *longhornclient.Volume, volumeAPI longhornclient.VolumeOperations) error {
+ 	// Trigger snapshot purge of the volume
+ 	if _, err := volumeAPI.ActionSnapshotPurge(volume); err != nil {
++		// A rebuilding replica means "not now", not "broken". Returning the
++		// error here fails this volume's job, and because recurringJob()
++		// collects goroutine errors through errgroup and RecurringJobCmd()
++		// turns any non-nil result into logrus.Fatal, ONE rebuilding volume
++		// aborts the whole run — every volume that had not yet been processed
++		// is silently skipped for that tick.
++		//
++		// With a frequent cleanup schedule and a cluster large enough that
++		// some replica is usually rebuilding, that can mean the sweep almost
++		// never completes: snapshots accumulate unbounded, replica
++		// directories grow far past their volume's nominal size, and nodes
++		// eventually hit DiskPressure and start evicting pods.
++		//
++		// Skip instead. This mirrors how the purge-status poll below already
++		// treats per-replica purge errors — logged as warnings, job returns
++		// nil — so the two halves of this function stay consistent.
++		if isTransientPurgeRejection(err) {
++			job.logger.WithField("volume", volume.Name).Infof(
++				"Skipping snapshot purge because a replica is rebuilding; will retry on the next run")
++			return nil
++		}
+ 		return err
+ 	}
+ 
+diff --git a/app/recurring_job_test.go b/app/recurring_job_test.go
+new file mode 100644
+index 00000000..58f6de20
+--- /dev/null
++++ b/app/recurring_job_test.go
+@@ -0,0 +1,57 @@
++package app
++
++import (
++	"errors"
++	"fmt"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++)
++
++// TestIsTransientPurgeRejection pins the matcher that decides whether a failed
++// ActionSnapshotPurge aborts the recurring job or is skipped until the next
++// run.
++//
++// This matters more than its size suggests. recurringJob() collects per-volume
++// errors through an errgroup and RecurringJobCmd() turns any non-nil result
++// into logrus.Fatal, so a single volume's error ends the whole sweep and every
++// volume not yet processed is skipped for that tick. Matching too narrowly
++// re-introduces that abort; matching too broadly silently swallows real purge
++// failures. Both regressions are invisible until snapshots have accumulated
++// enough to fill a disk.
++func TestIsTransientPurgeRejection(t *testing.T) {
++	assert := assert.New(t)
++
++	// The real message, as produced by the engine and surfaced through the
++	// proxy. Captured verbatim from a v1.7.2 cluster.
++	realWorld := errors.New(
++		"Bad response statusCode [500]. Status [500 Internal Server Error]. " +
++			"Body: [message=failed to purge snapshot: proxyServer=10.244.77.1:8501 " +
++			"destination=10.244.77.1:18795: failed to purge snapshots: rpc error: " +
++			"code = Unknown desc = tcp://10.244.76.157:10169: cannot purge snapshots " +
++			"because tcp://10.244.76.157:10169 is rebuilding, code=Internal Server Error, " +
++			"detail=] from [http://longhorn-backend:9500/v1/volumes/pvc-x?action=snapshotPurge]")
++	assert.True(isTransientPurgeRejection(realWorld),
++		"the engine's rebuild rejection must be treated as transient, or one "+
++			"rebuilding volume aborts the entire recurring job")
++
++	// Minimal form, in case the surrounding wrapping changes.
++	assert.True(isTransientPurgeRejection(
++		errors.New("cannot purge snapshots because tcp://10.0.0.1:10000 is rebuilding")))
++
++	// Wrapped errors must still match — callers may add context.
++	assert.True(isTransientPurgeRejection(
++		fmt.Errorf("purging volume pvc-abc: %w",
++			errors.New("cannot purge snapshots because tcp://10.0.0.1:10000 is rebuilding"))))
++
++	// Genuine failures must NOT be swallowed: these should still fail the job
++	// loudly rather than be silently skipped every run.
++	assert.False(isTransientPurgeRejection(nil))
++	assert.False(isTransientPurgeRejection(errors.New("timed out waiting for snapshot purge to complete")))
++	assert.False(isTransientPurgeRejection(errors.New("volume pvc-x not found")))
++	assert.False(isTransientPurgeRejection(errors.New("Bad response statusCode [500]")))
++	assert.False(isTransientPurgeRejection(errors.New("failed to purge snapshots: connection refused")))
++	// "rebuild" alone is not the guard condition — only an in-progress
++	// rebuild is, and the engine says "is rebuilding".
++	assert.False(isTransientPurgeRejection(errors.New("replica rebuild scheduled")))
++}
+-- 
+2.50.1 (Apple Git-155)
+
