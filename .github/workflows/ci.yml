@@ -25,13 +25,7 @@ name: CI
 on:
   pull_request:
   push:
-    # TEMPORARY (remove before merge): this branch is included so CI can
-    # produce a refs/heads/ run. A cross-repo bug in the
-    # superseded-run-coalescer cancels every refs/pull/ run for this PR
-    # (tf-multiverse#9910 has the one-line fix); branch runs are immune
-    # because that arm only matches `r.ref LIKE 'refs/pull/%'`. This is the
-    # only way to get CI evidence for this PR until #9910 lands.
-    branches: [main, agent/oss-ci-verification-loops]
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
