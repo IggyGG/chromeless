@@ -8,6 +8,7 @@
 
 #include "capture/encoder/h264_encoder.h"
 
+#include <algorithm>  // std::find, used by the NAL-type assertions.
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -147,6 +148,74 @@ TEST(H264EncoderTest, InitEncodeAcceptsBaselineDefault) {
   auto settings = DefaultSettings(640, 360, 30, 1'500'000);
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
             enc.InitEncode(&settings, webrtc::VideoEncoder::Settings(webrtc::VideoEncoder::Capabilities(false), 1, 1200)));
+  EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Release());
+}
+
+// Mid-session resolution change — the cycle libwebrtc drives on a
+// client-driven viewport resize. See the twin test in vp9_encoder_test.cc for
+// the full contract; the short version is that VideoStreamEncoder::
+// ReconfigureEncoder (third_party/webrtc/video/video_stream_encoder.cc at
+// branch-heads/7727, :1398-1416) does
+//
+//     ReleaseEncoder()  ->  InitEncode(new size)  ->  RegisterEncodeCompleteCallback()
+//
+// whenever width/height change, and this encoder is only correct under
+// exactly that ordering.
+//
+// The x264-specific hazard this pins down: Release() closes the x264_t and
+// resets pic_in_/pic_out_, and InitEncode re-creates all three. It
+// deliberately uses x264_picture_init (NOT x264_picture_alloc) because
+// Encode() points img.plane[] at webrtc-owned I420 buffers -- see the bug
+// history at h264_encoder.cc:185-196, where the alloc variant SEGVed inside
+// libx264 on the first Encode. A re-init at a new resolution re-runs exactly
+// that path with different strides, which is the scenario most likely to
+// resurrect that crash. A SEGV here means mid-session resize kills the guest.
+TEST(H264EncoderTest, ReinitAtNewResolutionProducesFramesAtNewGeometry) {
+  H264Encoder enc(H264EncoderConfig{});
+  CapturingCallback cb;
+  const webrtc::VideoEncoder::Settings kSettings(
+      webrtc::VideoEncoder::Capabilities(false), 1, 1200);
+
+  // ── Session 1: 640x360 ──
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
+  auto small = DefaultSettings(640, 360, 30, 1'500'000);
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.InitEncode(&small, kSettings));
+  for (int i = 0; i < 30; ++i) {
+    enc.Encode(MakeFrame(640, 360, i), nullptr);
+  }
+  ASSERT_FALSE(cb.captured().empty());
+
+  // ── The resize. Release() nulls callback_, so the re-register is
+  //    load-bearing: without it Encode's guard drops every frame silently. ──
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Release());
+  auto large = DefaultSettings(1280, 720, 30, 1'500'000);
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.InitEncode(&large, kSettings));
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
+
+  // ── Session 2: 1280x720 — the stride-change path against externally-owned
+  //    plane pointers. Must produce output, and must start with an IDR so the
+  //    receiver can pick up the new SPS. ──
+  const size_t before = cb.captured().size();
+  for (int i = 0; i < 30; ++i) {
+    enc.Encode(MakeFrame(1280, 720, i), nullptr);
+  }
+  ASSERT_GT(cb.captured().size(), before)
+      << "no output after re-init — resize freezes the stream";
+  const auto& first_after = cb.captured()[before];
+  EXPECT_GT(first_after.size, 0u);
+  EXPECT_EQ(webrtc::kVideoCodecH264, first_after.codec_type);
+  auto nals = ScanNalTypes(first_after.payload.data(),
+                           first_after.payload.size());
+  // New geometry needs a fresh parameter set: SPS(7) + PPS(8) + IDR(5).
+  EXPECT_TRUE(std::find(nals.begin(), nals.end(), 7) != nals.end())
+      << "no SPS after re-init — receiver cannot decode the new resolution";
+  EXPECT_TRUE(std::find(nals.begin(), nals.end(), 8) != nals.end())
+      << "no PPS after re-init";
+  EXPECT_TRUE(std::find(nals.begin(), nals.end(), 5) != nals.end())
+      << "no IDR after re-init";
+
+  // Double Release must be a no-op, not a double x264_encoder_close.
+  EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Release());
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Release());
 }
 
