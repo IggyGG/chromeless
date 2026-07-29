@@ -133,7 +133,12 @@ jobs:
           path: ./compose-logs/
           retention-days: 14
 
+      # Gated on the probe like every other compose step: infra/compose.yaml
+      # declares CHROMELESS_IMAGE as REQUIRED, so ANY compose subcommand --
+      # including `down` -- fails interpolation when it is unset. An
+      # ungated `if: always()` teardown therefore failed the whole job even
+      # though the probe had correctly reported "e2e skipped".
       - name: docker compose down
-        if: always()
+        if: always() && steps.probe.outputs.present == 'true'
         run: |
           docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans
