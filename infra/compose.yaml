@@ -11,10 +11,10 @@
 #                  run build` against ../client. Populates ../client/dist
 #                  with bundled main.js + a copy of index.html. Exits 0
 #                  before the client service starts (T40).
-#   chromium   — the T7 + T28 + T31 image. Boots Chromium under Xvfb
-#                with the streamer page (T23) opened as --app; runs
-#                cold-start.sh + idle-watchdog.sh per T31. DevTools
-#                on :9222.
+#   chromium   — the cloud_browser_worker runtime image. Boots Chromium
+#                under Xvfb; the native peer builds the PeerConnection in
+#                the browser process and dials signaling. DevTools on
+#                :9222. YOU SUPPLY THIS IMAGE — see below.
 #   signaling  — Go WebSocket signaling server (T13). Distroless image,
 #                so no in-container healthcheck (see service block
 #                comment); depending services use service_started.
@@ -22,14 +22,22 @@
 #                runtime-generated config.js carrying SIGNALING_URL.
 #
 # Usage (from repo root):
-#   docker compose -f infra/compose.yaml up --build
+#
+#   CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+#     docker compose -f infra/compose.yaml up
 #
 # Then open http://localhost:3000 in a browser.
 #
+# CHROMELESS_IMAGE is REQUIRED and has no default. The browser is a
+# from-source Chromium build (4-8h cold; see build/chromeless-build.sh)
+# and this repo publishes no images, so there is nothing honest to
+# default to — compose fails fast with a message rather than pulling a
+# tag that doesn't exist.
+#
 # Override the signaling endpoint the client uses (defaults to
-# ws://signaling:8080 per project spec; that DNS name only resolves
-# inside the docker network, so for browser access from the host you'll
-# usually want to override):
+# ws://signaling:8080; that DNS name only resolves inside the docker
+# network, so for browser access from the host you'll usually want to
+# override):
 #   SIGNALING_URL=ws://localhost:8080 docker compose -f infra/compose.yaml up
 
 name: chromeless
@@ -72,12 +80,23 @@ services:
     restart: "no"
 
   chromium:
-    # Build context is the repo root because the Dockerfile copies
-    # capture/streamer-page/ (T28) and infra/* into the image.
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile
-    image: chromeless:dev
+    # OSS-W1 — bring your own image. There is no `build:` stanza because
+    # the browser cannot be built here: it is a from-source Chromium build
+    # (4-8h cold; see build/chromeless-build.sh) producing
+    # cloud_browser_worker, wrapped by build/Dockerfile.runtime. This repo
+    # does not publish images, so point CHROMELESS_IMAGE at one your own
+    # build produced:
+    #
+    #   CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+    #     docker compose -f infra/compose.yaml up
+    #
+    # The `?err` form fails fast with that message rather than pulling a
+    # nonexistent tag. This replaced a build of infra/Dockerfile — the
+    # legacy stock-Chromium + getDisplayMedia image, which had not been
+    # buildable since the M7 native-peer migration deleted
+    # capture/streamer-page/ while the Dockerfile still COPYd it, and
+    # which contained none of the native peer / FrameSink capture path.
+    image: ${CHROMELESS_IMAGE:?set CHROMELESS_IMAGE to a cloud_browser_worker image (see build/chromeless-build.sh)}
     container_name: cbwrtc-chromium
     networks: [cbnet]
     ports:
@@ -85,42 +104,18 @@ services:
       # chromeless-metrics-sidecar (T38) — Prometheus scrape target.
       - "9100:9100"
     environment:
-      # Streamer launch (T28). Override per session as the lifecycle
-      # scripts (T31) come online.
-      SESSION_ID: dev
-      SIGNALING_URL: ws://signaling:8080/ws
-      STREAMER_FPS: "30"
-      # T86: route the dev-compose stack through Chromium's synthetic
-      # media source (test pattern + tone) instead of real
-      # getDisplayMedia. Two reasons this is the dev default:
-      #   1. Real getDisplayMedia under Chromium 147 + Xvfb fails with
-      #      `NotReadableError: Could not start video source` even
-      #      after T78's X11+SwiftShader pin (the UA confirms the X11
-      #      ozone backend is in use; the screen capturer's `start`
-      #      step is what's failing). Xvfb itself is fine — see
-      #      supervisord.conf line 42, screen 0 is 1920x1080x24.
-      #   2. Phase 2's FrameSinkVideoCapturer (T47/T55) doesn't go
-      #      through getDisplayMedia at all — it taps Viz directly.
-      #      Spending more cycles fixing the v1 path that Phase 2
-      #      replaces is wrong-shaped work; route around the bug,
-      #      validate the rest of the pipeline, fix it durably in
-      #      Phase 2.
-      # Set to "" (empty) to flip back to real-getDisplayMedia for
-      # diagnostic runs once Phase 2 capture is in place.
-      CHROMELESS_USE_FAKE_MEDIA: "1"
-      # T109: replay a pre-recorded harness y4m through the synthetic
-      # camera so reconcile.py sees real per-frame QR codes (the
-      # default synthetic-media moving-green-square produces zero
-      # decode rate per qa-tester's T65 finding). The fixtures
-      # directory is bind-mounted at /opt/chromeless-fixtures (see
-      # `volumes:` below); generate the y4m via
-      # harness/latency/record-y4m.sh on the dev host first.
-      #
-      # Empty CHROMELESS_USE_FAKE_MEDIA_FILE → fall back to the
-      # synthetic green square. We default it to the standard 720p30
-      # filename; the launch script gracefully degrades when the
-      # file isn't readable.
-      CHROMELESS_USE_FAKE_MEDIA_FILE: ${CHROMELESS_USE_FAKE_MEDIA_FILE:-/opt/chromeless-fixtures/harness-loop-720p30.y4m}
+      SESSION_ID: ${SESSION_ID:-dev}
+      # launch-chromeless.sh translates these into the WEBRTC_SIGNALING_*
+      # / WEBRTC_ICE_* vars the native peer reads (OSS-W1). Point
+      # SIGNALING_URL at the host-published port when driving the stack
+      # from a browser on the host: SIGNALING_URL=ws://localhost:8080
+      SIGNALING_URL: ${SIGNALING_URL:-ws://signaling:8080/ws}
+      SIGNALING_TOKEN: ${SIGNALING_TOKEN:-}
+      # ICE. Unset → the peer falls back to public STUN, which is fine for
+      # a same-host compose run but will not traverse most NATs. Bring the
+      # `turn` profile up (see below) and set this to use a local relay.
+      CHROMELESS_ICE_SERVERS: ${CHROMELESS_ICE_SERVERS:-}
+      CHROMELESS_ICE_TRANSPORT_POLICY: ${CHROMELESS_ICE_TRANSPORT_POLICY:-}
       # T99: OTel for chromeless-metrics-sidecar (which runs inside this container
       # under supervisord). Empty by default → SDK installs a no-op
       # provider, so the service-without-jaeger case stays quiet.
@@ -129,31 +124,24 @@ services:
       #     docker compose -f infra/compose.yaml --profile observability up
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       CHROMELESS_TRACE_SAMPLE_RATIO: ${CHROMELESS_TRACE_SAMPLE_RATIO:-1.0}
-    # T109: bind-mount the harness y4m fixtures dir read-only so
-    # CHROMELESS_USE_FAKE_MEDIA_FILE can point at a y4m generated by
-    # harness/latency/record-y4m.sh. The dir may be empty on a
-    # fresh checkout — Chromium degrades gracefully (warning + the
-    # synthetic green square) per launch-chromeless.sh.
-    volumes:
-      - ../harness/latency/fixtures:/opt/chromeless-fixtures:ro
     # /dev/shm at default 64m is too small for Chromium tabs; either bump
-    # shm_size or rely on the Dockerfile's --disable-dev-shm-usage. Both
+    # shm_size or rely on the image's --disable-dev-shm-usage. Both
     # is belt-and-braces for stability.
     shm_size: "1gb"
-    # The Dockerfile already sets a HEALTHCHECK; we restate it here so
+    # The image already sets a HEALTHCHECK; we restate it here so
     # other services can depend_on: condition: service_healthy without
     # surprises if someone overrides the image tag.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9222/json/version"]
       interval: 10s
       timeout: 3s
-      # Cold-start.sh + Xvfb + Pulse + streamer-static + Chromium need
-      # a generous grace on the first boot.
+      # cold-start.sh + Xvfb + Pulse + Chromium need a generous grace on
+      # the first boot.
       start_period: 45s
       retries: 3
     depends_on:
-      # streamer page tries to dial signaling immediately at --app load,
-      # so we want signaling at least started before chromium boots.
+      # The native peer dials signaling as soon as it starts, so we want
+      # signaling at least started before chromium boots.
       signaling:
         condition: service_started
     restart: unless-stopped
@@ -213,7 +201,13 @@ services:
         cat > /srv/runtime/config.js <<EOF
         // Generated at container start by infra/compose.yaml.
         // Override SIGNALING_URL in the environment to change.
-        window.__CBWRTC_CONFIG__ = {
+        //
+        // OSS-W1: client/src/config.ts reads __CHROMELESS_CONFIG__ (and
+        // still accepts the legacy __CBWRTC_CONFIG__ spelling). Before
+        // that landed, index.html never loaded this file and nothing read
+        // the global, so overriding SIGNALING_URL here silently did
+        // nothing and the client always dialled localhost.
+        window.__CHROMELESS_CONFIG__ = {
           signalingUrl: "$${SIGNALING_URL}"
         };
         EOF

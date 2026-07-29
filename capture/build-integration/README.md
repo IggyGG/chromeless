@@ -34,11 +34,21 @@ the surface tiny:
   other milestone), the roll branch re-applies the series; merge
   conflicts are fixed forward, never skipped.
 
-Today the series is exactly one patch:
-[`0001-expose-encoder-factory-injection.patch`](../../patches/0001-expose-encoder-factory-injection.patch),
-which adds an embedder-overridable virtual on `ContentBrowserClient`
-that returns a `webrtc::VideoEncoderFactory`. Everything else lives
-in our own source tree and links against unmodified upstream APIs.
+Today the series is three patches — see
+[`patches/README.md`](../../patches/README.md) for the index and the
+rebase-on-roll procedure:
+
+- [`0002-add-cloud-browser-to-build-graph.patch`](../../patches/0002-add-cloud-browser-to-build-graph.patch)
+  hooks `//cloud-browser` into Chromium's build graph.
+- [`0003-add-cloud-browser-webrtc-overrides.patch`](../../patches/0003-add-cloud-browser-webrtc-overrides.patch)
+- [`0005-expose-host-frame-sink-manager.patch`](../../patches/0005-expose-host-frame-sink-manager.patch)
+  exports `content::GetEmbedderHostFrameSinkManager()` so the embedder can
+  bind a `FrameSinkVideoCapturer` without depending on `//content/browser`.
+
+Patches 0001 (the renderer-side encoder-factory injection hook) and 0004
+were **retired in M7 R6**: with the `PeerConnectionFactory` now built in the
+browser process, the renderer-side hook is unreachable. Everything else
+lives in our own source tree and links against unmodified upstream APIs.
 
 ## How the encoder factory plugs into libwebrtc
 

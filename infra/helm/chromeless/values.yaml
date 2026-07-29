@@ -44,7 +44,15 @@ capture:
   autostartStreamer: true
 
 inputBridge:
-  enabled: true
+  # OSS-W1: default flipped true → false. The input-bridge sidecar was
+  # retired in the M7 R4 native-peer migration — input now arrives on the
+  # `input` DataChannel and is dispatched inside the browser process (see
+  # capture/build-integration/cb_input_dispatch*.cc). No Dockerfile for
+  # `chromeless-input-bridge` exists anywhere in this repo, so defaulting
+  # this to true made EVERY chart install fail on an unpullable image.
+  # The template blocks are kept and still gated on this flag, so anyone
+  # who has built that image can re-enable it.
+  enabled: false
   wsAddr: ":9200"
   metricsAddr: ":9101"
   cdpUrl: "http://127.0.0.1:9222"

@@ -33,13 +33,17 @@ import { StatsSampler, StatsSample, STATS_PROTOCOL_VERSION, formatSummary } from
 import { fetchSessionToken, withToken } from "./src/auth.js";
 import { classifyNegotiation, describeOutcome } from "./src/codec-negotiate.js";
 import { estimateConnectionQuality, type ProbeResult } from "./src/probe.js";
+import { resolveSignalingUrl } from "./src/config.js";
 
 // Codec preference list, top-first. The first entry must match the
 // codec we ask `prioritizeCodec` to lead with on the answer SDP, so
 // the negotiator's "ok" outcome aligns with what we actually want.
 const VIDEO_CODEC_PREFERENCE = ["VP9", "AV1", "H264", "VP8"] as const;
 
-const DEFAULT_SIGNALING = "ws://localhost:8080/ws";
+// OSS-W1 — resolved at load from ?signaling=, then window.__CHROMELESS_CONFIG__
+// (injected by infra/compose.yaml's generated config.js), then the built-in
+// localhost fallback. See client/src/config.ts.
+const DEFAULT_SIGNALING = resolveSignalingUrl();
 
 type Envelope =
   | { type: "offer";  from: "client" | "browser"; data: RTCSessionDescriptionInit }
