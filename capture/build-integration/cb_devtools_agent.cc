@@ -583,6 +583,57 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
     return {};
   }
 
+  // 1.5 UNKNOWN-KEY REJECTION.
+  //
+  // This is the structural fix for the BUG-1 / BUG-2 class documented below.
+  // Both bugs have the SAME root cause, and it is not the individual
+  // spellings: params are read with bare Find*() calls, so a key nobody
+  // reads is silently ignored. The caller gets a success response, the
+  // feature quietly does not happen, and the symptom surfaces minutes later
+  // somewhere else:
+  //
+  //   BUG-1: `signalingUseTls` unread → use_tls defaulted true → the guest
+  //          dialled wss:// at a plaintext broker → opaque TLS error.
+  //   BUG-2: array-form `iceServers` unread → fell back to public STUN →
+  //          a deployment with provisioned TURN silently ran without it.
+  //
+  // Neither appeared in any response or log. Aliases (added below) fix the
+  // two spellings we know about; rejecting unknown keys fixes the NEXT one
+  // too, at the point of the mistake, with the misspelling in the message.
+  //
+  // `Cb.*` is hand-dispatched — no PDL, no /json/protocol entry — so there
+  // is no schema doing this for us. This list IS the schema; keep it in sync
+  // when adding a param (the DCHECK-free cost is one line).
+  static constexpr const char* kKnownParams[] = {
+      "signalingHost",      "signalingSessionId", "signalingToken",
+      "signalingUseTls",    "useTls",             "iceServers",
+      "iceTransportPolicy",
+  };
+  for (const auto& kv : *dict) {
+    const std::string& key = kv.first;
+    bool known = false;
+    for (const char* k : kKnownParams) {
+      if (key == k) {
+        known = true;
+        break;
+      }
+    }
+    if (!known) {
+      // Name the offending key AND the accepted set: a caller who typo'd
+      // `signalingTls` should not have to diff their JSON against a header.
+      std::string accepted;
+      for (const char* k : kKnownParams) {
+        if (!accepted.empty()) accepted += ", ";
+        accepted += k;
+      }
+      *out_error = "Cb.startNativeSession: unknown param '" + key +
+                   "' (accepted: " + accepted +
+                   "). Rejected rather than ignored — a silently dropped "
+                   "param surfaces later as an unrelated failure.";
+      return {};
+    }
+  }
+
   // 2. Required signaling identity.
   const std::string* signaling_host = dict->FindString("signalingHost");
   const std::string* signaling_session_id =

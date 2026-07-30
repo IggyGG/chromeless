@@ -39,6 +39,11 @@ import("//testing/test.gni")  # provides test() template used below
 # ---------------------------------------------------------------------
 source_set("cb_wire_envelope") {
   sources = [
+    # Header-only transport interface. Lives with the codec because it is
+    # the same kind of thing — a pure contract with no I/O — and because
+    # its only dependency IS the codec (Envelope). Giving it its own
+    # source_set would be a target with no .cc file and one dep.
+    "cb_signaling_transport.h",
     "cb_wire_envelope.cc",
     "cb_wire_envelope.h",
   ]

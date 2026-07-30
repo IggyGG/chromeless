@@ -185,6 +185,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
+#include "capture/signaling/cb_signaling_transport.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
 
@@ -308,7 +309,7 @@ class CbOffererDriver
   CbOffererDriver(
       webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
       webrtc::Thread* signaling_thread,
-      SignalingWsClient* ws_client,
+      SignalingTransport* ws_client,
       webrtc::PeerConnectionInterface::RTCConfiguration ice_config,
       OffererDriverObserver* observer,
       scoped_refptr<base::SequencedTaskRunner> ui_runner);
@@ -553,7 +554,11 @@ class CbOffererDriver
   // originate same-thread and the proxy runs them inline (no blocking
   // BlockingCall hop). Not owned — main_parts owns + outlives it.
   raw_ptr<webrtc::Thread> signaling_thread_;
-  raw_ptr<SignalingWsClient> ws_client_;
+  // SignalingTransport, not SignalingWsClient: the driver calls exactly
+  // one method on it (Send, four sites), so it has no reason to depend on
+  // the chromium-network-service implementation. See
+  // cb_signaling_transport.h for why the interface is one virtual.
+  raw_ptr<SignalingTransport> ws_client_;
   webrtc::PeerConnectionInterface::RTCConfiguration ice_config_;
   raw_ptr<OffererDriverObserver> observer_;
   scoped_refptr<base::SequencedTaskRunner> ui_runner_;
