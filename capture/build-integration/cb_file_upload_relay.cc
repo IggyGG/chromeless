@@ -6,7 +6,6 @@
 #include "cloud-browser/capture/build-integration/cb_file_upload_relay.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
@@ -17,6 +16,7 @@
 #include "base/strings/string_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "cloud-browser/capture/config/cb_env_config.h"
 #include "cloud-browser/capture/signaling/cb_dc_host.h"
 #include "third_party/webrtc/api/data_channel_interface.h"
 
@@ -362,16 +362,11 @@ bool CbFileUploadRelay::FrameWithinCap(const std::string& frame) const {
 
 namespace {
 
-std::string EnvOrDefault(const char* var, const char* fallback) {
-  const char* raw = std::getenv(var);
-  if (raw == nullptr || *raw == '\0') return fallback;
-  return std::string(raw);
-}
 
 }  // namespace
 
 std::string ResolveFileUploadBridgeUrl() {
-  return EnvOrDefault("CHROMELESS_FILE_UPLOAD_BRIDGE_URL",
+  return config::GetEnvOr("CHROMELESS_FILE_UPLOAD_BRIDGE_URL",
                       kDefaultFileBridgeWsUrl);
 }
 

@@ -574,6 +574,7 @@ source_set("stats_relay") {
     "cb_stats_relay.h",
   ]
   deps = [
+    "//cloud-browser/capture/config:cb_env_config",
     "//net/traffic_annotation",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
@@ -626,6 +627,7 @@ source_set("clipboard_relay") {
     "cb_clipboard_relay.h",
   ]
   deps = [
+    "//cloud-browser/capture/config:cb_env_config",
     "//cloud-browser/capture/signaling:cb_dc_host",
     "//net/traffic_annotation",
     "//services/network/public/cpp",
@@ -686,6 +688,7 @@ source_set("file_upload_relay") {
     "cb_file_upload_relay.h",
   ]
   deps = [
+    "//cloud-browser/capture/config:cb_env_config",
     "//cloud-browser/capture/signaling:cb_dc_host",
     "//net/traffic_annotation",
     "//services/network/public/cpp",

@@ -6,7 +6,6 @@
 #include "cloud-browser/capture/build-integration/cb_clipboard_relay.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
@@ -18,6 +17,7 @@
 #include "base/synchronization/lock.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "cloud-browser/capture/config/cb_env_config.h"
 #include "cloud-browser/capture/signaling/cb_dc_host.h"
 #include "third_party/webrtc/api/data_channel_interface.h"
 
@@ -356,26 +356,21 @@ bool CbClipboardOutboundServer::FrameWithinCap(
 
 namespace {
 
-std::string EnvOrDefault(const char* var, const char* fallback) {
-  const char* raw = std::getenv(var);
-  if (raw == nullptr || *raw == '\0') return fallback;
-  return std::string(raw);
-}
 
 }  // namespace
 
 std::string ResolveClipboardInboundUrl() {
-  return EnvOrDefault("CHROMELESS_CLIPBOARD_INBOUND_URL",
+  return config::GetEnvOr("CHROMELESS_CLIPBOARD_INBOUND_URL",
                       kDefaultBridgeInboundUrl);
 }
 
 std::string ResolveClipboardOutboundAddr() {
-  return EnvOrDefault("CHROMELESS_CLIPBOARD_OUTBOUND_ADDR",
+  return config::GetEnvOr("CHROMELESS_CLIPBOARD_OUTBOUND_ADDR",
                       kDefaultRelayOutboundAddr);
 }
 
 std::string ResolveClipboardOutboundPath() {
-  return EnvOrDefault("CHROMELESS_CLIPBOARD_OUTBOUND_PATH",
+  return config::GetEnvOr("CHROMELESS_CLIPBOARD_OUTBOUND_PATH",
                       kDefaultRelayOutboundPath);
 }
 
