@@ -131,12 +131,31 @@ jobs:
             "${{ env.REGISTRY }}/${{ steps.repo.outputs.lower }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}" \
             -o spdx-json="sbom-${{ matrix.image }}-${{ steps.tag.outputs.value }}.spdx.json"
 
-      - name: Upload SBOM artefact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-${{ matrix.image }}-${{ steps.tag.outputs.value }}
-          path: sbom-${{ matrix.image }}-${{ steps.tag.outputs.value }}.spdx.json
-          retention-days: 90
+      # OSS-W2: this was `uses: actions/upload-artifact@v4`, which RESOLVES on
+      # the mirror but fails at runtime with GHESNotSupportedError — v4 uses
+      # GitHub's artifact backend service, absent on Forgejo. See the
+      # attest-build-provenance note below for the resolution-time variant of
+      # the same trap; this is the runtime variant.
+      #
+      # An SBOM is worth keeping, so publish it where this host actually can:
+      # push it to the registry alongside the image it describes. `cosign
+      # attach sbom` is deprecated upstream but is the only registry-native
+      # option that needs no GitHub service; if it isn't available the SBOM
+      # still lands in the log rather than vanishing silently.
+      - name: Publish SBOM
+        env:
+          SBOM: sbom-${{ matrix.image }}-${{ steps.tag.outputs.value }}.spdx.json
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ steps.repo.outputs.lower }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}
+        run: |
+          echo "::group::${SBOM} (first 200 lines)"
+          head -200 "${SBOM}"
+          echo "::endgroup::"
+          if command -v cosign >/dev/null 2>&1; then
+            cosign attach sbom --sbom "${SBOM}" "${IMAGE_REF}" \
+              || echo "::warning::cosign attach sbom failed; SBOM is in the log above only"
+          else
+            echo "::notice::cosign not present; SBOM is in the log above only"
+          fi
 
       # OSS-W2: the `actions/attest-build-provenance@v2` step that lived here
       # is REMOVED, not disabled.

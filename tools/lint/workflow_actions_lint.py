@@ -48,6 +48,23 @@ KNOWN_MISSING = {
     "actions/attest-build-provenance": "no Forgejo mirror, and the attestation "
                                        "API is GitHub-specific; cosign signing "
                                        "is the portable alternative",
+    # RESOLVES but cannot RUN — a second failure class this lint now covers.
+    # upload-artifact@v4 (and download-artifact@v4) clone fine from the
+    # mirror, then abort at runtime with
+    #   GHESNotSupportedError: @actions/artifact v2.0.0+ … are not currently
+    #   supported on GHES
+    # because v4 talks to GitHub's artifact backend service, which Forgejo
+    # does not implement. Worse than a plain failure: with `if: always()` it
+    # fails jobs whose own work PASSED — on 2026-07-30 it turned a
+    # `verdict=PASS exitCode=0` native-peer-gate run red. Echo the payload
+    # into the run log instead; the log is the artifact here.
+    "actions/upload-artifact": "resolves but fails at runtime on Forgejo "
+                               "(GHESNotSupportedError: the v4 artifact "
+                               "backend is GitHub-only); print the payload "
+                               "to the run log with a `run:` step instead",
+    "actions/download-artifact": "resolves but fails at runtime on Forgejo "
+                                 "(same GHES-only v4 artifact backend as "
+                                 "upload-artifact)",
 }
 
 # Captures owner/repo, tolerating a subpath: `github/codeql-action/init@v3`

@@ -53,10 +53,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      # OSS-W2: no `actions/setup-node@v4` — it installs a glibc node into
+      # this host's musl (Alpine) job container, which then cannot exec. The
+      # poisoned PATH fails every later JS action's post-step with exit 255,
+      # so the job dies regardless of its own result. Full write-up in
+      # ci.yml's "Node version (image-provided)" step.
+      - name: Node version (image-provided)
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::no node in the job image; Playwright needs one"
+            exit 1
+          }
+          echo "node: $(node --version)  npm: $(npm --version 2>/dev/null || echo MISSING)"
 
       # OSS-W1: the e2e stack needs a real cloud_browser_worker image. The
       # browser is a from-source Chromium build (4-8h cold — see
@@ -180,36 +188,36 @@ jobs:
           set -o pipefail
           npx playwright test --project=chromium 2>&1 | tee playwright.log
 
-      - name: Upload Playwright artefacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-${{ github.run_id }}
-          path: |
-            tests/e2e/playwright-report/
-            tests/e2e/test-results/
-            tests/e2e/playwright.log
-          if-no-files-found: ignore
-          retention-days: 14
+      # OSS-W2: `actions/upload-artifact@v4` fails hard on this host —
+      # "GHESNotSupportedError: @actions/artifact v2.0.0+ … not currently
+      # supported on GHES" — because v4 talks to GitHub's artifact backend
+      # service, which Forgejo does not implement. With `if: always()` it
+      # failed jobs whose own work had passed. Summarise into the log instead;
+      # the failing spec's output is already in playwright.log above.
+      - name: Playwright output summary
+        if: always() && steps.fsprobe.outputs.shared == 'true'
+        working-directory: tests/e2e
+        run: |
+          echo "--- playwright.log tail (artifact upload is unsupported on this host) ---"
+          tail -100 playwright.log 2>/dev/null || echo "(no playwright.log)"
+          echo "--- test-results tree ---"
+          ls -R test-results 2>/dev/null | head -50 || echo "(no test-results)"
 
-      - name: Capture container logs on failure
+      # Same reason as above: no upload-artifact on this host, so the logs go
+      # to the run log where they are actually readable. Tail-bounded per
+      # container so one chatty service can't bury the others — chromium alone
+      # emits a BeginFrame diagnostic line every 5 s.
+      - name: Container logs on failure
         if: failure() && steps.fsprobe.outputs.shared == 'true'
         env:
           CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
-          mkdir -p ./compose-logs
           for c in $(docker compose -f infra/compose.yaml ps -q); do
             name=$(docker inspect --format '{{.Name}}' "$c" | sed 's|^/||')
-            docker logs "$c" >"./compose-logs/${name}.log" 2>&1 || true
+            echo "::group::${name}"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
           done
-
-      - name: Upload container logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: compose-logs-${{ github.run_id }}
-          path: ./compose-logs/
-          retention-days: 14
 
       # Gated on the probes like every other compose step: infra/compose.yaml
       # declares CHROMELESS_IMAGE as REQUIRED, so ANY compose subcommand --

@@ -52,10 +52,28 @@ jobs:
       # that one unresolvable action killed the whole Lint job — the log
       # shows "skipping post step for 'hadolint'; step was not executed"
       # followed immediately by "Job failed". Nothing in Lint ever ran.
+      #
+      # Two details that cost a red run on 2026-07-30 (Lint passed at 09:10Z
+      # and failed at 13:06Z with an unchanged Dockerfile):
+      #
+      #   * the image tag was `:latest`, unpinned. hadolint rolled between the
+      #     two runs and the new version reports two more findings. Pin it, so
+      #     a lint result is a property of this repo, not of what upstream
+      #     published this morning.
+      #   * no --failure-threshold was set, so hadolint's default (`info`)
+      #     applies and ANY info-level finding fails the job. The two it now
+      #     reports are both deliberate:
+      #       DL3025 (line 239) — HEALTHCHECK must be shell form; the check is
+      #         `curl … || exit 1`, and JSON/exec form cannot express `||`.
+      #       DL3066 (line 242) — `USER cbuser` is a named user on purpose
+      #         (the image creates it); a bare uid would lose that intent.
+      #     Threshold `warning` keeps error-class findings fatal (which is
+      #     what a Dockerfile lint is for) without gating on style advice we
+      #     have already considered and rejected.
       - name: hadolint
         run: |
-          docker run --rm -i hadolint/hadolint:latest \
-            hadolint - < build/Dockerfile.runtime
+          docker run --rm -i hadolint/hadolint:v2.12.0 \
+            hadolint --failure-threshold warning - < build/Dockerfile.runtime
 
       # OSS-W2: static include check for the Chromium embedder. capture/
       # only compiles inside a full Chromium checkout (4-8 h), so a missing
