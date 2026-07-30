@@ -5,11 +5,12 @@
 # semver and `latest` tags, attaches an SBOM per image as a workflow
 # artifact, and publishes auto-generated release notes.
 #
-# Image set (matches T7/T13/T71/T76 commits):
-#   chromeless                  infra/Dockerfile          (whole-pod runtime)
-#   chromeless-signaling                 signaling/Dockerfile      (T13)
-#   chromeless-controller infra/controllers/.../Dockerfile (T71)
-#   chromeless-turn-issuer               infra/turn-issuer/Dockerfile (T76)
+# Image set — the Go control-plane services only:
+#   chromeless-signaling    signaling/Dockerfile
+#   chromeless-controller   infra/controllers/.../Dockerfile
+#   chromeless-turn-issuer  infra/turn-issuer/Dockerfile
+#
+# The browser itself is deliberately absent — see the matrix comment below.
 
 name: Release
 
@@ -43,9 +44,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: chromeless
-            dockerfile: infra/Dockerfile
-            context: .
+          # OSS-W1: the `chromeless` row is gone. It built infra/Dockerfile,
+          # the legacy stock-Chromium + getDisplayMedia image — not the
+          # product, and unbuildable since the M7 native-peer migration
+          # deleted capture/streamer-page/ while the Dockerfile still COPYd
+          # it. The real browser (build/Dockerfile.runtime, wrapping
+          # cloud_browser_worker) is NOT published here: it is a from-source
+          # Chromium build (4-8h cold, see build/chromeless-build.sh) that
+          # cannot run on a GHA runner. Build it yourself with
+          # build/chromeless-build.sh and push to your own registry; see
+          # docs/contribute/build-chromium.md.
           - image: chromeless-signaling
             dockerfile: signaling/Dockerfile
             context: signaling
@@ -108,8 +116,14 @@ jobs:
           cosign sign --yes \
             "${{ env.REGISTRY }}/${{ steps.repo.outputs.lower }}/${{ matrix.image }}@${{ steps.push.outputs.digest }}"
 
+      # OSS-W2: `anchore/sbom-action` 404s on Forgejo's action mirror, which
+      # would fail this job before any step ran. The action only installs
+      # syft, so use anchore's own installer script directly.
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          syft version
 
       - name: Generate SBOM (SPDX-JSON)
         run: |
@@ -124,12 +138,23 @@ jobs:
           path: sbom-${{ matrix.image }}-${{ steps.tag.outputs.value }}.spdx.json
           retention-days: 90
 
-      - name: Generate build provenance attestation
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ steps.repo.outputs.lower }}/${{ matrix.image }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
+      # OSS-W2: the `actions/attest-build-provenance@v2` step that lived here
+      # is REMOVED, not disabled.
+      #
+      # It does not exist on Forgejo's action mirror
+      # (data.forgejo.org/actions/attest-build-provenance → 404), and the
+      # attestation API it calls is GitHub-specific. Critically, an `if:`
+      # guard would NOT have helped: Forgejo's runner resolves (git-clones)
+      # every `uses:` in the job BEFORE executing any step, so an
+      # unresolvable action fails the whole job regardless of its condition.
+      # That is exactly how `actions/github-script` in harness-loopback.yml
+      # failed 56 runs — the log shows "step was not executed" for every
+      # step, including checkout.
+      #
+      # Images are still cosign-signed and carry an SBOM above, which is the
+      # portable half of the supply-chain story. A GitHub mirror that wants
+      # keyless attestation should add it in a GitHub-only workflow file
+      # rather than here.
 
   release-notes:
     name: Generate release notes
@@ -183,10 +208,14 @@ jobs:
           } > RELEASE_NOTES.md
           cat RELEASE_NOTES.md
 
-      - name: Create / update GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tags.outputs.current }}
-          body_path: RELEASE_NOTES.md
-          generate_release_notes: false
-          fail_on_unmatched_files: false
+      # OSS-W2: `softprops/action-gh-release` 404s on Forgejo's action
+      # mirror, which would fail this job before any step ran. Forgejo's
+      # release API is GitHub-compatible enough for this, so call it
+      # directly and stay portable across both hosts.
+      - name: Create / update release
+        env:
+          API_TOKEN: ${{ secrets.RELEASE_API_TOKEN || github.token }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.tags.outputs.current }}
+        run: python3 tools/ci/publish_release.py

@@ -50,4 +50,25 @@ Thumbs.db
 # Project-specific
 harness/captures/
 tests/artifacts/
+# Retired in the M7 R4 native-peer migration (input now rides the `input`
+# DataChannel into cb_input_dispatch*.cc). A stale 13 MiB local build of
+# the old sidecar still sits in some working trees.
 capture/input-bridge/input-bridge
+
+# Agent worktrees / scratch. .claude/worktrees/ holds full checkouts of
+# this repo; without this every repo-wide grep returns each hit N+1 times.
+.claude/
+
+# Ad-hoc cluster drivers and one-shot incident forensics. These are
+# genuinely useful while chasing a live bug and genuinely noise in the
+# tree afterwards — write them here so they never land in a commit.
+tests/scratch/
+
+# Probe output directories
+newtab-probe-out/
+
+# `go build ./...` in signaling/ drops the binary next to the source.
+/signaling/signaling
+
+# Python bytecode from tools/
+tools/**/__pycache__/

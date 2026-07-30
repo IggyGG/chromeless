@@ -192,6 +192,17 @@
         <pre id="log"></pre>
       </aside>
     </main>
+    <!--
+      Optional runtime config. infra/compose.yaml generates config.js at
+      container start to carry SIGNALING_URL into the page; when serving
+      dist/ standalone (or over file://) the file simply won't exist, so
+      this is loaded defensively — a missing config.js must not block
+      main.js. `onerror` swallows the 404; main.js then falls back to
+      the ?signaling= query param or its compile-time default.
+      Deliberately NOT type="module": classic scripts are guaranteed to
+      execute before the deferred module below.
+    -->
+    <script src="./config.js" onerror="void 0"></script>
     <script type="module" src="./main.js"></script>
   </body>
 </html>

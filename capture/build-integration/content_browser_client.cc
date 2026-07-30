@@ -97,6 +97,9 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   // lifetime contract as the two callbacks above.
   base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
       start_native_session_callback;
+  // OSS-W0 — graceful process exit at Cb.shutdown dispatch time. Same
+  // Unretained(main_parts_) lifetime contract as the callbacks above.
+  base::RepeatingCallback<bool()> shutdown_callback;
   if (main_parts_) {
     track_source_getter = base::BindRepeating(
         &CloudBrowserBrowserMainParts::cb_track_source,
@@ -107,11 +110,14 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
     start_native_session_callback = base::BindRepeating(
         &CloudBrowserBrowserMainParts::StartNativeSession,
         base::Unretained(main_parts_));
+    shutdown_callback =
+        base::BindRepeating(&CloudBrowserBrowserMainParts::Shutdown,
+                            base::Unretained(main_parts_));
   }
   return std::make_unique<CbDevToolsManagerDelegate>(
       default_context, aura_context, std::move(track_source_getter),
       std::move(active_capture_callback),
-      std::move(start_native_session_callback));
+      std::move(start_native_session_callback), std::move(shutdown_callback));
 }
 
 }  // namespace cloud_browser

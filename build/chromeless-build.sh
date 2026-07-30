@@ -41,6 +41,11 @@
 #                            resource packs the runtime image loads.
 #   CHROMELESS_GIT_SHA              short git sha; default derived from
 #                            ${CHROMELESS_REPO}/.git or the env.
+#   CHROMELESS_TESTS_NONFATAL       "1" to ship the artifact even when the
+#                            Step 7 unit tests fail. Off by default —
+#                            failing tests fail the build. Only set this
+#                            on a lane whose build profile genuinely lacks
+#                            the codepaths some tests need, and record why.
 #   SKIP_FETCH              "1" to skip Step 1 entirely (assumes
 #                            /work/src/chromium is already populated).
 #                            Used by Job retries.
@@ -441,15 +446,26 @@ step_done
 # Step 7 — unit tests.
 #
 # Don't run them under STUB_MODE, but in real builds run them before
-# packaging. NON-FATAL during first-light bringup (Wall #38): test
-# failures are logged but don't block STEP 8/9 because some encoder
-# tests require HAS_X264 / HAS_NVENC / HAS_VAAPI codepaths that aren't
-# enabled in this build profile, plus there are known DanglingPtr
-# warnings from raw_ptr cleanup paths in test fixtures we'll fix
-# alongside the runtime wiring. The worker binary itself builds and
-# links cleanly; we want the artifact even if tests are imperfect.
+# packaging.
 #
-# Set CHROMELESS_TESTS_FATAL=1 to restore strict mode once tests pass cleanly.
+# OSS-W2: these are now FATAL BY DEFAULT. They were non-fatal during
+# first-light bringup (Wall #38) for a real reason — some encoder tests
+# require HAS_X264 / HAS_NVENC / HAS_VAAPI codepaths not enabled in every
+# build profile, and there were known DanglingPtr warnings from raw_ptr
+# cleanup in test fixtures. But "temporarily non-blocking" became
+# permanent, and the effect is that the ONLY place C++ tests run at all
+# (they need a Chromium tree, so `make verify` cannot touch them) reported
+# failures as `WARN:` and shipped the artifact anyway. A test suite whose
+# failures never block is not a test suite.
+#
+# The escape hatch is now explicit and named after its actual reason:
+#   CHROMELESS_TESTS_NONFATAL=1   log failures, continue, ship anyway.
+# Use it for a bringup lane on a profile with known-unsupported codepaths,
+# and say so in the job that sets it. Everything else should fail loudly.
+#
+# The old CHROMELESS_TESTS_FATAL=1 opt-IN is gone: strict is the default
+# now, so it had no meaning. Nothing in the repo set it (grep is clean),
+# which is precisely why the tests never blocked anything.
 # ---------------------------------------------------------------------
 
 step "7/10 unit tests"
@@ -462,12 +478,15 @@ else
     run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_encoder_unittests" || encoder_rc=$?
     run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_framesink_capturer_unittests" || framesink_rc=$?
     if [[ "${encoder_rc}" -ne 0 || "${framesink_rc}" -ne 0 ]]; then
-        log "WARN: unit tests reported failures (encoder=${encoder_rc} framesink=${framesink_rc})"
-        if [[ -n "${CHROMELESS_TESTS_FATAL:-}" ]]; then
-            log "ERROR: CHROMELESS_TESTS_FATAL=1 set; failing build."
+        log "unit tests reported failures (encoder=${encoder_rc} framesink=${framesink_rc})"
+        if [[ -n "${CHROMELESS_TESTS_NONFATAL:-}" ]]; then
+            log "WARN: CHROMELESS_TESTS_NONFATAL=1 — continuing to STEP 8 and"
+            log "WARN: shipping this artifact with failing unit tests."
+        else
+            log "ERROR: unit tests failed. Set CHROMELESS_TESTS_NONFATAL=1 to ship"
+            log "ERROR: anyway (and record why in the job that sets it)."
             exit 1
         fi
-        log "WARN: continuing to STEP 8 (CHROMELESS_TESTS_FATAL unset; first-light non-blocking)."
     fi
 fi
 

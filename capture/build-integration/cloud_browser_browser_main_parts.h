@@ -259,6 +259,21 @@ class CloudBrowserBrowserMainParts
   //       (H1). The env-boot path is unaffected by that scope (no-op there).
   webrtc::RTCError StartNativeSession(const NativeSessionConfig& cfg);
 
+  // OSS-W0 — request a graceful process exit by running the quit closure
+  // parked in WillRunMainMessageLoop(). Quitting the RunLoop unwinds into
+  // PostMainMessageLoopRun(), so the LIFO teardown there runs in full: the
+  // offerer driver emits its `bye` envelope, the WS closes with code 1000,
+  // and libwebrtc tears the PeerConnection down cleanly. That is the whole
+  // point of exposing this over CDP — SIGTERM/SIGKILL skip the `bye`, so the
+  // broker and the remote peer are left inferring the disconnect from a
+  // socket error instead of being told.
+  //
+  // MUST run on the UI thread. Returns false when the closure is unavailable
+  // — either the main message loop never started, or shutdown already ran
+  // (base::OnceClosure is consumed on first use, so repeat calls are safe
+  // and simply report false rather than double-quitting).
+  bool Shutdown();
+
  private:
   // CV2-CAPTURE-REARM: re-arm the FrameSink capturer after a
   // cross-document navigation swapped the captured WebContents'

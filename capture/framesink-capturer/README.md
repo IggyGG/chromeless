@@ -1,9 +1,14 @@
 # `capture/framesink-capturer/`
 
 `capturer.{h,cc}` is the **consumer end** of Viz's video-capture
-Mojo. Pair it with `media_factory` injection from T19 (added by
-[`patches/0001-expose-encoder-factory-injection.patch`](../../patches/0001-expose-encoder-factory-injection.patch))
-to feed our encoder factory.
+Mojo. Frames flow into `cb_framesink_video_track_source.{h,cc}`, which
+feeds the browser-process `PeerConnectionFactory` built in
+`cloud_browser_pcf.cc` — that is where our encoder factory is installed.
+
+(Historical note: this used to pair with renderer-side `media_factory`
+injection via `patches/0001-expose-encoder-factory-injection.patch`. That
+patch was retired in M7 R6 when the PeerConnectionFactory moved into the
+browser process — see [`patches/README.md`](../../patches/README.md).)
 
 ```
 [Viz process]                        [our cloud-browser worker]

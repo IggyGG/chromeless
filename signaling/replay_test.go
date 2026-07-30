@@ -166,6 +166,44 @@ func TestHasICEData(t *testing.T) {
 	}
 }
 
+// TestResolveICEReplayMaxAge covers the OSS-W0 env override. The default
+// moved 60s → 300s so that slow-boot deployments (firecracker, cold k8s
+// nodes) don't silently age out every buffered guest candidate before the
+// viewer registers; the override lets anyone tune further, but never past
+// the TURN-allocation ceiling.
+func TestResolveICEReplayMaxAge(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{"unset uses default", "", defaultICEReplayMaxAge},
+		{"whitespace uses default", "   ", defaultICEReplayMaxAge},
+		{"valid override", "120", 120 * time.Second},
+		{"trimmed override", "  90  ", 90 * time.Second},
+		{"zero rejected", "0", defaultICEReplayMaxAge},
+		{"negative rejected", "-30", defaultICEReplayMaxAge},
+		{"unparsable rejected", "abc", defaultICEReplayMaxAge},
+		{"float rejected", "12.5", defaultICEReplayMaxAge},
+		{"above ceiling clamped", "5000", iceReplayMaxAgeCeiling},
+		{"at ceiling kept", "600", iceReplayMaxAgeCeiling},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := resolveICEReplayMaxAge(func(string) string { return c.env })
+			if got != c.want {
+				t.Errorf("resolveICEReplayMaxAge(%q) = %v, want %v", c.env, got, c.want)
+			}
+		})
+	}
+
+	// The default must stay under the TURN-allocation ceiling, else replay
+	// would routinely hand out candidates whose allocation has lapsed.
+	if defaultICEReplayMaxAge > iceReplayMaxAgeCeiling {
+		t.Fatalf("default %v exceeds ceiling %v", defaultICEReplayMaxAge, iceReplayMaxAgeCeiling)
+	}
+}
+
 // itoaSimple is a local int→string helper to keep this test file
 // self-contained without pulling strconv into a server-internal test.
 func itoaSimple(n int) string {

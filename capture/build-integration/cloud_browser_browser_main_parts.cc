@@ -1116,11 +1116,28 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
 
 void CloudBrowserBrowserMainParts::WillRunMainMessageLoop(
     std::unique_ptr<base::RunLoop>& run_loop) {
-  // Park the quit closure for a future Cb.shutdown CDP command. Today
-  // the worker exits on SIGTERM, so this closure is never run; storing
-  // it costs nothing and keeps the shutdown path symmetric with
-  // content_shell + headless.
+  // Park the quit closure for the Cb.shutdown CDP command (OSS-W0 — this
+  // used to be stored-but-never-run; Shutdown() below is the consumer).
+  // SIGTERM remains the other exit path.
   quit_main_message_loop_ = run_loop->QuitClosure();
+}
+
+bool CloudBrowserBrowserMainParts::Shutdown() {
+  // OSS-W0 — consumer of the closure parked in WillRunMainMessageLoop.
+  // base::OnceClosure is consumed on first Run(), so an is_null() check
+  // makes repeat calls safe: the second Cb.shutdown reports false instead
+  // of CHECK-failing on an already-run closure.
+  if (quit_main_message_loop_.is_null()) {
+    LOG(WARNING) << "Cb.shutdown: no quit closure available (main message "
+                    "loop not running, or shutdown already requested)";
+    return false;
+  }
+
+  LOG(INFO) << "Cb.shutdown: quitting the main message loop — "
+               "PostMainMessageLoopRun will run the LIFO teardown "
+               "(bye envelope → WS close 1000 → PC teardown).";
+  std::move(quit_main_message_loop_).Run();
+  return true;
 }
 
 void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {

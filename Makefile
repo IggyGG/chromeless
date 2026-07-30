@@ -4,12 +4,21 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help test test-unit test-integration test-smoke test-smoke-all \
-        test-harness test-harness-all test-e2e test-all-ci test-all-nightly \
+.PHONY: help verify lint lint-cxx lint-workflows lint-shell test test-unit test-integration \
+        test-smoke test-smoke-all test-harness test-harness-all test-e2e \
+        test-all-ci test-all-nightly \
         test-unit-signaling test-unit-client test-unit-harness
 
 help:
 	@echo "Targets:"
+	@echo "  make verify              # START HERE — everything runnable without a"
+	@echo "                           # Chromium tree or Docker (~15 s)"
+	@echo ""
+	@echo "  make lint                # all static checks"
+	@echo "  make lint-cxx            # C++ include lint — catches missing #includes"
+	@echo "                           # that would otherwise fail 4-8 h into a build"
+	@echo "  make lint-workflows      # every 'uses:' must exist on the CI action mirror"
+	@echo ""
 	@echo "  make test                # legacy alias for test-all-ci (the PR gate)"
 	@echo "  make test-all-ci         # PR-blocking subset (unit + integration + smoke)"
 	@echo "  make test-all-nightly    # PR-blocking + harness baselines + e2e"
@@ -23,6 +32,53 @@ help:
 	@echo "  make test-e2e            # tests/e2e/ Playwright specs (full compose stack)"
 	@echo ""
 	@echo "See tests/regression-suite.md for the full reference + gate split."
+
+# ---- verify ----------------------------------------------------------------
+#
+# The default entry point for a human or an agent who just changed something.
+#
+# Everything here runs WITHOUT a Chromium checkout and WITHOUT Docker, in
+# roughly fifteen seconds. That constraint is the point: the embedder in
+# capture/ can only be compiled inside a full Chromium tree (4-8 h cold, see
+# build/chromeless-build.sh), so for most edits the compiler is simply not
+# available as a feedback signal. `make verify` is what stands in for it.
+#
+# It is NOT a substitute for the build lane. A clean `make verify` means the
+# fast checks pass; C++ still needs a real build before you trust it.
+verify: lint test-unit test-integration
+	@echo ""
+	@echo ">>> verify OK — fast checks pass."
+	@echo ">>> NOTE: capture/ was not compiled (needs a Chromium tree)."
+	@echo ">>>       Run the build lane before trusting C++ changes."
+
+# ---- lint ------------------------------------------------------------------
+
+lint: lint-cxx lint-workflows lint-shell
+
+# Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
+# all of them before running any step, so one missing action fails the whole
+# job — this was the largest single cause of CI failures in this repo.
+# Offline by default; `--online` re-probes the mirror.
+lint-workflows:
+	@echo ">>> workflow actions lint"
+	@python3 tools/lint/workflow_actions_lint.py
+
+# Static include check for the Chromium embedder. See the docstring in
+# tools/lint/cxx_include_lint.py for what it does and deliberately doesn't.
+lint-cxx:
+	@echo ">>> cxx include lint"
+	@python3 tools/lint/cxx_include_lint.py capture
+	@python3 tools/lint/test_cxx_include_lint.py >/dev/null && \
+	  echo ">>> cxx-include-lint self-tests pass" || \
+	  { echo "!!! cxx-include-lint SELF-TESTS FAILED — the linter itself is broken"; exit 1; }
+
+lint-shell:
+	@if command -v shellcheck >/dev/null 2>&1; then \
+	  echo ">>> shellcheck"; \
+	  shellcheck infra/launch-chromeless.sh infra/lifecycle/*.sh tests/smoke/*.sh 2>&1 | head -40; \
+	else \
+	  echo "skip: shellcheck not installed"; \
+	fi
 
 # Legacy alias — prior CI configs may invoke `make test`. New work
 # should use `make test-all-ci` so the PR-blocking subset is explicit.
