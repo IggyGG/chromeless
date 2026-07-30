@@ -475,6 +475,17 @@ if [[ -n "${STUB_MODE}" ]]; then
 else
     encoder_rc=0
     framesink_rc=0
+    # Profile builds dynamic-link system libs staged at /work/system-libs
+    # (BUILD.gn:x264 with -Wl,--allow-shlib-undefined and NO rpath — the
+    # runtime image provides the libs on its default path). The build
+    # host's loader knows nothing about that directory, so the encoder
+    # test binary dies at exec with "error while loading shared
+    # libraries: libx264.so.164" before gtest even starts (exit 127) —
+    # first hit 2026-07-30, the first profile=x264 build to reach STEP 7
+    # after the profile-pipe fix. Export rather than per-command prefix
+    # so both binaries and any future test target get it; harmless for
+    # sw-profile builds (the dir just isn't consulted).
+    export LD_LIBRARY_PATH="/work/system-libs/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_encoder_unittests" || encoder_rc=$?
     run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_framesink_capturer_unittests" || framesink_rc=$?
     if [[ "${encoder_rc}" -ne 0 || "${framesink_rc}" -ne 0 ]]; then
