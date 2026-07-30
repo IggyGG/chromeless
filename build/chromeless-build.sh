@@ -499,22 +499,28 @@ else
     # Deriving the list means a target added to CHROMELESS_BUILD_TARGETS is
     # automatically executed, and STEP 7's existing fatal-on-missing check
     # still fires if it failed to link.
-    local -a test_binaries=()
+    # NOTE: no `local` here. This block runs at SCRIPT TOP LEVEL, not inside a
+    # function, and bash makes `local` a fatal error there — under `set -e`
+    # that aborts the step instantly with no output, which is exactly how the
+    # first run of this rewrite died (STEP 7 START, then nothing). Caught
+    # 2026-07-30 by the build itself; the shellcheck-style lint added
+    # alongside this now catches it before a 12-minute compile does.
+    test_binaries=()
     for _t in ${CHROMELESS_BUILD_TARGETS}; do
         # gn labels look like path/to:target_name — take the target name.
-        local _name="${_t##*:}"
+        _name="${_t##*:}"
         case "${_name}" in
             *_unittests) test_binaries+=("${_name}") ;;
         esac
     done
 
-    local tests_rc=0
+    tests_rc=0
     if [[ "${#test_binaries[@]}" -eq 0 ]]; then
         log "WARN: no *_unittests targets in CHROMELESS_BUILD_TARGETS — nothing to run."
         log "WARN: this lane is shipping an artifact no test has exercised."
     fi
     for _bin in "${test_binaries[@]}"; do
-        local _path="${CHROMIUM_SRC}/${OUT_DIR}/${_bin}"
+        _path="${CHROMIUM_SRC}/${OUT_DIR}/${_bin}"
         if [[ ! -x "${_path}" ]]; then
             log "ERROR: ${_bin} was requested but is missing or not executable."
             log "ERROR: it is in CHROMELESS_BUILD_TARGETS, so ninja should have"
