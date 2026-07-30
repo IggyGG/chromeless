@@ -53,10 +53,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      # OSS-W2: no `actions/setup-node@v4` — it installs a glibc node into
+      # this host's musl (Alpine) job container, which then cannot exec. The
+      # poisoned PATH fails every later JS action's post-step with exit 255,
+      # so the job dies regardless of its own result. Full write-up in
+      # ci.yml's "Node version (image-provided)" step.
+      # Playwright needs npm/npx, which ci-tools does not ship — install it
+      # from the distro so it matches the image's own node ABI (see ci.yml).
+      - name: Node + npm (image-provided)
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::no node in the job image; Playwright needs one"
+            exit 1
+          }
+          if ! command -v npm >/dev/null 2>&1; then
+            if command -v apk >/dev/null 2>&1; then
+              apk add --no-cache npm >/dev/null
+            elif command -v apt-get >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq npm >/dev/null
+            fi
+          fi
+          echo "node: $(node --version)  npm: $(npm --version 2>/dev/null || echo MISSING)"
 
       # OSS-W1: the e2e stack needs a real cloud_browser_worker image. The
       # browser is a from-source Chromium build (4-8h cold — see
@@ -80,21 +97,82 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: docker compose up
+      # C2: private-registry login — see ci.yml's identical step for the
+      # conditional-secrets rationale. Compose pulls the worker image
+      # itself, so the daemon needs the auth before `up`.
+      - name: Registry login (if credentials provided)
+        if: steps.probe.outputs.present == 'true' && env.REGISTRY_PASSWORD != ''
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          registry="${CHROMELESS_IMAGE%%/*}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
+            --username "${REGISTRY_USERNAME}" --password-stdin
+
+      # C2: does the docker daemon share this job's filesystem?
+      #
+      # infra/compose.yaml bind-mounts repo paths (../client, ../client/dist,
+      # ./observability/prometheus/prometheus.yml). Those are resolved by the
+      # DAEMON, not by compose — so they only work when the daemon can see the
+      # checkout. On this CI host it cannot: jobs run in a container talking to
+      # a sibling dind daemon over tcp://127.0.0.1:2375, with separate
+      # filesystems. Docker then auto-creates each missing source path as an
+      # empty DIRECTORY, which produces two distinct failures:
+      #
+      #   - a file mount becomes dir-onto-file:
+      #       error mounting ".../prometheus.yml" to rootfs at
+      #       "/etc/prometheus/prometheus.yml": not a directory
+      #   - a dir mount silently yields an EMPTY tree, so client-build npm's
+      #     into nothing and nginx serves a blank root — specs would fail
+      #     against a stack that never had the app in it.
+      #
+      # Observed 2026-07-30 on the first real-image e2e run. So probe for it
+      # rather than assuming: write a sentinel into the workspace and ask the
+      # daemon to read it back. Shared filesystem (GitHub-hosted runners,
+      # local dev, DinD with the workspace bind-mounted through) → the value
+      # round-trips and e2e runs for real. Not shared → skip with a notice
+      # instead of reporting a red that says nothing about the product.
+      - name: Probe daemon filesystem sharing
+        id: fsprobe
         if: steps.probe.outputs.present == 'true'
+        run: |
+          sentinel=".e2e-fsprobe-${GITHUB_RUN_ID:-local}"
+          printf 'shared-ok' > "${sentinel}"
+          got=$(docker run --rm -v "${PWD}/${sentinel}:/probe:ro" \
+                  alpine:3.20 cat /probe 2>/dev/null || true)
+          rm -f "${sentinel}"
+          if [ "${got}" = "shared-ok" ]; then
+            echo "shared=true" >> "$GITHUB_OUTPUT"
+            echo "daemon sees the workspace — running the compose stack"
+          else
+            echo "shared=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::docker daemon does not share this job's filesystem (got '${got}'); compose bind-mounts cannot resolve, so e2e is skipped. Run it where the daemon sees the checkout."
+          fi
+
+      - name: docker compose up
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         env:
           CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           docker compose -f infra/compose.yaml --profile observability up -d --wait
 
+      # Every compose subcommand interpolates the whole file, so each one
+      # needs CHROMELESS_IMAGE — it is declared `?err` REQUIRED. Three steps
+      # here (status, log capture, teardown) invoked compose without it and
+      # each died with "required variable CHROMELESS_IMAGE is missing a
+      # value"; the `if: always()` teardown then failed the job on its own.
       - name: Show service status
-        if: always() && steps.probe.outputs.present == 'true'
+        if: always() && steps.fsprobe.outputs.shared == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           docker compose -f infra/compose.yaml ps
           docker ps -a
 
       - name: Install Playwright + deps
-        if: steps.probe.outputs.present == 'true'
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         working-directory: tests/e2e
         run: |
           npm install --no-audit --no-fund
@@ -102,7 +180,7 @@ jobs:
 
       - name: Run Playwright specs
         id: playwright
-        if: steps.probe.outputs.present == 'true'
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         working-directory: tests/e2e
         env:
           # The compose stack publishes ports as documented in
@@ -119,41 +197,58 @@ jobs:
           set -o pipefail
           npx playwright test --project=chromium 2>&1 | tee playwright.log
 
-      - name: Upload Playwright artefacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-${{ github.run_id }}
-          path: |
-            tests/e2e/playwright-report/
-            tests/e2e/test-results/
-            tests/e2e/playwright.log
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Capture container logs on failure
-        if: failure() && steps.probe.outputs.present == 'true'
+      # OSS-W2: `actions/upload-artifact@v4` fails hard on this host —
+      # "GHESNotSupportedError: @actions/artifact v2.0.0+ … not currently
+      # supported on GHES" — because v4 talks to GitHub's artifact backend
+      # service, which Forgejo does not implement. With `if: always()` it
+      # failed jobs whose own work had passed. Summarise into the log instead;
+      # the failing spec's output is already in playwright.log above.
+      - name: Playwright output summary
+        if: always() && steps.fsprobe.outputs.shared == 'true'
+        working-directory: tests/e2e
         run: |
-          mkdir -p ./compose-logs
+          echo "--- playwright.log tail (artifact upload is unsupported on this host) ---"
+          tail -100 playwright.log 2>/dev/null || echo "(no playwright.log)"
+          echo "--- test-results tree ---"
+          ls -R test-results 2>/dev/null | head -50 || echo "(no test-results)"
+
+      # Same reason as above: no upload-artifact on this host, so the logs go
+      # to the run log where they are actually readable. Tail-bounded per
+      # container so one chatty service can't bury the others — chromium alone
+      # emits a BeginFrame diagnostic line every 5 s.
+      - name: Container logs on failure
+        if: failure() && steps.fsprobe.outputs.shared == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
           for c in $(docker compose -f infra/compose.yaml ps -q); do
             name=$(docker inspect --format '{{.Name}}' "$c" | sed 's|^/||')
-            docker logs "$c" >"./compose-logs/${name}.log" 2>&1 || true
+            echo "::group::${name}"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
           done
 
-      - name: Upload container logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: compose-logs-${{ github.run_id }}
-          path: ./compose-logs/
-          retention-days: 14
-
-      # Gated on the probe like every other compose step: infra/compose.yaml
+      # Gated on the probes like every other compose step: infra/compose.yaml
       # declares CHROMELESS_IMAGE as REQUIRED, so ANY compose subcommand --
       # including `down` -- fails interpolation when it is unset. An
       # ungated `if: always()` teardown therefore failed the whole job even
-      # though the probe had correctly reported "e2e skipped".
+      # though the probe had correctly reported "e2e skipped". It also needs
+      # the var in its OWN env: the gate stops it running when unset, but
+      # when the var IS set and `up` never ran, `down` still interpolates.
+      #
+      # `down` must survive the fs-probe skip too — a failed `up` can leave
+      # containers behind on a daemon we don't share a filesystem with, and
+      # those would then squat on the runner (a real cbwrtc-chromium was
+      # found still streaming 40 min after its job died, respawning chromium
+      # every 30s via the GPU-death self-terminate loop).
       - name: docker compose down
         if: always() && steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
-          docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans
+          docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans || true
+          # Belt-and-braces: compose `down` keys off project labels, which a
+          # half-failed `up` may not have applied to every container.
+          docker rm -f cbwrtc-chromium cbwrtc-signaling cbwrtc-client \
+            cbwrtc-client-build cbwrtc-prometheus cbwrtc-grafana cbwrtc-jaeger \
+            >/dev/null 2>&1 || true

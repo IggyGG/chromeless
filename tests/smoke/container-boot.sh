@@ -23,7 +23,7 @@
 #      is the entire CI matrix already.
 #
 # Layered checks (each step fails loud and identifies which step failed):
-#   1. Build the image if not already present locally.
+#   1. Resolve the image (pull it if a tag was named but isn't local).
 #   2. Start the container detached; poll DevTools (inside) up to 60 s.
 #   3. Assert /json/version returns HTTP 200 and a Browser identifier.
 #   4. Discover the first page target and its webSocketDebuggerUrl.
@@ -36,10 +36,10 @@
 #   bash tests/smoke/container-boot.sh
 #
 # Knobs (env):
-#   SMOKE_IMAGE_TAG        Docker image tag to test. Default: auto-detect
-#                          (prefers chromeless:ci, then :dev,
-#                          then builds :dev from infra/Dockerfile).
-#   SMOKE_FORCE_REBUILD    If "1", always docker build even if a tag exists.
+#   SMOKE_IMAGE_TAG        Docker image tag to test. Pulled if not present
+#                          locally. Default: auto-detect (prefers
+#                          chromeless:ci, then chromeless:dev). There is no
+#                          build fallback — see resolve_or_pull_image.
 #   SMOKE_NAVIGATE_URL     URL Chromium navigates to. Default:
 #                          https://example.com. Override to an offline
 #                          target if the runner has no public outbound
@@ -52,9 +52,8 @@
 #
 # Coordination notes (per infra-dev / T31):
 #   - We run with IDLE_TIMEOUT_S=999999 so the lifecycle idle-watchdog
-#     can't race the smoke and shut the container down mid-test.
-#   - Build context is the repo root with -f infra/Dockerfile (the
-#     Dockerfile COPYs both capture/streamer-page/ and infra/*).
+#     can't race the smoke and shut the container down mid-test. Only the
+#     Phase-1 lineage has that program at all — see step 3.
 #   - cold-start.sh wipes /home/cbuser/.config/chromium each boot, so
 #     this smoke gets a clean profile on every run with no extra effort.
 
@@ -63,7 +62,6 @@ set -euo pipefail
 # ---------- config & helpers ---------------------------------------------
 
 SMOKE_IMAGE_TAG="${SMOKE_IMAGE_TAG:-}"
-SMOKE_FORCE_REBUILD="${SMOKE_FORCE_REBUILD:-0}"
 SMOKE_NAVIGATE_URL="${SMOKE_NAVIGATE_URL:-https://example.com}"
 SMOKE_SCREENSHOT_PATH="${SMOKE_SCREENSHOT_PATH:-/tmp/chromeless-smoke.png}"
 SMOKE_READY_TIMEOUT_S="${SMOKE_READY_TIMEOUT_S:-60}"
@@ -105,23 +103,26 @@ require python3
 
 # ---------- 1. resolve image tag (build if necessary) -------------------
 
-resolve_or_build_image() {
-    if [ "$SMOKE_FORCE_REBUILD" = "1" ]; then
-        log "SMOKE_FORCE_REBUILD=1 — rebuilding image"
-        SMOKE_IMAGE_TAG="${SMOKE_IMAGE_TAG:-chromeless:dev}"
-        ( cd "$REPO_ROOT" && docker build -t "$SMOKE_IMAGE_TAG" -f infra/Dockerfile . ) \
-            || fail "docker build failed"
-        return
-    fi
-
+# OSS-W1: there is no build fallback any more. Every branch below used to
+# `docker build -f infra/Dockerfile .` — the legacy stock-Chromium image,
+# deleted when the M7 native-peer migration removed capture/streamer-page/.
+# The dead branch turned "image absent" into the maximally-misleading
+#   ERROR: resolve : lstat infra: no such file or directory
+#   [smoke] FAIL: docker build failed
+# which is what a pruned image looks like on a shared CI daemon: observed
+# 2026-07-30 on forgejo-runner-7, where dind-gc's high-water
+# `docker image prune -af --filter until=30m` had evicted the image the CI
+# job pulled minutes earlier. So: pull when a tag is named (the image comes
+# from a registry, never from here), and fail with the real reason otherwise.
+resolve_or_pull_image() {
     if [ -n "$SMOKE_IMAGE_TAG" ]; then
         if docker image inspect "$SMOKE_IMAGE_TAG" >/dev/null 2>&1; then
             log "using existing image: $SMOKE_IMAGE_TAG"
             return
         fi
-        log "image $SMOKE_IMAGE_TAG not present; building"
-        ( cd "$REPO_ROOT" && docker build -t "$SMOKE_IMAGE_TAG" -f infra/Dockerfile . ) \
-            || fail "docker build failed"
+        log "image $SMOKE_IMAGE_TAG not present locally; pulling"
+        docker pull "$SMOKE_IMAGE_TAG" >/dev/null \
+            || fail "image $SMOKE_IMAGE_TAG is neither present locally nor pullable (registry auth? tag typo?)"
         return
     fi
 
@@ -133,15 +134,12 @@ resolve_or_build_image() {
         SMOKE_IMAGE_TAG="chromeless:dev"
         log "auto-detected image: $SMOKE_IMAGE_TAG"
     else
-        SMOKE_IMAGE_TAG="chromeless:dev"
-        log "no chromeless image present; building $SMOKE_IMAGE_TAG"
-        ( cd "$REPO_ROOT" && docker build -t "$SMOKE_IMAGE_TAG" -f infra/Dockerfile . ) \
-            || fail "docker build failed"
+        fail "no image to test: set SMOKE_IMAGE_TAG to a cloud_browser_worker image (this repo cannot build one — see build/chromeless-build.sh)"
     fi
 }
 
 step "1. resolve image"
-resolve_or_build_image
+resolve_or_pull_image
 
 # ---------- 2. start container & wait for DevTools (in container) ------
 
@@ -175,21 +173,36 @@ done
 [ "$ready" = "1" ] || fail "DevTools did not respond within ${SMOKE_READY_TIMEOUT_S}s"
 
 # ---------- 3. watchdog env propagation --------------------------------
+#
+# Phase-1 images run [program:idle-watchdog] under supervisord, and this
+# step asserts the IDLE_TIMEOUT_S we passed on docker run actually reached
+# it. M7 images (build/Dockerfile.runtime + infra/supervisord.phase2.conf)
+# deliberately ship NO idle-watchdog — the native peer owns lifecycle — so
+# there is nothing to assert. The first CI run against a real cr7727-*
+# image (2026-07-30) failed exactly here: 20 s polling for a log file that
+# never exists in that lineage. Probe the baked conf for the program and
+# skip honestly when the image doesn't carry it, so the smoke stays valid
+# for both lineages.
 
 step "3. watchdog env"
-WATCHDOG_LOG=""
-for i in $(seq 1 20); do
-    WATCHDOG_LOG=$(docker exec "$CONTAINER_ID" sh -c \
-        'cat /var/log/supervisor/idle-watchdog.log 2>/dev/null || true') \
-        || fail "reading idle-watchdog log failed"
-    if printf '%s\n' "$WATCHDOG_LOG" | grep -q 'idle_timeout=999999s'; then
-        log "idle-watchdog inherited IDLE_TIMEOUT_S=999999"
-        break
-    fi
-    sleep 1
-done
-printf '%s\n' "$WATCHDOG_LOG" | grep -q 'idle_timeout=999999s' \
-    || fail "idle-watchdog did not inherit IDLE_TIMEOUT_S=999999"
+if docker exec "$CONTAINER_ID" grep -q '^\[program:idle-watchdog\]' \
+        /etc/supervisor/supervisord.conf 2>/dev/null; then
+    WATCHDOG_LOG=""
+    for i in $(seq 1 20); do
+        WATCHDOG_LOG=$(docker exec "$CONTAINER_ID" sh -c \
+            'cat /var/log/supervisor/idle-watchdog.log 2>/dev/null || true') \
+            || fail "reading idle-watchdog log failed"
+        if printf '%s\n' "$WATCHDOG_LOG" | grep -q 'idle_timeout=999999s'; then
+            log "idle-watchdog inherited IDLE_TIMEOUT_S=999999"
+            break
+        fi
+        sleep 1
+    done
+    printf '%s\n' "$WATCHDOG_LOG" | grep -q 'idle_timeout=999999s' \
+        || fail "idle-watchdog did not inherit IDLE_TIMEOUT_S=999999"
+else
+    log "image has no [program:idle-watchdog] (M7 native-peer lineage); skipping watchdog-env assertion"
+fi
 
 # ---------- 4. /json/version returns Chromium ---------------------------
 
