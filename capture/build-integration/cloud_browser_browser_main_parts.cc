@@ -30,6 +30,7 @@
 #include "base/logging.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/functional/bind.h"  // CV2-GPU-DEATH — BindRepeating/BindOnce
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/thread_restrictions.h"  // CV2-WARM — H1 ScopedAllowBaseSyncPrimitives
 #include "base/time/time.h"
@@ -484,6 +485,30 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   initial_web_contents_->WasShown();
   initial_web_contents_->Focus();
 
+  // CV2 capture-keepalive (RCA 2026-06-30) — THE fix for the ~50% cold-guest
+  // RENDERER-STARVED defect. WasShown() above makes the page "visible", but an
+  // offscreen cb-chromium renderer with no on-screen surface still applies
+  // "hidden rendering" optimizations: its cc::Scheduler stops raising
+  // client_needs_begin_frame_, so it never subscribes to our external
+  // BeginFrame source and emits ZERO CompositorFrames — even while the driver
+  // issues+acks BeginFrames at 29fps (measured: frames_received=0,
+  // VERDICT=RENDERER-STARVED, on ~50% of cold guests, content- and
+  // concurrency-independent, solo-guest-reproducible). web_contents.h is
+  // explicit that the capturer count is THE mechanism that disables those
+  // optimizations: "renderers will be configured to produce compositor frames
+  // regardless of their 'backgrounded' or on-screen occlusion state." The
+  // existing WasShown() comment below even *claims* "framesink capture force
+  // the renderer to keep producing output via separate capturer refcounts" —
+  // but that refcount was never actually taken (IncrementCapturerCount was
+  // absent from the whole capture path). Take it now and hold it for the
+  // worker's lifetime via the member ScopedClosureRunner (released before
+  // initial_web_contents_ is torn down). gfx::Size() = don't force a capture
+  // size (the FrameSinkVideoCapturer drives sizing); stay_hidden=false (we ARE
+  // shown); stay_awake=true (keep the renderer non-throttled); is_activity=true.
+  capture_keepalive_handle_ = initial_web_contents_->IncrementCapturerCount(
+      gfx::Size(), /*stay_hidden=*/false, /*stay_awake=*/true,
+      /*is_activity=*/true);
+
   // CV2-ICE: start the BeginFrame driver. This is THE primary fix for the
   // ~0.5 fps capture starvation. The FrameSinkVideoCapturer is a pull
   // consumer that does NOT request BeginFrames, and cb-chromium has no real
@@ -690,6 +715,36 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "returned null — Cb.startFrameSinkCapture would fail with "
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
+
+  // CV2 idle-refresh: enable the capturer's constant-frame-rate hold-and-repeat
+  // so WebRTC keeps streaming the last painted frame when the captured renderer
+  // goes IDLE and stops committing CompositorFrames. THE DEFECT (byte-proven on
+  // staging 2026-06-25): idle / sporadic-animation content (e.g. animejs.com
+  // between animations) produced ZERO frames — guest serial VERDICT=RENDERER-
+  // STARVED, frames_received +0 — while continuously-damaging content (scrolling
+  // pages, the portal UI) streamed fine at ~29fps. Root cause: the
+  // FrameSinkVideoCapturer is a PULL consumer and the BeginFrame driver's ticks
+  // do not reach an idle renderer's cc::Scheduler (cb_begin_frame_driver.h:60-99
+  // + 125-134 explicitly defer the static-page cure to "the encoder/track-source
+  // layer [must] hold-and-repeat the last frame"). The capturer now runs an
+  // idle-refresh deadline that calls the producer's RequestRefreshFrame() — viz
+  // re-delivers the last composited surface (no renderer repaint) as a normal
+  // OnFrameCaptured, advancing frames_received so the wire shows real fps.
+  //
+  // 100ms (10fps) is the deadline. SAFE FOR THE PRODUCING PATH: every delivered
+  // frame re-arms the deadline, so any page painting faster than 10fps never
+  // lets it fire — the documented producing cases run ~29fps (34ms inter-frame),
+  // a >2.9x margin under the 100ms deadline, so they issue ZERO refreshes and
+  // are bit-for-bit unchanged. Only a genuinely idle page (no natural frame for
+  // 100ms) gets the steady 10fps hold-and-repeat, which is imperceptible for
+  // static content (same pixels) and snaps back to full fps the instant the
+  // page paints again. Set here (not at capture-start) because it is stored and
+  // only takes effect once capturer_->Start() runs; the capturer is reached via
+  // capturer_for_test() exactly as the BeginFrame-driver diagnostic wiring below
+  // already does. BAKE-GATED: needs a cb-chromium rootfs rebuild to deploy.
+  if (auto* idle_capturer = cb_track_source_->capturer_for_test()) {
+    idle_capturer->SetIdleRefreshPeriod(base::Hertz(10));
+  }
 
   // CV2-ICE diag: now that the capturer + resolver both exist, wire them into
   // the BeginFrame driver as DIAGNOSTIC-ONLY observation sources (they do NOT
@@ -906,6 +961,20 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
   // outbound offer envelope from CreateOffer can be sent).
   offerer_driver_->Start();
   ws_client_->Connect();
+
+  // CV2-GPU-DEATH: wire the BeginFrame driver's permanent-renderer-death
+  // callback now that offerer_driver_ exists. The driver fires this (on this
+  // same main sequence) after 30s of continuous zero frame production despite
+  // an active capture target — the run11-class failure the =15 watchdog fix
+  // cannot address (ack-loop healthy, renderer produces nothing, forever).
+  // base::Unretained is safe: begin_frame_driver_ is owned by main_parts and
+  // reset in PostMainMessageLoopRun strictly before `this` is destroyed, so the
+  // callback cannot outlive main_parts.
+  if (begin_frame_driver_) {
+    begin_frame_driver_->SetPermanentDeathCallback(base::BindRepeating(
+        &CloudBrowserBrowserMainParts::OnGpuPermanentDeath,
+        base::Unretained(this)));
+  }
 
   // CV2-83 / cb_dc_host adoption — create and bind the native
   // DataChannels before adding media transceivers. The first media
@@ -1423,6 +1492,49 @@ void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {
   // path. A future R# may add a Cb.shutdown CDP method here.
   LOG(ERROR) << "CV2-69 offerer_driver: unrecoverable failure, reason="
              << reason;
+}
+
+// CV2-GPU-DEATH: the BeginFrame driver reported permanent renderer/GPU death
+// (run11-class: ack-loop healthy, capturer produced nothing for 30s+). This is
+// UNRECOVERABLE in-process — run11 shows the GPU process already crashed+reinit
+// and the renderer still never recovered; a fresh WebContents in the same
+// browser process inherits the same wedged GPU singleton. The only cure is a
+// brand-new guest, so: (1) tell physics to recycle THIS element's allocation
+// via CloseUnhealthy() (emits the session_unhealthy envelope → registry.release
+// → next allocate_or_reuse mints a fresh guest), then (2) exit cleanly so the
+// dead microVM's resources are freed promptly rather than lingering as a
+// "connected but producing nothing" peer. Runs on the main sequence (the
+// driver posts it here), so direct offerer_driver_ access is safe.
+void CloudBrowserBrowserMainParts::OnGpuPermanentDeath() {
+  LOG(ERROR) << "CV2-GPU-DEATH: main_parts received permanent-death signal from "
+                "BeginFrame driver — signalling session-unhealthy to physics "
+                "and self-terminating for a fresh-guest re-pin";
+
+  if (offerer_driver_) {
+    // CV2-GPU-DEATH review Finding #2: PrepareForTeardown MUST run before the
+    // driver close — cb_audio_lifecycle.h documents that OnClosed fires after
+    // pc_ is dropped, so skipping this routes into the "embedder forgot"
+    // fallback (a WARNING + non-graceful stop that opens a PulseAudio
+    // orphan-stream window). Mirror the normal PostMainMessageLoopRun teardown.
+    if (audio_lifecycle_) {
+      audio_lifecycle_->PrepareForTeardown("gpu-permanent-death");
+    }
+    // Emits session_unhealthy (best-effort) + tears down the PC. Distinct from
+    // Close() so physics recycles rather than treating this as a clean bye.
+    offerer_driver_->CloseUnhealthy("gpu-permanent-death");
+  }
+
+  // Quit the main message loop on a short delay so the session_unhealthy
+  // envelope has a chance to flush over the WS before the process tears down.
+  // quit_main_message_loop_ is the parked run-loop QuitClosure (see
+  // WillRunMainMessageLoop); running it drives the LIFO PostMainMessageLoopRun
+  // teardown. Guard against a double-fire: the driver's own one-way latch
+  // (permanent_death_signaled_) already ensures OnGpuPermanentDeath runs at most
+  // once, but check the closure is still non-null defensively.
+  if (quit_main_message_loop_) {
+    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, std::move(quit_main_message_loop_), base::Seconds(1));
+  }
 }
 // ============== END CV2-69 observer overrides ==============
 

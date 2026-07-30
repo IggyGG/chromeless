@@ -33,6 +33,7 @@
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "base/threading/thread.h"
+#include "base/time/time.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
@@ -107,6 +108,9 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   bool start_called() const { return start_called_; }
   int start_calls() const { return start_calls_; }
   int change_target_calls() const { return change_target_calls_; }
+  // Count of RequestRefreshFrame() the producer received — the idle-refresh
+  // hold-and-repeat signal (see capturer.h IDLE REFRESH doc).
+  int refresh_calls() const { return refresh_calls_; }
   int set_resolution_constraints_calls() const {
     return set_resolution_constraints_calls_;
   }
@@ -150,7 +154,7 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
     stop_called_ = true;
     if (consumer_.is_bound()) consumer_->OnStopped();
   }
-  void RequestRefreshFrame() override {}
+  void RequestRefreshFrame() override { ++refresh_calls_; }
   void CreateOverlay(int32_t /*stacking_index*/,
                      mojo::PendingReceiver<viz::mojom::FrameSinkVideoCaptureOverlay>
                          /*receiver*/) override {}
@@ -190,6 +194,7 @@ class FakeProducer : public viz::mojom::FrameSinkVideoCapturer {
   int start_calls_ = 0;
   int change_target_calls_ = 0;
   int set_resolution_constraints_calls_ = 0;
+  int refresh_calls_ = 0;
   gfx::Size last_resolution_;
   uint64_t ts_us_ = 0;
 };
@@ -226,8 +231,19 @@ class FrameSinkCapturerTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    capturer_.reset();
+    // Release delivered frames BEFORE destroying the capturer. Each delivered
+    // media::VideoFrame holds a refcounted BufferHandleScope whose destructor
+    // runs on_done_metric_ = BindRepeating(++s->buffers_done, &stats_) — a raw
+    // pointer into the capturer's own stats_ member (capturer.cc:281). If the
+    // capturer (and its stats_) is destroyed FIRST, releasing a still-held
+    // frame fires that closure against freed memory → partition_alloc
+    // "Detected dangling raw_ptr in unretained" FATAL. Tests that consume their
+    // frames mid-body (delivered_.clear()) never hit this; the idle-refresh
+    // tests that legitimately leave frames queued at teardown did. Ordering the
+    // releases correctly is the fix — production is unaffected (libwebrtc
+    // releases each frame while the capturer is live).
     delivered_.clear();
+    capturer_.reset();
   }
 
   void OnFrame(scoped_refptr<media::VideoFrame> f) {
@@ -487,6 +503,179 @@ TEST_F(FrameSinkCapturerTest, RetargetReappliesResolutionConstraints) {
       << "retarget must re-assert SetResolutionConstraints so the new surface "
          "is captured at the pinned resolution, not its natural size";
   EXPECT_EQ(gfx::Size(1280, 720), producer_.last_resolution());
+}
+
+// =====================================================================
+// Idle-refresh deadline (constant-frame-rate hold-and-repeat).
+//
+// Same fixture shape as FrameSinkCapturerTest but with a MOCK_TIME task
+// environment so we can deterministically FastForwardBy() the idle deadline
+// instead of sleeping. These cover the staging defect (animejs.com idle →
+// frames_received +0) and, critically, the SAFETY invariant that an animating
+// page (frames arriving faster than the deadline) is never refreshed.
+// =====================================================================
+class FrameSinkCapturerIdleRefreshTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    [[maybe_unused]] static const bool kMojoInited = []() {
+      mojo::core::Init();
+      return true;
+    }();
+    auto producer_remote = producer_.BindAndPassRemote();
+    capturer_ = std::make_unique<CloudBrowserFrameSinkCapturer>(
+        std::move(producer_remote),
+        base::BindRepeating(&FrameSinkCapturerIdleRefreshTest::OnFrame,
+                            base::Unretained(this)));
+  }
+
+  void TearDown() override {
+    // Release delivered frames BEFORE destroying the capturer. Each delivered
+    // media::VideoFrame holds a refcounted BufferHandleScope whose destructor
+    // runs on_done_metric_ = BindRepeating(++s->buffers_done, &stats_) — a raw
+    // pointer into the capturer's own stats_ member (capturer.cc:281). If the
+    // capturer (and its stats_) is destroyed FIRST, releasing a still-held
+    // frame fires that closure against freed memory → partition_alloc
+    // "Detected dangling raw_ptr in unretained" FATAL. Tests that consume their
+    // frames mid-body (delivered_.clear()) never hit this; the idle-refresh
+    // tests that legitimately leave frames queued at teardown did. Ordering the
+    // releases correctly is the fix — production is unaffected (libwebrtc
+    // releases each frame while the capturer is live).
+    delivered_.clear();
+    capturer_.reset();
+  }
+
+  void OnFrame(scoped_refptr<media::VideoFrame> f) {
+    delivered_.push_back(std::move(f));
+  }
+
+  // Advance mock time, which both fires the idle deadline timer AND pumps the
+  // Mojo IPC that carries RequestRefreshFrame() to the FakeProducer.
+  void AdvanceBy(base::TimeDelta d) { task_env_.FastForwardBy(d); }
+
+  // Pump pending Mojo IPC WITHOUT advancing mock time (so the idle deadline
+  // does not fire). Needed after Start() so the producer->Start message lands
+  // and binds the FakeProducer's consumer before the first SendFrame(), and so
+  // that re-delivered frames settle. Mirrors FrameSinkCapturerTest::
+  // FlushPendingIPC but on the MOCK_TIME environment.
+  void FlushPendingIPC() { task_env_.RunUntilIdle(); }
+
+  // MOCK_TIME so the OneShotTimer deadline is driven by FastForwardBy, not a
+  // real sleep. SingleThreadTaskEnvironment forwards the TimeSource arg to its
+  // TaskEnvironment base, which exposes FastForwardBy().
+  base::test::SingleThreadTaskEnvironment task_env_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+  FakeProducer producer_;
+  std::unique_ptr<CloudBrowserFrameSinkCapturer> capturer_;
+  std::vector<scoped_refptr<media::VideoFrame>> delivered_;
+
+  static constexpr base::TimeDelta kPeriod = base::Milliseconds(100);
+};
+
+// Off by default: a capturer that never had SetIdleRefreshPeriod() called must
+// NEVER issue a RequestRefreshFrame, no matter how long it sits idle. This is
+// the guarantee that existing callers/tests are bit-for-bit unaffected.
+TEST_F(FrameSinkCapturerIdleRefreshTest, DisabledByDefaultNeverRefreshes) {
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  AdvanceBy(base::Seconds(5));
+  EXPECT_EQ(0, producer_.refresh_calls())
+      << "idle-refresh must be opt-in; a capturer with no SetIdleRefreshPeriod "
+         "must not touch the producer when idle";
+  EXPECT_EQ(0u, capturer_->GetStats().idle_refreshes_requested);
+}
+
+// The defect cure: an IDLE captured renderer (no natural frames) must get a
+// steady hold-and-repeat cadence of RequestRefreshFrame() so WebRTC keeps
+// streaming the last painted frame instead of going to 0 fps.
+TEST_F(FrameSinkCapturerIdleRefreshTest, IdleRendererGetsSteadyRefreshCadence) {
+  capturer_->SetIdleRefreshPeriod(kPeriod);
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+
+  // Just before the first deadline: nothing yet.
+  AdvanceBy(kPeriod - base::Milliseconds(1));
+  EXPECT_EQ(0, producer_.refresh_calls());
+
+  // Cross the first deadline → one refresh, and the fallback re-arm keeps the
+  // cadence going every period even though the FakeProducer delivers no frame
+  // back (best-effort RequestRefreshFrame may be dropped by viz).
+  AdvanceBy(base::Milliseconds(1));
+  EXPECT_EQ(1, producer_.refresh_calls());
+  AdvanceBy(kPeriod);
+  EXPECT_EQ(2, producer_.refresh_calls());
+  AdvanceBy(kPeriod);
+  EXPECT_EQ(3, producer_.refresh_calls());
+
+  EXPECT_EQ(3u, capturer_->GetStats().idle_refreshes_requested)
+      << "every issued refresh must be counted for log/metric attribution";
+}
+
+// The SAFETY invariant: an ANIMATING page (frames arriving faster than the
+// deadline) must NEVER be refreshed — every delivered frame re-arms the
+// deadline before it can fire, so the working PRODUCING path is untouched.
+TEST_F(FrameSinkCapturerIdleRefreshTest, AnimatingPageIsNeverRefreshed) {
+  capturer_->SetIdleRefreshPeriod(kPeriod);
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();  // land producer->Start so SendFrame's consumer is bound.
+
+  // Deliver a frame every 33ms (≈30fps) for ~1s — well inside the 100ms
+  // deadline. Each natural frame must push the deadline out so it never fires.
+  const base::TimeDelta kInterFrame = base::Milliseconds(33);
+  for (int i = 0; i < 30; ++i) {
+    producer_.SendFrame();
+    AdvanceBy(kInterFrame);
+  }
+
+  EXPECT_EQ(0, producer_.refresh_calls())
+      << "a page painting faster than the idle deadline must never be "
+         "refreshed; the producing path must stay bit-for-bit unchanged";
+  EXPECT_EQ(0u, capturer_->GetStats().idle_refreshes_requested);
+  EXPECT_EQ(30u, capturer_->GetStats().frames_received)
+      << "all natural frames must still be delivered normally";
+}
+
+// Transition: a page that animates, then goes idle, then animates again must
+// refresh ONLY during the idle gap and snap straight back to the natural path
+// when it resumes painting.
+TEST_F(FrameSinkCapturerIdleRefreshTest, RefreshOnlyDuringIdleGap) {
+  capturer_->SetIdleRefreshPeriod(kPeriod);
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  FlushPendingIPC();  // land producer->Start so SendFrame's consumer is bound.
+
+  // Phase 1 — animating: no refreshes.
+  for (int i = 0; i < 5; ++i) {
+    producer_.SendFrame();
+    AdvanceBy(base::Milliseconds(33));
+  }
+  EXPECT_EQ(0, producer_.refresh_calls());
+
+  // Phase 2 — idle for ~3 periods: steady refresh cadence kicks in.
+  AdvanceBy(kPeriod * 3 + base::Milliseconds(1));
+  const int idle_refreshes = producer_.refresh_calls();
+  EXPECT_GE(idle_refreshes, 3)
+      << "idle gap must produce a hold-and-repeat refresh per period";
+
+  // Phase 3 — animation resumes: a natural frame re-arms the deadline, so no
+  // further refresh fires within one inter-frame interval.
+  producer_.SendFrame();
+  AdvanceBy(base::Milliseconds(33));
+  EXPECT_EQ(idle_refreshes, producer_.refresh_calls())
+      << "a resumed natural frame must cancel the pending idle deadline; no "
+         "refresh should fire while the page is painting again";
+}
+
+// Stop() must cancel the deadline: a stopped capturer must not keep poking a
+// stopped producer with RequestRefreshFrame.
+TEST_F(FrameSinkCapturerIdleRefreshTest, StopCancelsIdleRefresh) {
+  capturer_->SetIdleRefreshPeriod(kPeriod);
+  capturer_->Start(viz::VideoCaptureTarget(viz::FrameSinkId(1, 1)));
+  AdvanceBy(kPeriod + base::Milliseconds(1));
+  ASSERT_GE(producer_.refresh_calls(), 1);
+
+  capturer_->Stop();
+  const int at_stop = producer_.refresh_calls();
+  AdvanceBy(kPeriod * 5);
+  EXPECT_EQ(at_stop, producer_.refresh_calls())
+      << "Stop() must cancel the idle deadline so no refresh is sent to a "
+         "stopped producer";
 }
 
 }  // namespace

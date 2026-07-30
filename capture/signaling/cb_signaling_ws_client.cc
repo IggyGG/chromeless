@@ -625,12 +625,18 @@ void SignalingWsClient::FinishFrame(bool fin) {
     // Mid-message fragment — keep accumulating into inbound_message_.
     return;
   }
-  // Final fragment: decode the fully-assembled payload, then reset for the
-  // next message. inbound_message_ holds EXACTLY one message's bytes (every
-  // frame was length-bounded), so Decode never sees partial/concatenated JSON.
-  receiving_message_ = false;
-  LOG(INFO) << "cb_signaling: message assembled bytes="
-            << inbound_message_.size() << " — decoding";
+  // Final fragment: decode the fully-assembled payload.
+  // CV2-WALL2 FIX: do NOT reset receiving_message_ here. That flag is owned by
+  // the ARRIVAL path (OnDataFrame :477 sets `= !fin`), which already closes the
+  // message on its fin frame. FinishFrame runs on the DECODE timeline, which
+  // LAGS arrival (BeginReadData returns SHOULD_WAIT until pipe bytes land, so
+  // frames queue faster than they drain). A later message can already have
+  // OPENED (its OnDataFrame set receiving_message_=true) by the time THIS
+  // message decodes — resetting the flag here clobbered that open, so the next
+  // message's CONTINUATION tripped the "no message open" guard and killed the
+  // WS. The arrival path is the single authority for message-open state.
+  LOG(INFO) << "cb_signaling: WALL2-decode message assembled bytes="
+            << inbound_message_.size() << " — decoding (no receiving_message_ reset)";
   std::optional<Envelope> env = Decode(inbound_message_);
   inbound_message_.clear();
   if (!env.has_value()) {

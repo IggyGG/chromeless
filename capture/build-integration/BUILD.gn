@@ -1462,6 +1462,16 @@ test("cloud_browser_framesink_capturer_unittests") {
     "//testing/gmock",
     "//testing/gtest",
     "//ui/gfx/geometry",
+    # gtest's value pretty-printer for gfx::Size. RetargetReappliesResolution
+    # Constraints does EXPECT_EQ(gfx::Size(1280,720), ...), which makes gtest
+    # reference gfx::PrintTo(const Size&, ostream*). That symbol is DEFINED in
+    # //ui/gfx:test_support (geometry/test/geometry_util.cc), NOT in
+    # //ui/gfx/geometry (which only declares it in size.h). Without this dep
+    # the suite fails to LINK: "undefined symbol: gfx::PrintTo(gfx::Size
+    # const&, std::ostream*)". Latent since the gfx::Size EXPECT_EQ landed
+    # (6dcc1b27, 2026-06-14) — surfaced the first time this pipeline links the
+    # full suite. testonly target; this is a test() so that's fine.
+    "//ui/gfx:test_support",
   ]
   configs += [ ":cb_include_paths" ]               # T17.
 }

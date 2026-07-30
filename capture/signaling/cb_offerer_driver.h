@@ -167,6 +167,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -361,6 +362,15 @@ class CbOffererDriver
   // NOT wait for the broker's ack before transitioning to kClosed.
   void Close(std::string_view reason);
 
+  // CV2-GPU-DEATH: like Close(), but first emits a session_unhealthy envelope
+  // so physics releases this element's isolation-registry entry (the next
+  // allocate_or_reuse mints a FRESH guest instead of reusing this dead one).
+  // Called by main_parts when the BeginFrame driver reports permanent
+  // renderer/GPU death (run11-class: ack-loop healthy, zero production for
+  // 30s+). Distinct from Close() so a user-initiated close does not trigger a
+  // recycle. Safe from posted-task contexts (same teardown as Close()).
+  void CloseUnhealthy(std::string_view reason);
+
   // State accessor for tests + the embedder's readiness gate.
   OffererState state() const;
 
@@ -490,6 +500,10 @@ class CbOffererDriver
   // with teardown regardless.
   bool SendByeEnvelope();
 
+  // CV2-GPU-DEATH: emit the session_unhealthy envelope (monostate payload,
+  // `data` omitted like bye). Called from CloseUnhealthy() before teardown.
+  bool SendSessionUnhealthyEnvelope();
+
   // R6: renegotiation orchestrator. Three call sites converge here:
   // RequestRenegotiation(), HopHandleRenegotiationNeeded() (post-
   // initial), and HandleRequestRenegotiateEnvelope(). |trigger| is
@@ -548,6 +562,19 @@ class CbOffererDriver
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
 
   std::vector<IceCandidatePayload> pending_remote_ice_;
+
+  // CV2-ICE early-answer buffer (RCA 2026-06-30, kSettingLocal gap).
+  // On the cross-pod physics path the `answer` envelope can arrive
+  // BEFORE our own SetLocalDescription completes — i.e. while state_ is
+  // still kCreatingOffer / kSettingLocal, strictly EARLIER in the enum
+  // than kAwaitingAnswer. The prior dup-tolerance guard only covered the
+  // too-LATE window (kSettingRemote / kIceInFlight); a too-EARLY answer
+  // fell through to FailWithReason → teardown → guest SIGABRT (respR=0).
+  // This is the legitimate first answer, NOT a redundant duplicate, so
+  // it must be BUFFERED (not dropped) and replayed once SLD completes and
+  // we reach kAwaitingAnswer. HopHandleSetLocalDescriptionComplete drains
+  // it. Holds the SDP only (the answer payload); empty == none buffered.
+  std::optional<std::string> pending_early_answer_sdp_;
 
   OffererState state_ = OffererState::kIdle;
 

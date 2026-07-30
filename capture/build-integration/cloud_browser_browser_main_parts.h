@@ -59,6 +59,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"           // CV2-WARM — raw_ptr<AudioDeviceModule>
 #include "base/timer/timer.h"
+#include "base/functional/callback_helpers.h"  // CV2 — base::ScopedClosureRunner (capture_keepalive_handle_); placed after base/timer to avoid an add/add textual collision with the CV2-WARM raw_ptr.h include (functionally order-independent)
 #include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
 // that hold the runtime-wire consumer instances. CbCursorClient (M5
@@ -179,6 +180,16 @@ class CloudBrowserBrowserMainParts
   void OnRenegotiationCompleted() override;
   void OnClosed(std::string_view reason) override;  // offerer-driver path
   void OnFailed(std::string_view reason) override;
+
+  // CV2-GPU-DEATH: wired to begin_frame_driver_->SetPermanentDeathCallback().
+  // Fired (on the main sequence) when the BeginFrame driver detects permanent
+  // renderer/GPU death (30s+ of zero frame production, run11-class). Signals
+  // physics to recycle this element (offerer_driver_->CloseUnhealthy() →
+  // session_unhealthy envelope → registry.release) then quits the main message
+  // loop so the dead microVM's resources free promptly and a fresh guest boots
+  // on the next allocate_or_reuse. NOT an observer override — a plain callback
+  // target.
+  void OnGpuPermanentDeath();
 
   // Public read-only accessor for the default BrowserContext. Returns
   // nullptr until PreMainMessageLoopRun has executed (the context is
@@ -365,6 +376,22 @@ class CloudBrowserBrowserMainParts
 
   std::unique_ptr<CloudBrowserBrowserContext> browser_context_;
   std::unique_ptr<content::WebContents> initial_web_contents_;
+
+  // CV2 capture-keepalive (RCA 2026-06-30). The WebContents capturer-count
+  // handle. WITHOUT it the renderer applies "hidden rendering" optimizations
+  // and stops emitting CompositorFrames when not visibly on-screen — even
+  // though we drive external BeginFrames and call WasShown(). web_contents.h
+  // (M140) is explicit: "Both internal-to-content and embedders must increment
+  // the capturer count while capturing ... renderers will be configured to
+  // produce compositor frames regardless of their 'backgrounded' or on-screen
+  // occlusion state." This was the ~50% cold-guest RENDERER-STARVED defect
+  // (BeginFrames issued+acked at 29fps but frames_received=0): the external
+  // BeginFrame source reaches the renderer only when it has SUBSCRIBED, and an
+  // un-pinned renderer drops its subscription. Holding this handle for the
+  // session keeps the renderer producing. ScopedClosureRunner releases the
+  // count on destruction; declared AFTER initial_web_contents_ so reverse-order
+  // member destruction drops the handle while the WebContents is still alive.
+  base::ScopedClosureRunner capture_keepalive_handle_;
 
   // ChromelessV2 M1 — browser-process PeerConnectionFactory + the 3
   // dedicated rtc::Threads it runs on. The PCF replaces the renderer-

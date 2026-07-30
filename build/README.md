@@ -148,10 +148,87 @@ Each step prints its `=== STEP N/9 ... ===` markers and skips the
 heavy work. Useful as a pre-merge smoke test before a CI/CD
 push.
 
+## Provenance — `build/guest-release.json`
+
+This repo BUILDS the guest image, so this repo states what shipped.
+`build/guest-release.json` is that statement, and it is the intended
+source of truth for any consumer that pins the guest image.
+
+### The loop this exists to break
+
+The monorepo's `scripts/chromeless-auto-bump.sh` resolves its target
+image from the k8s `BrowserSessionPool/sw-pool` object, declaring that
+pool "the source of truth — we follow, never lead". But `sw-pool`'s
+template image is only ever hand-edited to match the monorepo's own pin.
+So `CURRENT == TARGET` by construction, and the bumper reports "up to
+date", exit 0, forever. The chromeless repo was not an input at any
+point. That is not a check that broke — it is a check that structurally
+**cannot** fail, because nothing in the loop can disagree with anything
+else. Adding a producer-side record gives the comparison a second,
+independent voice, so it can finally come out false.
+
+### Schema (`chromeless.guest-release/v1`)
+
+| field | meaning |
+|---|---|
+| `commit` | full 40-char chromeless SHA the guest binary was built from |
+| `image` | fully-qualified image ref including tag — what a pin must equal |
+| `digest` | `sha256:` manifest digest; the immutable identity (a tag can be re-pushed, a digest cannot) |
+| `dockerfile` | which Dockerfile produced it — `build/Dockerfile.runtime` for the real guest |
+| `built_at` | RFC3339 UTC |
+| `recorded_by` | `chromeless-kaniko-push.sh` for automated writes; `seed-manual` for the hand-seeded first entry |
+| `known_gap` | present ONLY while a stated invariant is knowingly violated; see below |
+
+Fields are flat and literal so a checker needs no parsing cleverness.
+Two invariants a consumer should assert:
+
+1. the monorepo pin string equals `.image`
+2. `.commit` is an ancestor of chromeless `main`
+
+### `known_gap` — read this before "fixing" a red
+
+The currently-recorded image was built from branch `capstats-plus-rearm`,
+which was never merged. Invariant 2 is therefore **expected to fail
+today**, and the record says so in `known_gap` rather than hiding it.
+That red is correct and actionable: production is running a binary whose
+exact provenance is not on `main`.
+
+Note the subtlety — the reconcile PR cherry-picked the load-bearing
+commit onto `main`, which makes main's guest **source** byte-identical to
+the shipped tree, but a cherry-pick mints a *new* SHA. So the recorded
+commit still is not an ancestor. Source parity is not ancestry.
+
+It clears exactly one way: rebuild the guest from a `main` SHA and let
+the push step rewrite this file. Never by hand-editing the field.
+
+### How it gets written
+
+`infra/k8s/chromeless-build/chromeless-kaniko-push.sh` writes it after a
+push whose Job reports `Complete=True`, so the file cannot claim an image
+that was never pushed. The SHA comes from the build **tag**, never from
+the operator's local checkout — that tree is routinely on some other
+branch, which is precisely how the drift arose.
+
+`chromeless-build.sh` deliberately does NOT write it: that script runs
+inside the K8s Job, on a build node, as uid 1000, against a bootstrap
+clone with no credentials and no working tree. It cannot update a
+git-tracked file, and wiring it there would be a mechanism that silently
+never runs.
+
+**The honest limitation:** the push script writes the file but does not
+commit it — it prints the exact `git commit` command instead. An operator
+who pushes and never commits leaves the record stale, and the
+consumer-side check then fails on the mismatch. Stale-and-caught is the
+designed failure mode; silently-wrong is the one being eliminated.
+
 ## Coordination notes
 
 - **T112 + T113 land together.** T112 owns the K8s Job spec; T113
   owns this script. Neither one is useful without the other.
+- **Guest provenance.** After any `chromeless-kaniko-push.sh` run,
+  commit the regenerated `build/guest-release.json` in the same change
+  that rolls the pin. A push that is never committed reads downstream as
+  a pin/record disagreement.
 - **T114 follows.** Once T113 produces a runtime image, T114
   exercises NVENC on the triform-5 Blackwell pool — see the joint
   task description.

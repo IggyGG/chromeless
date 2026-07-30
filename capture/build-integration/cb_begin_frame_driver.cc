@@ -38,6 +38,56 @@ constexpr base::TimeDelta kDiagnosticInterval = base::Seconds(5);
 // making the watchdog's re-issue safe against viz's overlap DCHECK.
 constexpr base::TimeDelta kStallWatchdogTimeout = base::Seconds(1);
 
+// How many CONSECUTIVE stall-watchdog fires (each kStallWatchdogTimeout apart)
+// with NO intervening BeginFrame ack must accrue before OnStallWatchdog
+// actually re-issues. Every fire before this WAITS (re-arm only).
+//
+// A missed ack has two causes that the driver cannot tell apart instantly:
+//   (1) the viz external-begin-frame controller is transiently UNBOUND — the
+//       GPU channel is (re)establishing on a cold boot OR a warm-snapshot
+//       restore. ui::Compositor stashes our issue and REPLAYS it on rebind,
+//       which then acks and clears this counter. This case SELF-HEALS if we
+//       simply wait; re-issuing into it is the double-issue that crashes the
+//       GPU process on viz_main_impl.cc:342 `!has_created_frame_sink_manager_`.
+//   (2) a genuine mid-stream freeze (the 2026-06-16 capture-start Show()
+//       Display reconfigure dropped the pending callback). The controller is
+//       bound + healthy, the ack just never comes, and re-issuing is the only
+//       recovery. This case does NOT self-heal — the wait never ends.
+//
+// The DISCRIMINATOR is elapsed time: a warm-restore rebind completes within a
+// few seconds (measured 2026-07-06: usually <1s, occasionally 2-5s under load),
+// after which the stashed frame acks and resets this counter. A genuine freeze
+// never acks. So waiting LONG ENOUGH to outlast any plausible rebind, then
+// re-issuing, serves case (2) without ever re-issuing into case (1).
+//
+// 2026-07-06 CORRECTION: the prior value of 2 (wait 1s, re-issue at 2s) was
+// INSIDE the warm-restore rebind window — a rebind slower than 2s still saw the
+// re-issue fire into the unbound controller and crash (guest-serial proven,
+// N=12 staging: ~2/12 sessions had a >2s rebind and crashed exactly here).
+// 15 => wait ~15s before assuming a genuine freeze — comfortably beyond any
+// observed warm-restore rebind, so a rebind ALWAYS self-heals first and never
+// reaches the re-issue. A true 15s freeze is already a hard failure; recovering
+// it at 15s (vs 2s) is still well within the client's connect budget, and
+// genuine freezes are rare — so the added latency costs nothing real while the
+// crash-immunity covers the entire rebind tail.
+constexpr int kWatchdogFiresBeforeReissue = 15;
+
+// CV2-GPU-DEATH: consecutive EmitDiagnostic() ticks (kDiagnosticInterval=5s
+// apart) with captured_delta==0 before declaring the renderer/GPU pipeline
+// permanently dead and signalling the session unhealthy for a physics re-pin.
+// 6 ticks = 30s. Rationale for the margin: the =15 watchdog's own worst-case
+// tolerated rebind is 15s (kWatchdogFiresBeforeReissue * kStallWatchdogTimeout);
+// a legitimate rebind that resolves at the full 15s produces a catch-up burst
+// (captured_delta>0) that resets this counter no later than tick 3, well before
+// tick 6 — so this NEVER false-positives on a slow-but-recovering guest. It only
+// fires on the run11 signature: ack-loop outwardly healthy (issued≈acked≈29fps,
+// watchdog_fires_without_ack_ back to 0 post-GPU-reinit) yet captured_delta==0
+// on every tick, forever. Guest-serial-proven: run11 EID 019f3554, 27+
+// consecutive zero-production ticks over 2+ minutes with no exception. A
+// false-positive recycle of a would-have-recovered guest is strictly worse than
+// a 15-20s-late recycle of a doomed one, so we err generous.
+constexpr int kZeroProductionTicksBeforeDeath = 6;
+
 
 // Cadence guardrails, expressed as INTERVALS (not rates). NOTE the inversion:
 // the *fastest* allowed rate (60 fps) is the *smallest* interval, hence
@@ -135,6 +185,12 @@ void CbBeginFrameDriver::SetDiagnosticSources(
   diag_capturer_ = capturer;
 }
 
+void CbBeginFrameDriver::SetPermanentDeathCallback(
+    base::RepeatingClosure on_permanent_death) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  on_permanent_death_ = std::move(on_permanent_death);
+}
+
 void CbBeginFrameDriver::IssueOneBeginFrame() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (!running_) {
@@ -221,6 +277,11 @@ void CbBeginFrameDriver::OnBeginFrameAck(uint64_t issue_epoch,
   if (issue_epoch != issue_epoch_) {
     return;
   }
+  first_ack_received_ = true;
+  // An ack means the controller is bound and the chain is live again, so any
+  // prior unbound-window/freeze wait is over — clear the consecutive-fire
+  // counter so the next stall starts a fresh wait-then-reissue cycle.
+  watchdog_fires_without_ack_ = 0;
   ++acked_since_report_;
 
   // The ack arrived, so the chain is healthy — cancel the stall watchdog before
@@ -251,6 +312,73 @@ void CbBeginFrameDriver::OnStallWatchdog() {
   if (!running_) {
     return;
   }
+  // CV2 2026-07-02 boot-window guard, GENERALIZED 2026-07-06 to cover any
+  // transiently-unbound window (cold boot OR warm-restore), not just the
+  // pre-first-ack one.
+  //
+  // A single missed ack cannot be attributed from here: it is EITHER the viz
+  // external-begin-frame controller being unbound (GPU channel initializing on
+  // a cold boot, OR re-establishing on a warm-snapshot restore — `CV2-WARM
+  // StartNativeSession` re-runs the FrameSinkManager create sequence), in which
+  // case ui::Compositor has our issue STASHED in pending_begin_frame_args_ and
+  // will replay+ack it on rebind — WAITING fixes it for free; OR a genuine
+  // mid-stream freeze (the 2026-06-16 capture-start Show() Display reconfigure
+  // that silently drops the pending callback), which needs the re-issue kick.
+  //
+  // Re-issuing into the UNBOUND case is the double-issue that crashes the GPU
+  // process on viz's `Check failed: !has_created_frame_sink_manager_`
+  // (viz_main_impl.cc:342) — measured live at ~1/3 of fresh warm-restore
+  // sessions (guest serial 019f3477-fe40 vs working control 019f3477-46c7,
+  // 2026-07-06): the fatal watchdog took the re-issue branch because the old
+  // `!first_ack_received_` latch was already true from pre-snapshot acks, so
+  // the boot-window guard did not apply to the warm-restore unbound window.
+  //
+  // TWO layered guards:
+  //
+  // (1) PRE-FIRST-ACK (original cold-boot guard, kept as an INDEFINITE wait).
+  //     Before the first-ever ack, a missed ack can ONLY be the controller not
+  //     yet bound (there is no prior ack, so no "was-acking-then-froze"
+  //     mid-stream freeze is even possible). ui::Compositor holds our first
+  //     issue stashed for replay-on-bind. Re-issuing is never right here — the
+  //     rebind will replay + ack whenever the GPU channel finishes initializing
+  //     (routinely >1s, occasionally several seconds on a cold microVM). So we
+  //     wait INDEFINITELY (re-arm every cycle, never re-issue) until that first
+  //     ack. This preserves f9d79b1's exact behavior for the cold-boot case and
+  //     must NOT be weakened to a bounded wait (a bounded wait would re-issue
+  //     into a still-unbound controller on a slow cold boot = the crash).
+  //
+  // (2) POST-FIRST-ACK (new 2026-07-06 warm-restore/freeze handling). After
+  //     acks have flowed, a missed ack is AMBIGUOUS: a transient re-unbind
+  //     (warm-restore GPU-channel re-establishment) OR a genuine mid-stream
+  //     freeze. We disambiguate by waiting exactly one cycle: a re-unbind
+  //     self-resolves (rebind → stashed replay → ack → counter resets), a
+  //     freeze does not. So re-issue only on the SECOND consecutive fire.
+  ++watchdog_fires_without_ack_;
+  const bool pre_first_ack = !first_ack_received_;
+  const bool within_wait_window =
+      watchdog_fires_without_ack_ < kWatchdogFiresBeforeReissue;
+  if (pre_first_ack || within_wait_window) {
+    LOG(WARNING) << "CbBeginFrameDriver: stall watchdog fired (no BeginFrame "
+                    "ack in "
+                 << kStallWatchdogTimeout.InMilliseconds()
+                 << "ms; consecutive-fires-without-ack="
+                 << watchdog_fires_without_ack_
+                 << ", first_ack_received=" << first_ack_received_
+                 << ") — controller "
+                 << (pre_first_ack ? "not yet bound (cold-boot window)"
+                                   : "may be re-establishing (warm-restore "
+                                     "GPU-channel window)")
+                 << "; NOT re-issuing (a stashed frame replays on bind; "
+                    "re-issuing here would double-issue and crash the GPU on "
+                    "!has_created_frame_sink_manager_), re-arming watchdog"
+                 << (pre_first_ack ? " (waiting for first bind)"
+                                   : " to wait one cycle");
+    stall_watchdog_timer_.Start(
+        FROM_HERE, kStallWatchdogTimeout,
+        base::BindOnce(&CbBeginFrameDriver::OnStallWatchdog,
+                       weak_factory_.GetWeakPtr()));
+    return;
+  }
   // No ack for kStallWatchdogTimeout => the pending frame callback was dropped
   // and the ack-chain froze (the 2026-06-16 capture-start Show() stall). The
   // pending re-arm timer (if any) is moot because the issue it would chain from
@@ -262,11 +390,20 @@ void CbBeginFrameDriver::OnStallWatchdog() {
   // is dropped by OnBeginFrameAck rather than re-arming a second issue.
   ++issue_epoch_;
   next_frame_timer_.Stop();
+  // Reset the consecutive-fire counter: this re-issue starts a fresh attempt,
+  // so a subsequent unbound window (after the re-issue but before its ack) must
+  // again get a full wait-one-cycle grace rather than re-issuing immediately.
+  // The IssueOneBeginFrame below arms the watchdog anew; if its ack never comes
+  // the counter climbs from 0 again and we wait before the next re-issue.
+  watchdog_fires_without_ack_ = 0;
   LOG(WARNING) << "CbBeginFrameDriver: stall watchdog fired (no BeginFrame ack "
                   "in "
-               << kStallWatchdogTimeout.InMilliseconds()
-               << "ms) — pending callback was dropped; re-issuing to restart "
-                  "the ack-chain";
+               << (kStallWatchdogTimeout.InMilliseconds() *
+                   kWatchdogFiresBeforeReissue)
+               << "ms across " << kWatchdogFiresBeforeReissue
+               << " consecutive fires) — controller was bound and acking but a "
+                  "pending callback was genuinely dropped mid-stream; "
+                  "re-issuing to restart the ack-chain";
   IssueOneBeginFrame();
 }
 
@@ -353,6 +490,53 @@ void CbBeginFrameDriver::EmitDiagnostic() {
   LOG(INFO) << "CbBeginFrameDriver[diag]: issued=" << issued << " ("
             << issued_fps << " fps) acked=" << acked << " | " << renderer_state
             << " | " << capture_state << " | VERDICT=" << verdict;
+
+  // --- CV2-GPU-DEATH: permanent-renderer-death detection ---
+  // Key off the ground-truth per-window CAPTURED delta, not the verdict string:
+  // both RENDERER-STARVED and DRIVER-STALLED share captured_delta==0 (nothing
+  // reached the capturer), and keying on the number is immune to future verdict
+  // wording changes. A single delivered frame (a slow-but-recovering guest, or a
+  // legitimate rebind catching up) resets the streak.
+  //
+  // ARM GATE (CV2-GPU-DEATH review Finding #1): detection is armed ONLY once
+  // on_permanent_death_ is wired — which happens in StartNativeSession(), the
+  // same moment a real WebRTC session (and its capture) begins. This is load-
+  // bearing, NOT just an optimization: diag_capturer_ is non-null from process
+  // boot (SetDiagnosticSources runs early + unconditionally), but on the warm-
+  // CDP-only boot path StartNativeSession()/capture-start arrive an arbitrarily
+  // later CDP dispatch. Without this gate, captured_delta==0 every tick during
+  // that idle window would burn consecutive_zero_production_ticks_ up to the
+  // threshold and latch permanent_death_signaled_ true BEFORE the callback ever
+  // exists — permanently self-disabling the feature for the process's life
+  // (the counter/latch never reset). Resetting the streak while unarmed keeps
+  // the 30s window measured from when capture actually began, not from boot.
+  if (capturer_present && on_permanent_death_) {
+    if (captured_delta == 0) {
+      ++consecutive_zero_production_ticks_;
+    } else {
+      consecutive_zero_production_ticks_ = 0;
+    }
+
+    if (consecutive_zero_production_ticks_ >= kZeroProductionTicksBeforeDeath &&
+        !permanent_death_signaled_) {
+      permanent_death_signaled_ = true;
+      LOG(ERROR)
+          << "CV2-GPU-DEATH: " << consecutive_zero_production_ticks_
+          << " consecutive diagnostic ticks ("
+          << (consecutive_zero_production_ticks_ *
+              kDiagnosticInterval.InSeconds())
+          << "s) with zero captured frames despite an active capture target "
+             "(captured_delta==0 every tick) — renderer/GPU pipeline is "
+             "permanently dead for this session; signalling session-unhealthy "
+             "and self-terminating so physics re-pins a fresh guest";
+      on_permanent_death_.Run();
+    }
+  } else {
+    // Unarmed (no death callback yet, or no capturer handle): keep the streak
+    // at 0 so the 30s window is measured from when detection actually arms
+    // (capture start), never from process boot. See the ARM GATE note above.
+    consecutive_zero_production_ticks_ = 0;
+  }
 }
 
 }  // namespace cloud_browser

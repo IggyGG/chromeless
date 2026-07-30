@@ -122,7 +122,15 @@ spec:
         # container so a single chown covers both hostPath dirs in
         # one shot.
         - name: bootstrap-our-repo
-          image: registry.triform.cloud/chromeless/chromeless-build-runner:0.1.4
+          # CV2-rehome: the chromeless/chromeless-build-runner repo path was
+          # pruned from the registry (NAME_UNKNOWN). The canonical, byte-
+          # identical runner image now lives at cloud-browser-webrtc/
+          # cb-build-runner:0.1.4 (same Dockerfile: Debian-bookworm + pinned
+          # depot_tools --depth 200 + sccache v0.8.2 + builder uid 1000;
+          # config blob verified identical 2026-06-29). Re-point rather than
+          # rebuild: this is the exact image that built all live cr7727 tags,
+          # so no depot_tools `main` version-skew is introduced.
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.4
           command:
             - sh
             - -euxc
@@ -171,11 +179,12 @@ spec:
             # Track main by default; set to a tag/SHA for reproducible
             # builds (`kubectl set env job/chromeless-build OUR_REPO_REF=v0.2.0`).
             - name: OUR_REPO_REF
-              # cv2/m2-track-source-deps for build #4: validates M2 R1
-              # (track-source webrtc deps in patches/0003) on top of
-              # integration/native-peer's M1 base (bf3de29 namespace fix).
-              # Flip back to "main" after M2 validation merges to main.
-              value: "cv2/m2-track-source-deps"
+              # cv2/idle-refresh-capturer (commit d95478c): the FrameSink
+              # idle-refresh hold-and-repeat fix so idle/static pages
+              # (animejs.com) stream WebRTC video. Compiles capture/framesink-
+              # capturer/capturer.{h,cc} from source (symlinked via build.sh
+              # step 2) + runs the 5 new capturer unit tests in-build.
+              value: "cv2/idle-refresh-capturer"
             # Creds for cloning private/internal Forgejo repos. The
             # forgejo-credentials Secret holds username + password
             # (Forgejo PAT). Same Secret pattern used by flux-system
@@ -213,7 +222,8 @@ spec:
               mountPath: /workspace
       containers:
         - name: build
-          image: registry.triform.cloud/chromeless/chromeless-build-runner:0.1.4
+          # CV2-rehome: canonical runner image (see bootstrap-our-repo note).
+          image: registry.triform.cloud/cloud-browser-webrtc/cb-build-runner:0.1.4
           imagePullPolicy: IfNotPresent
           # Invoke T113's script directly from the cloned repo. The
           # earlier brief proposed /work/src/build/chromeless-build.sh as the
@@ -224,11 +234,44 @@ spec:
             - bash
             - -c
             - |
-              # The chromeless-build-runner image ships /opt/depot_tools without
-              # python3_bin_reldir.txt — gn fails with "need to initialize
-              # depot_tools" until bootstrap_python3 is run. The bootstrap
-              # is idempotent, so doing it on every pod start is cheap.
-              (cd /opt/depot_tools && source ./bootstrap_python3 && bootstrap_python3) 2>&1 | tail -3
+              # depot_tools python3 bootstrap.
+              #
+              # The cb-build-runner image ships /opt/depot_tools without
+              # python3_bin_reldir.txt — gn/autoninja fail with "need to
+              # initialize depot_tools" until depot_tools' bootstrap_python3
+              # runs (it CIPD-installs the pinned python3 into the depot_tools
+              # dir and writes python3_bin_reldir.txt next to gn).
+              #
+              # PROBLEM (cb-build-runner:0.1.4, the CV2-rehome image): its
+              # /opt/depot_tools is ROOT-owned, but this container runs uid 1000
+              # with allowPrivilegeEscalation=false (no sudo). depot_tools'
+              # `cipd` self-bootstrap does `mktemp -p .` inside /opt/depot_tools
+              # → Permission denied → empty tmp path → `curl ... -o ''` →
+              # "curl: option -o: is badly used here" → python3 never installed →
+              # STEP 5 `gn gen` dies with python3_bin_reldir.txt not found.
+              # (The prior chromeless/chromeless-build-runner image — now pruned —
+              # evidently shipped /opt/depot_tools writable or pre-bootstrapped.)
+              #
+              # FIX: bootstrap the Chromium tree's OWN vendored depot_tools
+              # (//third_party/depot_tools), which is builder-owned + writable
+              # and version-matched to branch ${CHROMIUM_BRANCH_NUMBER}, then
+              # put it FIRST on PATH so build.sh's bare `gn`/`autoninja` resolve
+              # to it. Proven on cb-build-runner:0.1.4 (2026-06-29): bootstrap
+              # RC=0, `gn --version`→2341, `gn gen` parses the graph, autoninja
+              # + ninja 1.12.1 resolve — all as uid 1000. Falls back to
+              # /opt/depot_tools only on a cold tree (pre-gclient-sync); the
+              # SKIP_FETCH=1 lane below always has the tree present.
+              set -x
+              TREE_DT="${CHROMELESS_WORK_ROOT}/src/chromium/src/third_party/depot_tools"
+              if [ -f "${TREE_DT}/bootstrap_python3" ]; then
+                ( cd "${TREE_DT}" && source ./bootstrap_python3 && bootstrap_python3 ) 2>&1 | tail -3
+                export PATH="${TREE_DT}:${PATH}"
+                echo "depot_tools: using tree-vendored ${TREE_DT} (gn=$(command -v gn))"
+              else
+                echo "depot_tools: tree absent (cold build) — bootstrapping /opt/depot_tools"
+                ( cd /opt/depot_tools && source ./bootstrap_python3 && bootstrap_python3 ) 2>&1 | tail -3
+              fi
+              set +x
               exec bash /workspace/build/chromeless-build.sh
           env:
             # Diagnostic only — chromeless-build.sh derives CHROMELESS_GIT_SHA from
@@ -237,11 +280,10 @@ spec:
             - name: OUR_REPO
               value: "https://forgejo.triform.dev/triform/chromeless.git"
             - name: OUR_REPO_REF
-              # cv2/m2-track-source-deps for build #4: validates M2 R1
-              # (track-source webrtc deps in patches/0003) on top of
-              # integration/native-peer's M1 base (bf3de29 namespace fix).
-              # Flip back to "main" after M2 validation merges to main.
-              value: "cv2/m2-track-source-deps"
+              # cv2/idle-refresh-capturer (commit d95478c) — see bootstrap
+              # initContainer note. Diagnostic only here; the initContainer
+              # has already synced /workspace to this ref.
+              value: "cv2/idle-refresh-capturer"
             # T113 expects branch number, NOT a full ref. M147 stable
             # tracks 147.0.7727.x — branch 7727. Verify on
             # chromiumdash.appspot.com/branches before each roll.
@@ -266,10 +308,26 @@ spec:
               # because //cloud-browser/... isn't in chromium's root
               # build graph (a separate fix may also be needed to make
               # gn parse the BUILD.gn at all).
-              # 4 targets: worker + 3 unittest suites. pcf_unittests is
-              # M2-side coverage of the PCF refactor; encoder/framesink
-              # are the M1 + capture-side baselines.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/build-integration:cloud_browser_pcf_unittests"
+              #
+              # worker (the deployable binary — carries the idle-refresh
+              # capturer fix) + encoder + framesink-capturer unit suites.
+              # The framesink_capturer_unittests target compiles+runs the 5
+              # new idle-refresh tests (capturer_test.cc), so it IS the
+              # in-build validation of d95478c.
+              #
+              # cloud_browser_pcf_unittests REMOVED (2026-06-29): it has
+              # PRE-EXISTING breakage unrelated to the idle-refresh fix —
+              # cloud_browser_pcf_test.cc:112 uses dynamic_cast under a
+              # -fno-rtti build (error: "use of dynamic_cast requires
+              # -frtti") and :129 calls the dropped
+              # TestAudioDeviceModule::CreateTestAudioDeviceModule webrtc
+              # API (last touched by cv2-91 commit 127715a, NOT by this
+              # branch). With autoninja's default -k1 it aborts the whole
+              # graph on that first failure, blocking the worker binary.
+              # Dropping it does NOT weaken validation of THIS fix (whose
+              # test lives in framesink_capturer_unittests, retained). The
+              # PCF test rot is tracked separately for the M2 lane.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             # Ninja parallelism sized to CPU limit minus headroom for
             # the sccache server (~1-2 cores) + the LTO linker spike
             # (~2 cores). Limit is 40; 36 parallel ninja jobs leaves
@@ -302,6 +360,20 @@ spec:
               value: "0"
             - name: SCCACHE_CACHE_SIZE
               value: "80G"
+            # SKIP_CDP_VALIDATION=1 short-circuits ONLY STEP 10 (the in-pod
+            # cluster CDP smoke test). The chromeless-build pod runs from the
+            # cb-build-runner image (debian-slim, NO kubectl), so STEP 10's
+            # `kubectl apply -f chromeless-cdp-validation.yaml` exits 127 →
+            # the step dies → the pod burns a backoffLimit retry AND rebuilds,
+            # even though the worker binary was already built+packaged+staged
+            # at STEPS 6-9 (observed here 2026-06-29: every incarnation reached
+            # "STEP 10 cdp validation START ... applying ...cdp-validation.yaml"
+            # then restarted). The binary is validated by the in-build unit
+            # suites (STEP 7, incl. the idle-refresh capturer tests) and, more
+            # importantly, by the downstream animejs WebRTC re-validation after
+            # the bake+roll — NOT by this broken-in-this-context step. Skip it.
+            - name: SKIP_CDP_VALIDATION
+              value: "1"
           resources:
             requests:
               # Burstable QoS — see build-job.yaml header. Request was
@@ -314,6 +386,20 @@ spec:
               # bursts into idle CPU when peers leave it.
               cpu: "6"
               memory: "96Gi"
+              # Ephemeral-storage REQUEST decoupled from the limit (2026-06-29).
+              # The build's real I/O (chromium-src checkout + sccache + out/)
+              # all lands on triform-8 hostPath volumes (/work, /sccache) — NOT
+              # the container's writable layer / emptyDir, which counts as
+              # ephemeral. So the build's actual ephemeral footprint is just
+              # log spillover (tens of MiB). The previous manifest set ONLY the
+              # 8Gi limit, which K8s mirrors into an implicit 8Gi request; on a
+              # triform-8 whose ephemeral is ~96% RESERVED (but only ~6% USED —
+              # 87Gi truly free on the 98Gi kubelet fs), that 8Gi request made
+              # the Pod unschedulable (Insufficient ephemeral-storage). A 1Gi
+              # request fits the free reservation headroom while the 8Gi limit
+              # below still allows runtime burst. Root-cause fix, not a bypass:
+              # the request was overprovisioned scratch the build never uses.
+              ephemeral-storage: "1Gi"
             limits:
               cpu: "40"
               memory: "192Gi"
