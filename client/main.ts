@@ -1,59 +1,36 @@
-// v0 browser client for chromeless.
+// Demo page for chromeless — a thin DOM shell over ChromelessSession.
 //
-// Per docs/capture/path-of-least-resistance.md (T15) and T23, the
-// streamer (capture/streamer-page) holds the media and is therefore
-// the WebRTC offerer. This client is the **answerer**: it opens the
-// signaling websocket, waits for the streamer's offer, replies with an
-// SDP answer, and trickles ICE.
+// Track 5 split: the ~350-line answerer state machine that used to
+// live in this file (signaling dial, offer/answer/ICE pump, reconnect
+// + pc rebuild, stats, probe, teardown) is now
+// client/src/session.ts's ChromelessSession, importable by any app
+// without dragging this page along. What remains HERE is exactly the
+// demo: DOM lookups, the log pane, the status pill, wiring the video
+// element, input/cursor/file-upload channel attachment (all DOM-
+// coupled by nature), and the T81 passthrough button.
 //
-// Scope:
-//   - Connect to the signaling server (T13) at ws://localhost:8080/ws/{session}.
-//   - Fetch ICE config (T25) before constructing the RTCPeerConnection.
-//   - Wait for `{type: "offer", from: "browser"}` from the streamer.
-//   - createAnswer → prioritizeCodec(VP9) → setLocalDescription → send answer.
-//   - Receive any incoming media tracks via `pc.ontrack`; attach to <video>.
-//   - Receive any incoming data channels via `pc.ondatachannel`. When the
-//     streamer creates the "input" channel, wrap it with InputChannel
-//     (T20) and attach DOM listeners that forward mouse/keyboard.
-//   - Surface signaling/ICE/connection/reconnect state to the debug panel.
-//   - Auto-reconnect signaling websocket via T37's ReconnectingWebSocket;
-//     on reconnect, rebuild the peer connection and wait for a fresh
-//     offer from the streamer. On `iceConnectionState=failed`, send a
-//     `request_renegotiate` envelope to ask the streamer for a fresh
-//     offer with iceRestart=true (see docs/protocols/reconnect.md).
+// Integration recipe (what a third party copies):
+//   const session = new ChromelessSession({ signalingBase });
+//   session.on("track", (_t, stream) => video.srcObject = stream);
+//   session.on("dataChannel", (dc) => { /* input/cursor/files */ });
+//   await session.connect(sessionId);
 
 import { InputChannel } from "./src/input.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
-import { fetchTurnConfig } from "./src/turn.js";
-import { prioritizeCodec } from "./src/sdp.js";
-import { ReconnectingWebSocket, ReconnectState, requestIceRecovery } from "./src/reconnect.js";
-import { StatsSampler, StatsSample, STATS_PROTOCOL_VERSION, formatSummary } from "./src/stats.js";
-import { fetchSessionToken, withToken } from "./src/auth.js";
-import { classifyNegotiation, describeOutcome } from "./src/codec-negotiate.js";
-import { estimateConnectionQuality, type ProbeResult } from "./src/probe.js";
 import { resolveSignalingUrl } from "./src/config.js";
-
-// Codec preference list, top-first. The first entry must match the
-// codec we ask `prioritizeCodec` to lead with on the answer SDP, so
-// the negotiator's "ok" outcome aligns with what we actually want.
-const VIDEO_CODEC_PREFERENCE = ["VP9", "AV1", "H264", "VP8"] as const;
+import {
+  ChromelessSession,
+  type SessionLogLevel,
+  type SessionStatus,
+} from "./src/session.js";
+import type { ReconnectState } from "./src/reconnect.js";
 
 // OSS-W1 — resolved at load from ?signaling=, then window.__CHROMELESS_CONFIG__
 // (injected by infra/compose.yaml's generated config.js), then the built-in
 // localhost fallback. See client/src/config.ts.
 const DEFAULT_SIGNALING = resolveSignalingUrl();
-
-type Envelope =
-  | { type: "offer";  from: "client" | "browser"; data: RTCSessionDescriptionInit }
-  | { type: "answer"; from: "client" | "browser"; data: RTCSessionDescriptionInit }
-  | { type: "ice";    from: "client" | "browser"; data: RTCIceCandidateInit | null }
-  | { type: "bye";    from: "client" | "browser"; data?: undefined }
-  | { type: "request_renegotiate"; from: "client" | "browser"; data?: null }
-  | { type: "probe_result"; from: "client" | "browser"; data: ProbeResult }; // T102
-
-type LogLevel = "info" | "ok" | "warn" | "err";
 
 // ---------- DOM ----------
 
@@ -75,17 +52,16 @@ const els = {
   iceg: $<HTMLElement>("state-iceg"),
   conn: $<HTMLElement>("state-conn"),
   dc: $<HTMLElement>("state-dc"),
-  // T81: webcam/mic passthrough toggle. The button is in index.html;
-  // it stays disabled until we have a peer connection up.
+  // T81: webcam/mic passthrough toggle. Disabled until a pc is up.
   passthrough: $<HTMLButtonElement>("passthrough-toggle"),
 };
 
-function setStatus(state: "idle" | "connecting" | "connected" | "failed" | "closed", text?: string): void {
+function setStatus(state: SessionStatus, text?: string): void {
   els.status.dataset["state"] = state;
   els.statusText.textContent = text ?? state;
 }
 
-function log(level: LogLevel, msg: string, extra?: unknown): void {
+function log(level: SessionLogLevel, msg: string, extra?: unknown): void {
   const ts = new Date().toISOString().slice(11, 23);
   const tail = extra === undefined ? "" : "  " + safeStringify(extra);
   const line = document.createElement("div");
@@ -93,7 +69,6 @@ function log(level: LogLevel, msg: string, extra?: unknown): void {
     `<span class="ts">${ts}</span> <span class="lvl-${level}">${level.toUpperCase().padEnd(4)}</span> ${escapeHtml(msg)}${escapeHtml(tail)}`;
   els.log.appendChild(line);
   els.log.scrollTop = els.log.scrollHeight;
-  // Mirror to devtools.
   const c = level === "err" ? console.error : level === "warn" ? console.warn : console.log;
   c(`[${level}]`, msg, extra ?? "");
 }
@@ -108,77 +83,9 @@ function escapeHtml(s: string): string {
   }[ch] ?? ch));
 }
 
-// ---------- session ----------
-
-interface Session {
-  rws: ReconnectingWebSocket;
-  pc: RTCPeerConnection;
-  iceConfig: RTCConfiguration;
-  /** Session identifier — also the path segment of /ws/{session_id}. */
-  sessionId: string;
-  /** Tenant identifier from the verified token's `sub` (T48); "" if anonymous. */
-  tenantId: string;
-  /** Set when the streamer has opened the "input" data channel. */
-  dc: RTCDataChannel | null;
-  input: InputChannel | null;
-  detachInput: (() => void) | null;
-  /** Set when the streamer has opened the "stats" data channel. */
-  statsDc: RTCDataChannel | null;
-  /** Stats sampler — created with the pc, lives until pc rebuild. */
-  stats: StatsSampler | null;
-  /** Subscriber detach function for the stats sampler. */
-  detachStats: (() => void) | null;
-  /** Set when the streamer has opened the "files" data channel (T74). */
-  filesDc: RTCDataChannel | null;
-  fileUpload: FileUploadChannel | null;
-  /** Set when the streamer has opened the "cursor" data channel. */
-  cursorDc: RTCDataChannel | null;
-  cursor: { update(env: unknown): void; dispose(): void } | null;
-  /** Per-session detach function for window-level drop listeners. */
-  detachDrop: (() => void) | null;
-  /** T81: camera/mic passthrough controller. Bound to the pc lifetime;
-   *  reset on rebuild. null until enabled by the user. */
-  passthrough: CameraPassthrough | null;
-  /** Has at least one rws "open" fired? Used to distinguish first vs reconnect. */
-  hasOpenedOnce: boolean;
-}
-
-let active: Session | null = null;
-
-function teardown(reason: string): void {
-  if (!active) return;
-  log("info", `tearing down: ${reason}`);
-  try { active.detachInput?.(); } catch { /* ignore */ }
-  try { active.detachStats?.(); } catch { /* ignore */ }
-  try { active.detachDrop?.(); } catch { /* ignore */ }
-  try { active.cursor?.dispose(); } catch { /* ignore */ }
-  // T81: stop the camera/mic before closing the pc so tracks
-  // actually fire "ended" and the user-agent's recording-active
-  // indicator clears.
-  try { active.passthrough?.disable(); } catch { /* ignore */ }
-  try { active.stats?.stop(); } catch { /* ignore */ }
-  try { active.dc?.close(); } catch { /* ignore */ }
-  try { active.statsDc?.close(); } catch { /* ignore */ }
-  try { active.filesDc?.close(); } catch { /* ignore */ }
-  try { active.cursorDc?.close(); } catch { /* ignore */ }
-  try { active.pc.close(); } catch { /* ignore */ }
-  if (active.rws.isConnected()) {
-    try {
-      active.rws.send(JSON.stringify({ type: "bye", from: "client" } satisfies Envelope));
-    } catch { /* ignore */ }
-  }
-  try { active.rws.close(); } catch { /* ignore */ }
-  active = null;
-  setStatus("closed");
-  els.connect.disabled = false;
-  els.connect.textContent = "Connect";
-  setPassthroughButtonState("off", true);
-}
-
 // Map page coords into the source video's intrinsic pixel space,
 // undoing object-fit:contain. The remote expects coords in the source
-// coordinate system. Reused by the input data channel handler when it
-// arrives.
+// coordinate system.
 function videoContentMapper(cx: number, cy: number, rect: DOMRect): { x: number; y: number } {
   const v = els.video;
   const vw = v.videoWidth || rect.width;
@@ -194,68 +101,76 @@ function videoContentMapper(cx: number, cy: number, rect: DOMRect): { x: number;
   };
 }
 
+// ---------- demo state (DOM-side channel wiring) ----------
+
+// Per-connection DOM attachments the demo owns. The session owns the
+// pc/signaling/stats lifecycle; everything here is what touches the
+// document, torn down on "pcCreated" (rebuild) and "closed".
+interface DemoAttachments {
+  detachInput: (() => void) | null;
+  cursor: { update(env: unknown): void; dispose(): void } | null;
+  detachDrop: (() => void) | null;
+  passthrough: CameraPassthrough | null;
+  fileUpload: FileUploadChannel | null;
+}
+
+let session: ChromelessSession | null = null;
+let attach: DemoAttachments = emptyAttachments();
+
+function emptyAttachments(): DemoAttachments {
+  return { detachInput: null, cursor: null, detachDrop: null, passthrough: null, fileUpload: null };
+}
+
+function dropAttachments(): void {
+  try { attach.detachInput?.(); } catch { /* ignore */ }
+  try { attach.detachDrop?.(); } catch { /* ignore */ }
+  try { attach.cursor?.dispose(); } catch { /* ignore */ }
+  // T81: stop camera/mic so tracks fire "ended" and the user-agent's
+  // recording indicator clears; also the §T10 threat-model rule — no
+  // silent re-sharing across a rebuild, a fresh click is required.
+  try { attach.passthrough?.disable(); } catch { /* ignore */ }
+  attach = emptyAttachments();
+  els.dc.textContent = "—";
+  setPassthroughButtonState("off", true);
+}
+
 function wireDataChannel(dc: RTCDataChannel): void {
-  if (!active) return;
-  log("ok", `← data channel "${dc.label}" (state=${dc.readyState})`);
+  log("ok", `wiring data channel "${dc.label}"`);
   if (dc.label === "input") return wireInputChannel(dc);
-  if (dc.label === "stats") return wireStatsChannel(dc);
   if (dc.label === "cursor") return wireCursorChannel(dc);
   if (dc.label === "files") return wireFilesChannel(dc);
   log("warn", `ignoring unknown data channel label: ${dc.label}`);
 }
 
 function wireCursorChannel(dc: RTCDataChannel): void {
-  if (!active) return;
-  active.cursorDc = dc;
-  active.cursor?.dispose();
-  active.cursor = attachCursorChannel(dc, els.video);
+  attach.cursor?.dispose();
+  attach.cursor = attachCursorChannel(dc, els.video);
   dc.addEventListener("close", () => {
-    if (active?.cursorDc === dc) {
-      try { active.cursor?.dispose(); } catch { /* ignore */ }
-      active.cursor = null;
-      active.cursorDc = null;
-    }
+    try { attach.cursor?.dispose(); } catch { /* ignore */ }
+    attach.cursor = null;
   });
 }
 
-function wireStatsChannel(dc: RTCDataChannel): void {
-  if (!active) return;
-  active.statsDc = dc;
-  // Only start emitting frames over the channel once it's open.
-  // Subscribers (debug panel) are wired in buildPeerConnection.
-}
-
 /**
- * Wire the "files" RTCDataChannel for v1 file uploads (T74). When
- * the user drops a file onto the video element, T46 emits the
- * drag-drop *events* over the input channel; we then kick off a
- * content upload over this channel and (on success) the bridge has
- * already attached the file via DOM.setFileInputFiles.
- *
- * For now the upload is gated on a DataTransfer with kind="file"
- * AND a `target_selector` attribute on the video element (set via
- * `data-file-target` — defaults to `input[type=file]`). Without a
- * selector the bridge writes the file to disk but doesn't attach.
+ * Wire the "files" RTCDataChannel for v1 file uploads (T74). Drop a
+ * file onto the page → upload over this channel; the bridge attaches
+ * it via DOM.setFileInputFiles using the `data-file-target` selector
+ * on the video element (default `input[type=file]`).
  */
 function wireFilesChannel(dc: RTCDataChannel): void {
-  if (!active) return;
-  active.filesDc = dc;
   const fc = new FileUploadChannel(dc);
-  active.fileUpload = fc;
+  attach.fileUpload = fc;
 
   const onDrop = async (e: DragEvent) => {
-    if (!e.dataTransfer || !active || !active.fileUpload) return;
-    const files: File[] = [];
-    for (const item of Array.from(e.dataTransfer.files)) {
-      files.push(item);
-    }
+    if (!e.dataTransfer || !attach.fileUpload) return;
+    const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
     e.preventDefault();
     const targetSelector = els.video.dataset["fileTarget"] ?? "input[type=file]";
     for (const f of files) {
       log("info", `→ file_upload start`, { name: f.name, size: f.size, type: f.type });
       try {
-        const handle = active.fileUpload.uploadFile(f, {
+        const handle = attach.fileUpload.uploadFile(f, {
           target_selector: targetSelector,
           onProgress: (p) => log("info", `file_upload progress`,
             `${p.bytes_sent}/${p.bytes_total}`),
@@ -271,10 +186,8 @@ function wireFilesChannel(dc: RTCDataChannel): void {
       }
     }
   };
-  // dragover preventDefault is required for `drop` to fire on the
-  // target. We attach to the window so files dragged anywhere over
-  // the page are captured (matches the user mental model: "drop the
-  // PDF onto my cloud browser" without needing pixel precision).
+  // dragover preventDefault is required for `drop` to fire. Window-
+  // level so "drop the PDF onto my cloud browser" needs no precision.
   const onDragOver = (e: DragEvent) => {
     if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
       e.preventDefault();
@@ -282,26 +195,21 @@ function wireFilesChannel(dc: RTCDataChannel): void {
   };
   window.addEventListener("dragover", onDragOver);
   window.addEventListener("drop", onDrop);
-  active.detachDrop = () => {
+  attach.detachDrop = () => {
     window.removeEventListener("dragover", onDragOver);
     window.removeEventListener("drop", onDrop);
   };
 }
 
 function wireInputChannel(dc: RTCDataChannel): void {
-  if (!active) return;
   els.dc.textContent = dc.readyState;
   const input = new InputChannel(dc, {
     onCoalesce: (n) => log("info", `coalesced ${n} mouse_move`),
     onError: (err) => log("err", "input send failed", String(err)),
   });
-  active.dc = dc;
-  active.input = input;
 
   const attachListeners = () => {
-    if (!active) return;
-    const detach = input.attach(els.video, { toContentCoords: videoContentMapper });
-    active.detachInput = detach;
+    attach.detachInput = input.attach(els.video, { toContentCoords: videoContentMapper });
   };
   if (dc.readyState === "open") attachListeners();
   else dc.addEventListener("open", attachListeners, { once: true });
@@ -309,10 +217,8 @@ function wireInputChannel(dc: RTCDataChannel): void {
   dc.addEventListener("close", () => {
     els.dc.textContent = "closed";
     log("info", "input data-channel closed");
-    if (active) {
-      active.detachInput?.();
-      active.detachInput = null;
-    }
+    attach.detachInput?.();
+    attach.detachInput = null;
   });
   dc.addEventListener("error", (e) => {
     els.dc.textContent = "error";
@@ -321,158 +227,9 @@ function wireInputChannel(dc: RTCDataChannel): void {
   dc.addEventListener("message", (e) => log("info", "← input.message", e.data));
 }
 
-/**
- * Build a fresh RTCPeerConnection wired up to the active session. Used
- * on the first connect AND on every signaling reconnect, so each fresh
- * signaling channel gets a fresh peer connection and the streamer can
- * cleanly re-offer.
- */
-function buildPeerConnection(): RTCPeerConnection {
-  if (!active) throw new Error("buildPeerConnection: no active session");
-  const { iceConfig, rws } = active;
-  const pc = new RTCPeerConnection(iceConfig);
-
-  // T108 — Seed every state display from the freshly-constructed PC.
-  // The on*StateChange handlers only fire on TRANSITIONS, never on
-  // the initial state, so without this seeding a PC that gets stuck
-  // at "new" leaves the index.html placeholder "—" in place. The
-  // distinction matters: "—" means the PC never built; "new" means
-  // it built but didn't advance — completely different debugging.
-  els.conn.textContent = pc.connectionState;
-  els.sig.textContent = pc.signalingState;
-  els.ice.textContent = pc.iceConnectionState;
-  els.iceg.textContent = pc.iceGatheringState;
-  log("info", `pc constructed`, {
-    connectionState: pc.connectionState,
-    signalingState: pc.signalingState,
-    iceServers: iceConfig.iceServers?.length ?? 0,
-  });
-
-  pc.onsignalingstatechange = () => { els.sig.textContent = pc.signalingState; log("info", `signalingState=${pc.signalingState}`); };
-  pc.oniceconnectionstatechange = () => {
-    els.ice.textContent = pc.iceConnectionState;
-    const lvl: LogLevel = pc.iceConnectionState === "failed" ? "err" : "info";
-    log(lvl, `iceConnectionState=${pc.iceConnectionState}`);
-    if (pc.iceConnectionState === "failed") {
-      // T37 ICE recovery — ask the streamer to redo the offer with iceRestart=true.
-      const sent = requestIceRecovery((f) => rws.send(f), "client");
-      log(sent ? "info" : "warn", sent ? "→ request_renegotiate" : "request_renegotiate dropped (ws not open)");
-    }
-  };
-  pc.onicegatheringstatechange = () => { els.iceg.textContent = pc.iceGatheringState; };
-  pc.onconnectionstatechange = () => {
-    els.conn.textContent = pc.connectionState;
-    if (pc.connectionState === "connected") setStatus("connected");
-    else if (pc.connectionState === "failed") setStatus("failed");
-    else if (pc.connectionState === "disconnected" || pc.connectionState === "closed") setStatus("closed");
-    log(pc.connectionState === "failed" ? "err" : "info", `connectionState=${pc.connectionState}`);
-    // T81: enable the passthrough button only while the pc is up.
-    // We don't auto-disable on transient connection drops — the
-    // user still owns the share; teardown / rebuildPeerConnection
-    // are the only paths that actively flip it back to "off".
-    if (pc.connectionState === "connected") {
-      const enabled = active?.passthrough?.getState().enabled ?? false;
-      setPassthroughButtonState(enabled ? "on" : "off", false);
-    } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-      setPassthroughButtonState("off", true);
-    }
-  };
-
-  pc.onicecandidate = (ev) => {
-    const env: Envelope = { type: "ice", from: "client", data: ev.candidate ? ev.candidate.toJSON() : null };
-    rws.send(JSON.stringify(env));
-    if (ev.candidate) log("info", `→ ice`, ev.candidate.candidate);
-    else log("info", `→ ice (end of candidates)`);
-  };
-
-  pc.ontrack = (ev) => {
-    log("ok", `← track`, { kind: ev.track.kind, id: ev.track.id });
-    const stream = ev.streams[0] ?? new MediaStream([ev.track]);
-    if (els.video.srcObject !== stream) {
-      els.video.srcObject = stream;
-    }
-  };
-
-  pc.ondatachannel = (ev) => wireDataChannel(ev.channel);
-
-  // T42: per-second stats sampler. Subscribers update the debug panel
-  // and (when the streamer offers a "stats" channel) emit over the
-  // data channel for server-side scraping.
-  // T82: pass session_id + tenant_id through the sampler so the
-  // emitted envelope carries them — the sidecar uses these to label
-  // per-session metrics for T66 dashboards.
-  const stats = new StatsSampler(pc, {
-    intervalMs: 1000,
-    sessionId: active?.sessionId,
-    tenantId:  active?.tenantId,
-  });
-  let prev: StatsSample | undefined;
-  const detachStats = stats.on((s) => {
-    log("info", `stats ${formatSummary(s, prev)}`);
-    prev = s;
-    if (active?.statsDc?.readyState === "open") {
-      try {
-        active.statsDc.send(JSON.stringify(stats.buildEnvelope(s)));
-      } catch { /* ignore */ }
-    }
-  });
-  if (active) {
-    active.stats = stats;
-    active.detachStats = detachStats;
-  }
-  // Start sampling once connection is up; pc.onconnectionstatechange handles it.
-  const prevConnState = pc.onconnectionstatechange;
-  pc.onconnectionstatechange = (ev) => {
-    if (typeof prevConnState === "function") prevConnState.call(pc, ev);
-    if (pc.connectionState === "connected") stats.start();
-    else if (pc.connectionState === "closed" || pc.connectionState === "failed") stats.stop();
-  };
-
-  return pc;
-}
-
-function rebuildPeerConnection(reason: string): void {
-  if (!active) return;
-  log("info", `rebuilding peer connection: ${reason}`);
-  try { active.detachInput?.(); } catch { /* ignore */ }
-  try { active.detachStats?.(); } catch { /* ignore */ }
-  try { active.detachDrop?.(); } catch { /* ignore */ }
-  try { active.cursor?.dispose(); } catch { /* ignore */ }
-  // T81: rebuilds drop the camera/mic too. Per the threat model
-  // §T10, surviving a reconnect with passthrough still active
-  // would be silent re-sharing — we explicitly require a fresh
-  // user click after every pc rebuild.
-  try { active.passthrough?.disable(); } catch { /* ignore */ }
-  try { active.stats?.stop(); } catch { /* ignore */ }
-  active.detachInput = null;
-  active.detachStats = null;
-  active.detachDrop = null;
-  active.passthrough = null;
-  active.stats = null;
-  try { active.dc?.close(); } catch { /* ignore */ }
-  try { active.statsDc?.close(); } catch { /* ignore */ }
-  try { active.filesDc?.close(); } catch { /* ignore */ }
-  try { active.cursorDc?.close(); } catch { /* ignore */ }
-  active.dc = null;
-  active.statsDc = null;
-  active.filesDc = null;
-  active.cursorDc = null;
-  active.input = null;
-  active.fileUpload = null;
-  active.cursor = null;
-  try { active.pc.close(); } catch { /* ignore */ }
-  active.pc = buildPeerConnection();
-  els.dc.textContent = "—";
-  setPassthroughButtonState("off", false);
-  maybeExposePcForE2e(active.pc);
-}
-
 // E2E hook (tests/e2e/03-receives-video-track.spec.ts). Gated on
-// `?e2e=1` so production users — who hit this same URL — never get
-// the active PC pinned to window. The streamer-page (capture/streamer-
-// page) exposes its PC unconditionally on `window.pc` because that
-// page is privileged and only loaded by the in-container chromium;
-// this client page is end-user-reachable, so we opt in.
+// `?e2e=1` so production users never get the active PC pinned to
+// window; this page is end-user-reachable, so we opt in.
 function maybeExposePcForE2e(pc: RTCPeerConnection): void {
   if (new URLSearchParams(location.search).get("e2e") === "1") {
     (window as unknown as { __cbwrtc_pc?: RTCPeerConnection })
@@ -480,217 +237,67 @@ function maybeExposePcForE2e(pc: RTCPeerConnection): void {
   }
 }
 
-async function connect(sessionId: string): Promise<void> {
+// ---------- connect ----------
+
+function connect(sessionId: string): void {
   setStatus("connecting", "ws://");
   els.connect.disabled = true;
 
-  let wsUrl = `${DEFAULT_SIGNALING}/${encodeURIComponent(sessionId)}`;
+  const s = new ChromelessSession({ signalingBase: DEFAULT_SIGNALING });
+  session = s;
 
-  // T48: try to fetch a signed session token. If the issuer endpoint
-  // returns null (not deployed, or 404 in production until you wire
-  // your own issuer), we connect without a token — the signaling
-  // server will reject if `CHROMELESS_AUTH_PUBKEY` is set, accept
-  // otherwise.
-  const issued = await fetchSessionToken(sessionId, "client", { signalingBase: DEFAULT_SIGNALING });
-  if (issued) {
-    log("info", `auth token`, { exp: issued.exp, sub: issued.sub });
-    wsUrl = withToken(wsUrl, issued.token);
-  } else {
-    log("info", `no auth token (issuer unavailable; connecting unauthenticated)`);
-  }
-  log("info", `dialing signaling`, wsUrl.replace(/token=[^&]+/, "token=…"));
-
-  // Fetch ICE config once. We re-use it across reconnects; if it
-  // rotates (TURN-REST in Phase 3), this is the call site that grows a
-  // refresh.
-  const iceConfig = await fetchTurnConfig(DEFAULT_SIGNALING);
-  log("info", "ice config", iceConfig);
-
-  // T102: pre-call connection-quality probe. Best-effort — null on any
-  // failure. Run in parallel with the WS dial below by stashing the
-  // promise; we await it inside the `open` handler before sending
-  // the probe_result envelope.
-  const probePromise: Promise<ProbeResult | null> = estimateConnectionQuality({
-    signalingBase: DEFAULT_SIGNALING,
-    ...(issued?.token ? { authToken: issued.token } : {}),
-  }).catch(() => null);
-
-  const rws = new ReconnectingWebSocket(wsUrl);
-  // Stash a placeholder pc so the active record is well-typed; replaced
-  // synchronously by buildPeerConnection() once session is set.
-  active = {
-    rws, pc: null as unknown as RTCPeerConnection, iceConfig,
-    sessionId, tenantId: issued?.sub ?? "",
-    dc: null, input: null, detachInput: null,
-    filesDc: null, fileUpload: null,
-    cursorDc: null, cursor: null,
-    detachDrop: null,
-    passthrough: null,
-    statsDc: null, stats: null, detachStats: null,
-    hasOpenedOnce: false,
-  };
-  active.pc = buildPeerConnection();
-  els.dc.textContent = "—";
-  maybeExposePcForE2e(active.pc);
-
-  rws.on("stateChange", (next, prev, info) => {
-    log("info", `signaling ${prev}→${next}`, info.attempt > 0 ? { attempt: info.attempt, retryInMs: info.nextDelayMs } : undefined);
-    if (next === "reconnecting") setStatus("connecting", `reconnecting (attempt ${info.attempt})`);
-    else if (next === "failed")  setStatus("failed", `signaling failed`);
-  });
-
-  rws.on("open", () => {
-    if (!active) return;
-    if (active.hasOpenedOnce) {
-      log("ok", "ws reopened — rebuilding peer connection");
-      setStatus("connecting", "renegotiating");
-      rebuildPeerConnection("ws reconnected");
-    } else {
-      active.hasOpenedOnce = true;
-      log("ok", "ws open");
-      setStatus("connecting", "waiting for offer");
-    }
-    // Hello frame so signaling learns our role.
-    rws.send(JSON.stringify({ type: "ice", from: "client", data: null } satisfies Envelope));
-
-    // T102: ship the probe result *after* the hello so the streamer
-    // sees `probe_result` only on a registered session. Best-effort —
-    // null result silently skips emission.
-    void probePromise.then((probe) => {
-      if (!probe) {
-        log("info", "probe: no result (skipping probe_result envelope)");
-        return;
-      }
-      log("ok", "probe", probe);
-      rws.send(JSON.stringify({
-        type: "probe_result",
-        from: "client",
-        data: probe,
-      } satisfies Envelope));
-    });
-  });
-
-  rws.on("underlyingClose", (ev) => {
-    log(ev.wasClean ? "info" : "warn", `ws closed`, { code: ev.code, reason: ev.reason || "(none)" });
-    // We do NOT teardown the PC here. If signaling reconnects within
-    // backoff window, ICE/DTLS may still be flowing and we just need a
-    // fresh hello + offer cycle. rebuildPeerConnection runs on the
-    // next "open".
-  });
-
-  rws.on("message", async (ev: MessageEvent) => {
-    if (!active) return;
-    const { pc } = active;
-    let env: Envelope;
-    try {
-      env = JSON.parse(typeof ev.data === "string" ? ev.data : await (ev.data as Blob).text());
-    } catch (err) {
-      log("warn", "non-JSON ws frame", String(err));
-      return;
-    }
-    if (env.from === "client") {
-      log("warn", "echo from self?", env.type);
-      return;
-    }
-    switch (env.type) {
-      case "offer":
-        log("ok", `← offer`, { sdpBytes: env.data.sdp?.length ?? 0 });
-        try {
-          await pc.setRemoteDescription(env.data);
-          const answer = await pc.createAnswer();
-          // T30 munging applies on the answer (T34 role flip).
-          const mungedSdp = prioritizeCodec(answer.sdp ?? "", "VP9");
-          await pc.setLocalDescription({ type: answer.type, sdp: mungedSdp });
-          const reply: Envelope = { type: "answer", from: "client", data: { type: answer.type, sdp: mungedSdp } };
-          rws.send(JSON.stringify(reply));
-          log("ok", `→ answer`, { sdpBytes: mungedSdp.length });
-
-          // T54: inspect the negotiated codec immediately. The local
-          // description IS the negotiated answer, so the first PT in
-          // its m=video line tells us what the pipeline will use.
-          const result = classifyNegotiation(mungedSdp, [...VIDEO_CODEC_PREFERENCE]);
-          const lvl: LogLevel =
-            result.outcome === "ok" ? "ok" :
-            result.outcome === "fallback" ? "warn" : "err";
-          log(lvl, describeOutcome(result), { videoCodecs: result.videoCodecs });
-          if (result.outcome === "no_codec") {
-            teardown("no video codec negotiated");
-            return;
-          }
-          if (result.outcome === "fallback" && active?.statsDc?.readyState === "open") {
-            try {
-              active.statsDc.send(JSON.stringify({
-                v: STATS_PROTOCOL_VERSION,
-                t: Date.now(),
-                session_id: active.sessionId,
-                tenant_id: active.tenantId || "",
-                event: "codec_fallback",
-                data: {
-                  preferred: result.preferred,
-                  negotiated: result.negotiated,
-                  video_codecs: result.videoCodecs,
-                },
-              }));
-            } catch { /* ignore */ }
-          }
-        } catch (err) {
-          log("err", "answer pipeline failed", String(err));
-          teardown("answer failed");
-        }
-        break;
-      case "answer":
-        log("warn", `← unexpected answer from ${env.from}`);
-        break;
-      case "ice":
-        if (env.data === null) {
-          log("info", "← ice (end of candidates)");
-          return;
-        }
-        try {
-          await pc.addIceCandidate(env.data);
-          log("info", "← ice", env.data.candidate ?? "");
-        } catch (err) {
-          log("warn", "addIceCandidate failed", String(err));
-        }
-        break;
-      case "bye":
-        log("info", `← bye from ${env.from}`);
-        teardown("peer said bye");
-        break;
-      case "request_renegotiate":
-        // The streamer is asking US to renegotiate. We cannot
-        // initiate (we are the answerer). Best we can do is ack via
-        // log and rely on the streamer's own ICE restart machinery;
-        // if it re-offers, our offer handler picks it up.
-        log("info", `← request_renegotiate from ${env.from} (no-op for answerer; awaiting fresh offer)`);
-        break;
-      case "probe_result":
-        // The client is the only legit sender of probe_result; if the
-        // streamer ever loops one back, just ignore — we already used
-        // ours to seed the streamer.
-        log("info", `← probe_result from ${env.from} (ignored on client)`);
-        break;
+  s.on("log", log);
+  s.on("status", (st, text) => {
+    setStatus(st, text);
+    if (st === "connected") {
+      const enabled = attach.passthrough?.getState().enabled ?? false;
+      setPassthroughButtonState(enabled ? "on" : "off", false);
+    } else if (st === "failed") {
+      setPassthroughButtonState("off", true);
     }
   });
+  s.on("connectionState", (st) => { els.conn.textContent = st; });
+  s.on("signalingState", (st) => { els.sig.textContent = st; });
+  s.on("iceConnectionState", (st) => { els.ice.textContent = st; });
+  s.on("iceGatheringState", (st) => { els.iceg.textContent = st; });
+  s.on("track", (_track, stream) => {
+    if (els.video.srcObject !== stream) els.video.srcObject = stream;
+  });
+  s.on("dataChannel", wireDataChannel);
+  s.on("pcCreated", (pc) => {
+    // Initial pc AND every reconnect rebuild land here: drop the
+    // previous generation's DOM attachments, re-arm the e2e hook.
+    dropAttachments();
+    setPassthroughButtonState("off", false);
+    maybeExposePcForE2e(pc);
+  });
+  s.on("closed", () => {
+    dropAttachments();
+    session = null;
+    els.connect.disabled = false;
+    els.connect.textContent = "Connect";
+  });
 
-  rws.connect();
+  void s.connect(sessionId).catch((err) => {
+    log("err", "connect failed", String(err));
+    s.disconnect("connect failed");
+  });
 }
 
 // ---------- wire up ----------
 
 els.connect.addEventListener("click", () => {
-  if (active) {
-    teardown("user clicked");
+  if (session) {
+    session.disconnect("user clicked");
     return;
   }
   const sessionId = els.sessionId.value.trim() || "dev";
   els.connect.textContent = "Disconnect";
-  void connect(sessionId);
+  connect(sessionId);
 });
 
 // ---------- T81: passthrough button ----------
 
-/** Set the passthrough button's visual + disabled state. */
 function setPassthroughButtonState(state: "off" | "pending" | "on", disabled: boolean): void {
   els.passthrough.dataset["state"] = state;
   els.passthrough.disabled = disabled;
@@ -701,38 +308,27 @@ function setPassthroughButtonState(state: "off" | "pending" | "on", disabled: bo
 }
 
 els.passthrough.addEventListener("click", async () => {
-  if (!active) return;
-  // Toggle: enable if not yet enabled, disable otherwise. We always
-  // create a fresh CameraPassthrough on enable so the post-rebuild
-  // state (per the threat model) starts from a clean slate.
-  if (active.passthrough && active.passthrough.getState().enabled) {
+  const pc = session?.getPeerConnection();
+  if (!session || !pc) return;
+  if (attach.passthrough && attach.passthrough.getState().enabled) {
     log("info", "passthrough: user clicked stop");
-    active.passthrough.disable();
+    attach.passthrough.disable();
     setPassthroughButtonState("off", false);
     return;
   }
   setPassthroughButtonState("pending", true);
-  const cp = new CameraPassthrough(active.pc, {
-    onStateChange: (s) => log("info", "passthrough state",
-      `enabled=${s.enabled} v=${s.videoTrackActive} a=${s.audioTrackActive}`),
+  const cp = new CameraPassthrough(pc, {
+    onStateChange: (st) => log("info", "passthrough state",
+      `enabled=${st.enabled} v=${st.videoTrackActive} a=${st.audioTrackActive}`),
     onNeedRenegotiate: (reason) => {
-      // The streamer (offerer per T34) needs to re-offer with the
-      // new m= sections. Reuse the existing T37 envelope.
-      if (!active) return;
-      try {
-        active.rws.send(JSON.stringify({
-          type: "request_renegotiate", from: "client",
-        } satisfies Envelope));
-        log("info", `→ request_renegotiate (${reason})`);
-      } catch (err) {
-        log("warn", "request_renegotiate send failed", String(err));
-      }
+      // The offerer needs to re-offer with the new m= sections.
+      session?.requestRenegotiate(reason);
     },
     onError: (err) => log("err", `passthrough ${err.code}`, err.message),
   });
   try {
     await cp.enable();
-    if (active) active.passthrough = cp;
+    attach.passthrough = cp;
     setPassthroughButtonState("on", false);
     log("ok", "passthrough enabled");
   } catch (err) {
@@ -745,10 +341,9 @@ els.passthrough.addEventListener("click", async () => {
   }
 });
 
-window.addEventListener("beforeunload", () => teardown("page unload"));
+window.addEventListener("beforeunload", () => session?.disconnect("page unload"));
 
 log("info", "client loaded — click Connect to start");
 
-// Hint to the bundler/eslint that ReconnectState is part of the public
-// surface even though main.ts only uses it via the rws callbacks.
+// Part of the public surface via the session's signaling event.
 export type { ReconnectState };
