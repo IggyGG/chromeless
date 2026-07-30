@@ -1,14 +1,9 @@
 {
   "schema": "chromeless.guest-release/v1",
-  "commit": "78e5bb4138c3078d1f280bdc88152bc2af90ba6f",
-  "image": "registry.triform.cloud/chromeless/chromeless:cr7727-78e5bb4138c3",
-  "digest": "sha256:34ff9751c814800086c488ede2d1e87a9be1d2570c5e94afcc5139c15b79a873",
+  "commit": "f9e46a1434b56d02bcf47668133b6fdb145dbfa0",
+  "image": "registry.triform.cloud/chromeless/chromeless:cr7727-f9e46a1434b5",
+  "digest": "sha256:06766d9a56d5971b26a197a485b35d0903aadc69d9e6537098f7317007e7bcd4",
   "dockerfile": "build/Dockerfile.runtime",
-  "built_at": "2026-07-10T08:06:42Z",
-  "recorded_by": "seed-manual",
-  "known_gap": {
-    "commit_on_main": false,
-    "reason": "This image was built from branch capstats-plus-rearm, which was never merged. The PR that introduces this file cherry-picks the load-bearing commit (a71b0d0, Cb.getCaptureStats) onto main, making main's guest SOURCE byte-identical to the shipped tree -- but the IMAGE itself still comes from the unmerged SHA. Until the guest is rebuilt from a main SHA, an ancestry check on `commit` is EXPECTED to fail. That failure is correct and actionable: it means production is running a binary whose exact provenance is not on main. Clear it by rebuilding from main and letting the push step rewrite this file -- never by editing this field by hand.",
-    "clears_when": "chromeless-build.sh runs with OUR_REPO_REF=main and chromeless-kaniko-push.sh rewrites this file with the resulting main-descendant SHA"
-  }
+  "built_at": "2026-07-30T09:02:05Z",
+  "recorded_by": "chromeless-kaniko-push.sh"
 }
