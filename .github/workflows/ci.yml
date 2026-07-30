@@ -277,15 +277,26 @@ jobs:
       # implementation cannot pass its own conformance suite, the suite is
       # wrong and we want to know from CI rather than from a third party.
       #
-      # Two mechanics worth stating, both learned the hard way:
+      # Three mechanics, all learned the hard way:
+      #
       #   * DevTools binds 127.0.0.1 only (Chromium 147 ignores
       #     --remote-debugging-address), so `-p 9222` cannot reach it. We
       #     join the worker's network namespace with
       #     `--network container:<id>` instead — the same reason
       #     tests/smoke/container-boot.sh drives CDP via `docker exec`.
+      #
       #   * the runtime image ships no node (correct — it is a browser, not
-      #     a toolchain), so the kit runs from node:22-alpine with the
-      #     checkout mounted read-only.
+      #     a toolchain), so the kit runs from node:22-alpine.
+      #
+      #   * DO NOT bind-mount the kit with `-v "${PWD}/conformance:/conf"`.
+      #     Bind sources are resolved by the DAEMON, which on this host is a
+      #     sibling dind with its own filesystem — it cannot see the job's
+      #     checkout, silently creates an empty directory at that path, and
+      #     the run dies with `Cannot find module '/conf/run.mjs'`. That is
+      #     the identical trap e2e.yml's "Probe daemon filesystem sharing"
+      #     step exists for, and this step walked into it on its first run
+      #     (2026-07-30). `docker cp` moves the files through the daemon's
+      #     own API, so it works whether or not the filesystem is shared.
       - name: Conformance kit vs the worker image
         if: steps.probe.outputs.present == 'true'
         env:
@@ -293,16 +304,24 @@ jobs:
         run: |
           set -euo pipefail
           cid=$(docker run -d --rm --shm-size=1g "${CHROMELESS_IMAGE}")
-          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          runner=""
+          cleanup() {
+            [ -n "${runner}" ] && docker rm -f "${runner}" >/dev/null 2>&1 || true
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
           for i in $(seq 1 60); do
             if docker exec "$cid" curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
               echo "devtools up after ${i}s"; break
             fi
             sleep 1
           done
-          docker run --rm --network "container:${cid}" \
-            -v "${PWD}/conformance:/conf:ro" node:22-alpine \
-            node /conf/run.mjs --target=http://127.0.0.1:9222 --role=cdp
+          # Create → copy → start, so the kit is inside the container's own
+          # filesystem before node looks for it.
+          runner=$(docker create --network "container:${cid}" node:22-alpine \
+            node /conf/run.mjs --target=http://127.0.0.1:9222 --role=cdp)
+          docker cp conformance/. "${runner}:/conf"
+          docker start -a "${runner}"
 
   docs:
     name: Docs link check
