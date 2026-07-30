@@ -89,6 +89,7 @@
 // M3 R1 codec — Envelope struct + Encode/Decode free functions.
 // Aligned with the API drafted in cb_wire_envelope.h on
 // cv2/m3-wire-envelope-codec (commit f51d5c4).
+#include "capture/signaling/cb_signaling_transport.h"
 #include "capture/signaling/cb_wire_envelope.h"
 
 namespace cloud_browser::signaling {
@@ -182,7 +183,8 @@ class SignalingClientObserver {
 //      a mid-handshake destruction silently aborts the dial without
 //      firing observer callbacks.
 class SignalingWsClient
-    : public network::mojom::WebSocketHandshakeClient,
+    : public SignalingTransport,
+      public network::mojom::WebSocketHandshakeClient,
       public network::mojom::WebSocketClient {
  public:
   SignalingWsClient(
@@ -207,7 +209,7 @@ class SignalingWsClient
   // envelope; the physics broker rewrites server-side too). Returns
   // false if not currently connected or if the codec rejected the
   // envelope (observer.OnError() also fires on codec rejection).
-  bool Send(const Envelope& envelope);
+  bool Send(const Envelope& envelope) override;
 
   // Lower-level escape hatch: send |json| as a single text frame
   // without going through R1's encoder. Tests use this to inject
