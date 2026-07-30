@@ -265,18 +265,21 @@ spec:
                   name: sccache-s3-creds
                   key: AWS_SECRET_ACCESS_KEY
             - name: CHROMELESS_BUILD_TARGETS
-              # Build-czar 2026-05-17 (opt B, post Build #23): drop the
-              # 3 unittest targets — cloud_browser_worker ONLY. Build #23
-              # proved every PRODUCTION cloud-browser TU compiles clean
-              # with iters 1-6 (pcf.o + cb_audio_device_module.o +
-              # worker_main.o all F CXX, cb_dc_host.o no-error). The only
-              # build #23 errors were in cloud_browser_pcf_test.cc
-              # (dynamic_cast/-frtti + TestAudioDeviceModule rename) — a
-              # unittest TU orthogonal to M-stack structural validation.
-              # Operator accepts loss of test-coverage signal (unittests
-              # validate separately later, tracked IMPROVE). Worker-only
-              # = zero error sources + ~20-30% faster build.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings"
+              # 2026-07-30: unittest targets RESTORED (encoder + framesink),
+              # reverting build-czar 2026-05-17 opt B (worker-only). Opt B
+              # was a build-#23-era mitigation for compile errors in
+              # cloud_browser_pcf_test.cc; those test TUs were since
+              # repaired (BUILD.gn Wall #37 test_support work) and every
+              # OTHER lane (x264/t2/nvenc/vaapi) kept building them. The
+              # forcing event: main's chromeless-build.sh STEP 7 now FAILS
+              # (not warns) when the test binaries are missing — the
+              # silent-skip was exactly the "unverified C++" class the OSS
+              # verify-loop work closed, and this lane had been skipping
+              # tests for 10 weeks under a WARN nobody read. First fatal
+              # catch: 2026-07-30 build of main (worker compiled clean in
+              # 11m15s, STEP 7 exit 127 on both binaries).
+              # t2's extra pcf_unittests target stays t2-only for now.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             - name: NINJA_PARALLELISM
               # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
               # 36 was conservative. 56 leaves ~8 cores for OS + I/O +
