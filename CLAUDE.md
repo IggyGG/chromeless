@@ -47,7 +47,34 @@ Consequences:
 When you finish C++ work, **say plainly that it is unverified.** Do not
 describe it as done or working.
 
+### Firing the build lane
+
+Use `infra/k8s/chromeless-build/fire-build.sh <ref>`, not `kubectl apply`.
+It renders the manifest from `git show <ref>:<path>`, then reads the **live
+Job object back** and refuses to leave it running if the spec disagrees with
+the ref. Hand-firing desynced the manifest from the live Job three times in
+one afternoon (2026-07-30), and every time the build ran to completion and
+reported a verdict about the wrong target list.
+
+`--keep-going` sets `NINJA_KEEP_GOING=0` so one pass collects every failing
+TU. Without it each drift error costs a full ~30 min cycle to discover.
+
 ## Traps that have cost real time
+
+- **A green build lane is green about a target list, not about the tree.**
+  `capture/**/BUILD.gn` declares seven `test()` targets; for ~10 weeks three
+  of them appeared in no build manifest at all. They were declared, reviewed,
+  merged, and compiled by nothing. When they were finally added, the first
+  build failed immediately — `CbAudioTestRecorder` implemented two of
+  `webrtc::AudioTransport`'s three pure virtuals, so it was abstract and the
+  test could not declare one. Broken the whole time, green the whole time.
+  `make lint-build-targets` now fails if any `test()` target is built by no
+  lane (and if a lane names a target no `BUILD.gn` declares).
+
+  The header's own `TODO` had predicted the failure exactly, including that
+  the build pod would be what found it. **A TODO that names its own
+  verification step is a defect nobody has run yet** — treat one as a task,
+  not a note.
 
 - **`.claude/worktrees/` holds full checkouts of this repo.** Any repo-wide
   `grep`/`find` returns every hit N+1 times unless you exclude it. It is
