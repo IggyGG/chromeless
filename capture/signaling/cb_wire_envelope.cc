@@ -30,9 +30,51 @@ std::optional<EnvelopeType> TagFromString(std::string_view tag) {
   if (tag == "request_renegotiate") return EnvelopeType::kRequestRenegotiate;
   if (tag == "probe_result") return EnvelopeType::kProbeResult;
   if (tag == "session_unhealthy") return EnvelopeType::kSessionUnhealthy;
-  // Source-pin: every other string (including the historic v0
-  // `sdp_offer`, `candidate`, `hello`) MUST fall through to nullopt.
-  // The negative test in cb_wire_envelope_test.cc locks this.
+  // Source-pin: every other string (`hello`, `restart_ice`, …) MUST fall
+  // through to nullopt. The negative test in cb_wire_envelope_test.cc
+  // locks this. The PORTAL dialect's tags are handled by
+  // PortalTagFromString below — deliberately a separate function, so this
+  // one keeps meaning "the canonical accept-list" and nothing silently
+  // widens it.
+  return std::nullopt;
+}
+
+// ---------------------------------------------------------------------
+// Portal dialect (decode-only)
+// ---------------------------------------------------------------------
+//
+// The triform portal speaks a FLAT variant of this protocol, documented at
+// portal/src/canvas/browser_screencast_webrtc.rs:48-53:
+//
+//   {"type":"sdp_offer",     "sdp":"v=0..."}
+//   {"type":"sdp_answer",    "sdp":"v=0..."}
+//   {"type":"ice_candidate", "candidate":"...", "sdpMid":"0", "sdpMLineIndex":0}
+//
+// Three differences from canonical, each of which Decode() rejects on its
+// own: a different tag, no `from` field, and the payload inlined as
+// siblings of `type` instead of nested under `data`.
+//
+// Today this only works because physics translates in the middle —
+// `pattern_c_envelope_to_portal_msg` in screencast_ws.rs:6909. That
+// translator is LOSSY: it maps offer/answer/ice and returns None for bye,
+// request_renegotiate, probe_result and session_unhealthy, so those four
+// tags never reach the portal at all.
+//
+// Accepting the flat dialect HERE is the half of the fix that belongs in
+// this repo: a peer built from this tree can now talk to a portal-dialect
+// counterpart directly. It does NOT make the translator deletable on its
+// own — the portal would still have to learn the other four tags first.
+// Said plainly so nobody reads this commit as "the translator can go now".
+//
+// Decode-only, on purpose. We keep EMITTING canonical, because:
+//   * the canonical form is the one physics and this repo's own client
+//     both speak, and
+//   * an emitter that chose a dialect per-peer would need to know which
+//     peer it is talking to, which the codec deliberately does not.
+std::optional<EnvelopeType> PortalTagFromString(std::string_view tag) {
+  if (tag == "sdp_offer") return EnvelopeType::kOffer;
+  if (tag == "sdp_answer") return EnvelopeType::kAnswer;
+  if (tag == "ice_candidate") return EnvelopeType::kIce;
   return std::nullopt;
 }
 
@@ -289,19 +331,78 @@ std::optional<Envelope> Decode(std::string_view json) {
 
   const std::string* type_str = dict.FindString("type");
   if (!type_str) return std::nullopt;
+
   std::optional<EnvelopeType> type = TagFromString(*type_str);
-  if (!type) return std::nullopt;  // source-pin rejection.
+  if (type) {
+    // Canonical dialect: {type, from, data}.
+    const std::string* from_str = dict.FindString("from");
+    if (!from_str) return std::nullopt;
+    std::optional<PeerRole> from = RoleFromString(*from_str);
+    if (!from) return std::nullopt;
 
-  const std::string* from_str = dict.FindString("from");
-  if (!from_str) return std::nullopt;
-  std::optional<PeerRole> from = RoleFromString(*from_str);
-  if (!from) return std::nullopt;
+    const base::Value* data = dict.Find("data");
+    std::optional<EnvelopeData> data_payload = DecodeData(*type, data);
+    if (!data_payload) return std::nullopt;
 
-  const base::Value* data = dict.Find("data");
-  std::optional<EnvelopeData> data_payload = DecodeData(*type, data);
-  if (!data_payload) return std::nullopt;
+    return Envelope{*type, *from, std::move(*data_payload)};
+  }
 
-  return Envelope{*type, *from, std::move(*data_payload)};
+  // Portal dialect: flat, no `from`, payload inlined. See
+  // PortalTagFromString for the full contract and why this is decode-only.
+  std::optional<EnvelopeType> portal_type = PortalTagFromString(*type_str);
+  if (!portal_type) return std::nullopt;  // source-pin rejection, unchanged.
+
+  // `from` is absent by construction in this dialect. The portal is always
+  // the CLIENT peer — it is the browser-facing UI, and the only producer of
+  // these frames (browser_screencast_webrtc.rs). We record that rather than
+  // leaving the field indeterminate, because callers switch on it: the
+  // offerer driver uses `from` to tell its own replayed envelopes from a
+  // peer's. Inferring "client" is a statement about who speaks this dialect,
+  // not a default — if some future producer speaks flat-but-not-client, it
+  // must send canonical instead.
+  const PeerRole from = PeerRole::kClient;
+
+  switch (*portal_type) {
+    case EnvelopeType::kOffer:
+    case EnvelopeType::kAnswer: {
+      const std::string* sdp = dict.FindString("sdp");
+      if (!sdp) return std::nullopt;
+      // The canonical form carries data.type as a redundant copy of the
+      // tag; synthesize it so downstream code sees one shape regardless of
+      // which dialect arrived.
+      return Envelope{*portal_type, from,
+                      EnvelopeData{SdpPayload{
+                          std::string(TagToString(*portal_type)), *sdp}}};
+    }
+    case EnvelopeType::kIce: {
+      IceCandidatePayload p;
+      const std::string* candidate = dict.FindString("candidate");
+      // A flat ice frame with no `candidate` is this dialect's
+      // end-of-candidates marker: the canonical form says that with
+      // `data: null`, which has no flat equivalent since the payload IS
+      // the frame.
+      if (!candidate) {
+        p.is_end_of_candidates = true;
+        return Envelope{*portal_type, from, EnvelopeData{std::move(p)}};
+      }
+      p.is_end_of_candidates = false;
+      p.candidate = *candidate;
+      if (const std::string* sm = dict.FindString("sdpMid")) {
+        p.sdp_mid = *sm;
+      }
+      if (std::optional<int> idx = dict.FindInt("sdpMLineIndex")) {
+        p.sdp_m_line_index = *idx;
+      }
+      if (const std::string* uf = dict.FindString("usernameFragment")) {
+        p.username_fragment = *uf;
+      }
+      return Envelope{*portal_type, from, EnvelopeData{std::move(p)}};
+    }
+    default:
+      // PortalTagFromString only ever returns the three tags above; a
+      // fourth would be a bug in that function, not bad input.
+      return std::nullopt;
+  }
 }
 
 // ---------------------------------------------------------------------

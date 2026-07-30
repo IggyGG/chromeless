@@ -104,7 +104,17 @@ enum class EnvelopeType {
 // dropped).
 std::optional<EnvelopeType> TagFromString(std::string_view tag);
 
-// Encode-side: the canonical wire string for each tag.
+// Decode-side, PORTAL dialect only: maps the triform portal's flat tags
+// (`sdp_offer`, `sdp_answer`, `ice_candidate`) onto the same enum.
+// Deliberately separate from TagFromString so that function keeps meaning
+// "the canonical accept-list" — see the comment block on the definition
+// for the wire shapes and why this is decode-only.
+std::optional<EnvelopeType> PortalTagFromString(std::string_view tag);
+
+// Encode-side: the canonical wire string for each tag. There is no
+// portal-dialect encoder: this peer always EMITS canonical (an emitter that
+// picked a dialect per-peer would need to know which peer it is addressing,
+// which this codec deliberately does not).
 std::string_view TagToString(EnvelopeType type);
 
 // `from` field. Browser is the only value the cb-chromium emitter ever
@@ -217,14 +227,26 @@ struct Envelope {
 std::optional<std::string> Encode(const Envelope& env);
 
 // Decode a UTF-8 JSON string from the signaling WebSocket into an
-// Envelope. Returns nullopt for:
+// Envelope. Accepts TWO dialects and normalizes both to the struct above:
+//
+//   canonical  {type, from, data}          — everything in this repo, and
+//                                            physics's SignalingEnvelope
+//   portal     {type:"sdp_offer", sdp}     — the triform portal's flat form
+//                                            (decode-only; see
+//                                            PortalTagFromString)
+//
+// Returns nullopt for:
 //   * non-JSON input (parse failure)
 //   * JSON that isn't a top-level object
-//   * missing `type` or `from` field
-//   * `type` not one of the pinned tags (THIS IS LOAD-BEARING —
-//     `sdp_offer` and friends MUST be rejected; the negative test
+//   * missing `type`
+//   * `type` not in EITHER dialect's tag set (STILL LOAD-BEARING — the
+//     accept-list is closed, just larger: `hello`, `restart_ice`,
+//     `candidate` and friends MUST be rejected, and the negative test
 //     pins this)
-//   * `from` not one of "browser" / "client"
+//   * canonical only: missing `from`, or `from` not "browser"/"client"
+//     (the portal dialect has no `from`; it is inferred as kClient —
+//     see the Decode implementation for why that is a statement rather
+//     than a default)
 //   * per-tag `data` shape violation (e.g. ice with non-null,
 //     non-object data; offer/answer with non-object data; bye with
 //     a `data` field present)
