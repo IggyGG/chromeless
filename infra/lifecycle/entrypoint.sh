@@ -40,11 +40,15 @@ fi
 if [ ! -w /dev/console ] 2>/dev/null; then
     ln -sf /var/log/supervisor/chromium.err.log /dev/console 2>/dev/null || {
         # /dev may be read-only for us (runAsNonRoot pods). Fall back to
-        # rewriting a runtime copy of the conf — /etc is root-owned, so
-        # copy to /run (always writable tmpfs in this image's layout).
+        # rewriting a runtime copy of the conf. NOT /run itself — that
+        # is root-owned 755 in this image (only /run/user/1000,
+        # /run/supervisor, /run/chromeless-session are chowned to
+        # cbuser; first deploy of this fix died `line 45:
+        # /run/supervisord.runtime.conf: Permission denied`). Use
+        # /run/supervisor, which the Dockerfile already owns to us.
         sed 's|^stderr_logfile=/dev/console$|stderr_logfile=/var/log/supervisor/chromium.err.log|' \
-            /etc/supervisor/supervisord.conf > /run/supervisord.runtime.conf
-        exec /usr/bin/supervisord -c /run/supervisord.runtime.conf
+            /etc/supervisor/supervisord.conf > /run/supervisor/supervisord.runtime.conf
+        exec /usr/bin/supervisord -c /run/supervisor/supervisord.runtime.conf
     }
 fi
 
