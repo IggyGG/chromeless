@@ -29,11 +29,18 @@ export const VALID_TAGS = Object.freeze([
   'request_renegotiate', 'probe_result', 'session_unhealthy',
 ]);
 
-// Tags a conforming implementation MUST reject. `sdp_offer` is named in
-// the header as the historic v0 tag the contract intentionally dropped;
-// the others are plausible-looking neighbours that have never been valid.
+// The triform portal's flat dialect. Decode-side only: a conforming peer
+// ACCEPTS these (cb_wire_envelope.cc PortalTagFromString) and still emits
+// canonical. Listed here so the kit does not assert the opposite of the
+// code — `sdp_offer` used to be in REJECTED_TAGS below, and moving it is
+// part of the same change that taught the decoder this dialect.
+export const PORTAL_TAGS = Object.freeze(['sdp_offer', 'sdp_answer', 'ice_candidate']);
+
+// Tags a conforming implementation MUST reject. Plausible-looking
+// neighbours that have never been valid in EITHER dialect — the
+// accept-list is closed, just larger than it was.
 export const REJECTED_TAGS = Object.freeze([
-  'sdp_offer', 'candidate', 'hello', 'restart_ice',
+  'candidate', 'hello', 'restart_ice',
 ]);
 
 function offerEnvelope(sdp = 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n') {
@@ -103,9 +110,7 @@ const rejectsOffContractTags = {
         return result.fail({
           expected: `these tags rejected: ${REJECTED_TAGS.join(', ')}`,
           observed: `relayed to the peer: ${relayed.join(', ')}`,
-          hint: relayed.includes('sdp_offer')
-            ? '`sdp_offer` is the historic v0 tag this contract dropped. Relaying it means the broker has drifted back to a contract the peers no longer implement — a peer built from this repo will reject the frame and the session will stall with no error on the broker side.'
-            : 'the accept-list is closed; anything outside it must not be relayed',
+          hint: 'the accept-list is closed; anything outside it must not be relayed. Note it is closed, not small: the canonical tags PLUS the portal dialect (sdp_offer / sdp_answer / ice_candidate) are all valid — see PORTAL_TAGS above.',
           relayed,
         });
       }
