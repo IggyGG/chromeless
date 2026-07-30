@@ -6,7 +6,6 @@
 #include "cloud-browser/capture/build-integration/cb_stats_relay.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -23,6 +22,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "base/values.h"
+#include "cloud-browser/capture/config/cb_env_config.h"
 #include "net/base/load_flags.h"
 #include "net/http/http_request_headers.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
@@ -527,20 +527,15 @@ void CbWebrtcEventEmitter::EmitInternal(const std::string& event,
 
 namespace {
 
-std::string EnvOrDefault(const char* var, const char* fallback) {
-  const char* raw = std::getenv(var);
-  if (raw == nullptr || *raw == '\0') return fallback;
-  return std::string(raw);
-}
 
 }  // namespace
 
 std::string ResolveStatsSidecarUrl() {
-  return EnvOrDefault("CHROMELESS_METRICS_URL", kDefaultStatsSidecarUrl);
+  return config::GetEnvOr("CHROMELESS_METRICS_URL", kDefaultStatsSidecarUrl);
 }
 
 std::string ResolveWebrtcEventUrl() {
-  return EnvOrDefault("CHROMELESS_WEBRTC_METRICS_URL",
+  return config::GetEnvOr("CHROMELESS_WEBRTC_METRICS_URL",
                       kDefaultWebrtcEventUrl);
 }
 

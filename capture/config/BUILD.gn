@@ -1,0 +1,42 @@
+# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+#
+# gn targets for the embedder's configuration surface.
+#
+# Scope note: this is ONE shared env reader plus its tests, not a config
+# framework. The per-subsystem typed structs (WsClientConfig in
+# capture/signaling, IceConfig alongside it) already exist and are the
+# right shape; this deduplicates the four-line getenv helper that had
+# been copy-pasted into three relay .cc files and gives the env surface a
+# single documented home. See cb_env_config.h for why it stops there.
+
+import("//testing/test.gni")  # provides test() template used below
+
+source_set("cb_env_config") {
+  sources = [
+    "cb_env_config.cc",
+    "cb_env_config.h",
+  ]
+
+  # No chromium deps at all — <cstdlib> and <string>. Deliberate: this is
+  # linked into the browser process AND into a standalone test binary, and
+  # keeping it dependency-free means the test does not drag in //base.
+  deps = []
+
+  # Repo-root include paths (T17) — same config every other target here
+  # uses, referenced by absolute label because it is declared in
+  # capture/build-integration/BUILD.gn.
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+  public_configs =
+      [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
+test("cb_env_config_unittests") {
+  sources = [ "cb_env_config_test.cc" ]
+  deps = [
+    ":cb_env_config",
+    "//base/test:run_all_unittests",
+    "//testing/gmock",
+    "//testing/gtest",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
