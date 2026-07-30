@@ -14,6 +14,7 @@ authoritative — not any prose here.
 
 | read | why |
 | --- | --- |
+| [`protocols/signaling-envelope.md`](./protocols/signaling-envelope.md) | **The signaling frames themselves** — both dialects, the closed accept-list, and what a peer must reject. Start here if you are implementing a peer or a broker. |
 | [`protocols/`](./protocols/) | Per-channel wire specs — input, cursor, clipboard, file-upload, stats, probe, reconnect, simulcast, codec-fallback, SDP munging, webcam/mic. The most useful docs in this tree, and kept in lockstep with the code by repo convention. |
 | [`../capture/signaling/cb_wire_envelope.h`](../capture/signaling/cb_wire_envelope.h) | The signaling envelope contract itself. Authoritative over any prose. |
 | [`../conformance/README.md`](../conformance/README.md) | Point the kit at your deployment and it tells you whether you satisfy the above. |

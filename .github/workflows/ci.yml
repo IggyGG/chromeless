@@ -93,6 +93,16 @@ jobs:
       - name: Workflow actions lint
         run: python3 tools/lint/workflow_actions_lint.py
 
+      # OSS-W2: `local` outside a function is a RUNTIME error in bash, and
+      # `bash -n` does not catch it — it is not a syntax error. The build
+      # orchestrator is ~700 lines of top-level shell where one such slip
+      # aborts a step silently: STEP 7 logged its START banner and stopped,
+      # 27 minutes into a t7 build, after a clean 745-second compile
+      # (2026-07-30). This runs in milliseconds and fails on the same
+      # condition.
+      - name: Shell top-level `local` lint
+        run: python3 tools/lint/shell_toplevel_local_lint.py
+
       # Go signaling server: gofmt + vet
       - name: Set up Go
         uses: actions/setup-go@v5

@@ -52,8 +52,10 @@ to read, not just that something is wrong.
 Anyone can accept a well-formed `offer`. The contract's load-bearing half is
 what a conforming implementation must **refuse**:
 
-- `sdp_offer` — the historic v0 tag, dropped on purpose. Accepting it means
-  your broker has drifted back to a contract this project abandoned.
+- `restart_ice`, `hello`, `candidate` — plausible-looking names that have
+  never been valid in either dialect. The accept-list is **closed**, not
+  small: canonical tags *plus* the portal's flat dialect (`sdp_offer`,
+  `sdp_answer`, `ice_candidate`) are all legal, and nothing else is.
 - `bye` with a `data` field — `bye` carries no payload at all.
 - an envelope with no `from`, or `from: "server"`.
 

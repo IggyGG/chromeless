@@ -117,13 +117,38 @@ constexpr char kRealProbeResultEnvelope[] = R"({
   }
 })";
 
-// Negative-test fixture: the historic v0 `sdp_offer` tag. Physics
-// has NEVER accepted this — webrtc_signaling.rs:124-155's serde enum
-// renames to snake_case and only declares the six current tags. We
-// pin the rejection here so a future codec edit that "helpfully"
-// remaps sdp_offer -> offer breaks loudly.
-constexpr char kRejectedSdpOfferEnvelope[] = R"({
+// Portal-dialect fixtures. `sdp_offer` USED to be a negative fixture here
+// — "the historic v0 tag, physics has never accepted this". That framing
+// was wrong on the facts: it is not historic and not v0, it is the LIVE
+// dialect the triform portal speaks today, documented at
+// portal/src/canvas/browser_screencast_webrtc.rs:48-53. It reaches this
+// codec only because physics translates in the middle
+// (pattern_c_envelope_to_portal_msg, screencast_ws.rs:6909), and that
+// translator silently DROPS bye / request_renegotiate / probe_result /
+// session_unhealthy.
+//
+// The old test existed so that flipping this contract required an explicit
+// argument rather than a quiet edit. This is that argument, made in the
+// place the tripwire pointed at.
+//
+// Note the shape: flat, no `from`, payload as siblings of `type`. All
+// three differences are why the canonical decoder rejected it.
+constexpr char kPortalFlatOfferEnvelope[] = R"({
   "type": "sdp_offer",
+  "sdp": "v=0\r\n"
+})";
+
+constexpr char kPortalFlatIceEnvelope[] = R"({
+  "type": "ice_candidate",
+  "candidate": "candidate:1 1 udp 2122260223 10.0.0.1 54321 typ host",
+  "sdpMid": "0",
+  "sdpMLineIndex": 0
+})";
+
+// What must STILL be rejected. The accept-list is closed, just larger:
+// widening it to the portal dialect must not widen it to anything else.
+constexpr char kRejectedUnknownTagEnvelope[] = R"({
+  "type": "restart_ice",
   "from": "browser",
   "data": { "type": "offer", "sdp": "v=0\r\n" }
 })";
@@ -164,7 +189,10 @@ TEST(CbWireEnvelopeTagTest, AllTagsRoundTrip) {
 }
 
 TEST(CbWireEnvelopeTagTest, UnknownTagsRejected) {
-  // The historic v0 tag — load-bearing rejection.
+  // `sdp_offer` is a PORTAL-dialect tag, and the two tag spaces stay
+  // separate: PortalTagFromString knows it, this one must not. Decode()
+  // consults both, which is where the widening lives — keeping it out of
+  // here is what stops "canonical" quietly becoming "anything we accept".
   EXPECT_EQ(TagFromString("sdp_offer"), std::nullopt);
   // Other plausible-but-wrong names.
   EXPECT_EQ(TagFromString(""), std::nullopt);
@@ -268,11 +296,68 @@ TEST(CbWireEnvelopeDecodeTest, RealSessionUnhealthyDecodes) {
 // Negative test — load-bearing rejection
 // ---------------------------------------------------------------------
 
-TEST(CbWireEnvelopeDecodeTest, RejectsHistoricSdpOfferTag) {
-  // Locks the source-pin contract. If a maintainer ever "fixes" the
-  // codec to accept sdp_offer as an alias for offer, this test fires
-  // and they have to argue the contract change explicitly.
-  EXPECT_EQ(Decode(kRejectedSdpOfferEnvelope), std::nullopt);
+TEST(CbWireEnvelopeDecodeTest, RejectsUnknownTagEvenWithValidShape) {
+  // The replacement for the old RejectsHistoricSdpOfferTag. The accept-list
+  // is still CLOSED — accepting the portal dialect widened it by exactly
+  // three tags, not to anything that happens to carry a well-formed
+  // envelope around it. `restart_ice` is well-formed in every respect
+  // except its tag, so this fails for the one reason we care about.
+  EXPECT_EQ(Decode(kRejectedUnknownTagEnvelope), std::nullopt);
+  EXPECT_EQ(TagFromString("restart_ice"), std::nullopt);
+  EXPECT_EQ(PortalTagFromString("restart_ice"), std::nullopt);
+  // Canonical lookup must NOT have grown the portal tags: the two tag
+  // spaces stay separate so `TagFromString` keeps meaning "canonical".
+  EXPECT_EQ(TagFromString("sdp_offer"), std::nullopt);
+  EXPECT_EQ(TagFromString("ice_candidate"), std::nullopt);
+}
+
+TEST(CbWireEnvelopeDecodeTest, AcceptsPortalFlatOffer) {
+  std::optional<Envelope> env = Decode(kPortalFlatOfferEnvelope);
+  ASSERT_TRUE(env.has_value());
+  EXPECT_EQ(env->type, EnvelopeType::kOffer);
+  // No `from` on the wire; inferred as the client peer (the portal is the
+  // only producer of this dialect).
+  EXPECT_EQ(env->from, PeerRole::kClient);
+  ASSERT_TRUE(std::holds_alternative<SdpPayload>(env->data));
+  const SdpPayload& p = std::get<SdpPayload>(env->data);
+  EXPECT_EQ(p.sdp, "v=0\r\n");
+  // data.type is synthesized so downstream sees ONE shape regardless of
+  // which dialect arrived.
+  EXPECT_EQ(p.sdp_type, "offer");
+}
+
+TEST(CbWireEnvelopeDecodeTest, AcceptsPortalFlatIce) {
+  std::optional<Envelope> env = Decode(kPortalFlatIceEnvelope);
+  ASSERT_TRUE(env.has_value());
+  EXPECT_EQ(env->type, EnvelopeType::kIce);
+  EXPECT_EQ(env->from, PeerRole::kClient);
+  ASSERT_TRUE(std::holds_alternative<IceCandidatePayload>(env->data));
+  const IceCandidatePayload& p = std::get<IceCandidatePayload>(env->data);
+  EXPECT_FALSE(p.is_end_of_candidates);
+  EXPECT_EQ(p.sdp_mid, "0");
+  EXPECT_EQ(p.sdp_m_line_index, 0);
+}
+
+TEST(CbWireEnvelopeDecodeTest, PortalFlatIceWithoutCandidateIsEndOfCandidates) {
+  // The flat dialect has no way to say `data: null` — the payload IS the
+  // frame — so an ice frame with no candidate carries that meaning.
+  std::optional<Envelope> env = Decode(R"({"type":"ice_candidate"})");
+  ASSERT_TRUE(env.has_value());
+  ASSERT_TRUE(std::holds_alternative<IceCandidatePayload>(env->data));
+  EXPECT_TRUE(std::get<IceCandidatePayload>(env->data).is_end_of_candidates);
+}
+
+TEST(CbWireEnvelopeEncodeTest, AlwaysEmitsCanonicalNeverPortal) {
+  // Decoding the portal dialect must not make us SPEAK it. Round-trip a
+  // portal frame and assert the re-encoded form is canonical.
+  std::optional<Envelope> env = Decode(kPortalFlatOfferEnvelope);
+  ASSERT_TRUE(env.has_value());
+  std::optional<std::string> out = Encode(*env);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_NE(out->find("\"offer\""), std::string::npos);
+  EXPECT_EQ(out->find("sdp_offer"), std::string::npos);
+  EXPECT_NE(out->find("\"from\""), std::string::npos);
+  EXPECT_NE(out->find("\"data\""), std::string::npos);
 }
 
 TEST(CbWireEnvelopeDecodeTest, RejectsNonJson) {

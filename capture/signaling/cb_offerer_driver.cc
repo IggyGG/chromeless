@@ -75,7 +75,7 @@ const char* StateName(OffererState s) {
 CbOffererDriver::CbOffererDriver(
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pcf,
     webrtc::Thread* signaling_thread,
-    SignalingWsClient* ws_client,
+    SignalingTransport* ws_client,
     webrtc::PeerConnectionInterface::RTCConfiguration ice_config,
     OffererDriverObserver* observer,
     scoped_refptr<base::SequencedTaskRunner> ui_runner)

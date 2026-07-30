@@ -39,12 +39,21 @@ import("//testing/test.gni")  # provides test() template used below
 # ---------------------------------------------------------------------
 source_set("cb_wire_envelope") {
   sources = [
+    # Header-only transport interface. Lives with the codec because it is
+    # the same kind of thing — a pure contract with no I/O — and because
+    # its only dependency IS the codec (Envelope). Giving it its own
+    # source_set would be a target with no .cc file and one dep.
+    "cb_signaling_transport.h",
     "cb_wire_envelope.cc",
     "cb_wire_envelope.h",
   ]
-  deps = [
-    "//base",
-  ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
@@ -85,7 +94,6 @@ source_set("cb_signaling_ws_client") {
   ]
   deps = [
     ":cb_wire_envelope",
-    "//base",
     "//mojo/public/cpp/bindings",
     "//mojo/public/cpp/system",
     # //net carries net::IsolationInfo, SiteForCookies, the network
@@ -100,6 +108,13 @@ source_set("cb_signaling_ws_client") {
     "//services/network/public/mojom",
     "//url",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
@@ -245,7 +260,6 @@ source_set("cb_offerer_driver") {
     ":cb_signaling_ws_client",  # M3 R2
     ":cb_wire_envelope",        # M3 R1
     "//cloud-browser/capture/build-integration:cloud_browser_pcf",  # M1
-    "//base",
     # build-czar M-stack fix (2026-05-17): //third_party/webrtc/api:*
     # targets have visibility restricted to //third_party/webrtc/* and
     # //third_party/webrtc_overrides/* — external consumers must go
@@ -257,6 +271,13 @@ source_set("cb_offerer_driver") {
     # and :stats_relay in capture/build-integration/BUILD.gn.
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
@@ -330,7 +351,6 @@ source_set("cb_dc_host") {
     "cb_dc_host.h",
   ]
   deps = [
-    "//base",
     # libwebrtc — DataChannelInterface, PeerConnectionInterface,
     # rtc::CopyOnWriteBuffer all routed through the cloud-browser
     # passthrough. build-czar M-stack fix iter 2 (2026-05-17): Build #17
@@ -344,6 +364,13 @@ source_set("cb_dc_host") {
     # entirely; the passthrough covers it.
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   # Repo-root include-path config — propagated transitively so the
   # `#include "capture/signaling/cb_dc_host.h"` form resolves the same
   # way M1's headers resolve. Same config M3 R1..R4 use.
@@ -369,12 +396,18 @@ source_set("cb_signaling_reconnect") {
   deps = [
     ":cb_signaling_ws_client",
     ":cb_wire_envelope",
-    "//base",
     # //services/network/public/mojom for the NetworkContext* the
     # wrapper threads through to the inner client on each
     # reconnect attempt.
     "//services/network/public/mojom",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
   public_configs =
       [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
