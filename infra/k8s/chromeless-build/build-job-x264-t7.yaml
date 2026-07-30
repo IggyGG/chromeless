@@ -346,6 +346,7 @@ spec:
               # only restored the two targets the old value had named. The tree
               # actually declares SEVEN test() targets:
               #
+              #   cb_env_config_unittests             <- config surface
               #   cb_wire_envelope_unittests          <- signaling codec
               #   cloud_browser_adm_unittests
               #   cloud_browser_encoder_unittests     built here
@@ -367,7 +368,7 @@ spec:
               # may have bitrotted over the 10 weeks nothing built them, and
               # finding that out belongs in its own change rather than riding
               # along with a codec fix.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/signaling:cb_wire_envelope_unittests cloud-browser/capture/build-integration:cloud_browser_adm_unittests cloud-browser/capture/build-integration:cloud_browser_input_dispatch_unittests cloud-browser/capture/build-integration:cloud_browser_pointer_state_unittests"
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/signaling:cb_wire_envelope_unittests cloud-browser/capture/build-integration:cloud_browser_adm_unittests cloud-browser/capture/build-integration:cloud_browser_input_dispatch_unittests cloud-browser/capture/build-integration:cloud_browser_pointer_state_unittests cloud-browser/capture/config:cb_env_config_unittests"
             - name: NINJA_PARALLELISM
               # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
               # 36 was conservative. 56 leaves ~8 cores for OS + I/O +
