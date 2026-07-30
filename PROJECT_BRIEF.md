@@ -1,5 +1,21 @@
 # Cloud Browser over WebRTC — Project Brief
 
+> **Status: HISTORICAL — the architecture described here no longer exists.**
+>
+> This brief plans around *stock Chromium + `getDisplayMedia`*, driven from
+> outside the browser. That is not what this project is. The M7 native-peer
+> migration deleted `capture/streamer-page/` and moved the WebRTC peer
+> **inside the browser process** — see `capture/build-integration/` and
+> `capture/signaling/`. Sections below that read as present tense ("where we
+> are now", "Phase 0") describe early 2026, not today.
+>
+> Kept because the *reasoning* is still worth reading — particularly
+> principle 1 ("don't fork Chromium until you have to") and the prior-art
+> survey, which is exactly the wall this project eventually hit and had to
+> descend past. For what the system actually is now, read `README.md`; for
+> the wire contracts, `docs/protocols/` and
+> `capture/signaling/cb_wire_envelope.h`.
+
 **Scope:** Open-source cloud browser with low-latency WebRTC streaming
 **Team:** 4 developers + 1 dedicated tester, WebRTC-strong
 **Target:** Linux server-side, containerized; software encode for v1; both single- and multi-tenant eventually
