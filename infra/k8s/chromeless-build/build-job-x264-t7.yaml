@@ -279,7 +279,34 @@ spec:
               # catch: 2026-07-30 build of main (worker compiled clean in
               # 11m15s, STEP 7 exit 127 on both binaries).
               # t2's extra pcf_unittests target stays t2-only for now.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
+              #
+              # 2026-07-30 (same day, second pass): + cb_wire_envelope_unittests.
+              # Restoring encoder+framesink above fixed the SILENT-SKIP, but I
+              # only restored the two targets the old value had named. The tree
+              # actually declares SEVEN test() targets:
+              #
+              #   cb_wire_envelope_unittests          <- signaling codec
+              #   cloud_browser_adm_unittests
+              #   cloud_browser_encoder_unittests     built here
+              #   cloud_browser_framesink_capturer_unittests   built here
+              #   cloud_browser_input_dispatch_unittests
+              #   cloud_browser_pcf_unittests         (t2-only, deliberate)
+              #   cloud_browser_pointer_state_unittests
+              #
+              # So the wire-envelope tests — including the negative test whose
+              # own comment says it exists "so a maintainer has to argue the
+              # contract change explicitly" — have never executed in this lane.
+              # A test that cannot run is documentation, and it was being cited
+              # as a guarantee. Found while verifying the portal-dialect decode
+              # change: the new assertions compiled and were never exercised.
+              #
+              # Adding the signaling one here because that is the contract this
+              # repo publishes to third parties. The remaining three (adm,
+              # input_dispatch, pointer_state) are a separate question — they
+              # may have bitrotted over the 10 weeks nothing built them, and
+              # finding that out belongs in its own change rather than riding
+              # along with a codec fix.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/signaling:cb_wire_envelope_unittests"
             - name: NINJA_PARALLELISM
               # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
               # 36 was conservative. 56 leaves ~8 cores for OS + I/O +

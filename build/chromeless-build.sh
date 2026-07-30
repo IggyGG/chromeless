@@ -471,10 +471,8 @@ step_done
 step "7/10 unit tests"
 
 if [[ -n "${STUB_MODE}" ]]; then
-    log "[stub] would run cloud_browser_encoder_unittests + cloud_browser_framesink_capturer_unittests"
+    log "[stub] would run every *_unittests target in CHROMELESS_BUILD_TARGETS"
 else
-    encoder_rc=0
-    framesink_rc=0
     # Profile builds dynamic-link system libs staged at /work/system-libs
     # (BUILD.gn:x264 with -Wl,--allow-shlib-undefined and NO rpath — the
     # runtime image provides the libs on its default path). The build
@@ -486,10 +484,55 @@ else
     # so both binaries and any future test target get it; harmless for
     # sw-profile builds (the dir just isn't consulted).
     export LD_LIBRARY_PATH="/work/system-libs/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_encoder_unittests" || encoder_rc=$?
-    run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_framesink_capturer_unittests" || framesink_rc=$?
-    if [[ "${encoder_rc}" -ne 0 || "${framesink_rc}" -ne 0 ]]; then
-        log "unit tests reported failures (encoder=${encoder_rc} framesink=${framesink_rc})"
+
+    # Run every *_unittests target that was BUILT, derived from
+    # CHROMELESS_BUILD_TARGETS rather than hardcoded.
+    #
+    # This used to name two binaries literally. That is how
+    # cb_wire_envelope_unittests came to be built-but-never-run: adding a
+    # target to the lane's target list did nothing here, and the mismatch is
+    # invisible — the build goes green either way. Same failure SHAPE as the
+    # silent-skip this step's fatal-on-missing check was added to close, one
+    # level up: there the binary was missing, here it exists and nobody
+    # invokes it.
+    #
+    # Deriving the list means a target added to CHROMELESS_BUILD_TARGETS is
+    # automatically executed, and STEP 7's existing fatal-on-missing check
+    # still fires if it failed to link.
+    # NOTE: no `local` here. This block runs at SCRIPT TOP LEVEL, not inside a
+    # function, and bash makes `local` a fatal error there — under `set -e`
+    # that aborts the step instantly with no output, which is exactly how the
+    # first run of this rewrite died (STEP 7 START, then nothing). Caught
+    # 2026-07-30 by the build itself; the shellcheck-style lint added
+    # alongside this now catches it before a 12-minute compile does.
+    test_binaries=()
+    for _t in ${CHROMELESS_BUILD_TARGETS}; do
+        # gn labels look like path/to:target_name — take the target name.
+        _name="${_t##*:}"
+        case "${_name}" in
+            *_unittests) test_binaries+=("${_name}") ;;
+        esac
+    done
+
+    tests_rc=0
+    if [[ "${#test_binaries[@]}" -eq 0 ]]; then
+        log "WARN: no *_unittests targets in CHROMELESS_BUILD_TARGETS — nothing to run."
+        log "WARN: this lane is shipping an artifact no test has exercised."
+    fi
+    for _bin in "${test_binaries[@]}"; do
+        _path="${CHROMIUM_SRC}/${OUT_DIR}/${_bin}"
+        if [[ ! -x "${_path}" ]]; then
+            log "ERROR: ${_bin} was requested but is missing or not executable."
+            log "ERROR: it is in CHROMELESS_BUILD_TARGETS, so ninja should have"
+            log "ERROR: produced it — treat this as a build failure, not a skip."
+            tests_rc=1
+            continue
+        fi
+        run "${_path}" || tests_rc=$?
+    done
+
+    if [[ "${tests_rc}" -ne 0 ]]; then
+        log "unit tests reported failures (rc=${tests_rc}); ran: ${test_binaries[*]}"
         if [[ -n "${CHROMELESS_TESTS_NONFATAL:-}" ]]; then
             log "WARN: CHROMELESS_TESTS_NONFATAL=1 — continuing to STEP 8 and"
             log "WARN: shipping this artifact with failing unit tests."
