@@ -231,7 +231,6 @@ source_set("framesink_capture") {
     "../framesink-capturer/video_frame_conversion.h",
   ]
   deps = [
-    "//base",
     "//components/viz/common",
     "//components/viz/host",
     "//components/viz/service",
@@ -255,6 +254,13 @@ source_set("framesink_capture") {
 
     "//ui/gfx/geometry",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -280,7 +286,6 @@ source_set("active_webcontents_resolver") {
     "cb_active_webcontents_resolver.h",
   ]
   deps = [
-    "//base",
     # WebContents, WebContentsObserver, RenderFrameHost,
     # RenderViewHost, RenderWidgetHost, RenderWidgetHostView.
     "//content/public/browser",
@@ -288,6 +293,13 @@ source_set("active_webcontents_resolver") {
     # capture-vs-current FSID mismatch warning.
     "//components/viz/common",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]               # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -419,7 +431,6 @@ source_set("cb_audio_lifecycle") {
     "../audio/cb_audio_lifecycle.h",
   ]
   deps = [
-    "//base",
     "//third_party/abseil-cpp:absl",
     # CV2-69 — TODO marker retired (M55-R5-merge-with-m3-r4-r6 commit
     # landed). :cb_offerer_driver is the M3 R4 target.
@@ -435,6 +446,13 @@ source_set("cb_audio_lifecycle") {
     # (see cb_audio_lifecycle.h "ADM ref-cycle care" section). The
     # API header for it rides the passthrough above; no extra dep.
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]
   public_configs = [ ":cb_include_paths" ]
 }
@@ -556,13 +574,19 @@ source_set("stats_relay") {
     "cb_stats_relay.h",
   ]
   deps = [
-    "//base",
     "//net/traffic_annotation",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
     "//url",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -602,7 +626,6 @@ source_set("clipboard_relay") {
     "cb_clipboard_relay.h",
   ]
   deps = [
-    "//base",
     "//cloud-browser/capture/signaling:cb_dc_host",
     "//net/traffic_annotation",
     "//services/network/public/cpp",
@@ -610,6 +633,13 @@ source_set("clipboard_relay") {
     "//url",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -656,7 +686,6 @@ source_set("file_upload_relay") {
     "cb_file_upload_relay.h",
   ]
   deps = [
-    "//base",
     "//cloud-browser/capture/signaling:cb_dc_host",
     "//net/traffic_annotation",
     "//services/network/public/cpp",
@@ -664,6 +693,13 @@ source_set("file_upload_relay") {
     "//url",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -738,8 +774,14 @@ source_set("pointer_state") {
   deps = [
     # base::TimeTicks for the snapshot timestamp, base::Value::Dict
     # for the envelope-shape helpers.
-    "//base",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -842,7 +884,6 @@ source_set("input_dispatch_ime") {
     "cb_input_dispatch_ime.h",
   ]
   deps = [
-    "//base",
     # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
     ":input_dispatch",
     # R3's WebContentsResolver forward-declared interface (R5 depends
@@ -859,6 +900,13 @@ source_set("input_dispatch_ime") {
     "//ui/base/ime",
     "//ui/gfx/range",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]               # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -879,7 +927,6 @@ source_set("input_dispatch_touch") {
     "cb_input_dispatch_touch.h",
   ]
   deps = [
-    "//base",
     ":input_dispatch",
     ":input_dispatch_mouse",
     # RenderWidgetHostImpl + input::RenderInputRouter (the latter pulled
@@ -887,6 +934,13 @@ source_set("input_dispatch_touch") {
     # / WebTouchPoint — all via the content-public re-export.
     "//content/public/browser",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]               # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -909,7 +963,6 @@ source_set("input_dispatch_drag") {
     "cb_input_dispatch_drag.h",
   ]
   deps = [
-    "//base",
     ":input_dispatch",
     # R3's WebContentsResolver forward-declared interface + the
     # CbInputDispatchMouse pointer for held-modifier read access.
@@ -923,6 +976,13 @@ source_set("input_dispatch_drag") {
     "//third_party/blink/public/mojom:mojom_platform",
     "//url",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]               # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -974,7 +1034,6 @@ source_set("cursor_client") {
     "cb_cursor_client.h",
   ]
   deps = [
-    "//base",
     "//skia",
     "//ui/aura",
     "//ui/base",
@@ -982,6 +1041,13 @@ source_set("cursor_client") {
     "//ui/display",
     "//ui/gfx/geometry",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]
   public_configs = [ ":cb_include_paths" ]
 }
@@ -1001,7 +1067,6 @@ source_set("cursor_xy_join") {
     "cb_cursor_xy_join.h",
   ]
   deps = [
-    "//base",
     # M5 R1 — CbCursorClient + CursorChangeCallback.
     ":cursor_client",
     # M4 R3 — CbInputDispatchMouse + CbLastPointerSnapshot struct.
@@ -1011,6 +1076,13 @@ source_set("cursor_xy_join") {
     # mojom-forward directly so make the dep explicit.
     "//ui/base/cursor/mojom:cursor_type_shared",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -1125,7 +1197,6 @@ source_set("embedder") {
     # F1 (ResourceBundle) lives in //ui/base already in this list;
     # F3 (crash keys) is the only new dep.
     "//components/crash/core/common:crash_key",
-    "//base",
     # cloud_browser_browser_context.cc registers with the
     # BrowserContext / Simple keyed-service dependency managers (same
     # shape every chromium embedder uses; see
@@ -1194,6 +1265,13 @@ source_set("embedder") {
     # see cb_devtools_agent.cc file-header note); this dep list is
     # otherwise complete and gn-check-clean.
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   # Apply the repo-root include path explicitly. public_configs from
   # :encoder_factory and :framesink_capture only propagate to direct
   # consumers, not transitively through this source_set's own
@@ -1293,7 +1371,6 @@ source_set("input_dispatch_clipboard") {
     "cb_input_dispatch_clipboard.h",
   ]
   deps = [
-    "//base",
     # R1's CbInputDispatch + InputEnvelope + CbInputDispatchDelegate.
     # TODO(M4-R8-r1-merge): no-op once R1 merges; today this dep
     # points at a source_set that only exists on
@@ -1317,6 +1394,13 @@ source_set("input_dispatch_clipboard") {
     # transitively (same fix as input_dispatch_mouse + _keyboard above).
     "//content/public/browser",
   ]
+
+  # public_deps: this target's PUBLIC header includes "base/...", so //base
+  # is part of its interface — dependents need base's include dirs (which
+  # carry partition_alloc's generated headers) transitively. See the note
+  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
+  # produces when it is a private dep.
+  public_deps = [ "//base" ]
   configs += [ ":cb_include_paths" ]                # T17.
   public_configs = [ ":cb_include_paths" ]
 }
