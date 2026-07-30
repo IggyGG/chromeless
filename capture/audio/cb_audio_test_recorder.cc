@@ -122,6 +122,28 @@ int32_t CbAudioTestRecorder::NeedMorePlayData(
   return 0;
 }
 
+void CbAudioTestRecorder::PullRenderData(int bits_per_sample,
+                                         int /*sample_rate*/,
+                                         size_t number_of_channels,
+                                         size_t number_of_frames,
+                                         void* audio_data,
+                                         int64_t* elapsed_time_ms,
+                                         int64_t* ntp_time_ms) {
+  // Silence-renderer, same contract as NeedMorePlayData above. Unlike
+  // that one, this signature reports its buffer geometry in BITS per
+  // sample and FRAMES, not bytes and samples — so the size arithmetic
+  // is (frames * channels * bits/8), not (samples * bytes). Getting
+  // that wrong would zero the wrong length and either under-fill (the
+  // caller renders whatever garbage was in the tail) or overrun.
+  if (audio_data != nullptr) {
+    std::memset(audio_data, 0,
+                number_of_frames * number_of_channels *
+                    (static_cast<size_t>(bits_per_sample) / 8));
+  }
+  if (elapsed_time_ms) *elapsed_time_ms = -1;
+  if (ntp_time_ms) *ntp_time_ms = -1;
+}
+
 size_t CbAudioTestRecorder::RecordedCallCount() const {
   webrtc::MutexLock lock(&lock_);
   return recorded_call_count_;
