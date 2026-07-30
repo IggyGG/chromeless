@@ -80,6 +80,20 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # C2: private-registry login — see ci.yml's identical step for the
+      # conditional-secrets rationale. Compose pulls the worker image
+      # itself, so the daemon needs the auth before `up`.
+      - name: Registry login (if credentials provided)
+        if: steps.probe.outputs.present == 'true' && env.REGISTRY_PASSWORD != ''
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          registry="${CHROMELESS_IMAGE%%/*}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
+            --username "${REGISTRY_USERNAME}" --password-stdin
+
       - name: docker compose up
         if: steps.probe.outputs.present == 'true'
         env:

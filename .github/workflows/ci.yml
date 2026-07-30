@@ -167,6 +167,22 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # C2: CHROMELESS_IMAGE points at a private registry
+      # (registry.triform.cloud). Login is conditional on the secrets
+      # existing so a fork (or GitHub, where these secrets are absent)
+      # that sets a PUBLIC image still works without them. `docker login`
+      # via stdin keeps the password out of argv/process listings.
+      - name: Registry login (if credentials provided)
+        if: steps.probe.outputs.present == 'true' && env.REGISTRY_PASSWORD != ''
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          registry="${CHROMELESS_IMAGE%%/*}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
+            --username "${REGISTRY_USERNAME}" --password-stdin
+
       - name: Pull the worker image
         if: steps.probe.outputs.present == 'true'
         env:
