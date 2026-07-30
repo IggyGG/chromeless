@@ -209,20 +209,41 @@ cmd_apply_patches() {
 cmd_gen() {
     require_chromium_src
     require_depot_tools
-    # CB_BUILD_PROFILE selects which args.<profile>.gn overlay to import.
-    # Each overlay imports the base args.gn first, then sets its
+    # CHROMELESS_BUILD_PROFILE selects which args.<profile>.gn overlay to
+    # import. Each overlay imports the base args.gn first, then sets its
     # profile-specific *_libdir / *_sdk_path to flip the matching
     # encoder gate on. "sw" (default) imports the base args.gn directly
     # — no HW or x264 path enabled.
     #
+    # HISTORY (2026-07-30): this read `CB_BUILD_PROFILE` from 2026-05-01
+    # (Track F1) until today, but the c12d40d cb-*→chromeless rename
+    # (2026-05-05) renamed the WRAPPER's variable — chromeless-build.sh
+    # validates and exports CHROMELESS_BUILD_PROFILE — without touching
+    # this reader. Result: the wrapper's export never reached this
+    # switch, `:-sw` won silently, and EVERY build since 2026-05-05 —
+    # including every deployed cr7727-* production image — was gn-gen'd
+    # with the base args.gn: x264_libdir empty, HAS_X264 undefined,
+    # H264Encoder compiled as the stub. Nobody noticed for 12 weeks
+    # because (a) the t7 lane also skipped the unit tests that assert
+    # InitEncode works, and (b) at runtime the encoder factory's probe
+    # fails closed onto libwebrtc's built-in encoders, so video kept
+    # flowing — just never through the x264 path the profile was meant
+    # to enable. Found by the restored verify loop: H264EncoderTest
+    # failed 7/7 with WEBRTC_VIDEO_CODEC_ERROR from the #else stub,
+    # while the same params succeeded against the staged libx264
+    # directly, and `objdump -p cloud_browser_worker` showed no x264
+    # NEEDED entry.
+    # CB_BUILD_PROFILE is still honoured as a fallback for any direct
+    # caller of this script that predates the rename.
+    #
     # Valid values: sw (default), x264, vaapi, nvenc, all.
-    local profile="${CB_BUILD_PROFILE:-sw}"
+    local profile="${CHROMELESS_BUILD_PROFILE:-${CB_BUILD_PROFILE:-sw}}"
     local overlay
     case "${profile}" in
         sw)             overlay="args.gn";;
         x264|vaapi|nvenc|all)
                         overlay="args.${profile}.gn";;
-        *)              die "unknown CB_BUILD_PROFILE=${profile} (expected sw|x264|vaapi|nvenc|all)";;
+        *)              die "unknown CHROMELESS_BUILD_PROFILE=${profile} (expected sw|x264|vaapi|nvenc|all)";;
     esac
     local args_path="//cloud-browser/capture/build-integration/${overlay}"
     log "gn gen ${OUT_DIR} (profile=${profile}, importing ${args_path})..."
