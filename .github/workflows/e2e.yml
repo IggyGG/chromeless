@@ -32,6 +32,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Job-level gate, not just the step-level probe below. On Forgejo a
+    # step-level `if:` prevents only the step's EXECUTION — the job still
+    # clones every action and runs the pre-probe setup steps (checkout,
+    # buildx, setup-node). Observed 2026-07-29: the probe correctly said
+    # "e2e skipped" and the job STILL failed, because setup-node's tool
+    # cache was broken on that runner and its post-steps exited 255. A
+    # job-level `if:` is evaluated before any of that (codeql.yml proves
+    # the pattern on this host), so an unset var now skips the whole job
+    # green instead of gambling on runner state it doesn't need.
+    #
+    # The step-level probe is kept: it still guards the var-set-but-empty
+    # edge and keeps every compose step independently gated (see the
+    # teardown comment at the bottom).
+    if: vars.CHROMELESS_IMAGE != ''
+
     steps:
       - uses: actions/checkout@v4
 
