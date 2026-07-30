@@ -52,9 +52,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      # OSS-W2: no `actions/setup-node@v4` — it installs a glibc node onto
+      # this host's musl (Alpine) job container, poisoning PATH so every
+      # later JS action's post-step exits 255 and the job fails with none of
+      # its own work having run. Full write-up in ci.yml's "Node version
+      # (image-provided)" step. The gate only needs `node` + `docker`, both
+      # of which ci-tools ships.
+      - name: Node version (image-provided)
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::no node in the job image; the gate is a node script"
+            exit 1
+          }
+          echo "node: $(node --version)"
 
       - name: Check for a supplied worker image
         id: probe
@@ -120,9 +130,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      # OSS-W2: see the scaffold job's identical step — setup-node ships a
+      # glibc node this musl job container cannot exec.
+      - name: Node version (image-provided)
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::no node in the job image; the gate is a node script"
+            exit 1
+          }
+          echo "node: $(node --version)"
 
       - name: Check for a supplied worker image
         id: probe

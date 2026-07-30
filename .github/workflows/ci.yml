@@ -99,12 +99,42 @@ jobs:
       # Client: TypeScript typecheck + unit tests. ESLint is run only when
       # the project actually has a config file, so we skip cleanly with a
       # notice instead of failing.
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: client/package-lock.json
+      #
+      # OSS-W2: `actions/setup-node@v4` is deliberately NOT used. The CI host
+      # maps `ubuntu-latest` to an ALPINE job container (ci-tools, musl libc),
+      # and setup-node downloads the official node tarball — which is
+      # dynamically linked against glibc. It extracts fine, so setup-node
+      # reports success ("Adding to the cache…", "npm: 10.8.2"), then every
+      # later step that resolves `node` from PATH dies:
+      #
+      #   /opt/hostedtoolcache/node/20.20.2/x64/bin/node: cannot execute:
+      #     required file not found            <- /lib64/ld-linux-x86-64.so.2
+      #   exec .../bin/node: no such file or directory   <- post-steps, 255
+      #
+      # Because the poisoned PATH persists, EVERY `post` step of EVERY
+      # JS action in the job then fails with exit 255 and the job fails even
+      # when its real work passed. Observed 2026-07-30: Lint's tsc + all 217
+      # vitest tests PASSED, then "Post Set up Node"/"Post Set up Go"/"Post
+      # checkout" each 255'd and the job reported failure. Both native-peer
+      # gates and e2e died the same way with nothing of theirs having run.
+      # `setup-go` is unaffected only because Go ships static binaries.
+      #
+      # ci-tools already ships node v22 + npm built against musl, which runs
+      # the whole client suite (verified in-container: 15 files / 217 tests
+      # green). So use what the image provides and assert it exists, rather
+      # than installing an ABI-incompatible one. If you re-add setup-node,
+      # pin a glibc job container too, or this comes back.
+      - name: Node version (image-provided)
+        run: |
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::no node in the job image; add one or pin a container with node"
+            exit 1
+          fi
+          echo "node: $(node --version)  npm: $(npm --version 2>/dev/null || echo MISSING)"
+          if ! command -v npm >/dev/null 2>&1; then
+            echo "::error::node present but npm missing in the job image"
+            exit 1
+          fi
 
       - name: Install client deps
         working-directory: client
