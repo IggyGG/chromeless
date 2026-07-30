@@ -1,5 +1,11 @@
 # Phase 0 exit gate — report
 
+> **Status: HISTORICAL — a point-in-time record, not current guidance.**
+> Run 2026-04-30 against repo HEAD `e6ec3eab`, when the capture path was
+> stock Chromium + `getDisplayMedia`. The M7 native-peer migration replaced
+> that wholesale, so the components measured here are gone. Kept as the
+> record of what the gate actually found on the day.
+
 **Date:** 2026-04-30
 **Author:** `qa-tester`
 **Repo HEAD at run:** `e6ec3eab`

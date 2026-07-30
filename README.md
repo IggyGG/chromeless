@@ -232,9 +232,14 @@ latency-obsessed. If that overlaps with what you need, it may be useful to you.
 | [`tests/`](./tests/) | Smoke, integration, e2e, and WebRTC drivers. |
 | [`verification/`](./verification/) | Assertion-gate tooling. |
 
-Historical planning documents (`PROJECT_BRIEF.md`, the phase-exit reports)
-describe an earlier architecture — stock Chromium plus `getDisplayMedia` — that
-no longer exists. Read them as history.
+[`docs/README.md`](./docs/README.md) is the map: it groups the documentation by
+what you're trying to do (integrate / operate / change the browser) and lists,
+explicitly, which documents are historical.
+
+Historical planning documents (`PROJECT_BRIEF.md`, the phase-exit reports, the
+Phase 1 stack audit) describe an earlier architecture — stock Chromium plus
+`getDisplayMedia` — that no longer exists. They each carry a status banner
+saying so. Read them as history.
 
 ---
 

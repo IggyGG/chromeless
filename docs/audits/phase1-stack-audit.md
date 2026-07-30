@@ -1,5 +1,13 @@
 # Phase 1 stack end-to-end audit (T100)
 
+> **Status: HISTORICAL — point-in-time, and its subject no longer exists.**
+> Audited 2026-04-30 at repo HEAD `f6528a2`, when the stack was stock
+> Chromium + `getDisplayMedia` with a `capture/streamer-page/` JS peer. M7
+> deleted that and moved the WebRTC peer into the browser process, so the
+> per-component findings below describe code that is gone. The *method* —
+> component-by-component against a written success criterion — is still the
+> model worth copying.
+
 **Date:** 2026-04-30 · **Author:** `qa-tester` · **Repo HEAD:** `f6528a2` ·
 **Scope:** every Phase 1 component reviewed against
 [`docs/v1-success-criteria.md`](../v1-success-criteria.md).
