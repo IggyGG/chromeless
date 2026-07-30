@@ -42,6 +42,7 @@ shows the diff, and resurrecting `pvc-chromium-src.yaml` +
 | `cleanup-job.yaml` | **Manual** Job to wipe `/var/lib/longhorn/chromeless-build/` on triform-8. NOT in the kustomize bundle — operator runs explicitly when starting from scratch. |
 | `Dockerfile.build-runner` | Build-runner image: Debian 12 + depot_tools + sccache + git + python3 + sudo + zstd. Pushed to forgejo. |
 | `kustomization.yaml` | `kubectl apply -k .` entry. |
+| `fire-build.sh` | **Preferred way to fire a build.** Renders the manifest from a git ref, applies it, then reads the LIVE Job object back and refuses to leave it running if the spec disagrees. See below. |
 
 ## Prereqs (one-time, per-cluster)
 
@@ -171,6 +172,44 @@ kubectl exec -n chromeless-build chromeless-build-debug -- \
 
 Option C is faster than `kubectl cp` for multi-GB artifacts (skips
 the per-file overhead of the cp implementation).
+
+## Firing a build (use the script)
+
+```bash
+./infra/k8s/chromeless-build/fire-build.sh <ref> [--keep-going]
+```
+
+The ref is mandatory. There is no default, deliberately: defaulting to `main`
+is exactly how you end up testing `main` while believing you tested your
+branch.
+
+**Why a script instead of `kubectl apply`.** Firing a build by hand means
+copying a manifest, adjusting the name / ref / target list, and applying it.
+Each of those is a place where the thing you meant to test and the thing that
+actually ran come apart — and the divergence is invisible, because the Job
+runs to completion either way and reports a verdict about whatever the live
+spec said. On 2026-07-30 that produced three wrong results in one afternoon:
+a manifest `sed`-derived from a previous job's copy (branch had six test
+targets, live Job had three, reported as "all six compile"); the same class
+again; and a job whose `OUR_REPO_REF` still said `main` while the commit under
+test was on a branch.
+
+So the script does the thing all three of those skipped — it reads the live
+object back:
+
+- the manifest comes from `git show <ref>:<path>`, never the working tree
+- `OUR_REPO_REF` is rewritten at **both** sites (init + build container; a
+  mismatch between them silently runs an old build script — cost two failed
+  attempts on 2026-05-17), and it aborts if it finds fewer than two
+- after apply, live targets and ref are diffed against the ref's manifest;
+  any mismatch deletes the Job and exits non-zero
+
+`--keep-going` sets `NINJA_KEEP_GOING=0` so a single pass collects every
+failing TU instead of stopping at the first. Worth it when probing for API
+drift — otherwise each error costs a full build cycle to find.
+
+It deliberately does NOT watch the build or interpret the result. Reading a
+build log is still something you do with your eyes; see "Watch the build".
 
 ## Iterate on the build
 
