@@ -33,9 +33,16 @@ not build.
 | role | suite | what it asserts |
 | --- | --- | --- |
 | `signaling` | signaling-wire | envelope tags, `from` values, per-tag `data` shapes, and that off-contract tags are REJECTED |
-| `cdp` | cdp-surface | DevTools reachable, `/json/version` shape, a page target exists, `Cb.*` presence |
-| `media` | media-sanity | an offer is produced, has the expected m-lines, and the codec set matches what the encoder factory advertises |
-| `full` | all of the above | |
+| `cdp` | cdp-surface | DevTools reachable, `/json/version` shape, a page target exists |
+| `full` | both of the above | |
+
+**Not implemented yet:** a `media-sanity` suite (is an offer produced, does it
+carry the expected m-lines, does the advertised codec set match the encoder
+factory). It needs a real PeerConnection on the running deployment, which is
+a bigger lift than the two suites above and belongs with the work that wires
+`verification/`'s boot harness into a live media path. Until it exists there
+is no `--role=media`; asking for one is a usage error rather than a silent
+no-op.
 
 Every check names the spec clause it enforces, so a failure tells you what
 to read, not just that something is wrong.
