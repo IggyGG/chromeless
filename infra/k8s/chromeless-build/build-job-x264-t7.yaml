@@ -369,6 +369,31 @@ spec:
               # finding that out belongs in its own change rather than riding
               # along with a codec fix.
               value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/signaling:cb_wire_envelope_unittests cloud-browser/capture/build-integration:cloud_browser_adm_unittests cloud-browser/capture/build-integration:cloud_browser_input_dispatch_unittests cloud-browser/capture/build-integration:cloud_browser_pointer_state_unittests cloud-browser/capture/config:cb_env_config_unittests"
+            - name: CHROMELESS_TESTS_SKIP_RUN
+              # BUILT here, but not EXECUTED here. See STEP 7 in
+              # build/chromeless-build.sh for the mechanism and its guards.
+              #
+              # cloud_browser_adm_unittests drives the REAL libwebrtc Pulse
+              # backend: it needs a live audio server with an actual capture
+              # source. This is a compile pod. Even with pulseaudio installed
+              # and running, there is no sound card and no monitor source, so
+              # InitRecording() returns -1 and the test is RED for a reason
+              # that says nothing about the code.
+              #
+              # It is an integration test wearing a unit test's clothes. The
+              # runtime image (build/Dockerfile.runtime) already runs
+              # pulseaudio under supervisord — that is where it can produce a
+              # verdict that means something.
+              #
+              # It is still BUILT here, deliberately. Compiling it is what
+              # found two real defects on 2026-07-30 (CbAudioTestRecorder was
+              # abstract; the test passthrough was missing link-time
+              # webrtc_overrides deps), and the ~10-week gap this whole
+              # mechanism came from was "declared but never compiled". Not
+              # running it costs nothing that compiling it buys.
+              value: "cloud_browser_adm_unittests"
+            - name: CHROMELESS_TESTS_SKIP_RUN_REASON
+              value: "needs a live PulseAudio server with a capture source; compile pod has none. Runs in the runtime image (M5.5). Still compiled+linked here."
             - name: NINJA_PARALLELISM
               # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
               # 36 was conservative. 56 leaves ~8 cores for OS + I/O +
