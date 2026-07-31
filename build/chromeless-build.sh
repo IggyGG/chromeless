@@ -514,7 +514,48 @@ else
         esac
     done
 
+    # CHROMELESS_TESTS_SKIP_RUN — space-separated binary names that this lane
+    # BUILDS but does not EXECUTE.
+    #
+    # This exists for tests that need a runtime the compile lane is not, and
+    # only those. Today that is cloud_browser_adm_unittests, which drives the
+    # real libwebrtc Pulse backend and therefore needs a live audio server
+    # with a capture source; the compile pod has neither. It is an integration
+    # test wearing a unit test's clothes, and the runtime image
+    # (build/Dockerfile.runtime) already runs PulseAudio under supervisord —
+    # that is where it belongs.
+    #
+    # Compiling it here is still valuable and still happens: the ~10-week gap
+    # this whole mechanism came out of was "declared but never COMPILED", and
+    # compiling it is what found two real defects (an abstract
+    # CbAudioTestRecorder, and missing link-time webrtc_overrides deps).
+    # Skipping the RUN gives that up for nothing, so we don't.
+    #
+    # Three guards keep this from becoming the silent-skip class that STEP 7
+    # was rewritten to close in the first place:
+    #   1. it is opt-IN per lane, never a default;
+    #   2. every skip is logged by name WITH its reason, at the same volume as
+    #      a failure — a skip you cannot see is a lie;
+    #   3. a skipped binary must still have been BUILT. A name in this list
+    #      that ninja did not produce, or that is not in this lane's target
+    #      list at all, is a hard error — that is how a stale entry survives a
+    #      target rename and quietly stops running something.
     tests_rc=0
+    skipped_run=()
+    for _s in ${CHROMELESS_TESTS_SKIP_RUN:-}; do
+        _found=0
+        for _b in "${test_binaries[@]}"; do
+            [[ "${_b}" == "${_s}" ]] && _found=1 && break
+        done
+        if [[ "${_found}" -eq 0 ]]; then
+            log "ERROR: CHROMELESS_TESTS_SKIP_RUN names '${_s}', which is not in"
+            log "ERROR: this lane's CHROMELESS_BUILD_TARGETS. Stale entry after a"
+            log "ERROR: rename or removal — fix the list rather than leaving a"
+            log "ERROR: skip that silently matches nothing."
+            tests_rc=1
+        fi
+    done
+
     if [[ "${#test_binaries[@]}" -eq 0 ]]; then
         log "WARN: no *_unittests targets in CHROMELESS_BUILD_TARGETS — nothing to run."
         log "WARN: this lane is shipping an artifact no test has exercised."
@@ -528,8 +569,26 @@ else
             tests_rc=1
             continue
         fi
+        # Note the ordering: the executable check above runs FIRST, so a
+        # skipped binary that failed to link is still a build failure. Skipping
+        # the run must never soften "it did not build".
+        _skip=0
+        for _s in ${CHROMELESS_TESTS_SKIP_RUN:-}; do
+            [[ "${_bin}" == "${_s}" ]] && _skip=1 && break
+        done
+        if [[ "${_skip}" -eq 1 ]]; then
+            log "SKIP-RUN: ${_bin} built OK but NOT executed in this lane."
+            log "SKIP-RUN: reason: ${CHROMELESS_TESTS_SKIP_RUN_REASON:-<none given — set CHROMELESS_TESTS_SKIP_RUN_REASON>}"
+            skipped_run+=("${_bin}")
+            continue
+        fi
         run "${_path}" || tests_rc=$?
     done
+
+    if [[ "${#skipped_run[@]}" -gt 0 ]]; then
+        log "STEP 7 summary: ran ${#test_binaries[@]} target(s) minus ${#skipped_run[@]} skipped: ${skipped_run[*]}"
+        log "STEP 7 summary: those were COMPILED and LINKED here, just not run."
+    fi
 
     if [[ "${tests_rc}" -ne 0 ]]; then
         log "unit tests reported failures (rc=${tests_rc}); ran: ${test_binaries[*]}"
