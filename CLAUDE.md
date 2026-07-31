@@ -134,6 +134,37 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
 `docs/operations/triform-deploy.md` documents one real cluster. Useful as a
 worked example; not a generic guide.
 
+## Working with the user: decisions must be ASKED, not written down
+
+**If the user has to decide something, use the AskUserQuestion tool. Every
+time. Not a paragraph at the end of a message.**
+
+This is not a style preference. A message that ends with "three things are
+yours to decide" reads as *finished* — the user sees a completed task and no
+prompt, so the thread goes dead while an agent believes it is politely
+waiting. That happened repeatedly on 2026-07-30: three open decisions (merge
+a green PR, where a RED-by-design test should live, whether to reshard a
+backup CronJob) sat in prose across several messages and the session stalled.
+
+Rules:
+
+- A decision only counts as raised once it has gone through
+  `AskUserQuestion`. Prose alongside it is fine; prose *instead* of it is not.
+- Ask **at the moment you're blocked**, not in a summary at the end. If you
+  discover the question mid-task, finish everything that doesn't depend on the
+  answer first, then ask.
+- Put your recommendation first and label it `(Recommended)`. You have the
+  context; make the call easy.
+- Batch related decisions into one call (up to 4 questions) rather than
+  stringing out several rounds.
+- **Don't** ask for things you can determine yourself — a conventional
+  default, a fact in the repo, or a choice the user already made. Asking about
+  those is its own kind of noise.
+
+What *does* warrant asking: anything outward-facing or hard to reverse (merges,
+deploys, prod image promotion, destructive storage operations), and any fork
+where different answers mean materially different work.
+
 ## Conventions
 
 - **Comments explain *why*.** This codebase is unusually heavily commented and
