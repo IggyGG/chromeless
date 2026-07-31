@@ -4,7 +4,8 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help verify lint lint-cxx lint-workflows lint-shell test test-unit test-integration \
+.PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
+        test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
         test-unit-signaling test-unit-client test-unit-harness
@@ -18,6 +19,7 @@ help:
 	@echo "  make lint-cxx            # C++ include lint — catches missing #includes"
 	@echo "                           # that would otherwise fail 4-8 h into a build"
 	@echo "  make lint-workflows      # every 'uses:' must exist on the CI action mirror"
+	@echo "  make lint-build-targets  # every test() target is built by some lane"
 	@echo ""
 	@echo "  make test                # legacy alias for test-all-ci (the PR gate)"
 	@echo "  make test-all-ci         # PR-blocking subset (unit + integration + smoke)"
@@ -53,7 +55,7 @@ verify: lint test-unit test-integration
 
 # ---- lint ------------------------------------------------------------------
 
-lint: lint-cxx lint-workflows lint-shell
+lint: lint-cxx lint-workflows lint-shell lint-build-targets
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -71,6 +73,17 @@ lint-cxx:
 	@python3 tools/lint/test_cxx_include_lint.py >/dev/null && \
 	  echo ">>> cxx-include-lint self-tests pass" || \
 	  { echo "!!! cxx-include-lint SELF-TESTS FAILED — the linter itself is broken"; exit 1; }
+
+# Every test() target declared in capture/ must appear in some build lane's
+# CHROMELESS_BUILD_TARGETS. Three of the seven did not, for ~10 weeks, and the
+# first compile after they were added failed immediately — see the docstring.
+# The lanes were green about a smaller set of files than the tree contains.
+lint-build-targets:
+	@echo ">>> build targets lint"
+	@python3 tools/lint/build_targets_lint.py
+	@python3 tools/lint/test_build_targets_lint.py >/dev/null && \
+	  echo ">>> build-targets-lint self-tests pass" || \
+	  { echo "!!! build-targets-lint SELF-TESTS FAILED — the linter itself is broken"; exit 1; }
 
 lint-shell:
 	@if command -v shellcheck >/dev/null 2>&1; then \
