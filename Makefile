@@ -5,7 +5,7 @@
 # pointing at the task that will deliver them, rather than silently passing.
 
 .PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
-        lint-runtime-contracts test test-unit test-integration \
+        lint-runtime-contracts lint-tests-wired test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
         test-unit-signaling test-unit-client test-unit-harness \
@@ -57,7 +57,8 @@ verify: lint test-unit test-integration
 
 # ---- lint ------------------------------------------------------------------
 
-lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts
+lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts \
+      lint-tests-wired
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -98,6 +99,17 @@ lint-build-targets:
 # CHROMELESS_AUTOSTART_STREAMER is not referenced by the launcher at all.
 #
 # A red test that nothing runs is indistinguishable from no test.
+# Every test entrypoint under tests/ must be reachable from a make target, a
+# workflow, a build script, or a k8s pod template. 34 files were reachable from
+# NONE of those — written, reviewed, merged, run by nothing. One had been RED
+# for months without anyone knowing.
+#
+# Sibling of lint-build-targets, which exists because three test() targets went
+# uncompiled for ten weeks. Same defect, one directory over, same fix.
+lint-tests-wired:
+	@echo ">>> tests-wired lint"
+	@python3 tools/lint/tests_wired_lint.py
+
 lint-runtime-contracts:
 	@echo ">>> runtime contracts"
 	@fail=0; \
