@@ -88,8 +88,22 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
   produced two production bugs (`signalingUseTls` read as `useTls`;
   array-form `iceServers` read only as a string, silently falling back to
   public STUN). If you add a param, add it to the alias/validation path too.
-- **`docker compose` needs `CHROMELESS_IMAGE`.** No image is published
-  anywhere; you supply one. Compose fails fast with a message.
+- **`docker compose` needs `CHROMELESS_IMAGE`, `CHROMELESS_USER`, and
+  `CHROMELESS_PASS`.** No image is published anywhere; you supply one. The
+  credentials gate the gateway and have no default on purpose — a built-in
+  password looks like protection. Compose fails fast on each.
+- **The standalone stack publishes exactly one port: the gateway (8443).**
+  DevTools (9222) and the broker (8080) are internal. Do not republish them to
+  make a test easier: 9222 is unauthenticated remote code execution against the
+  browser and the image passes `--remote-allow-origins=*`, and the broker with
+  no `CHROMELESS_AUTH_PUBKEY` accepts anyone. Use `docker compose exec`.
+- **coturn: `lt-cred-mech` for the compose profile, `use-auth-secret` for k8s.**
+  These are NOT interchangeable. `signaling/turn.go` only emits static
+  credentials, which cannot authenticate against a `use-auth-secret` relay —
+  pairing them yields a relay that refuses every allocation while looking
+  healthy, with no error anywhere and no video. The Helm chart and
+  `infra/k8s/turn-deployment.yaml` are the HMAC-REST half and pair with
+  `infra/turn-issuer/`.
 - **CI runs on Forgejo, and every `uses:` must exist on its action mirror.**
   Forgejo *does* execute `.github/workflows` (no `.forgejo/` needed). But it
   resolves actions from `data.forgejo.org`, and it **git-clones every `uses:`
@@ -130,6 +144,7 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
 | `docs/build/chromium-from-source.md` — pinning and rolls | `docs/phase-{0,1}-exit-report.md` |
 | `capture/signaling/cb_wire_envelope.h` — the authoritative wire contract | Anything referencing `capture/streamer-page/` (deleted in M7) |
 | `README.md` — rewritten and accurate as of 2026-07 | `docs/audits/`, `docs/measurements/` — point-in-time |
+| `docs/operations/standalone.md` + `infra/gateway/README.md` — the self-hosted path | Anything describing a published `:3000` client or `:8080` broker — that topology is gone |
 
 `docs/operations/triform-deploy.md` documents one real cluster. Useful as a
 worked example; not a generic guide.
@@ -186,7 +201,7 @@ capture/          the embedder (the product)
   encoder/            x264 / VP9 / NVENC / VAAPI / SVT-AV1 behind one factory
 signaling/        Go broker
 client/           TypeScript client + demo page
-infra/            compose, Helm, CRDs + controller, lifecycle scripts
+infra/            gateway (standalone TLS/login/nav), compose, Helm, CRDs, lifecycle
 build/            Chromium build orchestration + runtime image
 tools/lint/       host-runnable static checks
 tests/            smoke · integration · e2e · webrtc drivers

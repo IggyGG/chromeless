@@ -23,7 +23,7 @@ you build it yourself. See [Building](#building) for what that costs.
 | `capture/` | C++ | The product. A Chromium content-embedder (`cloud_browser_worker`) built out-of-tree against a pinned Chromium release branch. Native browser-process libwebrtc peer, FrameSink capture, encoder factory, input dispatch, five data channels, a custom `Cb.*` CDP domain. |
 | `signaling/` | Go | WebSocket signaling broker. One session = one `client` + one `browser`. JWT auth, TURN credential minting, offer/ICE replay buffers. |
 | `client/` | TypeScript | Browser-side client: answerer state machine, input encoder, cursor/clipboard/file-upload/stats channels, codec negotiation, reconnect. Tested with vitest. |
-| `infra/` | YAML/shell | compose stack, Helm chart, `BrowserSession` CRDs + controller, TURN issuer. |
+| `infra/` | Go/YAML | The standalone gateway (TLS, login, session tokens, navigation), compose stack, Helm chart, `BrowserSession` CRDs + controller, TURN issuer. |
 | `harness/` | mixed | Glass-to-glass latency measurement (flashing block + webcam reconciliation). |
 
 The browser is **always the offerer**; the client is the answerer.
@@ -38,34 +38,48 @@ build it (below) or use one your organization already built.
 ```bash
 git clone <this-repo> && cd chromeless
 
-# Build the client bundle once.
-( cd client && npm ci && npm run build )
+# Generate the keypair the gateway signs with and the broker verifies against.
+eval "$(cd infra/gateway && go run ./cmd/keygen)"
 
 CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
   docker compose -f infra/compose.yaml up
 ```
 
-Then open <http://localhost:3000>.
+Then open <https://localhost:8443>, accept the certificate once, and sign in.
+Type a URL in the address bar and you are driving a real Chromium.
 
-`CHROMELESS_IMAGE` is required and has no default — compose fails fast with a
-message rather than pulling a tag that doesn't exist.
+Three variables are required and none has a default. `CHROMELESS_IMAGE`
+because this repo publishes no images and there is nothing honest to point at;
+`CHROMELESS_USER` / `CHROMELESS_PASS` because a built-in default password is
+worse than no login at all — it looks like protection. Compose fails fast on
+each with a message.
 
-The page and the worker reach signaling from opposite sides of the docker
-network, so they take separate values. Both defaults are correct for a stock
-`compose up`; override only when publishing elsewhere:
+**About that certificate warning.** The gateway generates a self-signed
+certificate on first boot and reuses it afterwards. Accepting it once also
+covers the `wss://` signaling connection, because the page and the WebSocket
+share one origin — which is the reason everything runs on a single port. Bring
+your own with `CHROMELESS_TLS_CERT` / `CHROMELESS_TLS_KEY`, and add
+`CHROMELESS_TLS_HOSTS=hostname,192.168.1.10` if you reach it by anything other
+than `localhost`.
 
-| | dialled by | default |
-| --- | --- | --- |
-| `CHROMELESS_CLIENT_SIGNALING_URL` | the browser, on the host | `ws://localhost:8080/ws` |
-| `SIGNALING_URL` | the worker, inside the network | `ws://signaling:8080/ws` |
+Exactly one port is published: the gateway. The signaling broker and Chromium's
+DevTools stay on the internal network — DevTools in particular is
+unauthenticated remote code execution against the browser, and it used to be
+published by default.
 
-The client also derives its endpoint from the page's own origin when nothing
-is injected, so serving the bundle from any host or port works without
-configuration.
+Without `CHROMELESS_ICE_SERVERS` the peer falls back to public STUN. Fine for a
+same-host run and **will not traverse most NATs**; for anything else bring up
+the bundled relay:
 
-Without `CHROMELESS_ICE_SERVERS` the peer falls back to public STUN. That is
-fine for a same-host compose run and **will not traverse most NATs**; bring
-your own TURN for anything else.
+```bash
+CHROMELESS_TURN_SECRET=$(openssl rand -hex 32) \
+  docker compose -f infra/compose.yaml --profile turn up
+```
+
+**Running the browser on another machine** — a box with more cores, or a server
+you already have — is `infra/compose.host.yaml` plus `infra/compose.worker.yaml`.
+See [`docs/operations/standalone.md`](./docs/operations/standalone.md).
 
 ---
 
@@ -105,14 +119,19 @@ above:
         │  Browser client — client/              │
         │  RTCPeerConnection (answerer)          │
         │  recv video+audio · send input over DC │
-        └───────┬───────────────────────▲────────┘
+        │  address bar ─── POST /api/navigate ─┐ │
+        └───────┬───────────────────────▲──────┼─┘
                 │ WebSocket (SDP/ICE)   │ SRTP/DTLS media + DataChannels
-                ▼                       │
-        ┌──────────────────────┐        │
-        │  signaling/  (Go)    │        │
-        │  offer + ICE replay  │        │
-        └───────┬──────────────┘        │
-                │                       │
+                ▼                       │      │
+   ╔════════════════════════════════════╪══════╪═══╗
+   ║  infra/gateway/  (Go)   TLS ends here      │  ║  ← the only published
+   ║  login · session tokens · static · proxy   │  ║     port, standalone
+   ╚════════┬═══════════════════════════╪══════╪═══╝
+        ┌───▼──────────────────┐        │      │ CDP Page.navigate
+        │  signaling/  (Go)    │        │      │
+        │  offer + ICE replay  │        │      │
+        └───────┬──────────────┘        │      │
+                │                       │      │
 ┌───────────────▼───────────────────────┼──────────────────────────────┐
 │  cloud_browser_worker  (capture/)     │                              │
 │                                       │                              │
@@ -122,9 +141,17 @@ above:
 │     ├─ native libwebrtc PeerConnection ◀────────────────────┘        │
 │     │    └─ encoder factory: x264 / VP9 / NVENC / VAAPI / SVT-AV1 ───┤
 │     ├─ DataChannels: input · stats · cursor · clipboard · files      │
-│     └─ CDP: Cb.startSession · Cb.startFrameSinkCapture · …           │
+│     └─ CDP: Page.navigate ◀──────────────────────────────────────────┘
+│            Cb.startNativeSession · Cb.startFrameSinkCapture · …      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+The gateway is the standalone deployment's single front door; Kubernetes
+deployments terminate TLS at an Ingress and mint sessions in the controller
+instead, and skip it. **Navigation does not ride the peer connection**: the
+connection carries pixels and input, and the URL goes over HTTP to a control
+plane that drives CDP. The triform portal works the same way, with physics in
+the gateway's place.
 
 The peer lives in the **browser process**, not in a page. There is no streamer
 web page and no `getDisplayMedia` — both were removed in the M7 native-peer
@@ -157,10 +184,15 @@ translates the friendly names into what the browser process reads:
 Setting a `WEBRTC_*` variable directly always wins, which is how the Kubernetes
 controller drives it.
 
-Sessions can also be started at runtime over CDP — `Cb.startSession` (and its
-deprecated alias `Cb.startNativeSession`) takes the same settings as
-parameters, which is what a warm-pool orchestrator uses after restoring a
-snapshot.
+Sessions can also be started at runtime over CDP — `Cb.startNativeSession`
+takes the same settings as parameters, which is what a warm-pool orchestrator
+uses after restoring a snapshot. (This previously documented a
+`Cb.startSession` with `Cb.startNativeSession` as its "deprecated alias". It
+is the other way round: `startNativeSession` is the only spelling the embedder
+implements — see `kStartNativeSessionMethod` in
+`capture/build-integration/cb_devtools_agent.cc`. Since `Cb.*` is
+hand-dispatched and absent from `/json/protocol`, nothing would have caught
+the wrong name but a failing call.)
 
 ---
 
@@ -172,8 +204,12 @@ snapshot.
   nothing is published to a public one. Required values: the Ed25519 auth
   pubkey, the TURN shared secret, and TURN URLs.
 - **Firecracker / warm snapshots** — boot the worker with no signaling env and
-  drive `Cb.startSession` over CDP once the microVM is restored.
-- **Bare docker** — `infra/compose.yaml` is the reference.
+  drive `Cb.startNativeSession` over CDP once the microVM is restored.
+- **Standalone / bare docker** — `infra/compose.yaml` plus
+  [`infra/gateway/`](./infra/gateway/): one TLS port, a login, and everything
+  else on an internal network. Split across two machines with
+  `infra/compose.host.yaml` + `infra/compose.worker.yaml`. Full guide:
+  [`docs/operations/standalone.md`](./docs/operations/standalone.md).
 
 Day-2 material is in [`docs/operations/`](./docs/operations/);
 `triform-deploy.md` there documents one real production cluster and is useful
@@ -229,7 +265,7 @@ latency-obsessed. If that overlaps with what you need, it may be useful to you.
 | [`capture/`](./capture/) | The Chromium embedder: browser-process WebRTC peer, FrameSink capture, encoders, input dispatch, `Cb.*` CDP domain. |
 | [`signaling/`](./signaling/) | Go WebSocket signaling broker. |
 | [`client/`](./client/) | TypeScript browser client + demo page. |
-| [`infra/`](./infra/) | compose stack, Helm chart, CRDs + controller, TURN issuer, lifecycle scripts. |
+| [`infra/`](./infra/) | [gateway](./infra/gateway/), compose stack, Helm chart, CRDs + controller, TURN issuer, lifecycle scripts. |
 | [`build/`](./build/) | Chromium build orchestration and the runtime image. |
 | [`patches/`](./patches/) | The (small) Chromium patch series. |
 | [`docs/protocols/`](./docs/protocols/) | Per-channel wire specs — the most useful docs here. |
