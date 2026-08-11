@@ -1,63 +1,98 @@
-// 03: The client receives a video RTCRtpReceiver from the cloud peer.
+// 03: Real video arrives from the cloud peer and decodes.
 //
-// CURRENTLY SKIPPED — un-skip when T34 lands and the streamer-page is
-// confirmed actually emitting media into the negotiated PC.
+// THIS IS THE SPEC THAT PROVES THE PRODUCT WORKS. Everything else in this
+// suite checks that machinery is wired; this one checks that pixels move.
 //
-// Why this is skipped today:
-//   The streamer page (T23) and its supervisord/Dockerfile wiring (T28)
-//   are in place, so the cloud-Chromium *can* call getDisplayMedia and
-//   add a track. But the negotiation flow today still has both peers as
-//   offerers (T34 hasn't flipped client/main.ts to the answerer role),
-//   so the SDP exchange never completes and `ontrack` never fires on
-//   the client. Both T23 (streamer media source) and T34 (correct
-//   negotiation direction) need to be live for this assertion to hold.
+// Un-skipped. It carried `test.skip` pending "T34" — the flip of the client to
+// the answerer role — which landed with the M7 native-peer migration. The
+// `window.__cbwrtc_pc` hook it says "a future client-side hook should add"
+// also exists: client/main.ts:248 `maybeExposePcForE2e`, gated on `?e2e=1`.
+// Both preconditions have been met for a long time; the suite has simply not
+// been asserting on video.
 //
-// What to do when T34 lands:
-//   - Remove `test.skip` and re-run.
-//   - If it still fails, follow the diagnostic order documented inline:
-//     (a) confirm `state-conn` reaches "connected"; (b) confirm
-//     `state-dc` reaches "open"; (c) inspect `getReceivers()` from the
-//     test page evaluation. If only (c) fails, the negotiation is OK
-//     but the streamer isn't actually adding a track — that's a
-//     T23/T28 follow-up bug.
-//
-// Implementation note:
-//   Reaching the live RTCPeerConnection from Playwright requires the
-//   client to expose a test-mode hook (e.g. assigning the active PC to
-//   `window.__cbwrtc_pc` behind a query-string flag). A small follow-up
-//   on the client (T34 work or a child task) should add that hook so
-//   E2E tests can introspect getReceivers() without DOM scraping.
+// A RECEIVER IS NOT ENOUGH. The original assertion — getReceivers() contains a
+// video track — passes in a well-documented failure mode where the transport
+// is up, the track object exists, and NOT ONE FRAME ever arrives. That is the
+// CV2 `fdec=0` shape, and it has been mistaken for success here before (see
+// the memory note: "green verdicts lie"). So this also requires
+// `framesDecoded` to actually climb, which is the difference between "a video
+// track was negotiated" and "you can see the browser".
 
 import { expect, test } from "@playwright/test";
 
+// A cold worker can take ~35s to offer, then frames have to start flowing.
+const CONNECT_TIMEOUT_MS = 60_000;
+const FRAMES_TIMEOUT_MS = 30_000;
+
 test.describe("video track reception", () => {
-  test.skip(
-    "client peer connection has at least one video RTCRtpReceiver after Connect",
-    async ({ page }) => {
-      await page.goto("/?e2e=1");
-      await page.locator("#connect").click();
+  test("client receives a video track that actually decodes frames", async ({
+    page,
+  }) => {
+    // ?e2e=1 turns on window.__cbwrtc_pc (client/main.ts:248).
+    await page.goto("/?e2e=1");
+    await page.locator("#connect").click();
 
-      // Stage 1: wait for the connection to come up.
-      await expect(page.locator("#state-conn")).toHaveText("connected", {
-        timeout: 20_000,
-      });
+    // Stage 1 — the connection. Diagnostic ordering matters here: if this
+    // fails, nothing below can pass, and the message should say so.
+    await expect(
+      page.locator("#state-conn"),
+      "peer connection never reached 'connected' — negotiation problem, not a media one",
+    ).toHaveText("connected", { timeout: CONNECT_TIMEOUT_MS });
 
-      // Stage 2: introspect the live PC for a video receiver. Requires
-      // a future client-side hook that exposes the PC on window when
-      // ?e2e=1 is set; without it, this evaluate() returns null and
-      // the test fails with a clear message rather than a silent pass.
-      const hasVideoReceiver = await page.evaluate(() => {
-        const pc = (window as unknown as { __cbwrtc_pc?: RTCPeerConnection })
-          .__cbwrtc_pc;
-        if (!pc) return null;
-        return pc.getReceivers().some((r) => r.track?.kind === "video");
-      });
+    // Stage 2 — a video receiver exists. Necessary, not sufficient.
+    const hasVideoReceiver = await page.evaluate(() => {
+      const pc = (window as unknown as { __cbwrtc_pc?: RTCPeerConnection })
+        .__cbwrtc_pc;
+      if (!pc) return null;
+      return pc.getReceivers().some((r) => r.track?.kind === "video");
+    });
+    expect(
+      hasVideoReceiver,
+      "client did not expose window.__cbwrtc_pc — is ?e2e=1 set, and did main.ts's hook run?",
+    ).not.toBeNull();
+    expect(
+      hasVideoReceiver,
+      "no video receiver on the peer connection — the worker negotiated no video m-line",
+    ).toBe(true);
 
-      expect(
-        hasVideoReceiver,
-        "client did not expose window.__cbwrtc_pc — add the e2e hook"
-      ).not.toBeNull();
-      expect(hasVideoReceiver).toBe(true);
-    }
-  );
+    // Stage 3 — FRAMES. This is the assertion that catches the failure the
+    // other two miss: transport up, track present, nothing rendering.
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(async () => {
+            const pc = (window as unknown as { __cbwrtc_pc?: RTCPeerConnection })
+              .__cbwrtc_pc;
+            if (!pc) return 0;
+            const stats = await pc.getStats();
+            let frames = 0;
+            stats.forEach((report) => {
+              if (report.type === "inbound-rtp" && report.kind === "video") {
+                frames = Math.max(frames, (report as { framesDecoded?: number }).framesDecoded ?? 0);
+              }
+            });
+            return frames;
+          }),
+        {
+          message:
+            "framesDecoded never went above 0 — a video track was negotiated but " +
+            "no frame ever decoded. This is the fdec=0 shape: check that the " +
+            "worker's capture is armed and that ICE picked a working pair.",
+          timeout: FRAMES_TIMEOUT_MS,
+        },
+      )
+      .toBeGreaterThan(0);
+
+    // Stage 4 — the element the user actually looks at has real dimensions.
+    // A <video> with a live srcObject but 0x0 intrinsic size shows nothing.
+    const dims = await page.evaluate(() => {
+      const v = document.getElementById("remote") as HTMLVideoElement | null;
+      return v ? { w: v.videoWidth, h: v.videoHeight } : null;
+    });
+    expect(dims, "no #remote video element").not.toBeNull();
+    expect(
+      dims!.w * dims!.h,
+      `#remote has no intrinsic size (${dims!.w}x${dims!.h}) — nothing is painting`,
+    ).toBeGreaterThan(0);
+  });
 });
