@@ -21,6 +21,10 @@ venv/
 *.out
 bin/
 vendor/
+# `go build` with no -o drops a binary named after the module directory next to
+# the sources. These are the ones that exist today.
+/infra/gateway/gateway
+/infra/k8s/chromeless-build/tools/snap-cleaner/snap-cleaner
 
 # C++ / build
 *.o

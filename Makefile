@@ -8,7 +8,7 @@
         test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
-        test-unit-signaling test-unit-client test-unit-harness
+        test-unit-signaling test-unit-go-modules test-unit-client test-unit-harness
 
 help:
 	@echo "Targets:"
@@ -26,6 +26,7 @@ help:
 	@echo "  make test-all-nightly    # PR-blocking + harness baselines + e2e"
 	@echo ""
 	@echo "  make test-unit           # all subproject unit tests"
+	@echo "  make test-unit-go-modules # every Go module except signaling/"
 	@echo "  make test-integration    # tests/integration/ — Go toolchain only, no Docker"
 	@echo "  make test-smoke          # tests/smoke/container-boot.sh (single canonical smoke)"
 	@echo "  make test-smoke-all      # all tests/smoke/*.sh (Linux + Docker)"
@@ -114,7 +115,37 @@ test-all-nightly: test-all-ci test-harness-all test-e2e
 
 # ---- unit ------------------------------------------------------------------
 
-test-unit: test-unit-signaling test-unit-client test-unit-harness
+test-unit: test-unit-signaling test-unit-go-modules test-unit-client test-unit-harness
+
+# Every OTHER Go module in the tree.
+#
+# Discovered by `find -name go.mod` rather than hand-listed, so a new module
+# joins the gate automatically instead of silently running nowhere. That is the
+# same failure shape as the unbuilt test() targets (see lint-build-targets) and
+# it gets the same fix: derive the list, never maintain it by hand. Added when
+# infra/gateway/ landed with 31 tests that no target invoked — `make verify`
+# was green and had run none of them.
+#
+# signaling/ is excluded (its own target above) and tests/integration/ too
+# (that is `make test-integration`; it builds a binary and is not a unit test).
+# .claude/worktrees/ holds full checkouts of this repo, so it MUST be pruned or
+# every module is found N+1 times; see CLAUDE.md.
+test-unit-go-modules:
+	@echo ">>> go test — every module except signaling/ and tests/integration/"
+	@fail=0; \
+	for gomod in $$(find . -name go.mod -not -path "./.claude/*" \
+	                  -not -path "./signaling/*" \
+	                  -not -path "./tests/integration/*" | sort); do \
+	  d=$$(dirname $$gomod); \
+	  printf '  %-52s ' "$$d"; \
+	  if ( cd $$d && go test ./... >/tmp/gomod-$$$$.log 2>&1 ); then \
+	    echo "ok"; \
+	  else \
+	    echo "FAIL"; sed 's/^/      /' /tmp/gomod-$$$$.log | head -8; fail=1; \
+	  fi; \
+	  rm -f /tmp/gomod-$$$$.log; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "!!! a Go module failed"; exit 1; fi
 
 test-unit-signaling:
 	@if [ -d signaling ] && ls signaling/*.go >/dev/null 2>&1; then \

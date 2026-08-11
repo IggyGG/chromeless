@@ -34,11 +34,17 @@
 # default to — compose fails fast with a message rather than pulling a
 # tag that doesn't exist.
 #
-# Override the signaling endpoint the client uses (defaults to
-# ws://signaling:8080; that DNS name only resolves inside the docker
-# network, so for browser access from the host you'll usually want to
-# override):
-#   SIGNALING_URL=ws://localhost:8080 docker compose -f infra/compose.yaml up
+# Two separate signaling endpoints, because the page and the worker sit on
+# opposite sides of the docker network boundary and cannot share one value:
+#
+#   CHROMELESS_CLIENT_SIGNALING_URL  what a browser ON THE HOST dials.
+#                                    Default ws://localhost:8080/ws — the
+#                                    published port. Needs the /ws path.
+#   SIGNALING_URL                    what the WORKER dials, from inside cbnet.
+#                                    Default ws://signaling:8080/ws.
+#
+# The defaults are correct for a stock `docker compose up`; override only when
+# publishing on a different host/port.
 
 name: chromeless
 
@@ -106,9 +112,18 @@ services:
     environment:
       SESSION_ID: ${SESSION_ID:-dev}
       # launch-chromeless.sh translates these into the WEBRTC_SIGNALING_*
-      # / WEBRTC_ICE_* vars the native peer reads (OSS-W1). Point
-      # SIGNALING_URL at the host-published port when driving the stack
-      # from a browser on the host: SIGNALING_URL=ws://localhost:8080
+      # / WEBRTC_ICE_* vars the native peer reads (OSS-W1).
+      #
+      # This is the WORKER's view and must stay cbnet-internal: the worker
+      # dials from inside its own container, where `localhost` is itself.
+      # An earlier comment here suggested `SIGNALING_URL=ws://localhost:8080`
+      # for host-browser access — that is the wrong service to change, and it
+      # points the worker at a port nothing is listening on inside its own
+      # netns. The PAGE's endpoint is CHROMELESS_CLIENT_SIGNALING_URL on the
+      # client service below.
+      #
+      # The /ws path is dropped by launch-chromeless.sh (the native peer builds
+      # its own path from the session id) and only the host:port survives.
       SIGNALING_URL: ${SIGNALING_URL:-ws://signaling:8080/ws}
       SIGNALING_TOKEN: ${SIGNALING_TOKEN:-}
       # ICE. Unset → the peer falls back to public STUN, which is fine for
@@ -171,6 +186,70 @@ services:
       CHROMELESS_TRACE_SAMPLE_RATIO: ${CHROMELESS_TRACE_SAMPLE_RATIO:-1.0}
     restart: unless-stopped
 
+  # The standalone gateway: one TLS port, a login, and a reverse proxy to the
+  # broker. This is what makes the stack usable outside Kubernetes — before it,
+  # a compose deployment published the broker and Chromium's DevTools straight
+  # onto the host with no TLS and no authentication anywhere.
+  #
+  # Requires CHROMELESS_USER and CHROMELESS_PASS. Both are `?err` REQUIRED
+  # rather than defaulted: a gateway that boots with a built-in password is
+  # worse than one that refuses to boot, because it looks protected.
+  #
+  #   CHROMELESS_IMAGE=… CHROMELESS_USER=me CHROMELESS_PASS=… \
+  #     docker compose -f infra/compose.yaml up
+  #   → https://localhost:8443
+  #
+  # The first visit warns about the self-signed certificate. Accepting it also
+  # covers the wss:// signaling dial, because the page and the WebSocket share
+  # this origin — which is the reason everything funnels through one port.
+  gateway:
+    build:
+      # Repo root, NOT infra/gateway: the image builds the client bundle from
+      # client/ and (from the token step onward) shares a package with
+      # signaling/ via a `replace` that reaches outside the module. See
+      # infra/gateway/Dockerfile. .dockerignore keeps capture/ out of the
+      # context.
+      context: ..
+      dockerfile: infra/gateway/Dockerfile
+    image: chromeless-gateway:dev
+    container_name: cbwrtc-gateway
+    networks: [cbnet]
+    ports:
+      - "${CHROMELESS_PORT:-8443}:8443"
+    environment:
+      CHROMELESS_USER: ${CHROMELESS_USER:?set CHROMELESS_USER to the login username for https://localhost:8443}
+      CHROMELESS_PASS: ${CHROMELESS_PASS:?set CHROMELESS_PASS to the login password for https://localhost:8443}
+      CHROMELESS_SIGNALING_URL: ws://signaling:8080
+      CHROMELESS_CDP_URL: http://chromium:9222
+      # Extra SANs for the generated certificate. Needed when reaching the
+      # gateway by LAN IP or hostname rather than localhost — a browser will
+      # not accept a cert that does not name the host actually typed.
+      CHROMELESS_TLS_HOSTS: ${CHROMELESS_TLS_HOSTS:-}
+    volumes:
+      # Persist the generated keypair so it survives a restart. Without this
+      # the browser re-warns on every `compose up`, and any cert the operator
+      # added to their trust store is invalidated.
+      - gateway_certs:/data/certs
+      # Live reload: esbuild --watch writes ../client/dist on the host and the
+      # gateway serves it directly, overlaying the copy baked into the image.
+      - ../client/dist:/srv/client:ro
+    healthcheck:
+      # distroless has no shell and no curl, so the probe cannot be an ordinary
+      # command line. The binary re-execs itself with -healthcheck and hits its
+      # own /healthz over loopback, which keeps the probe in step with the
+      # server rather than duplicating its notion of "up".
+      test: ["CMD", "/gateway", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    depends_on:
+      signaling:
+        condition: service_started
+      client-build:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   client:
     image: nginx:alpine
     container_name: cbwrtc-client
@@ -187,11 +266,31 @@ services:
       - ../client/dist:/usr/share/nginx/html:ro
       - client_runtime:/srv/runtime
     environment:
-      # Project spec says ws://signaling:8080. That DNS name resolves
-      # inside cbnet only; from a host browser the page can't reach it.
-      # Override SIGNALING_URL at compose-up time when testing from the
-      # host (e.g. SIGNALING_URL=ws://localhost:8080).
-      SIGNALING_URL: ws://signaling:8080
+      # The URL a browser ON THE HOST dials. It must be host-reachable and
+      # must carry the /ws path segment.
+      #
+      # This was `ws://signaling:8080` — hardcoded, and wrong twice over:
+      #
+      #   1. Not interpolated. The README documented `SIGNALING_URL=... docker
+      #      compose up` as the way to drive the stack from a host browser, but
+      #      the value never reached this service, so the generated config.js
+      #      always carried `ws://signaling:8080` regardless.
+      #   2. Missing `/ws`. client/src/session.ts builds `${base}/${sessionId}`,
+      #      and the broker routes on the `/ws/` and `/api/webrtc/signaling/`
+      #      prefixes (signaling/server.go:513). `ws://signaling:8080/dev`
+      #      matches neither and 404s. Even had the DNS name resolved, it
+      #      could not have connected.
+      #
+      # And `signaling` is a cbnet-internal DNS name that a host browser cannot
+      # resolve at all — so the injected value also SUPPRESSED the working
+      # origin-derived default in client/src/config.ts. The only way to connect
+      # was the undocumented `?signaling=ws://localhost:8080/ws` query param.
+      #
+      # Deliberately NOT named SIGNALING_URL: that variable is also read by the
+      # chromium service below, where the value must be cbnet-internal. One
+      # variable cannot serve both — the README's `SIGNALING_URL=ws://localhost
+      # :8080` fixed the page by pointing the WORKER at its own container.
+      SIGNALING_URL: ${CHROMELESS_CLIENT_SIGNALING_URL:-ws://localhost:8080/ws}
     # NOTE: $$ in command/heredoc bodies escapes compose's own variable
     # interpolation so the literal $ reaches the container shell / nginx.
     command:
@@ -200,13 +299,18 @@ services:
       - |
         cat > /srv/runtime/config.js <<EOF
         // Generated at container start by infra/compose.yaml.
-        // Override SIGNALING_URL in the environment to change.
+        // Set CHROMELESS_CLIENT_SIGNALING_URL to change it.
         //
         // OSS-W1: client/src/config.ts reads __CHROMELESS_CONFIG__ (and
         // still accepts the legacy __CBWRTC_CONFIG__ spelling). Before
         // that landed, index.html never loaded this file and nothing read
         // the global, so overriding SIGNALING_URL here silently did
         // nothing and the client always dialled localhost.
+        //
+        // NOTE this value OUTRANKS the origin-derived default in config.ts.
+        // Injecting a wrong one is worse than injecting none — it replaces a
+        // value that would have worked. If you serve the page from somewhere
+        // other than the published 8080, set the variable to match.
         window.__CHROMELESS_CONFIG__ = {
           signalingUrl: "$${SIGNALING_URL}"
         };
@@ -335,6 +439,10 @@ services:
     restart: unless-stopped
 
 volumes:
+  # The gateway's self-signed TLS keypair. Persisted so it survives a restart:
+  # regenerating would re-warn the browser on every `compose up` and invalidate
+  # any cert the operator added to their trust store.
+  gateway_certs:
   client_runtime:
   # T40: cached node_modules for client-build. Speeds up successive
   # `compose up` runs and avoids the host filesystem inheriting per-

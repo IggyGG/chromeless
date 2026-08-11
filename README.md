@@ -47,16 +47,21 @@ CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
 
 Then open <http://localhost:3000>.
 
-Driving it from a browser on the host means the in-network DNS name won't
-resolve, so point the client at the published port:
-
-```bash
-CHROMELESS_IMAGE=… SIGNALING_URL=ws://localhost:8080 \
-  docker compose -f infra/compose.yaml up
-```
-
 `CHROMELESS_IMAGE` is required and has no default — compose fails fast with a
 message rather than pulling a tag that doesn't exist.
+
+The page and the worker reach signaling from opposite sides of the docker
+network, so they take separate values. Both defaults are correct for a stock
+`compose up`; override only when publishing elsewhere:
+
+| | dialled by | default |
+| --- | --- | --- |
+| `CHROMELESS_CLIENT_SIGNALING_URL` | the browser, on the host | `ws://localhost:8080/ws` |
+| `SIGNALING_URL` | the worker, inside the network | `ws://signaling:8080/ws` |
+
+The client also derives its endpoint from the page's own origin when nothing
+is injected, so serving the bundle from any host or port works without
+configuration.
 
 Without `CHROMELESS_ICE_SERVERS` the peer falls back to public STUN. That is
 fine for a same-host compose run and **will not traverse most NATs**; bring
