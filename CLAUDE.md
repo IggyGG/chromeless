@@ -134,6 +134,46 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
 `docs/operations/triform-deploy.md` documents one real cluster. Useful as a
 worked example; not a generic guide.
 
+## Work in your own worktree. Never in the shared checkout.
+
+**Before you touch anything, make a worktree:**
+
+```bash
+git worktree add .claude/worktrees/<task> -b <branch>
+git worktree lock .claude/worktrees/<task> --reason "active session: <task>"
+cd .claude/worktrees/<task>
+```
+
+Multiple agents and multiple Claude sessions routinely share this repo
+directory, and git gives them no interlock. The primary checkout is for
+orientation and spawning worktrees — not for authoring.
+
+This is not hygiene advice. On 2026-08-11 a session in this repo:
+
+1. ran `git checkout <other-branch>`, which **aborted** because
+   `infra/compose.yaml` had uncommitted changes,
+2. did not check the exit status and committed anyway — landing the commit on
+   a *concurrent session's* branch,
+3. ran `git reset --hard HEAD~1` to undo that, which **destroyed the other
+   session's uncommitted work**: 61 insertions / 148 deletions, never staged,
+   therefore absent from the reflog, from `fsck --lost-found`, and from any
+   stash. Permanently lost.
+
+The abort message in step 1 named the file that was at risk. It was ignored.
+
+Rules that follow:
+
+- **A failed `git checkout` means STOP**, not "continue and commit". Check
+  `$?`, or check `git branch --show-current` before committing.
+- **`git reset --hard` in a shared checkout is a destructive operation on
+  someone else's data.** Use `git reset --soft` to undo your own commit while
+  keeping the tree.
+- **Never use `git stash` here.** This repo and tf-multiverse both carry
+  stashes belonging to other work (21 in tf-multiverse at last count). To move
+  a file between branches use `git show <sha>:<path> > /tmp/...`.
+- **`.claude/worktrees/` holds full checkouts and is gitignored.** Exclude it
+  from every repo-wide `grep`/`find` or you get N+1 hits.
+
 ## Working with the user: decisions must be ASKED, not written down
 
 **If the user has to decide something, use the AskUserQuestion tool. Every
