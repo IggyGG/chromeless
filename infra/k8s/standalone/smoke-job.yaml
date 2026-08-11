@@ -1,0 +1,109 @@
+# infra/k8s/standalone/smoke-job.yaml — does the worker image boot and paint?
+#
+# The k8s equivalent of tests/smoke/container-boot.sh, which needs a local
+# docker daemon this environment does not have (and an amd64 host, which this
+# arm64 Mac is not).
+#
+# WHY RUN THIS FIRST. It takes an image and nothing else — no gateway, no
+# broker, no client bundle, no compose. It answers "does Chromium boot and
+# paint" separately from "do my changes work", so that any later failure in the
+# standalone stack is unambiguously mine. Skipping it is how a bad image gets
+# misdiagnosed as a gateway bug.
+#
+# Same shape as the shell smoke: boot the worker, poll DevTools until it
+# answers, find the page target, drive Page.navigate, poll for
+# document.readyState=complete, capture a screenshot, assert it is a PNG over
+# 5 KiB. All CDP happens over loopback INSIDE the pod, exactly as the shell
+# version does it over `docker exec` — Chromium 147 binds DevTools to 127.0.0.1
+# regardless of --remote-debugging-address, so this is the only way in.
+#
+#   kubectl apply -f infra/k8s/standalone/smoke-job.yaml
+#   kubectl logs -n chromeless -f job/chromeless-smoke
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-smoke
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-smoke
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  backoffLimit: 0          # a flaky retry would hide the failure we are looking for
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless-smoke
+        app.kubernetes.io/part-of: chromeless-standalone
+    spec:
+      restartPolicy: Never
+      # The namespace enforces PodSecurity "restricted". Without this the
+      # pod is admitted but warns on four counts; set it properly rather than
+      # shipping something that only works because the policy is in warn mode.
+      #
+      # runAsNonRoot is satisfied by the image itself (USER cbuser, uid 1000 —
+      # see build/Dockerfile.runtime), and the python sidecar is told the same
+      # uid explicitly since its image defaults to root.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: registry-pull
+      containers:
+        - name: worker
+          # The pin recorded in build/guest-release.json, built from 44f2e20 —
+          # the exact commit this branch sits on.
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-44f2e20dece6
+          env:
+            # CDP-only mode, and getting here is NOT as simple as "set nothing".
+            #
+            # infra/lifecycle/cold-start.sh:63 DEFAULTS SIGNALING_URL to
+            # ws://signaling:8080/ws when it is unset, and launch-chromeless.sh
+            # then translates that into WEBRTC_SIGNALING_HOST. So an
+            # unconfigured worker does not sit quietly as a CDP target the way
+            # the docs suggest — it dials a hostname that does not exist,
+            # fails the handshake with ERR_NAME_NOT_RESOLVED, and the process
+            # EXITS. supervisord respawns it, and Chromium restart-loops every
+            # ~32s while DevTools appears to be up.
+            #
+            # An explicit empty string beats the default, leaving
+            # WEBRTC_SIGNALING_HOST unset, which is the condition
+            # cloud_browser_browser_main_parts.cc:843 checks before skipping
+            # the signaling subsystem entirely.
+            - name: SIGNALING_URL
+              value: ""
+            - name: IDLE_TIMEOUT_S
+              value: "999999"
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits:   { cpu: "2", memory: 4Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+        - name: smoke
+          # python3 + the stdlib is all the probe needs; it speaks RFC 6455 by
+          # hand exactly as tests/smoke/container-boot.sh does.
+          image: python:3.12-slim
+          command: ["python3", "-u", "/probe/smoke.py"]
+          volumeMounts:
+            - { name: probe, mountPath: /probe }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: probe
+          configMap:
+            name: chromeless-smoke-probe

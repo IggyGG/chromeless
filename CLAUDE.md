@@ -104,6 +104,21 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
   healthy, with no error anywhere and no video. The Helm chart and
   `infra/k8s/turn-deployment.yaml` are the HMAC-REST half and pair with
   `infra/turn-issuer/`.
+- **An "unconfigured" worker is not idle — it restart-loops.**
+  `infra/lifecycle/cold-start.sh:63` defaults `SIGNALING_URL` to
+  `ws://signaling:8080/ws`, which `launch-chromeless.sh` turns into a real
+  dial. Where that name does not resolve, the handshake fails
+  (`ERR_NAME_NOT_RESOLVED`) and the browser process **exits**; supervisord
+  respawns it about every 30 s. DevTools keeps answering `/json/version`
+  throughout, so the pod looks healthy and a CDP client sees a page target that
+  vanishes under it. For a genuine CDP-only worker set `SIGNALING_URL=""` —
+  that is what leaves `WEBRTC_SIGNALING_HOST` unset, which is the condition
+  `cloud_browser_browser_main_parts.cc:843` checks before skipping signaling.
+- **`webSocketDebuggerUrl` often has NO PORT** (`ws://localhost/devtools/...`).
+  Parsing it naively and defaulting to 80 dials nothing, or something else
+  listening locally. Always force 9222 — `infra/gateway/cdp.go` and
+  `tests/cdp/conftest.py` both do this, and `infra/k8s/standalone/smoke-probe.py`
+  had to learn it the same way.
 - **CI runs on Forgejo, and every `uses:` must exist on its action mirror.**
   Forgejo *does* execute `.github/workflows` (no `.forgejo/` needed). But it
   resolves actions from `data.forgejo.org`, and it **git-clones every `uses:`

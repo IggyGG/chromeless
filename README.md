@@ -203,8 +203,14 @@ the wrong name but a failing call.)
   translates annotations into pod env. Point `images.*` at your own registry;
   nothing is published to a public one. Required values: the Ed25519 auth
   pubkey, the TURN shared secret, and TURN URLs.
-- **Firecracker / warm snapshots** — boot the worker with no signaling env and
-  drive `Cb.startNativeSession` over CDP once the microVM is restored.
+- **Firecracker / warm snapshots** — boot the worker as a CDP-only target and
+  drive `Cb.startNativeSession` over CDP once the microVM is restored. Note
+  that "no signaling env" is **not** how you get there: `cold-start.sh`
+  defaults `SIGNALING_URL` to `ws://signaling:8080/ws`, so an unconfigured
+  worker dials a host that usually does not resolve, fails the handshake, and
+  the process exits — supervisord then restart-loops it every ~30 s while
+  DevTools still answers, which looks like a healthy browser. Set
+  `SIGNALING_URL=""` explicitly.
 - **Standalone / bare docker** — `infra/compose.yaml` plus
   [`infra/gateway/`](./infra/gateway/): one TLS port, a login, and everything
   else on an internal network. Split across two machines with
