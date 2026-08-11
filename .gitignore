@@ -54,6 +54,11 @@ Thumbs.db
 # Project-specific
 harness/captures/
 tests/artifacts/
+# Playwright: report/trace output, and the saved gateway session cookie that
+# auth.setup.ts writes. The cookie is a live credential — never commit it.
+tests/e2e/playwright/
+tests/e2e/playwright-report/
+tests/e2e/test-results/
 # Retired in the M7 R4 native-peer migration (input now rides the `input`
 # DataChannel into cb_input_dispatch*.cc). A stale 13 MiB local build of
 # the old sidecar still sits in some working trees.

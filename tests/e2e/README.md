@@ -47,30 +47,54 @@ docker compose -f ../../infra/compose.yaml down
 ```
 
 The default flow drives `docker compose -f infra/compose.yaml up --build`
-under Playwright's `webServer` and waits for the client to be reachable
-at `http://localhost:3000`. To skip the compose management — for
-example, when you've already brought the stack up by hand or are
-running on a CI host that pre-provisions the stack — set:
+under Playwright's `webServer` and waits for the **gateway** at
+`https://localhost:8443`. To skip the compose management — for example when
+you have already brought the stack up by hand, or are on a CI host that
+pre-provisions it — set:
 
 ```sh
 CHROMELESS_E2E_USE_RUNNING_STACK=1 npm run test:e2e
 
 # or against a different URL entirely:
-CHROMELESS_E2E_BASE_URL=http://my-host:3000 \
+CHROMELESS_E2E_BASE_URL=https://my-host:8443 \
 CHROMELESS_E2E_USE_RUNNING_STACK=1 \
   npm run test:e2e
 ```
 
-You can also point the suite at a hand-rolled local stack
-(`go run ./signaling`, `python3 -m http.server -d client/dist 5173`):
+Three things about the topology are worth knowing before debugging a failure
+here:
+
+- **One published port.** The stack exposes only the gateway (8443). The
+  signaling broker (8080) and Chromium's DevTools (9222) used to be published
+  and no longer are — 9222 is unauthenticated remote code execution against
+  the browser. Reach either through `docker compose exec` instead.
+- **HTTPS with a self-signed certificate.** The config sets
+  `ignoreHTTPSErrors: true`; a suite that talks to the gateway without it
+  fails every navigation on the TLS check.
+- **Everything is behind a login.** `auth.setup.ts` runs first as a setup
+  project, signs in, and saves the cookie as `storageState` for every spec —
+  so the specs themselves never mention auth. The credentials default to
+  `e2e` / `e2e-password` and are passed to compose by the same config, so the
+  pair the gateway boots with cannot drift from the pair we sign in with.
+
+Readiness is probed at `/healthz`, not `/`: every other route redirects to
+`/login` without a session, and a 303 would let Playwright call the stack ready
+before it is.
+
+You can still point the suite at a hand-rolled stack, but note it must now
+serve the page and the broker on ONE origin — the client derives its signaling
+endpoint from `location` (`client/src/config.ts`), so a page on :5173 will dial
+:5173 for the WebSocket. Running the gateway directly is the simplest way:
 
 ```sh
 ( cd signaling && go run . ) &
-( cd client && npm install && npm run build && python3 -m http.server -d dist 5173 ) &
+( cd client && npm install && npm run build ) &&
+( cd infra/gateway && CHROMELESS_USER=e2e CHROMELESS_PASS=e2e-password \
+    CHROMELESS_SIGNALING_URL=ws://127.0.0.1:8080 \
+    CHROMELESS_STATIC_DIR=../../client/dist \
+    CHROMELESS_TLS_DIR=/tmp/chromeless-certs go run . ) &
 
-CHROMELESS_E2E_USE_RUNNING_STACK=1 \
-CHROMELESS_E2E_BASE_URL=http://localhost:5173 \
-  npm run test:e2e
+CHROMELESS_E2E_USE_RUNNING_STACK=1 npm run test:e2e
 ```
 
 ## Known dependencies
@@ -82,16 +106,10 @@ CHROMELESS_E2E_BASE_URL=http://localhost:5173 \
 | 03    | T34, possibly more T23/T28 follow-up | Needs a connected PC + real media + a client-side `window.__cbwrtc_pc` test hook. |
 | 04    | T78 (T69 + T52 already in) | Audio presence E2E (T64). Active code path; T69 (window.pc) and T52 (host DevTools) are already on main. As of authoring, gated by **T78** — getDisplayMedia inside the cloud Chromium fails with NotReadableError, so the streamer's start() throws before reaching `window.pc = pc`. Once T78 lands, this spec passes without further changes. Failure messages name T78 explicitly. |
 
-Other follow-ups visible from this suite that are **not** mine:
-
-- The `client` service in `infra/compose.yaml` bind-mounts `client/`
-  but the page imports `./main.js`, which is built into `client/dist/`.
-  As of this writing, opening `http://localhost:3000/` returns a 404
-  on `main.js`. Spec 01 therefore fails against the canonical compose
-  flow today; it does pass via the hand-rolled local stack described
-  above. **Follow-up needed on T28/T31:** either bind-mount
-  `client/dist/` after a build step, or update the index to import
-  `./dist/main.js`. Filed as a follow-up via TaskCreate.
+(A note here used to describe the `client` nginx service serving a 404 on
+`main.js` because it bind-mounted the source rather than the build. That
+service is gone — the gateway serves `client/dist` directly, and the
+`client-build` service still populates it.)
 
 ## How to add a test
 
