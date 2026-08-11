@@ -1,0 +1,177 @@
+# infra/compose.host.yaml — everything except the browser.
+#
+# The other half of infra/compose.worker.yaml: the gateway, the broker, the
+# client bundle, and (optionally) a TURN relay. Run this where you sit; run the
+# worker where the cores are.
+#
+#   eval "$(cd infra/gateway && go run ./cmd/keygen)"
+#   CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
+#   CHROMELESS_CDP_URL=http://127.0.0.1:9222 \
+#     docker compose -f infra/compose.host.yaml up
+#
+# Then open https://localhost:8443.
+#
+# Note there is no `chromium` service here and no CHROMELESS_IMAGE: this half
+# needs no from-source Chromium build at all, which is the other reason to
+# split — you can iterate on the gateway and the client while the worker keeps
+# running elsewhere.
+#
+# Ordinarily the worker is started SECOND, since it dials out and the broker
+# needs to be listening. It retries, so the reverse order also converges.
+
+name: chromeless-host
+
+networks:
+  cbnet:
+    driver: bridge
+
+services:
+  client-build:
+    image: node:20-alpine
+    container_name: chromeless-host-client-build
+    working_dir: /work
+    volumes:
+      - ../client:/work
+      - client_node_modules:/work/node_modules
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        mkdir -p dist
+        npm install --no-audit --no-fund
+        npm run build
+    restart: "no"
+
+  signaling:
+    build:
+      context: ../signaling
+      dockerfile: Dockerfile
+    image: chromeless-signaling:dev
+    container_name: chromeless-host-signaling
+    networks: [cbnet]
+    # Internal only, exactly as in the single-host stack: the worker reaches
+    # the broker THROUGH the gateway's TLS port, so this never needs to be
+    # published. With no auth pubkey the broker accepts anyone, which on a
+    # machine reachable from the network would be a way straight past the
+    # login.
+    expose:
+      - "8080"
+    environment:
+      SIGNALING_PORT: "8080"
+      CHROMELESS_AUTH_PUBKEY: ${CHROMELESS_AUTH_PUBKEY:-}
+      # Hand the browser the same relay the worker uses; see the `turn` profile
+      # in infra/compose.yaml for why these are static credentials.
+      TURN_URLS: ${CHROMELESS_TURN_URLS:-}
+      TURN_USER: ${CHROMELESS_TURN_USER:-chromeless}
+      TURN_PASS: ${CHROMELESS_TURN_SECRET:-}
+      STUN_URLS: ${CHROMELESS_STUN_URLS:-}
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: infra/gateway/Dockerfile
+    image: chromeless-gateway:dev
+    container_name: chromeless-host-gateway
+    networks: [cbnet]
+    ports:
+      - "${CHROMELESS_PORT:-8443}:8443"
+    environment:
+      CHROMELESS_USER: ${CHROMELESS_USER:?set CHROMELESS_USER to the login username}
+      CHROMELESS_PASS: ${CHROMELESS_PASS:?set CHROMELESS_PASS to the login password}
+      CHROMELESS_SIGNALING_URL: ws://signaling:8080
+      # The REMOTE worker's DevTools, for navigation. Reach it over a private
+      # network or an SSH tunnel from this machine:
+      #
+      #   ssh -N -L 9222:127.0.0.1:9222 worker-host
+      #   CHROMELESS_CDP_URL=http://host.docker.internal:9222
+      #
+      # (host.docker.internal because the tunnel terminates on the host, not
+      # inside this container. On Linux, add an extra_hosts entry or use the
+      # bridge gateway address.)
+      #
+      # Leave it unset if you do not need the address bar; everything else
+      # works without it.
+      CHROMELESS_CDP_URL: ${CHROMELESS_CDP_URL:-}
+      CHROMELESS_AUTH_PRIVKEY: ${CHROMELESS_AUTH_PRIVKEY:-}
+      CHROMELESS_AUTH_PUBKEY: ${CHROMELESS_AUTH_PUBKEY:-}
+      # A split deployment is usually reached by name or LAN IP rather than
+      # localhost, and a certificate that does not name the host you typed is
+      # rejected. Add them here:
+      #   CHROMELESS_TLS_HOSTS=gateway.example.com,192.168.1.10
+      #
+      # The worker CANNOT click through a self-signed certificate the way a
+      # browser can — see compose.worker.yaml. For anything long-lived, mount a
+      # real one with CHROMELESS_TLS_CERT/_KEY.
+      CHROMELESS_TLS_HOSTS: ${CHROMELESS_TLS_HOSTS:-}
+    volumes:
+      - gateway_certs:/data/certs
+      - ../client/dist:/srv/client:ro
+    healthcheck:
+      test: ["CMD", "/gateway", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    depends_on:
+      signaling:
+        condition: service_started
+      client-build:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Same relay as infra/compose.yaml's `turn` profile — see the long comment
+  # there for the credential-mechanism rationale. Much more likely to be needed
+  # here: once the peers are on different networks, host candidates will not
+  # connect them.
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: chromeless-host-coturn
+    profiles: [turn]
+    network_mode: host
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        case "$$TURN_USER_SPEC" in
+          *UNSET_RUN_openssl_rand_hex_32)
+            echo "coturn: CHROMELESS_TURN_SECRET is not set." >&2
+            echo "  Generate one and re-run:" >&2
+            echo "    CHROMELESS_TURN_SECRET=\$$(openssl rand -hex 32) \\" >&2
+            echo "      docker compose -f infra/compose.host.yaml --profile turn up" >&2
+            exit 2
+            ;;
+        esac
+        exec turnserver "$$@"
+      - --
+    environment:
+      TURN_USER_SPEC: ${CHROMELESS_TURN_USER:-chromeless}:${CHROMELESS_TURN_SECRET:-UNSET_RUN_openssl_rand_hex_32}
+    command:
+      - -n
+      - --listening-port=3478
+      - --fingerprint
+      - --lt-cred-mech
+      - --realm=chromeless
+      - --user=${CHROMELESS_TURN_USER:-chromeless}:${CHROMELESS_TURN_SECRET:-UNSET_RUN_openssl_rand_hex_32}
+      - --min-port=49152
+      - --max-port=65535
+      - --no-multicast-peers
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --no-tlsv1
+      - --no-tlsv1_1
+      - --no-cli
+      - --log-file=stdout
+      - --simple-log
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  gateway_certs:
+  client_node_modules:

@@ -133,9 +133,21 @@ services:
       # its own path from the session id) and only the host:port survives.
       SIGNALING_URL: ${SIGNALING_URL:-ws://signaling:8080/ws}
       SIGNALING_TOKEN: ${SIGNALING_TOKEN:-}
-      # ICE. Unset → the peer falls back to public STUN, which is fine for
-      # a same-host compose run but will not traverse most NATs. Bring the
-      # `turn` profile up (see below) and set this to use a local relay.
+      # ICE. Unset → the peer falls back to public STUN, which is fine for a
+      # same-host compose run and will NOT traverse most NATs.
+      #
+      # With the `turn` profile up, point this at the local relay. One value,
+      # because the worker and the browser must agree on the relay AND the
+      # credential — mismatched halves fail as "no candidate pair", which looks
+      # like a network problem rather than a config one:
+      #
+      #   CHROMELESS_TURN_SECRET=$(openssl rand -hex 32)
+      #   CHROMELESS_ICE_SERVERS='[{"urls":["turn:<host-ip>:3478"],
+      #                             "username":"chromeless",
+      #                             "credential":"'"$CHROMELESS_TURN_SECRET"'"}]'
+      #
+      # <host-ip> is a LAN address, not localhost: the relay's job is to be
+      # reachable from the viewer's machine as well as this container.
       CHROMELESS_ICE_SERVERS: ${CHROMELESS_ICE_SERVERS:-}
       CHROMELESS_ICE_TRANSPORT_POLICY: ${CHROMELESS_ICE_TRANSPORT_POLICY:-}
       # T99: OTel for chromeless-metrics-sidecar (which runs inside this container
@@ -207,6 +219,18 @@ services:
       # Leave both unset to keep the old anonymous behaviour (useful when
       # driving the broker directly from a test harness).
       CHROMELESS_AUTH_PUBKEY: ${CHROMELESS_AUTH_PUBKEY:-}
+      # What /turn-credentials hands the BROWSER. signaling/turn.go has always
+      # read these three and nothing in this repo has ever set them, so the
+      # endpoint returned STUN-only in every deployment.
+      #
+      # They must name the same relay and credential as the worker's
+      # CHROMELESS_ICE_SERVERS above: both peers have to be able to allocate on
+      # it, and a half-configured pair fails as "no candidate pair" — which
+      # reads as a network fault rather than a config one.
+      TURN_URLS: ${CHROMELESS_TURN_URLS:-}
+      TURN_USER: ${CHROMELESS_TURN_USER:-chromeless}
+      TURN_PASS: ${CHROMELESS_TURN_SECRET:-}
+      STUN_URLS: ${CHROMELESS_STUN_URLS:-}
       # T99: same OTel opt-in pattern as chromium. webrtc-dev's
       # signaling/tracing.go reads these.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -293,6 +317,112 @@ services:
   # and lets client/src/config.ts derive its endpoint from the page origin
   # instead of being told. That also retires the generated config.js, whose
   # whole job was injecting a signaling URL now correct by construction.
+
+  # ---------------------------------------------------------------------
+  # Optional TURN relay. Bring up with:
+  #
+  #   CHROMELESS_TURN_SECRET=$(openssl rand -hex 32) \
+  #     docker compose -f infra/compose.yaml --profile turn up
+  #
+  # Off by default because a same-host run does not need a relay: the browser
+  # and the worker are both on this machine, and host candidates connect
+  # directly. You need this the moment the two are on different networks —
+  # a worker on a remote host, or a viewer behind a symmetric NAT or a
+  # corporate firewall.
+  #
+  # (The `turn` profile was promised in a comment in this file for a long time
+  # and never actually existed. This is it.)
+  #
+  # CREDENTIAL MECHANISM — the part that is easy to get wrong.
+  #
+  # This uses `lt-cred-mech` with a static `user=`, NOT `use-auth-secret`.
+  # Both coturn configs elsewhere in this repo
+  # (infra/helm/chromeless/templates/coturn.yaml, infra/k8s/turn-deployment.yaml)
+  # set `use-auth-secret`, which is the HMAC-REST scheme: the username is a
+  # timestamp and the password is an HMAC of it. A STATIC username/password
+  # cannot authenticate against that — every Allocate is refused, and the
+  # symptom is silence, not an error.
+  #
+  # signaling/turn.go only knows how to emit static credentials, so pairing it
+  # with a use-auth-secret relay yields a TURN server that rejects everything
+  # while looking healthy. Static credentials are the honest match here.
+  # docs/ice-and-turn.md scopes them as "fine for a single internal
+  # deployment, not safe for shipping browser-side to the world" — which is
+  # exactly this case, and it now sits behind a login.
+  #
+  # Multi-user deployments should run infra/turn-issuer/ (HMAC-REST, with
+  # secret rotation) against a use-auth-secret relay, which is what triform
+  # does.
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: cbwrtc-coturn
+    profiles: [turn]
+    # host networking, not a port map. A relay allocates from a wide UDP range
+    # (49152-65535) and the allocated port has to be reachable from outside;
+    # docker's per-port NAT cannot express that, and mapping 16k ports is not a
+    # workable alternative. This does mean the profile is Linux-only —
+    # network_mode: host is a no-op on Docker Desktop for macOS/Windows.
+    network_mode: host
+    # Refuse the sentinel. Compose cannot make a variable required per-profile
+    # (it interpolates the whole file for every subcommand), so the check lives
+    # here, where it only runs when the profile is actually up. Starting a
+    # relay with a placeholder password would be worse than not starting one.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        case "$$TURN_USER_SPEC" in
+          *UNSET_RUN_openssl_rand_hex_32)
+            echo "coturn: CHROMELESS_TURN_SECRET is not set." >&2
+            echo "  Generate one and re-run:" >&2
+            echo "    CHROMELESS_TURN_SECRET=\$$(openssl rand -hex 32) \\" >&2
+            echo "      docker compose -f infra/compose.yaml --profile turn up" >&2
+            exit 2
+            ;;
+        esac
+        exec turnserver "$$@"
+      - --
+    environment:
+      # Read by the guard above. Same value as the --user flag below; kept as
+      # its own variable so the check does not have to parse argv.
+      TURN_USER_SPEC: ${CHROMELESS_TURN_USER:-chromeless}:${CHROMELESS_TURN_SECRET:-UNSET_RUN_openssl_rand_hex_32}
+    command:
+      - -n                              # no config file; everything is a flag
+      - --listening-port=3478
+      - --fingerprint
+      - --lt-cred-mech
+      - --realm=chromeless
+      # NOT the `?err` required form. Compose interpolates the WHOLE file for
+      # every subcommand, including `config` and `down`, so a required variable
+      # on an inactive profile breaks the default stack for everyone who never
+      # asked for TURN. The sentinel below is refused by the entrypoint check
+      # instead, which only runs when the profile is actually up.
+      - --user=${CHROMELESS_TURN_USER:-chromeless}:${CHROMELESS_TURN_SECRET:-UNSET_RUN_openssl_rand_hex_32}
+      - --min-port=49152
+      - --max-port=65535
+      # Do not let a relay allocation be aimed back into private space. Without
+      # these, anyone who can authenticate can use the relay to reach services
+      # on the host's LAN — an SSRF pivot with a TURN server in front of it.
+      - --no-multicast-peers
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --no-tlsv1
+      - --no-tlsv1_1
+      - --no-cli
+      - --log-file=stdout
+      - --simple-log
+    # The official image bakes file capabilities onto the turnserver binary, so
+    # dropping ALL capabilities makes the kernel refuse to exec it — EPERM at
+    # startup, with `no_new_privs` set. tf-multiverse hit exactly this in
+    # production (see deployment/kubernetes/apps/production-triform/coturn.yaml);
+    # NET_BIND_SERVICE is required despite every port here being >1024.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
 
   # ---------------------------------------------------------------------
   # Optional observability stack (T66). Bring up with:
