@@ -24,19 +24,22 @@ import (
 )
 
 const (
-	envUser        = "CHROMELESS_USER"
-	envPass        = "CHROMELESS_PASS"
-	envPort        = "CHROMELESS_PORT"
-	envTLSCert     = "CHROMELESS_TLS_CERT"
-	envTLSKey      = "CHROMELESS_TLS_KEY"
-	envTLSDir      = "CHROMELESS_TLS_DIR"
-	envTLSHosts    = "CHROMELESS_TLS_HOSTS"
+	envUser         = "CHROMELESS_USER"
+	envPass         = "CHROMELESS_PASS"
+	envPort         = "CHROMELESS_PORT"
+	envTLSCert      = "CHROMELESS_TLS_CERT"
+	envTLSKey       = "CHROMELESS_TLS_KEY"
+	envTLSDir       = "CHROMELESS_TLS_DIR"
+	envTLSHosts     = "CHROMELESS_TLS_HOSTS"
 	envSignalingURL = "CHROMELESS_SIGNALING_URL"
 	envCDPURL       = "CHROMELESS_CDP_URL"
 	envStaticDir    = "CHROMELESS_STATIC_DIR"
 	envSessionTTL   = "CHROMELESS_SESSION_TTL"
 	envAuthPrivkey  = "CHROMELESS_AUTH_PRIVKEY"
 	envAuthPubkey   = "CHROMELESS_AUTH_PUBKEY"
+	// Named CHROMIUM_START_URL, not CHROMELESS_*, to match what
+	// infra/launch-chromeless.sh and the k8s controller already set.
+	envStartURL = "CHROMIUM_START_URL"
 
 	defaultPort       = "8443"
 	defaultTLSDir     = "/data/certs"
@@ -82,6 +85,10 @@ type config struct {
 	// here except a startup cross-check: a mismatched pair is the one
 	// configuration error with no useful symptom (see checkPubkeyMatches).
 	authPubkey string
+
+	// startURL is the page to open once the worker is reachable. Empty leaves
+	// it on about:blank, which is what the embedder boots to.
+	startURL string
 }
 
 func loadConfig() (*config, error) {
@@ -108,6 +115,7 @@ func loadConfig() (*config, error) {
 		sessionTTL:   defaultSessionTTL,
 		authPrivkey:  strings.TrimSpace(os.Getenv(envAuthPrivkey)),
 		authPubkey:   strings.TrimSpace(os.Getenv(envAuthPubkey)),
+		startURL:     strings.TrimSpace(os.Getenv(envStartURL)),
 	}
 
 	// Half a TLS pair is a misconfiguration, not a fallback. Silently

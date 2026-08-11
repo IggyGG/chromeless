@@ -29,6 +29,7 @@ type gateway struct {
 	log      *slog.Logger
 	proxy    *httputil.ReverseProxy
 	issuer   *issuer
+	cdp      *cdpClient
 }
 
 func newGateway(cfg *config, logger *slog.Logger) (*gateway, error) {
@@ -59,6 +60,7 @@ func newGateway(cfg *config, logger *slog.Logger) (*gateway, error) {
 		log:      logger,
 		proxy:    proxy,
 		issuer:   iss,
+		cdp:      &cdpClient{baseURL: strings.TrimRight(cfg.cdpURL, "/")},
 	}, nil
 }
 
@@ -87,6 +89,16 @@ func (g *gateway) routes() http.Handler {
 	// issuer, which hands a token to anyone who asks and refuses to start
 	// alongside a configured pubkey; this is the authenticated replacement.
 	mux.Handle("/issue-token", g.requireSession(http.HandlerFunc(g.handleIssueToken)))
+
+	// Navigation. URL-shaped verbs only — NEVER a raw CDP passthrough, which
+	// would hand any logged-in caller Runtime.evaluate and file:// reads. See
+	// cdp.go.
+	mux.Handle("/api/navigate", g.requireSession(http.HandlerFunc(g.handleNavigate)))
+	mux.Handle("/api/back", g.requireSession(g.navCommand("Page.goBack")))
+	mux.Handle("/api/forward", g.requireSession(g.navCommand("Page.goForward")))
+	mux.Handle("/api/reload", g.requireSession(g.navCommand("Page.reload")))
+	mux.Handle("/api/stop", g.requireSession(g.navCommand("Page.stopLoading")))
+	mux.Handle("/api/current-url", g.requireSession(http.HandlerFunc(g.handleCurrentURL)))
 
 	// /probe carries its own JWT in the query string (client/src/probe.ts
 	// resolveProbeURL), and the broker verifies it. Wrapping it in a cookie

@@ -285,4 +285,85 @@ describe("ChromelessSession", () => {
     await session.connect("dev-10");
     await expect(session.connect("dev-10")).rejects.toThrow(/already connected/);
   });
+
+  // The browser is the offerer, so an offer that never arrives used to hang
+  // the client forever with no diagnosis: this class had no timeout at all.
+  // The portal measured six of nine failing panels receiving 1000+ ICE
+  // candidates and ZERO offers, so it is a real shape, not a hypothetical.
+  describe("offer-wait watchdog", () => {
+    it("asks for a fresh offer when none arrives, then fails visibly", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session } = makeSession();
+        const statuses: Array<[string, string | undefined]> = [];
+        session.on("status", (st, text) => statuses.push([st, text]));
+
+        await session.connect("dev-11");
+        const ws = lastSocket();
+        ws.triggerOpen();
+
+        // Nothing yet: the wait has to be generous enough to cover a cold
+        // worker (~35s p99 in triform's measurements), or a normal slow boot
+        // looks like a failure.
+        vi.advanceTimersByTime(30_000);
+        expect(ws.sentEnvelopes().some((e) => e.type === "request_renegotiate")).toBe(false);
+
+        vi.advanceTimersByTime(20_000); // past the 45s wait
+        expect(ws.sentEnvelopes().some((e) => e.type === "request_renegotiate")).toBe(true);
+        expect(statuses.some(([, t]) => t === "no offer; retrying")).toBe(true);
+
+        // Still nothing after the rescue window → report failure rather than
+        // spinning forever.
+        vi.advanceTimersByTime(25_000);
+        expect(statuses.some(([st]) => st === "failed")).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("stays quiet when the offer arrives", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session } = makeSession();
+        const statuses: string[] = [];
+        session.on("status", (st) => statuses.push(st));
+
+        await session.connect("dev-12");
+        const ws = lastSocket();
+        ws.triggerOpen();
+        ws.triggerMessage(JSON.stringify({
+          type: "offer", from: "browser",
+          data: { type: "offer", sdp: "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n" },
+        } satisfies Envelope));
+        await vi.advanceTimersByTimeAsync(0);
+
+        vi.advanceTimersByTime(120_000);
+        expect(ws.sentEnvelopes().some((e) => e.type === "request_renegotiate")).toBe(false);
+        expect(statuses).not.toContain("failed");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // A timer surviving teardown would emit "failed" onto a session the
+    // caller has already closed.
+    it("does not fire after disconnect", async () => {
+      vi.useFakeTimers();
+      try {
+        const { session } = makeSession();
+        const statuses: string[] = [];
+        session.on("status", (st) => statuses.push(st));
+
+        await session.connect("dev-13");
+        lastSocket().triggerOpen();
+        session.disconnect("test");
+        statuses.length = 0;
+
+        vi.advanceTimersByTime(120_000);
+        expect(statuses).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

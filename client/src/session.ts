@@ -136,6 +136,19 @@ interface Listeners {
 
 const DEFAULT_CODEC_PREFERENCE = ["VP9", "AV1", "H264", "VP8"] as const;
 
+// How long to wait for the browser's offer before asking for a fresh one.
+//
+// Generous on purpose: a cold Firecracker worker took ~35s p99 to emit its
+// first offer in triform's measurements, so a tight timeout would fire during
+// a NORMAL cold boot and turn a slow start into a visible failure.
+const OFFER_WAIT_MS = 45_000;
+
+// And after the rescue request. Both derive from one place: the portal shipped
+// a 60s offer wait against a 45s panel timeout, so the panel gave up BEFORE
+// the rescue could fire — measured zero fallbacks and 33 bails. If a
+// give-up deadline is added elsewhere, derive it from these.
+const OFFER_RESCUE_MS = 20_000;
+
 export class ChromelessSession {
   private readonly opts: Required<Pick<ChromelessSessionOptions, "signalingBase">> &
     ChromelessSessionOptions;
@@ -154,10 +167,55 @@ export class ChromelessSession {
   private hasOpenedOnce = false;
   private probePromise: Promise<ProbeResult | null> | null = null;
   private closedFired = false;
+  private offerWaitTimer: ReturnType<typeof setTimeout> | null = null;
+  private offerSeen = false;
 
   constructor(options: ChromelessSessionOptions) {
     this.opts = options;
     this.codecPreference = options.codecPreference ?? DEFAULT_CODEC_PREFERENCE;
+  }
+
+  // ---- offer-wait watchdog ----
+  //
+  // The browser is the offerer, so a client that never receives an offer waits
+  // forever: this class had no timeout of any kind, and "waiting for offer"
+  // was a terminal state with no diagnosis.
+  //
+  // It is not a rare case. The triform portal measured SIX of nine failing
+  // panels receiving 1000+ ICE candidates and ZERO offers, every candidate
+  // logging "queued until remote description is applied". Its fix is the one
+  // used here: ask for a fresh offer, then give up loudly.
+  //
+  // `request_renegotiate` is already in the envelope union and already handled
+  // on the inbound side (:426) — it was simply never SENT by the answerer.
+
+  private armOfferWatchdog(): void {
+    this.clearOfferWatchdog();
+    this.offerSeen = false;
+    this.offerWaitTimer = setTimeout(() => {
+      if (this.offerSeen) return;
+      this.log("warn",
+        `no offer after ${Math.round(OFFER_WAIT_MS / 1000)}s — asking for one`);
+      this.emit("status", "connecting", "no offer; retrying");
+      this.requestRenegotiate("offer-wait expired");
+
+      // Second window, then stop pretending. Reporting failure beats a
+      // spinner that never resolves.
+      this.offerWaitTimer = setTimeout(() => {
+        if (this.offerSeen) return;
+        this.log("err",
+          "still no offer — the worker is not producing one. Check that it " +
+          "reached signaling with the same session id.");
+        this.emit("status", "failed", "no offer from browser");
+      }, OFFER_RESCUE_MS);
+    }, OFFER_WAIT_MS);
+  }
+
+  private clearOfferWatchdog(): void {
+    if (this.offerWaitTimer !== null) {
+      clearTimeout(this.offerWaitTimer);
+      this.offerWaitTimer = null;
+    }
   }
 
   // ---- events ----
@@ -298,6 +356,7 @@ export class ChromelessSession {
         this.hasOpenedOnce = true;
         this.log("ok", "ws open");
         this.emit("status", "connecting", "waiting for offer");
+        this.armOfferWatchdog();
       }
       // Hello frame so signaling learns our role.
       rws.send(JSON.stringify({ type: "ice", from: "client", data: null } satisfies Envelope));
@@ -352,6 +411,8 @@ export class ChromelessSession {
     }
     switch (env.type) {
       case "offer": {
+        this.offerSeen = true;
+        this.clearOfferWatchdog();
         this.log("ok", "← offer", { sdpBytes: env.data.sdp?.length ?? 0 });
         try {
           await pc.setRemoteDescription(env.data);
@@ -549,6 +610,9 @@ export class ChromelessSession {
   private teardown(reason: string): void {
     if (!this.rws && !this.pc) return;
     this.log("info", `tearing down: ${reason}`);
+    // Before anything else: a surviving watchdog would fire after teardown and
+    // emit a "failed" status onto a session the caller has already closed.
+    this.clearOfferWatchdog();
     try { this.detachStats?.(); } catch { /* ignore */ }
     try { this.stats?.stop(); } catch { /* ignore */ }
     try { this.statsDc?.close(); } catch { /* ignore */ }

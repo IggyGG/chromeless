@@ -95,6 +95,16 @@ func main() {
 		// life of a session, and a write deadline would sever them mid-stream.
 	}
 
+	// CHROMIUM_START_URL finally does something. infra/launch-chromeless.sh has
+	// always passed it as --app=<url>, but the embedder reads only
+	// --remote-debugging-{port,address} and hardcodes about:blank, so the knob
+	// has never had any effect. Best-effort and asynchronous: the worker is
+	// usually still booting, and an unreachable start page is no reason to
+	// refuse to serve the UI.
+	if cfg.startURL != "" {
+		g.navigateAtStartup(cfg.startURL)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 

@@ -9,4 +9,6 @@ go 1.22
 // with the REPO ROOT as its context, not this directory.
 require github.com/iggy/chromeless/signaling v0.0.0
 
+require github.com/gorilla/websocket v1.5.3
+
 replace github.com/iggy/chromeless/signaling => ../../signaling
