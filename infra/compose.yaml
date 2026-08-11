@@ -180,6 +180,22 @@ services:
       - "8080:8080"
     environment:
       SIGNALING_PORT: "8080"
+      # Verifier for the session tokens the gateway mints. When this is unset
+      # the broker logs "auth disabled: any caller can connect" and means it —
+      # so the login on the gateway would be protecting only the HTML, and
+      # anyone able to reach this port would bypass it entirely.
+      #
+      # It must be the PUBLIC half of CHROMELESS_AUTH_PRIVKEY on the gateway.
+      # Both are generated outside compose, because this service needs the
+      # public key at ITS startup and cannot ask a service that has not booted
+      # yet. Generate a matching pair with (there is no root Go module, so
+      # this must run from the gateway's directory):
+      #
+      #   eval "$(cd infra/gateway && go run ./cmd/keygen)"
+      #
+      # Leave both unset to keep the old anonymous behaviour (useful when
+      # driving the broker directly from a test harness).
+      CHROMELESS_AUTH_PUBKEY: ${CHROMELESS_AUTH_PUBKEY:-}
       # T99: same OTel opt-in pattern as chromium. webrtc-dev's
       # signaling/tracing.go reads these.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -221,6 +237,16 @@ services:
       CHROMELESS_PASS: ${CHROMELESS_PASS:?set CHROMELESS_PASS to the login password for https://localhost:8443}
       CHROMELESS_SIGNALING_URL: ws://signaling:8080
       CHROMELESS_CDP_URL: http://chromium:9222
+      # Signing key for session tokens; its public half goes to signaling as
+      # CHROMELESS_AUTH_PUBKEY. Unset → the gateway generates one per boot,
+      # which is fine on its own but leaves the broker verifying against a key
+      # nobody holds — so set both, or neither. See the signaling block.
+      CHROMELESS_AUTH_PRIVKEY: ${CHROMELESS_AUTH_PRIVKEY:-}
+      # Passed here ONLY so the gateway can cross-check it against its own
+      # signing key and refuse to start on a mismatch. A mismatched pair is
+      # the one misconfiguration with no useful symptom: every token is
+      # rejected as a bad signature and neither log says the keys differ.
+      CHROMELESS_AUTH_PUBKEY: ${CHROMELESS_AUTH_PUBKEY:-}
       # Extra SANs for the generated certificate. Needed when reaching the
       # gateway by LAN IP or hostname rather than localhost — a browser will
       # not accept a cert that does not name the host actually typed.

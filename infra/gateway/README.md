@@ -57,6 +57,8 @@ The page and the WebSocket share an origin. That is load-bearing, not tidiness:
 | `CHROMELESS_CDP_URL` | `http://chromium:9222` | Worker DevTools (navigation). |
 | `CHROMELESS_STATIC_DIR` | `/srv/client` | Client bundle. |
 | `CHROMELESS_SESSION_TTL` | `12h` | Cookie lifetime. |
+| `CHROMELESS_AUTH_PRIVKEY` | generated | Ed25519 signing key, base64 or hex. |
+| `CHROMELESS_AUTH_PUBKEY` | — | Cross-check only; see below. |
 
 There is no default credential. A gateway that boots with a built-in password
 is worse than one that refuses to boot, because it looks protected.
@@ -88,6 +90,44 @@ cookie, "log out" is only a client-side suggestion.
 `/probe` is deliberately **not** cookie-gated: it carries its own JWT in the
 query string (`client/src/probe.ts`) and the broker verifies it. Requiring a
 cookie as well would break a legitimate non-browser caller holding a token.
+
+## Session tokens
+
+The cookie only proves you got past the login. The **broker** needs its own
+proof, because it is reachable on the internal network and would otherwise
+accept anyone — so the gateway also mints the Ed25519 JWT that
+`signaling/auth.go` verifies. `/issue-token` is cookie-gated and returns
+exactly the shape `client/src/auth.ts` already parses, so the client needs no
+changes beyond sending its cookie.
+
+Generate a matching pair and hand each half to the service that needs it:
+
+```bash
+eval "$(cd infra/gateway && go run ./cmd/keygen)"   # sets both env vars
+docker compose -f infra/compose.yaml up
+```
+
+Both halves are generated **outside** compose because the broker needs the
+public key at *its* startup, before the gateway exists — neither service can
+hand the other anything at boot.
+
+The gateway cross-checks `CHROMELESS_AUTH_PUBKEY` against its own signing key
+and refuses to start if they disagree. That mismatch is the one
+misconfiguration with no useful symptom: both services behave correctly and
+simply disagree, so every connection dies as "signature mismatch" with nothing
+in either log saying the keys differ.
+
+Leave both unset and the broker keeps its old anonymous behaviour — useful when
+driving it from a test harness, and loudly warned about at startup.
+
+The token format lives in [`signaling/token`](../../signaling/token), shared
+with the verifier rather than reimplemented. `turn-issuer` still carries its own
+copy with a comment telling you to update it by hand; that is the failure this
+package removes.
+
+Tokens are short-lived (15 min) so that ceasing to issue is an effective
+revocation without a denylist. `client/src/auth.ts` ships `TokenRefresher` for
+exactly this.
 
 ## Tests
 

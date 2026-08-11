@@ -32,9 +32,11 @@ const (
 	envTLSDir      = "CHROMELESS_TLS_DIR"
 	envTLSHosts    = "CHROMELESS_TLS_HOSTS"
 	envSignalingURL = "CHROMELESS_SIGNALING_URL"
-	envCDPURL      = "CHROMELESS_CDP_URL"
-	envStaticDir   = "CHROMELESS_STATIC_DIR"
-	envSessionTTL  = "CHROMELESS_SESSION_TTL"
+	envCDPURL       = "CHROMELESS_CDP_URL"
+	envStaticDir    = "CHROMELESS_STATIC_DIR"
+	envSessionTTL   = "CHROMELESS_SESSION_TTL"
+	envAuthPrivkey  = "CHROMELESS_AUTH_PRIVKEY"
+	envAuthPubkey   = "CHROMELESS_AUTH_PUBKEY"
 
 	defaultPort       = "8443"
 	defaultTLSDir     = "/data/certs"
@@ -69,6 +71,17 @@ type config struct {
 
 	staticDir  string
 	sessionTTL time.Duration
+
+	// authPrivkey is the Ed25519 signing key for session tokens, base64 or
+	// hex. Empty means "generate one at startup" — fine when the broker runs
+	// with auth disabled, but compose supplies it so the broker can be handed
+	// the matching public half at ITS startup, before this service exists.
+	authPrivkey string
+
+	// authPubkey is what the operator gave the broker. Not used for anything
+	// here except a startup cross-check: a mismatched pair is the one
+	// configuration error with no useful symptom (see checkPubkeyMatches).
+	authPubkey string
 }
 
 func loadConfig() (*config, error) {
@@ -93,6 +106,8 @@ func loadConfig() (*config, error) {
 		cdpURL:       envOr(envCDPURL, defaultCDP),
 		staticDir:    envOr(envStaticDir, defaultStaticDir),
 		sessionTTL:   defaultSessionTTL,
+		authPrivkey:  strings.TrimSpace(os.Getenv(envAuthPrivkey)),
+		authPubkey:   strings.TrimSpace(os.Getenv(envAuthPubkey)),
 	}
 
 	// Half a TLS pair is a misconfiguration, not a fallback. Silently

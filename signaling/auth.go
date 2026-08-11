@@ -49,59 +49,24 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/iggy/chromeless/signaling/token"
 )
 
 // Claims is the JWT payload we expect in a session token.
-type Claims struct {
-	Sub  string `json:"sub"`
-	Sid  string `json:"sid"`
-	Role string `json:"role"`
-	Exp  int64  `json:"exp"`
-	Iat  int64  `json:"iat"`
-	Nbf  int64  `json:"nbf,omitempty"`
-	// Jti (T89) — opaque token identifier used by the denylist for
-	// per-token revocation. Optional: pre-T89 tokens omit it; the
-	// denylist still works as tenant-wide.
-	Jti string `json:"jti,omitempty"`
-	// Aud — the regions this token is valid in. Optional and omitted by
-	// default; when present, a server whose CHROMELESS_REGION is not in
-	// the list rejects the connection with close code 1008.
-	//
-	// Encoded as a JSON array. RFC 7519 §4.1.3 also permits a bare
-	// string for a single audience, which UnmarshalJSON below accepts.
-	Aud []string `json:"aud,omitempty"`
-}
-
-// UnmarshalJSON accepts the RFC 7519 §4.1.3 shorthand where a single
-// audience may be a bare string rather than a one-element array. Without
-// this, a spec-legal `"aud":"eu-west-1"` from a third-party issuer would
-// fail to unmarshal and be reported as malformed claims.
-func (c *Claims) UnmarshalJSON(data []byte) error {
-	type rawClaims Claims // avoid recursing into this method
-	var probe struct {
-		*rawClaims
-		Aud json.RawMessage `json:"aud,omitempty"`
-	}
-	probe.rawClaims = (*rawClaims)(c)
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return err
-	}
-	c.Aud = nil
-	if len(probe.Aud) == 0 || string(probe.Aud) == "null" {
-		return nil
-	}
-	var list []string
-	if err := json.Unmarshal(probe.Aud, &list); err == nil {
-		c.Aud = list
-		return nil
-	}
-	var single string
-	if err := json.Unmarshal(probe.Aud, &single); err != nil {
-		return errors.New("aud must be a string or array of strings")
-	}
-	c.Aud = []string{single}
-	return nil
-}
+//
+// An alias, not a copy: the definition moved to signaling/token so that
+// everything minting or verifying one of these builds from a single struct.
+// The gateway (infra/gateway) mints tokens this server verifies, and the
+// claim names plus the exact signing-input bytes have to agree to the letter —
+// a drifted field name yields a token that parses and then fails verification
+// with a generic "signature mismatch", far from the code that got it wrong.
+// turn-issuer still keeps its own copy with a comment telling you to update it
+// by hand; that is what this removes.
+//
+// Aliased rather than re-typed so every existing reference — and the
+// RFC 7519 §4.1.3 bare-string `aud` handling — keeps working untouched.
+type Claims = token.Claims
 
 // regionPermitted reports whether a token bearing `aud` may be used on
 // this server.
@@ -310,12 +275,7 @@ func recordRoleMismatch() {
 }
 
 // base64URLDecode handles both raw and padded forms.
-func base64URLDecode(s string) ([]byte, error) {
-	if rem := len(s) % 4; rem != 0 {
-		s += strings.Repeat("=", 4-rem)
-	}
-	return base64.URLEncoding.DecodeString(s)
-}
+func base64URLDecode(s string) ([]byte, error) { return token.Base64URLDecode(s) }
 
 // signTokenForTesting produces a signed JWT-style token for use from
 // tests and the dev issuer. It deliberately lives in the same package
@@ -323,16 +283,6 @@ func base64URLDecode(s string) ([]byte, error) {
 //
 // Production code MUST NOT call this with a hardcoded key; the dev
 // issuer (signaling/dev-issuer.go) gates it behind an env var.
-func signToken(priv ed25519.PrivateKey, c Claims) string {
-	header := []byte(`{"alg":"EdDSA","typ":"JWT"}`)
-	payload, _ := json.Marshal(c)
-	headerB64 := base64URLEncode(header)
-	payloadB64 := base64URLEncode(payload)
-	signingInput := headerB64 + "." + payloadB64
-	sig := ed25519.Sign(priv, []byte(signingInput))
-	return signingInput + "." + base64URLEncode(sig)
-}
+func signToken(priv ed25519.PrivateKey, c Claims) string { return token.Sign(priv, c) }
 
-func base64URLEncode(b []byte) string {
-	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
-}
+func base64URLEncode(b []byte) string { return token.Base64URLEncode(b) }

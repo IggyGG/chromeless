@@ -70,6 +70,19 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The broker verifies what we mint, so it needs this value as
+	// CHROMELESS_AUTH_PUBKEY. Logged unconditionally: if it is not set there,
+	// the broker logs "auth disabled ... any caller can connect" and the login
+	// protects only the HTML — a failure mode with no other visible symptom.
+	logger.Info("session-token signing key ready",
+		slog.String("CHROMELESS_AUTH_PUBKEY", g.issuer.pubKeyBase64()),
+		slog.Bool("generated", cfg.authPrivkey == ""))
+	if cfg.authPrivkey == "" {
+		logger.Warn("signing key was generated at startup, so it changes on every " +
+			"restart — set CHROMELESS_AUTH_PRIVKEY (and the matching " +
+			"CHROMELESS_AUTH_PUBKEY on signaling) to keep the broker in step")
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           g.routes(),

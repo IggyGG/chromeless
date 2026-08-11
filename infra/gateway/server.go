@@ -28,11 +28,19 @@ type gateway struct {
 	sessions *sessionStore
 	log      *slog.Logger
 	proxy    *httputil.ReverseProxy
+	issuer   *issuer
 }
 
 func newGateway(cfg *config, logger *slog.Logger) (*gateway, error) {
 	target, err := url.Parse(cfg.signalingURL)
 	if err != nil {
+		return nil, err
+	}
+	iss, err := newIssuer(cfg.authPrivkey)
+	if err != nil {
+		return nil, err
+	}
+	if err := iss.checkPubkeyMatches(cfg.authPubkey); err != nil {
 		return nil, err
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -45,7 +53,13 @@ func newGateway(cfg *config, logger *slog.Logger) (*gateway, error) {
 		http.Error(w, "signaling backend unavailable", http.StatusBadGateway)
 	}
 
-	return &gateway{cfg: cfg, sessions: newSessionStore(cfg.sessionTTL), log: logger, proxy: proxy}, nil
+	return &gateway{
+		cfg:      cfg,
+		sessions: newSessionStore(cfg.sessionTTL),
+		log:      logger,
+		proxy:    proxy,
+		issuer:   iss,
+	}, nil
 }
 
 func (g *gateway) routes() http.Handler {
@@ -68,6 +82,11 @@ func (g *gateway) routes() http.Handler {
 	mux.Handle("/ws/", g.requireSession(http.HandlerFunc(g.handleProxy)))
 	mux.Handle("/api/webrtc/signaling/", g.requireSession(http.HandlerFunc(g.handleProxy)))
 	mux.Handle("/turn-credentials", g.requireSession(http.HandlerFunc(g.handleProxy)))
+
+	// Minted HERE, not proxied. The broker's own /issue-token is the dev
+	// issuer, which hands a token to anyone who asks and refuses to start
+	// alongside a configured pubkey; this is the authenticated replacement.
+	mux.Handle("/issue-token", g.requireSession(http.HandlerFunc(g.handleIssueToken)))
 
 	// /probe carries its own JWT in the query string (client/src/probe.ts
 	// resolveProbeURL), and the broker verifies it. Wrapping it in a cookie

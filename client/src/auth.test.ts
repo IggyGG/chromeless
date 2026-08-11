@@ -57,6 +57,21 @@ describe("fetchSessionToken", () => {
     expect(String(captured)).toContain("role=client");
     expect(String(captured)).toContain("session_id=s");
   });
+
+  // The standalone gateway gates /issue-token on the session cookie set at
+  // login. With credentials:"omit" the cookie is withheld, the gateway answers
+  // 401, this returns null, and session.ts then logs "connecting
+  // unauthenticated" and dials anyway — so the symptom is an unexplained
+  // WebSocket close from the broker, nowhere near the cause.
+  it("sends same-origin credentials so the gateway's session cookie is attached", async () => {
+    let init: RequestInit | undefined;
+    const fetchImpl: typeof fetch = (_url, i) => {
+      init = i;
+      return Promise.resolve(new Response(JSON.stringify({ token: "t", exp: 0, role: "client", sid: "s", sub: "u" }), { status: 200 })) as Promise<Response>;
+    };
+    await fetchSessionToken("s", "client", { signalingBase: base, fetchImpl });
+    expect(init?.credentials).toBe("same-origin");
+  });
 });
 
 // ---------------------------------------------------------------------------
