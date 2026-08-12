@@ -1,0 +1,325 @@
+# infra/k8s/standalone/stack.yaml — the standalone stack, on Kubernetes.
+#
+# The compose stack (infra/compose.yaml) expressed as plain manifests, so it
+# can run on a cluster where the worker image's amd64 build is native.
+#
+# ADDITIVE BY CONSTRUCTION. The `chromeless` namespace holds live workloads —
+# browser-session-controller and a chromeless-browserless CDP pool — and a
+# Helm release (`cb`) that is FAILED at revision 21 and owns one of them.
+# Everything here is plain kubectl with distinct names and a
+# `part-of: chromeless-standalone` label, so nothing can collide with the chart
+# and teardown is one selector:
+#
+#   kubectl delete all,secret,cm -n chromeless \
+#     -l app.kubernetes.io/part-of=chromeless-standalone
+#
+# NEVER `helm upgrade` in this namespace. Revision 21 is already failed; a Helm
+# operation could take the live controller with it.
+#
+# Prereqs:
+#   1. Images built:  kubectl apply -f infra/k8s/standalone/build-images.yaml
+#   2. Secret:        chromeless-standalone (see the README in this directory)
+#
+#   kubectl apply -f infra/k8s/standalone/stack.yaml
+#   kubectl port-forward -n chromeless svc/chromeless-standalone-gateway 8443:8443
+#   open https://localhost:8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromeless-standalone-signaling
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-signaling
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  selector:
+    app.kubernetes.io/name: chromeless-standalone-signaling
+  ports:
+    - { name: ws, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromeless-standalone-signaling
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-signaling
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chromeless-standalone-signaling
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless-standalone-signaling
+        app.kubernetes.io/part-of: chromeless-standalone
+    spec:
+      imagePullSecrets: [{ name: registry-pull }]
+      # A Kyverno policy (workload-must-exclude-triform-1) requires every
+      # workload to opt out of triform-1 explicitly. It is audit-only, so a pod
+      # without this still schedules — but it logs a PolicyViolation on every
+      # admission, which is noise in someone else's alerting.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["triform-1"]
+      securityContext:
+        runAsNonRoot: true
+        # 65532 = distroless's `nonroot`. The uid must be NUMERIC here: both
+        # images declare `USER nonroot:nonroot` by name, and with
+        # runAsNonRoot:true the kubelet refuses to start a container whose user
+        # it cannot prove is non-root — "image has non-numeric user (nonroot),
+        # cannot verify user is non-root", which surfaces as
+        # CreateContainerConfigError with no other clue.
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: signaling
+          # Built from this branch. The pre-existing `cv2-route-alias` tag
+          # predates signaling/token, so a broker built from it CANNOT verify
+          # what the gateway mints — every connection would be rejected as a
+          # bad signature, with nothing in either log saying the keys differ.
+          image: registry.triform.cloud/chromeless/signaling:standalone-v1
+          env:
+            - name: SIGNALING_PORT
+              value: "8080"
+            # The public half of the gateway's signing key. Without it the
+            # broker logs "auth disabled: any caller can connect" and means it.
+            - name: CHROMELESS_AUTH_PUBKEY
+              valueFrom:
+                secretKeyRef: { name: chromeless-standalone, key: CHROMELESS_AUTH_PUBKEY }
+          ports:
+            - { name: ws, containerPort: 8080 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromeless-standalone-worker
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-worker
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  selector:
+    app.kubernetes.io/name: chromeless-standalone-worker
+  ports:
+    # DevTools. Cluster-internal only: the gateway needs it for navigation, and
+    # nothing outside the namespace should reach it — it is unauthenticated
+    # remote code execution against the browser.
+    - { name: cdp, port: 9222, targetPort: 9222 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromeless-standalone-worker
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-worker
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  # ONE. cloud_browser_browser_main_parts.cc rejects a second bring-up
+  # ("native session already started"), so a worker is single-use and scaling
+  # this would just produce replicas fighting over one session id.
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chromeless-standalone-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless-standalone-worker
+        app.kubernetes.io/part-of: chromeless-standalone
+    spec:
+      imagePullSecrets: [{ name: registry-pull }]
+      # A Kyverno policy (workload-must-exclude-triform-1) requires every
+      # workload to opt out of triform-1 explicitly. It is audit-only, so a pod
+      # without this still schedules — but it logs a PolicyViolation on every
+      # admission, which is noise in someone else's alerting.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["triform-1"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: chromium
+          # The pin from build/guest-release.json, verified to boot and paint
+          # by infra/k8s/standalone/smoke-job.yaml.
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-44f2e20dece6
+          env:
+            - name: SESSION_ID
+              value: dev
+            # host[:port] only — no scheme, no path. The peer builds its own
+            # URL (cb_signaling_ws_client.cc) as
+            # ws[s]://<host>/api/webrtc/signaling/<session>.
+            #
+            # A SERVICE DNS NAME IS USED DELIBERATELY, and it is the first
+            # thing to suspect if the peer never appears: the k8s controller
+            # resolves these to an IP itself because "native Chromium has
+            # repeatedly failed to resolve Kubernetes service DNS names even
+            # when getent/curl work in the same pod"
+            # (controllers/.../reconciler/session.go). If the worker logs
+            # ERR_NAME_NOT_RESOLVED, substitute the Service ClusterIP here.
+            - name: WEBRTC_SIGNALING_HOST
+              value: chromeless-standalone-signaling:8080
+            - name: WEBRTC_SIGNALING_SESSION_ID
+              value: dev
+            # Plaintext ws:// — this hop is inside the cluster network. TLS
+            # terminates at the gateway, which is what faces a browser.
+            - name: WEBRTC_SIGNALING_TLS
+              value: "0"
+            # A browser-role token. The broker verifies it, and the worker
+            # cannot refresh one (cb_signaling_reconnect.h is explicit that
+            # token refresh is out of scope), so it is minted long-lived by a
+            # one-shot Job rather than by the gateway's 15-minute issuer.
+            - name: WEBRTC_SIGNALING_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chromeless-standalone-worker-token
+                  key: token
+          ports:
+            - { name: cdp, containerPort: 9222 }
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits:   { cpu: "2", memory: 4Gi }
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          readinessProbe:
+            httpGet:
+              path: /json/version
+              port: 9222
+              # Chromium's DNS-rebinding check answers 403 to any other Host.
+              httpHeaders: [{ name: Host, value: localhost }]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 12
+      volumes:
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromeless-standalone-gateway
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-gateway
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  selector:
+    app.kubernetes.io/name: chromeless-standalone-gateway
+  ports:
+    - { name: https, port: 8443, targetPort: 8443 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromeless-standalone-gateway
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-gateway
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chromeless-standalone-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless-standalone-gateway
+        app.kubernetes.io/part-of: chromeless-standalone
+    spec:
+      imagePullSecrets: [{ name: registry-pull }]
+      # A Kyverno policy (workload-must-exclude-triform-1) requires every
+      # workload to opt out of triform-1 explicitly. It is audit-only, so a pod
+      # without this still schedules — but it logs a PolicyViolation on every
+      # admission, which is noise in someone else's alerting.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["triform-1"]
+      securityContext:
+        runAsNonRoot: true
+        # 65532 = distroless's `nonroot`. The uid must be NUMERIC here: both
+        # images declare `USER nonroot:nonroot` by name, and with
+        # runAsNonRoot:true the kubelet refuses to start a container whose user
+        # it cannot prove is non-root — "image has non-numeric user (nonroot),
+        # cannot verify user is non-root", which surfaces as
+        # CreateContainerConfigError with no other clue.
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gateway
+          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v1
+          env:
+            - name: CHROMELESS_USER
+              valueFrom:
+                secretKeyRef: { name: chromeless-standalone, key: CHROMELESS_USER }
+            - name: CHROMELESS_PASS
+              valueFrom:
+                secretKeyRef: { name: chromeless-standalone, key: CHROMELESS_PASS }
+            # Cross-checked against the private half at startup; the gateway
+            # refuses to boot on a mismatch, because a mismatched pair is the
+            # one misconfiguration with no useful symptom.
+            - name: CHROMELESS_AUTH_PRIVKEY
+              valueFrom:
+                secretKeyRef: { name: chromeless-standalone, key: CHROMELESS_AUTH_PRIVKEY }
+            - name: CHROMELESS_AUTH_PUBKEY
+              valueFrom:
+                secretKeyRef: { name: chromeless-standalone, key: CHROMELESS_AUTH_PUBKEY }
+            - name: CHROMELESS_SIGNALING_URL
+              value: ws://chromeless-standalone-signaling:8080
+            - name: CHROMELESS_CDP_URL
+              value: http://chromeless-standalone-worker:9222
+            # Reached by port-forward, so localhost is what the browser types
+            # and the generated cert's default SANs already cover it.
+            - name: CHROMELESS_TLS_DIR
+              value: /data/certs
+          ports:
+            - { name: https, containerPort: 8443 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: certs, mountPath: /data/certs }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          livenessProbe:
+            exec: { command: ["/gateway", "-healthcheck"] }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+      volumes:
+        # emptyDir: the cert is regenerated on restart. Fine here — a
+        # port-forward user re-accepts it — but a durable deployment wants a
+        # PVC so the browser is not re-warned on every roll.
+        - name: certs
+          emptyDir: {}

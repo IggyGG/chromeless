@@ -181,6 +181,31 @@ func (c *cdpClient) send(ctx context.Context, method string, params map[string]a
 	}
 }
 
+// armCapture tells the worker to start pumping its compositor output into the
+// WebRTC video track.
+//
+// WITHOUT THIS THERE IS NO VIDEO, and the way it fails is memorable: the peer
+// connects, SDP completes, a video track is negotiated, and not one frame ever
+// arrives. After 30s of that the worker's own watchdog declares
+// "CV2-GPU-DEATH: ... zero captured frames despite an active capture target"
+// and SELF-TERMINATES, expecting an orchestrator to re-pin a fresh guest. The
+// diagnostic line that gives it away is `no-active-capture (no WebContents
+// being captured)` — the compositor is ticking at 30fps into nothing.
+//
+// Nothing arms it implicitly. In triform, physics issues this after the
+// session comes up (physics/src/api/handlers/screencast_ws.rs); in a
+// standalone deployment the gateway is the only thing playing that part.
+//
+// PAGE-SCOPED, NOT BROWSER-SCOPED. The handler resolves its target with
+// `channel->GetAgentHost()->GetWebContents()` (cb_devtools_agent.cc), so a
+// browser-level connection produces a null WebContents and the call fails with
+// "no active WebContents". send() dials the page target's debugger URL, which
+// is exactly the scope required.
+func (c *cdpClient) armCapture(ctx context.Context) error {
+	_, err := c.send(ctx, "Cb.startFrameSinkCapture", nil)
+	return err
+}
+
 // navigate points the worker's page at url.
 func (c *cdpClient) navigate(ctx context.Context, url string) error {
 	// Page.enable first so the navigation is driven with the Page domain

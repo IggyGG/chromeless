@@ -1,0 +1,169 @@
+# infra/k8s/standalone/build-images.yaml — build the two Go images the
+# standalone stack needs, in-cluster, with kaniko.
+#
+# WHY IN-CLUSTER. The gateway image has never been built anywhere, and the only
+# `signaling` tag in the registry (cv2-route-alias) predates this branch's
+# signaling/token package — so the broker it produces cannot verify what the
+# gateway mints. Both must be built from THIS branch. Building them locally
+# needs a docker daemon (absent) on an amd64 host (this one is arm64), so they
+# are built where they will run.
+#
+# Kaniko is how this cluster already builds — same executor version, same
+# registry-pull secret, same DOCKER_CONFIG mount as
+# infra/k8s/chromeless-build/chromeless-kaniko-push.yaml.
+#
+# THE BUILD CONTEXT IS THE REPO ROOT FOR BOTH. The gateway needs it because its
+# go.mod has `replace ... => ../../signaling` reaching outside its own
+# directory, and because the Dockerfile builds the client bundle from client/.
+# signaling/ does not strictly need the root, but using it for both keeps one
+# clone and one context definition.
+#
+#   kubectl apply -f infra/k8s/standalone/build-images.yaml
+#   kubectl logs -n chromeless -f job/chromeless-build-gateway
+#
+# Both Jobs are independent and run in parallel. Retag by editing IMAGE_TAG
+# below; the deployment manifests reference the same value.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-build-gateway
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-build-gateway
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless-build-gateway
+        app.kubernetes.io/part-of: chromeless-standalone
+    spec:
+      restartPolicy: Never
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Kaniko's own git context support exists, but a plain clone is easier
+        # to reason about and lets us pin the ref explicitly — the build lane
+        # learned the hard way (fire-build.sh) that a build reporting on the
+        # wrong ref is worse than a build that fails.
+        - name: clone
+          image: alpine/git:2.45.2
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              git clone --depth 1 --branch "$BRANCH" "$REPO" /workspace
+              echo "built from $(git -C /workspace rev-parse --short HEAD)"
+          env:
+            - name: REPO
+              value: https://forgejo.triform.dev/triform/chromeless.git
+            - name: BRANCH
+              value: feat/standalone-mode
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:v1.23.2
+          args:
+            - --dockerfile=/workspace/infra/gateway/Dockerfile
+            - --context=/workspace
+            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v1
+            - --single-snapshot          # one layer; these images are small
+            - --push-retry=3             # the registry 500s intermittently (BUGS-511/513)
+          env:
+            - name: DOCKER_CONFIG
+              value: /kaniko/.docker
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: docker-config, mountPath: /kaniko/.docker }
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits:   { cpu: "2", memory: 4Gi }
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: registry-pull
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chromeless-build-signaling
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-build-signaling
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless-build-signaling
+        app.kubernetes.io/part-of: chromeless-standalone
+    spec:
+      restartPolicy: Never
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: clone
+          image: alpine/git:2.45.2
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              git clone --depth 1 --branch "$BRANCH" "$REPO" /workspace
+              echo "built from $(git -C /workspace rev-parse --short HEAD)"
+          env:
+            - name: REPO
+              value: https://forgejo.triform.dev/triform/chromeless.git
+            - name: BRANCH
+              value: feat/standalone-mode
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:v1.23.2
+          args:
+            # signaling/Dockerfile COPYs go.mod then `.` relative to ITS own
+            # directory, so the context is signaling/, not the repo root.
+            - --dockerfile=/workspace/signaling/Dockerfile
+            - --context=/workspace/signaling
+            - --destination=registry.triform.cloud/chromeless/signaling:standalone-v1
+            - --single-snapshot
+            - --push-retry=3
+          env:
+            - name: DOCKER_CONFIG
+              value: /kaniko/.docker
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: docker-config, mountPath: /kaniko/.docker }
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits:   { cpu: "2", memory: 4Gi }
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: registry-pull
+            items:
+              - key: .dockerconfigjson
+                path: config.json

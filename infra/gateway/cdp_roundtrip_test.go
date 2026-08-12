@@ -195,8 +195,16 @@ func TestNavigateEndpointDrivesTheWorker(t *testing.T) {
 	if body.URL != "https://example.com/" {
 		t.Errorf("url = %q", body.URL)
 	}
-	if m := fw.methods(); len(m) == 0 || m[len(m)-1] != "Page.navigate" {
-		t.Errorf("worker saw %v, want a trailing Page.navigate", m)
+	// Page.navigate, then a capture re-arm. The re-arm is not incidental: a
+	// cross-document navigation swaps the RenderWidgetHost and the FrameSinkId
+	// with it, so a capturer bound to the old one goes silent and the user
+	// gets a live-but-frozen video element.
+	m := fw.methods()
+	if !containsMethod(m, "Page.navigate") {
+		t.Errorf("worker saw %v, want a Page.navigate", m)
+	}
+	if !containsMethod(m, "Cb.startFrameSinkCapture") {
+		t.Errorf("worker saw %v, want a Cb.startFrameSinkCapture re-arm after navigating", m)
 	}
 }
 
@@ -257,4 +265,13 @@ func TestHistoryCommandDeclinesGracefully(t *testing.T) {
 	if body.OK {
 		t.Error("reported ok:true for a declined command")
 	}
+}
+
+func containsMethod(methods []string, want string) bool {
+	for _, m := range methods {
+		if m == want {
+			return true
+		}
+	}
+	return false
 }

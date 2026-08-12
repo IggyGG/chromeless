@@ -65,6 +65,21 @@ func (g *gateway) handleNavigate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+
+	// Re-arm capture after the navigation. A cross-document navigation swaps
+	// the RenderWidgetHost and with it the FrameSinkId, so a capturer bound to
+	// the old one goes silent — the exact bug fixed in b482176 on the embedder
+	// side ("nav swaps RVH+FSID, capturer never re-armed"). The embedder
+	// re-arms on RenderViewHostChanged, but arming again here is cheap and
+	// covers the case where capture was never armed at all.
+	//
+	// Best-effort: a navigation that worked should not be reported as failed
+	// because the re-arm raced the swap.
+	if err := g.cdp.armCapture(ctx); err != nil {
+		g.log.Warn("capture re-arm after navigate failed",
+			slog.String("url", target), slog.Any("err", err))
+	}
+
 	g.log.Info("navigated", slog.String("url", target))
 	writeJSON(w, map[string]any{"url": target})
 }
@@ -134,6 +149,50 @@ func (g *gateway) navigateAtStartup(rawURL string) {
 		}
 		g.log.Warn("gave up loading the start url; the worker never became reachable",
 			slog.String("url", target))
+	}()
+}
+
+// armCaptureWhenReady arms FrameSink capture as soon as the worker is
+// reachable, and keeps trying while it is not.
+//
+// This is the difference between "a video track was negotiated" and "you can
+// see the browser". Nothing else in a standalone deployment issues
+// Cb.startFrameSinkCapture: in triform that is physics's job, and here the
+// gateway is what stands in its place. Left unarmed, the worker's compositor
+// ticks at 30fps into nothing, the client shows a black video element, and
+// after 30 seconds the worker declares CV2-GPU-DEATH and kills itself.
+//
+// Retried rather than fired once, because the gateway usually wins the startup
+// race: the worker needs ~15s for Xvfb + Chromium before DevTools answers at
+// all. Keeps going after success too — the worker self-terminates on some
+// failure paths and supervisord restarts it, and an unarmed replacement is
+// exactly as blind as an unarmed original.
+func (g *gateway) armCaptureWhenReady() {
+	go func() {
+		armed := false
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), navTimeout)
+			err := g.cdp.armCapture(ctx)
+			cancel()
+
+			switch {
+			case err == nil && !armed:
+				g.log.Info("framesink capture armed")
+				armed = true
+			case err != nil && armed:
+				// Lost it — most likely the worker restarted underneath us.
+				g.log.Warn("capture arm failed after previously succeeding; "+
+					"worker may have restarted", slog.Any("err", err))
+				armed = false
+			}
+			// 15s idle / 3s while trying to (re)establish. Cheap either way:
+			// one CDP round trip.
+			if armed {
+				time.Sleep(15 * time.Second)
+			} else {
+				time.Sleep(3 * time.Second)
+			}
+		}
 	}()
 }
 

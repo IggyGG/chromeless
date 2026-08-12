@@ -105,6 +105,12 @@ func main() {
 		g.navigateAtStartup(cfg.startURL)
 	}
 
+	// Arm FrameSink capture as soon as the worker answers. Without this the
+	// peer connects, negotiates a video track, and delivers no frames at all —
+	// then the worker self-terminates with CV2-GPU-DEATH after 30s of it. See
+	// armCaptureWhenReady.
+	g.armCaptureWhenReady()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
