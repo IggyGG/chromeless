@@ -1,0 +1,73 @@
+# infra/k8s/standalone/networkpolicy.yaml — let the standalone pods talk.
+#
+# The namespace carries `chromeless-default-deny` with `podSelector: {}`, which
+# denies ALL ingress and egress for every pod in it. The existing workloads are
+# each carved out by their own policy; new pods get nothing, and the symptom is
+# not a rejection but a TIMEOUT — the worker logs
+# `ERR_CONNECTION_TIMED_OUT`, the gateway logs `dial tcp ...: i/o timeout`, and
+# both look like the other service is down rather than like a policy drop.
+#
+# Purely additive: a separate policy selecting only
+# `part-of: chromeless-standalone`. NetworkPolicies are additive by definition
+# (the union of all policies selecting a pod is what is allowed), so this
+# cannot loosen anything for the live workloads next door.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chromeless-standalone-allow
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-allow
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: chromeless-standalone
+  policyTypes: [Ingress, Egress]
+
+  ingress:
+    # Between the three standalone pods: gateway → signaling (WebSocket
+    # proxy), gateway → worker (CDP navigation), worker → signaling (the peer
+    # dialling out).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: chromeless-standalone
+    # kubectl port-forward terminates at the KUBELET, so the connection to the
+    # pod arrives from the node's own address, not from another pod. Without
+    # this the forward connects and then hangs — the TCP session is accepted by
+    # the kubelet and dropped on the way in.
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - { protocol: TCP, port: 8443 }
+
+  egress:
+    # DNS. Cluster service names do not resolve without it, and the failure
+    # (ERR_NAME_NOT_RESOLVED) looks exactly like a wrong hostname.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Each other.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: chromeless-standalone
+    # The public internet, so the browser can actually browse — and so STUN
+    # works. Private ranges are excluded: a browser that can reach cluster
+    # services and the node network is an SSRF pivot, and this one renders
+    # whatever it fetches into a video stream anyone with the login can watch.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
