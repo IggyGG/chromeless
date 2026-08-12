@@ -5,10 +5,11 @@
 # pointing at the task that will deliver them, rather than silently passing.
 
 .PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
-        test test-unit test-integration \
+        lint-runtime-contracts lint-tests-wired test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
-        test-unit-signaling test-unit-client test-unit-harness
+        test-unit-signaling test-unit-client test-unit-harness \
+        test-unit-go-modules test-unit-encoder
 
 help:
 	@echo "Targets:"
@@ -20,6 +21,7 @@ help:
 	@echo "                           # that would otherwise fail 4-8 h into a build"
 	@echo "  make lint-workflows      # every 'uses:' must exist on the CI action mirror"
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
+	@echo "  make lint-runtime-contracts # hermetic launcher/runtime contracts"
 	@echo ""
 	@echo "  make test                # legacy alias for test-all-ci (the PR gate)"
 	@echo "  make test-all-ci         # PR-blocking subset (unit + integration + smoke)"
@@ -55,7 +57,8 @@ verify: lint test-unit test-integration
 
 # ---- lint ------------------------------------------------------------------
 
-lint: lint-cxx lint-workflows lint-shell lint-build-targets
+lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts \
+      lint-tests-wired
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -84,6 +87,39 @@ lint-build-targets:
 	@python3 tools/lint/test_build_targets_lint.py >/dev/null && \
 	  echo ">>> build-targets-lint self-tests pass" || \
 	  { echo "!!! build-targets-lint SELF-TESTS FAILED — the linter itself is broken"; exit 1; }
+
+# Hermetic runtime contracts — static greps plus a launcher dry-run with
+# CHROMELESS_BROWSER_BIN=/bin/echo, so nothing executes. No Docker, no Chromium,
+# no cluster; the whole set runs in well under a second.
+#
+# These three lived in tests/runtime/ invoked by NOTHING. Two passed the entire
+# time. The third had been failing for so long that its failure was invisible —
+# it asserted a pre-M7 token-in-URL shape and read capture/streamer-page/, a
+# directory deleted in M7. Rewriting it surfaced a second dead assertion:
+# CHROMELESS_AUTOSTART_STREAMER is not referenced by the launcher at all.
+#
+# A red test that nothing runs is indistinguishable from no test.
+# Every test entrypoint under tests/ must be reachable from a make target, a
+# workflow, a build script, or a k8s pod template. 34 files were reachable from
+# NONE of those — written, reviewed, merged, run by nothing. One had been RED
+# for months without anyone knowing.
+#
+# Sibling of lint-build-targets, which exists because three test() targets went
+# uncompiled for ten weeks. Same defect, one directory over, same fix.
+lint-tests-wired:
+	@echo ">>> tests-wired lint"
+	@python3 tools/lint/tests_wired_lint.py
+
+lint-runtime-contracts:
+	@echo ">>> runtime contracts"
+	@fail=0; \
+	for f in tests/runtime/*.sh; do \
+	  printf '  %-46s ' "$$(basename $$f)"; \
+	  if bash "$$f" >/tmp/rt-$$$$.log 2>&1; then echo "ok"; \
+	  else echo "FAIL"; sed 's/^/      /' /tmp/rt-$$$$.log | head -6; fail=1; fi; \
+	  rm -f /tmp/rt-$$$$.log; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "!!! a runtime contract failed"; exit 1; fi
 
 lint-shell:
 	@if command -v shellcheck >/dev/null 2>&1; then \
@@ -114,7 +150,52 @@ test-all-nightly: test-all-ci test-harness-all test-e2e
 
 # ---- unit ------------------------------------------------------------------
 
-test-unit: test-unit-signaling test-unit-client test-unit-harness
+test-unit: test-unit-signaling test-unit-go-modules test-unit-client test-unit-harness \
+           test-unit-encoder
+
+# Every OTHER Go module in the tree. `test-unit` used to run `signaling/` and
+# nothing else, so eight modules holding 13 _test.go files were gated by no make
+# target and no workflow — while tests/regression-suite.md:38-46 listed them as
+# PR-blocking. They were not. Six passed the whole time; nobody was looking.
+#
+# Discovered by `find -name go.mod` rather than hardcoded, so a new module is
+# picked up automatically instead of silently joining the ungated pile. That is
+# the same failure shape as the unbuilt test() targets (see lint-build-targets)
+# and it is fixed the same way: derive the list, never hand-maintain it.
+#
+# signaling/ is excluded (it has its own target above) and tests/integration/
+# too (that is `make test-integration` — it builds a binary and is not a unit
+# test). .claude/worktrees/ holds full checkouts of this repo, so it MUST be
+# pruned or every module is found N+1 times; see CLAUDE.md.
+test-unit-go-modules:
+	@echo ">>> go test — every module except signaling/ and tests/integration/"
+	@fail=0; \
+	for gomod in $$(find . -name go.mod -not -path "./.claude/*" \
+	                  -not -path "./signaling/*" \
+	                  -not -path "./tests/integration/*" | sort); do \
+	  d=$$(dirname $$gomod); \
+	  printf '  %-52s ' "$$d"; \
+	  if ( cd $$d && go test ./... >/tmp/gomod-$$$$.log 2>&1 ); then \
+	    echo "ok"; \
+	  else \
+	    echo "FAIL"; sed 's/^/      /' /tmp/gomod-$$$$.log | head -8; fail=1; \
+	  fi; \
+	  rm -f /tmp/gomod-$$$$.log; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "!!! a Go module failed"; exit 1; fi
+
+# 13 node:test cases pinning encoderImplementation strings, so a silent fallback
+# to Chromium's stock encoders fails loudly. Run by nothing until now, despite
+# passing in 1.3s with zero dependencies — and despite this repo having already
+# shipped exactly that regression once (every image was profile=sw for two
+# months because the profile pipe was severed and nothing checked).
+test-unit-encoder:
+	@if [ -f tests/webrtc/encoder-assertions.test.mjs ]; then \
+	  echo ">>> node --test tests/webrtc/encoder-assertions.test.mjs"; \
+	  node --test tests/webrtc/encoder-assertions.test.mjs; \
+	else \
+	  echo "skip: tests/webrtc/encoder-assertions.test.mjs not present"; \
+	fi
 
 test-unit-signaling:
 	@if [ -d signaling ] && ls signaling/*.go >/dev/null 2>&1; then \
@@ -132,12 +213,24 @@ test-unit-client:
 	  echo "skip: client has no package.json yet (T14)"; \
 	fi
 
+# The guard used to test `harness/pyproject.toml` / `harness/requirements.txt`.
+# NEITHER HAS EVER EXISTED. The real file is one directory down —
+# harness/latency/requirements.txt — so this target printed "skip: ... yet (T11)"
+# on every run since it was written and nobody read it. A target that can only
+# ever skip is the silent-skip class living in the Makefile itself.
+#
+# It still skips when there are no tests to run, but now says which of the two
+# reasons applies, because "no python project" and "python project with no
+# tests" want different fixes.
 test-unit-harness:
-	@if [ -f harness/pyproject.toml ] || [ -f harness/requirements.txt ]; then \
-	  echo ">>> pytest harness"; \
-	  ( cd harness && python -m pytest ); \
+	@if [ ! -f harness/latency/requirements.txt ] && [ ! -f harness/pyproject.toml ]; then \
+	  echo "skip: harness has no Python project (looked for harness/latency/requirements.txt)"; \
+	elif ! find harness -name 'test_*.py' -o -name '*_test.py' | grep -q .; then \
+	  echo "skip: harness has a Python project but ZERO test files — nothing to run."; \
+	  echo "      (this is a real gap, not a passing state; see the reconciler in harness/latency/)"; \
 	else \
-	  echo "skip: harness has no Python project yet (T11)"; \
+	  echo ">>> pytest harness"; \
+	  ( cd harness && python3 -m pytest ); \
 	fi
 
 # ---- integration -----------------------------------------------------------
