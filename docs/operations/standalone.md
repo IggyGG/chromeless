@@ -18,6 +18,11 @@ Kubernetes deployments do not use any of this — there an Ingress terminates TL
 and the controller mints sessions. See
 [`triform-deploy.md`](./triform-deploy.md) for a worked example of that.
 
+To run this same stack on a cluster — worth it when your machine cannot run the
+worker image, which is amd64-only — see
+[`infra/k8s/standalone/`](../../infra/k8s/standalone/). That is where the whole
+thing was first proven end to end, and its README lists what cost time.
+
 ---
 
 ## What is actually running
@@ -231,9 +236,31 @@ The client now gives up and says so rather than spinning forever.
 and still got nothing. Almost always a session-id mismatch or a worker that
 never dialled — check `docker compose logs chromium | grep -i signaling`.
 
-**Everything connects, no video, no errors.** Usually ICE. Without a relay,
-peers on different networks negotiate and then never pair. Bring up the `turn`
-profile and set both sides.
+**Everything connects, no video, no errors.** Usually ICE — and this one is
+confirmed, not theoretical. On a real deployment with the worker in a cluster
+and the viewer on a laptop, both behind NAT: offer and answer exchanged, VP9
+negotiated, both tracks received, all five data channels open, capture
+`VERDICT=PRODUCING` on the worker — and `framesDecoded` stuck at 0 forever. The
+worker's ICE goes `checking -> failed` with only host and srflx candidates and
+no relay. Adding TURN produced 6 relay candidates and a paired connection
+immediately.
+
+Check the worker's log for candidate types:
+
+```bash
+grep -oE "typ (host|srflx|relay)" <chromium.err.log> | sort | uniq -c
+```
+
+No `relay` line means no relay. Both peers need one — the worker via
+`CHROMELESS_ICE_SERVERS`, the browser via the broker's `TURN_URLS` /
+`TURN_USER` / `TURN_PASS`. Setting only one side fails the same way.
+
+**Video worked once, then a second client gets nothing.** One session per
+worker process. After the first client sends `bye` the worker logs
+`session closed, reason=remote bye` and will not start another —
+`StartNativeSession` rejects a second bring-up. Restart the container between
+sessions. This bites during testing more than in use, because a page reload is
+a new client.
 
 **The address bar does nothing.** The gateway needs `CHROMELESS_CDP_URL` to
 reach the worker's DevTools. In the single-host stack that is automatic; in a
