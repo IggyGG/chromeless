@@ -97,6 +97,24 @@ endpoint from `location` (`client/src/config.ts`), so a page on :5173 will dial
 CHROMELESS_E2E_USE_RUNNING_STACK=1 npm run test:e2e
 ```
 
+## Playwright cannot launch on an arm64 Mac with the pinned version
+
+`@playwright/test` is pinned to 1.48.2, whose chromium-1140 build does not
+launch here — `spawn Unknown system error -88` (EBADARCH), or a download that
+lands with an invalid code signature. `npx playwright install` makes it worse
+by resolving a NEWER playwright than the pinned one and fetching a build the
+runner will not use.
+
+That is a local tooling limitation, not a product one. The stack itself was
+verified end to end by driving real Google Chrome over CDP instead — login,
+connect, `framesDecoded` climbing at 1280x720, and a frame read off the live
+`<video>` element showing the remote page. The specs here are correct and will
+run wherever the pinned browser does (CI, Linux, an x86 Mac); they were checked
+with `--list` to confirm collection and un-skipping.
+
+If you need to run them locally on arm64, bump `@playwright/test` and re-pin
+the browser, or run them from a machine where 1.48.2 works.
+
 ## Known dependencies
 
 | Spec  | Blocked by | Notes |
