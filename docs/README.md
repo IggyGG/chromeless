@@ -42,6 +42,7 @@ authoritative — not any prose here.
 | [`capture/`](./capture/) | FrameSink capture design, damage rects, the encoder-factory catalog. |
 | [`internal/`](./internal/) | Per-encoder tuning rationale (H264, VP9, NVENC, VAAPI, SVT-AV1), BWE adapter, simulcast design. Design docs, so they age more slowly than status docs — but check the code before trusting a specific constant. |
 | [`security/passthrough-threat-model.md`](./security/passthrough-threat-model.md) | Threat model for camera/mic passthrough. |
+| [`findings/`](./findings/) | **Confirmed defects with no fix landed**, each reproduced against a live deployment. Read before debugging odd behaviour — the answer may already be here. Every one names the file and line to change; they are open tasks, not notes. |
 
 ## Background and prior art
 

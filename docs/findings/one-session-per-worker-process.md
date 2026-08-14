@@ -62,6 +62,30 @@ receives no offer at all. Still broken, but honestly broken: the client sits at
 "waiting for offer" instead of manufacturing a doomed connection, and the
 broker log shows `peer joined` with no replay.
 
+### The same bug in the other direction
+
+Deploying that fix and watching the broker turned up a second instance of it,
+which the `bye`-only rule did not cover. A viewer whose socket simply drops —
+tab closed, network blip, WS 1006 — sends no `bye`, so its `answer` stayed in
+the buffer. The next **worker** to join was replayed it:
+
+```
+14:54:55  peer left      role=browser                    ← worker restarting
+14:54:58  peer joined    role=browser   replayed=1       ← fresh worker gets
+                                                            the OLD viewer's answer
+14:54:59  ICE connection state -> 2                      ← "connected", to nobody
+```
+
+A freshly-booted worker consumed a dead answer, believed it had a viewer, and
+burned its one and only session before any real viewer arrived. Restarting the
+worker — the documented workaround for the defect above — therefore did not
+help, which is what made this worth chasing rather than accepting.
+
+The rule that covers both is simpler than the one it replaced: **a peer's
+buffered envelopes describe its peer connection, and are only valid while that
+peer is connected.** `hub.dropIfEmpty` does not do this — it only fires when
+BOTH peers are gone, and both these failures happen while one side is still up.
+
 ## Fixing it
 
 Two options, in preference order.
@@ -91,10 +115,22 @@ Not attempted here: `capture/` is an out-of-tree Chromium embedder needing a
 
 ## Testing it
 
-`signaling/replay_test.go:TestWS_ByeDiscardsReplayBuffer` covers the broker
-half, driving real WebSockets through the real handler. It asserts both
-directions: no dead envelopes to the second viewer, and live forwarding still
-works afterwards (so "discard everything" cannot pass by breaking the broker).
+Two tests in `signaling/replay_test.go` cover the broker half, both driving
+real WebSockets through the real handler:
+
+- `TestWS_ByeDiscardsReplayBuffer` — the `bye` path. Also asserts that live
+  forwarding still works afterwards, so "discard everything, always" cannot
+  pass by breaking the broker.
+- `TestWS_DisconnectDiscardsReplay` — the socket-drop path, with a browser
+  deliberately kept connected throughout.
+
+Both were checked by reverting each fix independently and confirming the
+matching test goes red. That check earned its keep three times here: the first
+version of each test passed with the fix reverted, for a different reason each
+time (calling the function directly instead of through the handler; closing
+both peers so `dropIfEmpty` reaped the session; asserting against a peer that
+had not finished registering). **A test written against a bug you have already
+fixed proves nothing until you have watched it fail.**
 
 The worker half has no test here and cannot have one without a build.
 
