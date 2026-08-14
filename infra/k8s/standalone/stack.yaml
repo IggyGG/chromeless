@@ -86,7 +86,7 @@ spec:
           # predates signaling/token, so a broker built from it CANNOT verify
           # what the gateway mints — every connection would be rejected as a
           # bad signature, with nothing in either log saying the keys differ.
-          image: registry.triform.cloud/chromeless/signaling:standalone-v1
+          image: registry.triform.cloud/chromeless/signaling:standalone-v2
           env:
             - name: SIGNALING_PORT
               value: "8080"
