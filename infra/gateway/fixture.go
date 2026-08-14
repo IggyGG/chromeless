@@ -18,18 +18,53 @@
 // The gateway is already reachable from the worker and already serves static
 // content, so it is the natural place to host a fixture.
 //
-// GATED OFF BY DEFAULT. Enabled only with CHROMELESS_ENABLE_TEST_FIXTURE=1,
-// and still behind the session cookie. Left on it is a stored-content endpoint
-// on an authenticated origin — not a serious hole, but not something a
-// production deployment should carry either.
+// SERVED OVER PLAIN HTTP ON A SEPARATE PORT, not through the TLS listener.
+// The worker is Chromium and it VALIDATES certificates — it cannot click
+// through the gateway's self-signed one the way a human can. Navigating it to
+// the https:// fixture fails the handshake with net_error -202
+// (ERR_CERT_AUTHORITY_INVALID) and renders an error page, so the test finds no
+// elements and reports a mouse failure that has nothing to do with the mouse.
+// (The same limitation is why infra/compose.worker.yaml tells split-host
+// deployments to mount a real certificate.)
+//
+// GATED OFF BY DEFAULT, enabled only with CHROMELESS_ENABLE_TEST_FIXTURE=1.
+// The listener is cluster-internal and unauthenticated: its consumer is the
+// worker, which has no session cookie, and what it serves is content the
+// operator just uploaded through the authenticated port.
 
 package main
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 )
+
+// fixturePort is the plain-HTTP listener. Deliberately not 8443: that one is
+// TLS-only and host-published, and this must be neither.
+const fixturePort = "8081"
+
+// serveFixtureListener starts the plain-HTTP fixture server. No-op when the
+// feature is off.
+func (g *gateway) serveFixtureListener() {
+	if !g.cfg.enableTestFixture {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/test-fixture", g.handleFixture)
+	srv := &http.Server{Addr: ":" + fixturePort, Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		g.log.Warn("TEST FIXTURE endpoint enabled on plain HTTP — "+
+			"do not enable this in a deployment you care about",
+			slog.String("addr", ":"+fixturePort))
+		if err := srv.ListenAndServe(); err != nil {
+			g.log.Error("fixture listener stopped", slog.Any("err", err))
+		}
+	}()
+}
 
 type fixtureStore struct {
 	mu   sync.RWMutex

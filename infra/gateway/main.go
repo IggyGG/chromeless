@@ -111,6 +111,10 @@ func main() {
 	// armCaptureWhenReady.
 	g.armCaptureWhenReady()
 
+	// Plain-HTTP test fixture, when enabled. Separate listener because the
+	// worker cannot accept the self-signed cert on the TLS port. See fixture.go.
+	g.serveFixtureListener()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 

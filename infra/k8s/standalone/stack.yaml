@@ -233,6 +233,11 @@ spec:
     app.kubernetes.io/name: chromeless-standalone-gateway
   ports:
     - { name: https, port: 8443, targetPort: 8443 }
+    # Plain-HTTP test fixture (CHROMELESS_ENABLE_TEST_FIXTURE=1 only). The
+    # worker cannot accept the self-signed cert on 8443, so the fixture it
+    # navigates to has to be served without TLS. Cluster-internal; never
+    # published to the host.
+    - { name: fixture, port: 8081, targetPort: 8081 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -278,7 +283,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: gateway
-          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v3
+          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v4
           env:
             - name: CHROMELESS_USER
               valueFrom:
@@ -305,6 +310,7 @@ spec:
               value: /data/certs
           ports:
             - { name: https, containerPort: 8443 }
+            - { name: fixture, containerPort: 8081 }
           resources:
             requests: { cpu: 50m, memory: 64Mi }
             limits:   { cpu: 500m, memory: 256Mi }

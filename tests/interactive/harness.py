@@ -348,9 +348,12 @@ def fixture_url(html: str) -> str:
     behind NAT and cannot dial back here.
 
     The gateway can serve it, and the worker can reach the gateway Service, so
-    the fixture is POSTed to /api/test-fixture and fetched from the worker's
-    side of the network. The endpoint only exists when the gateway is started
-    with CHROMELESS_ENABLE_TEST_FIXTURE=1.
+    the fixture is POSTed through the authenticated TLS port and fetched by the
+    worker over a separate PLAIN-HTTP listener. Plain HTTP because the worker
+    is Chromium and validates certificates: pointed at the https:// fixture it
+    fails the handshake with ERR_CERT_AUTHORITY_INVALID and renders an error
+    page, which then reads as a mouse failure. Enabled only when the gateway
+    runs with CHROMELESS_ENABLE_TEST_FIXTURE=1.
     """
     import ssl
     ctx = ssl.create_default_context()
@@ -362,7 +365,7 @@ def fixture_url(html: str) -> str:
     with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
         json.loads(r.read())
     # The worker fetches it by Service name, which is what it can resolve.
-    return "https://chromeless-standalone-gateway:8443/api/test-fixture"
+    return "http://chromeless-standalone-gateway:8081/api/test-fixture"
 
 
 def _req(verb, timeout=45):
