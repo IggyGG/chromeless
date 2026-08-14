@@ -414,6 +414,40 @@ func (s *session) unregister(p *peer) {
 	}
 }
 
+// discardReplay empties the replay buffers for BOTH roles, so a later-joining
+// peer is not handed a dead session's SDP.
+//
+// A `bye` means the negotiated peer connection is GONE — its ufrag/pwd, its
+// DTLS fingerprint and every candidate either side ever gathered are void.
+// Replaying them is not merely useless, it is actively misleading: the new peer
+// receives a complete, well-formed offer, answers it, and pairs its own fresh
+// candidates against sockets that no longer exist. Nothing in either log says
+// so, and it presents as `iceConnectionState=checking` forever with a single
+// unresponsive pair (`req=0`) — indistinguishable by inspection from a NAT or
+// TURN failure, which is where an afternoon went.
+//
+// BOTH ROLES, NOT JUST THE SENDER. The observed failure was a CLIENT bye
+// (viewer closes the tab) invalidating the BROWSER's buffered offer: the worker
+// receives the bye, tears its peer connection down, and — because
+// cb_offerer_driver's kClosed is terminal and main_parts' native_session_started_
+// is a one-way latch — can never offer again for the life of the process. Its
+// socket stays up, so the session is not reaped, and the next viewer to join is
+// replayed the dead offer plus nine dead candidates (`replayed: 10`). Discarding
+// only the sender's buffer would leave exactly the envelopes that cause this.
+//
+// The buffer exists for the opposite race (an offer arriving BEFORE the
+// counterpart joins, T96/T104) — a live session whose peer has not shown up
+// yet. Once either side says `bye`, that no longer describes anything.
+//
+// Note this cannot rely on hub.dropIfEmpty: that only fires when BOTH peers
+// have disconnected, and here the browser deliberately stays connected.
+func (s *session) discardReplay() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.recent)
+	clear(s.recentICE)
+}
+
 // forward sends raw to the peer in role; returns false if no such peer.
 //
 // T96: when envType is replayable, the most recent raw is also kept
@@ -687,6 +721,10 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			p.log.Debug("no counterpart yet (buffered if replayable)", slog.String("type", env.Type))
 		}
 		if env.Type == "bye" {
+			// The session this peer was in is over. Drop its buffered SDP and
+			// candidates so the next peer to join is not replayed a dead
+			// session's offer — see discardReplay for what that costs.
+			sess.discardReplay()
 			return
 		}
 	}

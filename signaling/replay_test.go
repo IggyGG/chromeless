@@ -3,9 +3,14 @@ package main
 import (
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // fakePeer builds a peer struct with an in-memory send channel large
@@ -226,4 +231,160 @@ func itoaSimple(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// TestWS_ByeDiscardsReplayBuffer is the regression test for "the second viewer
+// never gets video". It drives real WebSockets through the real handler,
+// because the bug is in the WIRING (the bye branch of readPump) as much as in
+// any one function — an earlier version of this test that called discardReplay
+// directly passed with the fix reverted.
+//
+// The sequence is copied from a live capture, and the details matter:
+//
+//	browser joins, offers, trickles ICE     → buffered
+//	viewer 1 joins, gets the replay, works
+//	viewer 1 sends `bye` and disconnects    → the worker tears its peer down
+//	                                          and can never offer again
+//	                                          (kClosed is terminal), but its
+//	                                          SOCKET stays up
+//	viewer 2 joins                          → MUST NOT get the dead offer
+//
+// Note the `bye` comes from the CLIENT while the BROWSER stays connected. That
+// is what makes this a real bug rather than a tidiness issue: the session is
+// never reaped (dropIfEmpty needs both peers gone), so the browser's stale
+// offer sits in the buffer indefinitely. Before the fix, viewer 2 received
+// `replayed: 10` — a complete, well-formed offer for a peer connection that no
+// longer existed — answered it, and sat in iceConnectionState=checking forever
+// with one unresponsive candidate pair. That looks exactly like a NAT or TURN
+// failure and is neither.
+func TestWS_ByeDiscardsReplayBuffer(t *testing.T) {
+	// globalAuth is package-level state that other tests in this package flip
+	// on. Without this the handler rejects these tokenless connections and the
+	// failure is "peer browser never registered" — which reads as a bug in the
+	// broker rather than as leakage from a neighbouring test. Same helper the
+	// probe tests use for the same reason.
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/bye-replay"
+
+	// Each connection gets a reader GOROUTINE rather than inline reads with
+	// deadlines. gorilla latches the first read error onto the connection, so
+	// a read that times out — which is exactly how "nothing was replayed" is
+	// observed — makes every later read on that conn fail instantly. That cost
+	// a confusing "live forwarding broken" failure against a working server.
+	type client struct {
+		conn   *websocket.Conn
+		frames chan string
+	}
+	dial := func(name string) *client {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		cl := &client{conn: c, frames: make(chan string, 64)}
+		go func() {
+			defer close(cl.frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				cl.frames <- string(raw)
+			}
+		}()
+		return cl
+	}
+	send := func(c *client, who, msg string) {
+		t.Helper()
+		if err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("%s write: %v", who, err)
+		}
+	}
+	// collect drains whatever arrives in a short window. An EMPTY result is
+	// the assertion in the middle of this test: "nothing was replayed" is a
+	// non-event, observable only by waiting and seeing nothing arrive.
+	collect := func(c *client) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(750 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+	// waitRegistered blocks until the hub actually holds a peer in `role`.
+	// Polling the hub beats sleeping: registration happens on the SERVER's
+	// read pump, so there is no client-side event to synchronise on, and too
+	// short a wait turns a live forward into a silently buffered one — which
+	// then reads as "live forwarding is broken" when it is the test that raced.
+	waitRegistered := func(role peerRole) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "bye-replay")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s never registered", role)
+	}
+
+	// The browser registers (the first frame carries the role), offers, and
+	// trickles a candidate. No client yet, so both are buffered.
+	brw := dial("browser")
+	send(brw, "browser", `{"type":"ice","from":"browser"}`) // registration hello
+	waitRegistered(roleBrowser)
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 SESSION-ONE"}}`)
+	send(brw, "browser", `{"type":"ice","from":"browser","data":{"candidate":"one"}}`)
+
+	// Viewer 1 joins and is correctly replayed the live session. If this stops
+	// holding, the assertion below would pass for the wrong reason.
+	cli1 := dial("client-1")
+	send(cli1, "client-1", `{"type":"ice","from":"client"}`)
+	waitRegistered(roleClient)
+	if got := collect(cli1); !strings.Contains(got, "SESSION-ONE") {
+		t.Fatalf("precondition: viewer 1 should get the buffered offer, got %q", got)
+	}
+
+	// Viewer 1 closes the tab: `bye`, then the socket goes away. The browser
+	// stays connected throughout — that is the whole point.
+	send(cli1, "client-1", `{"type":"bye","from":"client"}`)
+	_ = cli1.conn.Close()
+
+	// Viewer 2 joins. The negotiated connection is gone and the worker cannot
+	// offer again, so there is nothing legitimate to say to it.
+	cli2 := dial("client-2")
+	send(cli2, "client-2", `{"type":"ice","from":"client"}`)
+	waitRegistered(roleClient)
+	if got := collect(cli2); strings.Contains(got, "SESSION-ONE") ||
+		strings.Contains(got, `"candidate"`) {
+		t.Fatalf("viewer 2 was replayed a dead session's envelopes:\n%s", got)
+	}
+
+	// And the session must still work: a worker that CAN re-offer (a fresh
+	// process, or a future in-process re-arm) still reaches viewer 2. Without
+	// this, "discard everything" would pass by breaking the broker.
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 SESSION-TWO"}}`)
+	if got := collect(cli2); !strings.Contains(got, "SESSION-TWO") {
+		t.Fatalf("live forwarding broken after bye: got %q", got)
+	}
 }
