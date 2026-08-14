@@ -435,7 +435,35 @@ spec:
               # Same fix as triform-8's 2026-05-17 incident: shrink the
               # request so the pod schedules; the 40-CPU limit keeps
               # autoninja's real compute envelope unchanged.
-              cpu: "4"
+              #
+              # 4 → 2 (2026-08-14): the identical failure, third time. The
+              # node has crept 90% → 95% requested (45.9/48), leaving 2.29
+              # cores — so a 4-core request is OutOfcpu ×3 and the Job dies
+              # before the init container runs.
+              #
+              # The node is NOT busy. Measured at the time of this change:
+              # 15.5 of 48 cores in ACTUAL use (32%), with ~32 cores
+              # reserved-but-idle. The top reservations were
+              # triform-builder/builder-fsn-build-v2-0 (10 cores reserved,
+              # 14m used — an idle dind CI builder holding burst capacity)
+              # and longhorn's instance-manager (5.8 reserved, 229m used).
+              # Both are other teams' live services doing exactly what they
+              # should; the mismatch is between reservations and reality
+              # across the whole node, and this Job cannot fix that.
+              #
+              # What matters: the LIMIT is still 40 CPU, so the build's real
+              # compute envelope is untouched — NINJA_PARALLELISM=36 still
+              # gets its cores from the 32 that are genuinely idle. The
+              # request is only the scheduler's reservation, and on a node
+              # this over-reserved a smaller one is strictly more honest
+              # about what this Job actually consumes at rest (~1 core
+              # during gclient sync, bursting during compile).
+              #
+              # If this needs lowering a FOURTH time, that is the signal to
+              # stop shaving and address the node's reservation hygiene
+              # instead — a right-sized builder-fsn-build-v2 alone would
+              # return ~10 cores of schedulable headroom.
+              cpu: "2"
               memory: "96Gi"
               # Explicit ephemeral REQUEST decoupled from the 8Gi limit
               # (2026-07-02, same class as chromeless-kaniko-push.yaml's
