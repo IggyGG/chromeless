@@ -151,6 +151,10 @@ def http_json(url, host_header=None, timeout=10):
 # --------------------------------------------------------------------------
 # The oracle: the worker's own DevTools.
 # --------------------------------------------------------------------------
+class NoFrames(RuntimeError):
+    """No video reached the client. Its own message explains the usual cause."""
+
+
 class WorkerOracle:
     def __init__(self, base=WORKER_CDP):
         self.base = base.rstrip("/")
@@ -201,6 +205,12 @@ class ClientDriver:
     def __init__(self, user, password):
         self.profile = "/tmp/chromeless-itest-profile"
         subprocess.run(["rm", "-rf", self.profile], check=False)
+        # Reap anything a previous run left behind BEFORE starting a new one.
+        # Chrome outlives an interrupted harness, and each survivor holds the
+        # session's single `client` slot on the broker — so the next run gets
+        # no video and looks like a product failure. 57 of them had piled up
+        # before this was noticed.
+        self._reap_strays()
         self.proc = subprocess.Popen(
             [CHROME, f"--remote-debugging-port={CLIENT_CDP_PORT}",
              f"--user-data-dir={self.profile}", "--headless=new",
@@ -225,11 +235,28 @@ class ClientDriver:
         self.cdp.call("Runtime.enable")
         self.user, self.password = user, password
 
+    @staticmethod
+    def _reap_strays():
+        """Kill every chrome started by this harness, from any run.
+
+        Matched on the profile path, which is unique to this harness — so an
+        unrelated chrome the user has open is never touched.
+        """
+        subprocess.run(["pkill", "-9", "-f", "chromeless-itest-profile"],
+                       check=False, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        time.sleep(0.5)
+
     def close(self):
+        # terminate() alone leaves chrome's CHILD processes running: the
+        # launcher exits, the renderers and the network service do not, and
+        # they keep the WebSocket to the broker open. Kill the whole family.
         try:
             self.proc.terminate()
+            self.proc.wait(timeout=5)
         except Exception:
             pass
+        self._reap_strays()
 
     def login_and_connect(self, timeout=90):
         # Log in on a page that does NOT auto-connect.
@@ -268,7 +295,18 @@ class ClientDriver:
             if isinstance(frames, (int, float)) and frames > 0:
                 return frames
             time.sleep(2)
-        raise RuntimeError("client never decoded a frame; nothing else can be tested")
+        raise NoFrames(
+            "client never decoded a frame. Two causes account for almost every "
+            "occurrence, and NEITHER is a bug in what you are testing:\n"
+            "  1. The worker already served a session. It serves exactly ONE "
+            "per process (docs/findings/one-session-per-worker-process.md), so "
+            "a second run against the same pod always lands here. Fix:\n"
+            "       kubectl rollout restart "
+            "deploy/chromeless-standalone-worker -n chromeless\n"
+            "  2. A stray test chrome from an interrupted run still holds the "
+            "session's single `client` slot. This harness now reaps those at "
+            "startup, so it should not recur — verify with:\n"
+            "       pgrep -fl chromeless-itest-profile")
 
     # ---- input: genuine DOM events on the video element ----
     #
@@ -347,12 +385,19 @@ class ClientDriver:
             time.sleep(per_key_ms / 1000)
 
     def cursor_shape(self):
-        """What the cursor channel last told the client to render."""
+        """What the cursor channel last told the client to render.
+
+        Reads `[data-role="cursor-overlay"]`'s data-shape, which is what
+        client/src/cursor.ts actually sets. NOT getComputedStyle(...).cursor:
+        the client draws an inline-SVG glyph rather than relying on the CSS
+        cursor property (cursor.ts explains why — CSS `cursor` outside a real
+        hover is unreliable). Reading the CSS property returned the page's
+        default 'auto' no matter what the channel delivered, i.e. a check that
+        could only ever fail.
+        """
         return self.cdp.eval("""(() => {
-            const el = document.querySelector('.remote-cursor, #remote-cursor');
-            if (el && el.dataset && el.dataset.shape) return el.dataset.shape;
-            const stage = document.getElementById('stage');
-            return stage ? getComputedStyle(stage).cursor : null; })()""")
+            const el = document.querySelector('[data-role="cursor-overlay"]');
+            return el && el.dataset ? (el.dataset.shape || null) : null; })()""")
 
     def channel_states(self):
         return self.cdp.eval(

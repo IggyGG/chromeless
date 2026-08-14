@@ -279,18 +279,40 @@ def suite_channels(client, worker):
         check(f"channel open: {label}", f'"{label}"' in log or f"'{label}'" in log,
               "" if label in log else "not seen in client log")
 
-    # The cursor channel should report a pointer shape over a cursor:pointer
-    # element. Advisory: shape delivery depends on the remote actually
-    # re-rendering under the pointer.
-    box = json.loads(worker.eval("""(() => { const r =
-        document.getElementById('hot').getBoundingClientRect();
-        return JSON.stringify({x:(r.left+r.width/2)/innerWidth,
-                               y:(r.top+r.height/2)/innerHeight}); })()"""))
+    # The cursor channel should report `pointer` over a cursor:pointer element.
+    #
+    # Re-navigates to the fixture first: the suites above leave the worker on
+    # whatever they last used, and an earlier version of this check hovered a
+    # #hot element that no longer existed — measuring nothing and reporting a
+    # channel failure. Hover a plain element first so the shape has to CHANGE,
+    # rather than passing on whatever it happened to be already.
+    H.navigate(H.fixture_url(FORM_HTML))
+    worker.wait_for("!!document.getElementById('hot')", True, timeout=20)
+    plain = worker.rect("h")
+    client.mouse_move(plain["x"], plain["y"])
+    time.sleep(1.0)
+    before = client.cursor_shape()
+
+    box = worker.rect("hot")
     client.mouse_move(box["x"], box["y"])
-    time.sleep(1.5)
-    shape = client.cursor_shape()
-    check("cursor channel reports a shape", shape not in (None, "", "auto"),
-          f"shape={shape!r}")
+    ok, shape = _poll(lambda: client.cursor_shape(),
+                      lambda v: v == "pointer", timeout=15)
+    check("cursor channel reports the pointer shape", ok,
+          f"shape={shape!r} (was {before!r} over a plain element)")
+
+
+def _poll(get, want, timeout=15, interval=0.4):
+    """Poll a CLIENT-side value until it matches. worker.wait_for is the
+    equivalent for the remote page; this is its local twin, for state the
+    client renders (cursor shape, channel labels)."""
+    end = time.time() + timeout
+    last = None
+    while time.time() < end:
+        last = get()
+        if want(last):
+            return True, last
+        time.sleep(interval)
+    return False, last
 
 
 def _same_site(got, want):
