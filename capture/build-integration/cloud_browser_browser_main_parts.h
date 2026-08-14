@@ -606,11 +606,23 @@ class CloudBrowserBrowserMainParts
   bool devtools_http_handler_started_ = false;
 
   // Captured in WillRunMainMessageLoop, run in PostMainMessageLoopRun
-  // (or never, if the process is killed). Today we don't have an
-  // in-process trigger to call this — chromium will exit when
-  // SIGTERM is delivered to the worker — but stashing it keeps the
-  // shape ready for a future Cb.shutdown CDP method.
+  // (or never, if the process is killed). Triggered in-process by
+  // Cb.shutdown and by OnClosed (a closed session is unrecoverable —
+  // see the comment there).
   base::OnceClosure quit_main_message_loop_;
+
+  // Set once teardown has begun, so OnClosed can tell "the viewer left, exit
+  // so the supervisor gives us a fresh process" apart from "we are ALREADY
+  // exiting and this is our own teardown talking".
+  //
+  // Both look identical at the observer: PostMainMessageLoopRun calls
+  // offerer_driver_->Close("session ended"), which fires OnClosed. Without
+  // this, exiting-on-close would re-enter Shutdown() from inside the shutdown
+  // path. Shutdown() is idempotent (the OnceClosure is already consumed, so it
+  // returns false with a warning) — but depending on that to be safe is the
+  // kind of thing that stops being true when someone edits Shutdown(), and
+  // the log line it emits reads like a defect. Guard explicitly instead.
+  bool tearing_down_ = false;
 };
 
 }  // namespace cloud_browser

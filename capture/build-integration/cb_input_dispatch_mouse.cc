@@ -344,17 +344,36 @@ void CbInputDispatchMouse::DispatchMouseWheel(const base::DictValue& data,
   blink::WebMouseWheelEvent::Phase blink_phase =
       blink::WebMouseWheelEvent::kPhaseChanged;
   bool synth_zero_delta = false;
+  // Set when a phase=start envelope carries a real delta that must follow the
+  // synthetic zero-delta Begin as its own kPhaseChanged event.
+  bool emit_start_delta = false;
   if (phase) {
     if (*phase == "start") {
       blink_phase = blink::WebMouseWheelEvent::kPhaseBegan;
       wheel_in_gesture_ = true;
-      // Per spec: phase=start synthesises a zero-delta Begin so
-      // chromium's compositor sets up its gesture tracking before
-      // any actual delta arrives. The same envelope's dx/dy (if
-      // non-zero) would be lost here, but in practice phase=start
-      // envelopes carry dx=dy=0 — the next envelope (phase=changed
-      // or phase omitted) carries the first real delta.
+      // phase=start synthesises a zero-delta Begin so chromium's
+      // compositor sets up its gesture tracking before any actual
+      // delta arrives.
+      //
+      // The delta is NOT dropped. An earlier version of this comment
+      // asserted "in practice phase=start envelopes carry dx=dy=0",
+      // and that was simply wrong: docs/protocols/input-channel.md
+      // defines start as the "first **non-zero** wheel event after a
+      // quiet period", and client/src/input.ts sends it that way. So
+      // this discarded the first delta of every gesture. Because the
+      // gesture returns to idle after DEFAULT_WHEEL_END_DELAY_MS
+      // (150 ms), anyone scrolling slowly or deliberately sent
+      // nothing BUT start envelopes and the page never moved at all;
+      // fast continuous scrolling worked, minus its first event,
+      // which is why this survived. Confirmed against a live
+      // deployment: four wheel events at 350 ms spacing left
+      // window.scrollY at 0, while the same page scrolled correctly
+      // when a wheel was injected directly at the worker over CDP.
+      //
+      // Fix: keep the zero-delta Begin, then emit the carried delta
+      // as a follow-on kPhaseChanged below (see emit_start_delta).
       synth_zero_delta = true;
+      emit_start_delta = (*dx != 0 || *dy != 0);
     } else if (*phase == "end") {
       blink_phase = blink::WebMouseWheelEvent::kPhaseEnded;
       wheel_in_gesture_ = false;
@@ -415,6 +434,26 @@ void CbInputDispatchMouse::DispatchMouseWheel(const base::DictValue& data,
   event.delta_units = ui::ScrollGranularity::kScrollByPrecisePixel;
 
   rwh->ForwardWheelEvent(event);
+
+  // The delta that came in on the phase=start envelope. The Begin above must
+  // be zero-delta (the compositor uses it to set up gesture tracking), so the
+  // user's actual scroll is delivered here as the gesture's first Changed.
+  // Copying `event` rather than rebuilding it keeps position, modifiers,
+  // momentum and delta_units identical by construction — the two can't drift
+  // apart when one of them is later edited.
+  if (emit_start_delta) {
+    const float start_dx = *dx * scale;
+    const float start_dy = *dy * scale;
+    blink::WebMouseWheelEvent delta_event(event);
+    delta_event.phase = blink::WebMouseWheelEvent::kPhaseChanged;
+    delta_event.delta_x = start_dx;
+    delta_event.delta_y = start_dy;
+    delta_event.wheel_ticks_x =
+        (scale == 1.f) ? start_dx : static_cast<float>(*dx);
+    delta_event.wheel_ticks_y =
+        (scale == 1.f) ? start_dy : static_cast<float>(*dy);
+    rwh->ForwardWheelEvent(delta_event);
+  }
 
   last_pointer_state_.Update(widget.x, widget.y, held_buttons_blink_,
                              event_time);
