@@ -81,3 +81,6 @@ newtab-probe-out/
 
 # Python bytecode from tools/
 tools/**/__pycache__/
+
+# Deploy-time credentials written by infra/k8s/standalone/deploy.sh.
+infra/k8s/standalone/.standalone-creds

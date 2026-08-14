@@ -40,6 +40,8 @@ const (
 	// Named CHROMIUM_START_URL, not CHROMELESS_*, to match what
 	// infra/launch-chromeless.sh and the k8s controller already set.
 	envStartURL = "CHROMIUM_START_URL"
+	// Test-only fixture endpoint; see fixture.go.
+	envEnableTestFixture = "CHROMELESS_ENABLE_TEST_FIXTURE"
 
 	defaultPort       = "8443"
 	defaultTLSDir     = "/data/certs"
@@ -89,6 +91,9 @@ type config struct {
 	// startURL is the page to open once the worker is reachable. Empty leaves
 	// it on about:blank, which is what the embedder boots to.
 	startURL string
+
+	// enableTestFixture exposes /api/test-fixture. Off unless asked for.
+	enableTestFixture bool
 }
 
 func loadConfig() (*config, error) {
@@ -102,20 +107,21 @@ func loadConfig() (*config, error) {
 	}
 
 	c := &config{
-		user:         user,
-		pass:         pass,
-		addr:         ":" + envOr(envPort, defaultPort),
-		certFile:     strings.TrimSpace(os.Getenv(envTLSCert)),
-		keyFile:      strings.TrimSpace(os.Getenv(envTLSKey)),
-		tlsDir:       envOr(envTLSDir, defaultTLSDir),
-		tlsHosts:     splitCSV(os.Getenv(envTLSHosts)),
-		signalingURL: envOr(envSignalingURL, defaultSignaling),
-		cdpURL:       envOr(envCDPURL, defaultCDP),
-		staticDir:    envOr(envStaticDir, defaultStaticDir),
-		sessionTTL:   defaultSessionTTL,
-		authPrivkey:  strings.TrimSpace(os.Getenv(envAuthPrivkey)),
-		authPubkey:   strings.TrimSpace(os.Getenv(envAuthPubkey)),
-		startURL:     strings.TrimSpace(os.Getenv(envStartURL)),
+		user:              user,
+		pass:              pass,
+		addr:              ":" + envOr(envPort, defaultPort),
+		certFile:          strings.TrimSpace(os.Getenv(envTLSCert)),
+		keyFile:           strings.TrimSpace(os.Getenv(envTLSKey)),
+		tlsDir:            envOr(envTLSDir, defaultTLSDir),
+		tlsHosts:          splitCSV(os.Getenv(envTLSHosts)),
+		signalingURL:      envOr(envSignalingURL, defaultSignaling),
+		cdpURL:            envOr(envCDPURL, defaultCDP),
+		staticDir:         envOr(envStaticDir, defaultStaticDir),
+		sessionTTL:        defaultSessionTTL,
+		authPrivkey:       strings.TrimSpace(os.Getenv(envAuthPrivkey)),
+		authPubkey:        strings.TrimSpace(os.Getenv(envAuthPubkey)),
+		startURL:          strings.TrimSpace(os.Getenv(envStartURL)),
+		enableTestFixture: os.Getenv(envEnableTestFixture) == "1",
 	}
 
 	// Half a TLS pair is a misconfiguration, not a fallback. Silently

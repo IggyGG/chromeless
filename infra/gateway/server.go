@@ -30,6 +30,7 @@ type gateway struct {
 	proxy    *httputil.ReverseProxy
 	issuer   *issuer
 	cdp      *cdpClient
+	fixture  *fixtureStore
 }
 
 func newGateway(cfg *config, logger *slog.Logger) (*gateway, error) {
@@ -61,6 +62,7 @@ func newGateway(cfg *config, logger *slog.Logger) (*gateway, error) {
 		proxy:    proxy,
 		issuer:   iss,
 		cdp:      &cdpClient{baseURL: strings.TrimRight(cfg.cdpURL, "/")},
+		fixture:  &fixtureStore{},
 	}, nil
 }
 
@@ -99,6 +101,12 @@ func (g *gateway) routes() http.Handler {
 	mux.Handle("/api/reload", g.requireSession(g.navCommand("Page.reload")))
 	mux.Handle("/api/stop", g.requireSession(g.navCommand("Page.stopLoading")))
 	mux.Handle("/api/current-url", g.requireSession(http.HandlerFunc(g.handleCurrentURL)))
+
+	// Test-only, and off unless explicitly enabled. See fixture.go for why an
+	// interaction test cannot use a data: URL or a server on the test machine.
+	if g.cfg.enableTestFixture {
+		mux.Handle("/api/test-fixture", g.requireSession(http.HandlerFunc(g.handleFixture)))
+	}
 
 	// /probe carries its own JWT in the query string (client/src/probe.ts
 	// resolveProbeURL), and the broker verifies it. Wrapping it in a cookie
