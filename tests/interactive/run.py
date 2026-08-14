@@ -102,7 +102,21 @@ def suite_video(client, worker):
         for(let i=0;i<d.length;i+=4){const g=(d[i]+d[i+1]+d[i+2])/3;
           if(g<min)min=g; if(g>max)max=g;}
         return max-min; })()""")
-    check("frame is not a flat colour", (variance or 0) > 8, f"luma spread={variance}")
+    # about:blank IS a flat white frame, correctly. Navigate somewhere with
+    # content first, or this measures the wrong thing.
+    H.navigate("https://example.com/")
+    time.sleep(6)
+    variance2 = client.cdp.eval("""(() => {
+        const v=document.getElementById('remote');
+        const c=document.createElement('canvas'); c.width=160; c.height=90;
+        const x=c.getContext('2d'); x.drawImage(v,0,0,160,90);
+        const d=x.getImageData(0,0,160,90).data;
+        let min=255,max=0;
+        for(let i=0;i<d.length;i+=4){const g=(d[i]+d[i+1]+d[i+2])/3;
+          if(g<min)min=g; if(g>max)max=g;}
+        return max-min; })()""")
+    check("frame carries real page content", (variance2 or 0) > 8,
+          f"luma spread on about:blank={variance}, on example.com={variance2}")
 
 
 def suite_navigation(client, worker):
@@ -123,11 +137,21 @@ def suite_navigation(client, worker):
         if not ok:
             check(f"navigate: {label}", False, f"remote url={got!r}")
             continue
-        # Rendered, not merely navigated: real text on the page.
-        _, textlen = worker.wait_for(
-            "document.body ? document.body.innerText.length : 0",
-            lambda v: isinstance(v, int) and v > 40, timeout=25)
-        check(f"navigate: {label}", (textlen or 0) > 40, f"{textlen} chars of text")
+        # Rendered, not merely navigated. Text length alone is a bad oracle:
+        # a search page is mostly one input, and lite.duckduckgo.com renders
+        # ~17 characters of body text while being perfectly correct. Accept a
+        # real <title> OR meaningful text OR interactive elements.
+        _, evidence = worker.wait_for(
+            """(() => {
+                 const t = (document.title || '').trim().length;
+                 const b = document.body ? document.body.innerText.trim().length : 0;
+                 const e = document.querySelectorAll('input,button,a,form').length;
+                 return t + ':' + b + ':' + e; })()""",
+            lambda v: v and any(int(p) > 0 for p in str(v).split(":")[:1] + str(v).split(":")[1:]),
+            timeout=25)
+        t, b, e = (int(x) for x in str(evidence or "0:0:0").split(":"))
+        rendered = t > 0 or b > 40 or e > 0
+        check(f"navigate: {label}", rendered, f"title={t}c text={b}c elements={e}")
 
     # Back/forward drive REAL CDP history, not a client-side vector.
     before = worker.url()

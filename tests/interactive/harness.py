@@ -218,6 +218,18 @@ class ClientDriver:
             pass
 
     def login_and_connect(self, timeout=90):
+        # Log in on a page that does NOT auto-connect.
+        #
+        # /login is safe; /?e2e=1 is not. Loading the client bundle twice makes
+        # TWO signaling sessions, and the second one is poisoned: the broker
+        # replays the FIRST session's buffered offer and ICE to the reconnecting
+        # client ("replayed: 10"), so it answers a dead offer and its relay
+        # candidates pair against candidates that no longer exist. The symptom
+        # is ice=checking with a single host/tcp pair and req=0 — no
+        # connectivity check is ever attempted — which reads exactly like a NAT
+        # or TURN failure and is neither.
+        #
+        # So: authenticate here, and load the client exactly once, below.
         self.cdp.call("Page.navigate", {"url": f"{GATEWAY}/login"})
         time.sleep(2)
         self.cdp.eval(f"""(async () => {{
