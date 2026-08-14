@@ -75,7 +75,7 @@ spec:
           args:
             - --dockerfile=/workspace/infra/gateway/Dockerfile
             - --context=/workspace
-            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v2
+            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v3
             - --single-snapshot          # one layer; these images are small
             - --push-retry=3             # the registry 500s intermittently (BUGS-511/513)
           env:

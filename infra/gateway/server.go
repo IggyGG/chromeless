@@ -96,8 +96,8 @@ func (g *gateway) routes() http.Handler {
 	// would hand any logged-in caller Runtime.evaluate and file:// reads. See
 	// cdp.go.
 	mux.Handle("/api/navigate", g.requireSession(http.HandlerFunc(g.handleNavigate)))
-	mux.Handle("/api/back", g.requireSession(g.navCommand("Page.goBack")))
-	mux.Handle("/api/forward", g.requireSession(g.navCommand("Page.goForward")))
+	mux.Handle("/api/back", g.requireSession(g.historyCommand(-1)))
+	mux.Handle("/api/forward", g.requireSession(g.historyCommand(+1)))
 	mux.Handle("/api/reload", g.requireSession(g.navCommand("Page.reload")))
 	mux.Handle("/api/stop", g.requireSession(g.navCommand("Page.stopLoading")))
 	mux.Handle("/api/current-url", g.requireSession(http.HandlerFunc(g.handleCurrentURL)))
@@ -105,7 +105,17 @@ func (g *gateway) routes() http.Handler {
 	// Test-only, and off unless explicitly enabled. See fixture.go for why an
 	// interaction test cannot use a data: URL or a server on the test machine.
 	if g.cfg.enableTestFixture {
-		mux.Handle("/api/test-fixture", g.requireSession(http.HandlerFunc(g.handleFixture)))
+		// NOT cookie-gated, unlike everything else here. The consumer is the
+		// WORKER: the test stores a page and then navigates the browser to it,
+		// and the worker has no session cookie — it is not a logged-in user.
+		// Gating this on the cookie makes the store succeed and the fetch
+		// return "unauthorized", which renders as an error page the test then
+		// fails to find its elements in.
+		//
+		// Acceptable because the whole endpoint is off unless
+		// CHROMELESS_ENABLE_TEST_FIXTURE=1, and what it serves is content the
+		// operator themself just uploaded.
+		mux.HandleFunc("/api/test-fixture", g.handleFixture)
 	}
 
 	// /probe carries its own JWT in the query string (client/src/probe.ts

@@ -78,6 +78,15 @@ func newFakeWorker(t *testing.T) *fakeWorker {
 				})
 				continue
 			}
+			if req.Method == "Page.getNavigationHistory" {
+				_ = c.WriteJSON(map[string]any{"id": req.ID, "result": map[string]any{
+					"currentIndex": 1,
+					"entries": []map[string]any{
+						{"id": 10, "url": "https://a.example/"},
+						{"id": 11, "url": "https://b.example/"},
+					}}})
+				continue
+			}
 			_ = c.WriteJSON(map[string]any{"id": req.ID, "result": map[string]any{"frameId": "1"}})
 		}
 	})
@@ -208,14 +217,39 @@ func TestNavigateEndpointDrivesTheWorker(t *testing.T) {
 	}
 }
 
-// Back/forward drive real CDP history, not a client-side vector — a local
-// vector diverges the moment the page navigates itself.
-func TestHistoryEndpointsMapToCDPMethods(t *testing.T) {
+// History uses getNavigationHistory + navigateToHistoryEntry, NOT
+// Page.goBack/goForward.
+//
+// Those are a Chrome-branded convenience layer, not baseline CDP, and this
+// embedder does not implement them — a live worker answers
+// "'Page.goBack' wasn't found". The endpoints shipped using them and never
+// worked: the error was swallowed as a declined command, so Back reported
+// {"ok":false} and looked like "nothing to go back to". Found by the
+// interactive suite against a real deployment; this pins the fix.
+func TestHistoryUsesNavigateToHistoryEntry(t *testing.T) {
+	fw := newFakeWorker(t)
+	g, _ := newTestGateway(t, http.NotFoundHandler())
+	g.cdp = &cdpClient{baseURL: fw.srv.URL}
+	cookie := login(t, g, "operator", "s3cret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/back", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	g.routes().ServeHTTP(rec, req)
+
+	m := fw.methods()
+	if containsMethod(m, "Page.goBack") {
+		t.Error("used Page.goBack, which this embedder does not implement")
+	}
+	if !containsMethod(m, "Page.getNavigationHistory") {
+		t.Errorf("worker saw %v, want Page.getNavigationHistory", m)
+	}
+}
+
+func TestSimpleNavCommandsMapToCDPMethods(t *testing.T) {
 	for path, method := range map[string]string{
-		"/api/back":    "Page.goBack",
-		"/api/forward": "Page.goForward",
-		"/api/reload":  "Page.reload",
-		"/api/stop":    "Page.stopLoading",
+		"/api/reload": "Page.reload",
+		"/api/stop":   "Page.stopLoading",
 	} {
 		t.Run(path, func(t *testing.T) {
 			fw := newFakeWorker(t)

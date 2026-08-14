@@ -22,7 +22,8 @@
 // caller Runtime.evaluate — arbitrary code in the browser, plus file reads via
 // Page.navigate to file://. The whole point of unpublishing 9222 is that
 // nothing gets to speak CDP except this file, and this file only says
-// Page.navigate/goBack/goForward/reload/stopLoading.
+// Page.navigate / getNavigationHistory / navigateToHistoryEntry / reload /
+// stopLoading / Cb.startFrameSinkCapture.
 
 package main
 
@@ -217,7 +218,52 @@ func (c *cdpClient) navigate(ctx context.Context, url string) error {
 	return err
 }
 
-// simpleCommand runs a parameterless Page command (goBack/goForward/reload/…).
+// historyStep moves the page back (-1) or forward (+1) through real history.
+//
+// NOT Page.goBack / Page.goForward. Those are a Chrome-branded convenience
+// layer, not baseline CDP, and this embedder does not implement them — the
+// call fails with "'Page.goBack' wasn't found". The gateway shipped with those
+// endpoints and they never worked: navCommand swallowed the error as a
+// declined command and answered {"ok":false}, so pressing Back looked like
+// "nothing to go back to" rather than "this verb does not exist".
+//
+// Page.getNavigationHistory and Page.navigateToHistoryEntry ARE implemented,
+// and are what Chrome's own wrappers are built on, so this is the same
+// operation done explicitly: read the entry list, step the index, navigate to
+// the entry id.
+func (c *cdpClient) historyStep(ctx context.Context, delta int) error {
+	if _, err := c.send(ctx, "Page.enable", nil); err != nil {
+		return err
+	}
+	raw, err := c.send(ctx, "Page.getNavigationHistory", nil)
+	if err != nil {
+		return err
+	}
+	var hist struct {
+		CurrentIndex int `json:"currentIndex"`
+		Entries      []struct {
+			ID  int    `json:"id"`
+			URL string `json:"url"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &hist); err != nil {
+		return fmt.Errorf("parse navigation history: %w", err)
+	}
+
+	target := hist.CurrentIndex + delta
+	if target < 0 || target >= len(hist.Entries) {
+		// A genuine "nothing to go back to" — the end of the history, not a
+		// failure. Reported as declined so the UI does not raise a banner for
+		// pressing Back on the first page.
+		return fmt.Errorf("no history entry at index %d (have %d, at %d)",
+			target, len(hist.Entries), hist.CurrentIndex)
+	}
+	_, err = c.send(ctx, "Page.navigateToHistoryEntry",
+		map[string]any{"entryId": hist.Entries[target].ID})
+	return err
+}
+
+// simpleCommand runs a parameterless Page command (reload / stopLoading).
 func (c *cdpClient) simpleCommand(ctx context.Context, method string) error {
 	if _, err := c.send(ctx, "Page.enable", nil); err != nil {
 		return err

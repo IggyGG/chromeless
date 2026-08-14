@@ -84,6 +84,34 @@ func (g *gateway) handleNavigate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"url": target})
 }
 
+// historyCommand builds a handler for back (-1) / forward (+1).
+func (g *gateway) historyCommand(delta int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), navTimeout)
+		defer cancel()
+
+		if err := g.cdp.historyStep(ctx, delta); err != nil {
+			// Running off the end of the history is a no-op, not an error;
+			// reported as declined so Back on the first page raises nothing.
+			g.log.Info("history step declined",
+				slog.Int("delta", delta), slog.Any("err", err))
+			writeJSON(w, map[string]any{"ok": false, "reason": err.Error()})
+			return
+		}
+		// Re-arm capture: a history navigation swaps the RenderWidgetHost and
+		// the FrameSinkId exactly as a fresh navigation does.
+		if err := g.cdp.armCapture(ctx); err != nil {
+			g.log.Warn("capture re-arm after history step failed", slog.Any("err", err))
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	}
+}
+
 // navCommand builds a handler for a parameterless Page verb.
 func (g *gateway) navCommand(method string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
