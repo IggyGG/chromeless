@@ -91,15 +91,16 @@ the chromeless input path.
 | click | ✓ | ✓ | works |
 | typing, backspace, Ctrl+A | ✓ | ✓ | works |
 | **wheel / scroll** | ✓ `scrollY: 400` | ✗ `scrollY: 0` | **the bug above** |
-| **hover → `mouseover`** | ✓ fired | ✗ never fires | needs investigation |
-| **Tab then Space (checkbox)** | ✓ focus moves, box toggles | ✗ box stays unchecked | needs investigation |
+| **hover → `mouseover`** | ✓ fired | ✓ fired | **not a bug** — see below |
+| **Tab then Space (checkbox)** | ✓ focus moves, box toggles | ✗ neither happens | [`keyboard-dom-code-never-set.md`](./keyboard-dom-code-never-set.md) |
 
-The hover case is worth a look on its own: `mouse_move` envelopes clearly do
-arrive, because clicking works and the client sends a `mousemove` before every
-`mousedown`. So the coordinates land — but a bare move with no button appears
-not to produce a `mouseover` on the remote page.
+**The hover case was my own test bug**, recorded here because the shape of the
+mistake is worth remembering: the check moved the pointer to `#hot` while the
+two preceding click assertions had already left it there, and `mouseover` fires
+on ENTERING an element. A correct product reported as broken by a test that
+never moved the mouse. It passes once the pointer starts somewhere else.
 
-Tab-then-Space may be the same root cause as the wheel: both are non-printing
-keys, and printable characters demonstrably work. Worth checking whether
-`key_down` for `Tab`/`Space` reaches `cb_input_dispatch_keyboard.cc` with the
-`code` the dispatcher expects.
+**Tab and Space turned out to be a real and separate defect**, not the same
+root cause as the wheel: `dom_code`/`dom_key` are never populated, so Blink
+cannot run the default action. Isolated by controlled experiment and written up
+in [`keyboard-dom-code-never-set.md`](./keyboard-dom-code-never-set.md).

@@ -168,6 +168,20 @@ class WorkerOracle:
     def url(self):
         return self.eval("location.href")
 
+    def rect(self, element_id):
+        """Centre of an element, as REMOTE viewport fractions (0..1).
+
+        Fractions, not pixels: the client sends normalised coordinates so the
+        same gesture works at any window size, and hand-converting at each call
+        site is how a test ends up clicking somewhere plausible but wrong.
+        """
+        return json.loads(self.eval(
+            "(() => { const r = document.getElementById('%s')"
+            ".getBoundingClientRect();"
+            " return JSON.stringify({x:(r.left+r.width/2)/innerWidth,"
+            "                        y:(r.top+r.height/2)/innerHeight}); })()"
+            % element_id))
+
     def wait_for(self, expr, want, timeout=20, poll=0.4):
         """Poll an expression on the REMOTE page until it matches."""
         end = time.time() + timeout

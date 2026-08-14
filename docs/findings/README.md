@@ -10,6 +10,7 @@ its own verification step is a defect nobody has run yet.* These name theirs.
 | --- | --- | --- |
 | [`wheel-phase-start-delta-dropped.md`](./wheel-phase-start-delta-dropped.md) | `capture/build-integration/cb_input_dispatch_mouse.cc` | C++; needs a 4–8 h Chromium build |
 | [`one-session-per-worker-process.md`](./one-session-per-worker-process.md) | `capture/signaling/cb_offerer_driver.cc` + `cloud_browser_browser_main_parts.cc` | C++; the broker half IS fixed and landed |
+| [`keyboard-dom-code-never-set.md`](./keyboard-dom-code-never-set.md) | `capture/build-integration/cb_input_dispatch_keyboard.cc` | C++; Tab/Space and probably every non-printing key |
 
 ## Adding one
 

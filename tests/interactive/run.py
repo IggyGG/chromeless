@@ -170,10 +170,7 @@ def suite_mouse(client, worker):
     time.sleep(1.5)
 
     # Where is the clickable box, in REMOTE viewport fractions?
-    box = json.loads(worker.eval("""(() => { const r =
-        document.getElementById('hot').getBoundingClientRect();
-        return JSON.stringify({x:(r.left+r.width/2)/innerWidth,
-                               y:(r.top+r.height/2)/innerHeight}); })()"""))
+    box = worker.rect("hot")
     client.click(box["x"], box["y"])
     ok, clicks = worker.wait_for("window.__clicks || 0", lambda v: (v or 0) >= 1, timeout=15)
     check("click lands on the right element", ok, f"remote click count={clicks}")
@@ -183,9 +180,15 @@ def suite_mouse(client, worker):
     ok2, c2 = worker.wait_for("window.__clicks || 0", lambda v: (v or 0) >= 2, timeout=15)
     check("second click registers", ok2, f"count={c2}")
 
-    # Hover must change the cursor: #hot sets cursor:pointer.
+    # Hover fires mouseover on ENTERING an element. The two clicks above left
+    # the pointer already inside #hot, so moving to the same coordinates
+    # correctly fires nothing — an earlier version of this check did exactly
+    # that and reported a product bug that did not exist. Move away first.
     worker.eval("window.__hovered=0; document.getElementById('hot')"
                 ".addEventListener('mouseover',()=>{window.__hovered=1});1")
+    h1 = worker.rect("h")  # the <h1>, well clear of #hot
+    client.mouse_move(h1["x"], h1["y"])
+    time.sleep(0.4)
     client.mouse_move(box["x"], box["y"])
     ok3, hov = worker.wait_for("window.__hovered || 0", 1, timeout=15)
     check("mouse move produces a remote hover", ok3, f"hovered={hov}")
@@ -249,15 +252,24 @@ def suite_keyboard(client, worker):
                                lambda v: v == "replaced", timeout=20)
     check("ctrl+A select-all then overwrite", ok4, f"value={rep!r}")
 
-    # A checkbox, via keyboard: Tab to it and press Space.
+    # A checkbox, via keyboard, split into its two independent halves. As one
+    # check this reported "Tab+Space is broken" without saying WHICH key —
+    # and they fail for different reasons in different layers.
     worker.eval("document.getElementById('box').checked=false;"
                 "document.getElementById('target').focus();1")
     client.key("Tab", "Tab")
-    time.sleep(0.4)
+    ok5a, focused = worker.wait_for(
+        "document.activeElement && document.activeElement.id", "box", timeout=15)
+    check("tab moves remote focus", ok5a, f"activeElement={focused!r}")
+
+    # Space toggles whatever is focused. Focus it directly so this is a test of
+    # the Space key rather than a second test of Tab.
+    worker.eval("document.getElementById('box').focus();1")
+    time.sleep(0.3)
     client.key("Space", " ")
-    ok5, checked = worker.wait_for("document.getElementById('box').checked",
-                                   True, timeout=15)
-    check("tab + space toggles a remote checkbox", ok5, f"checked={checked}")
+    ok5b, checked = worker.wait_for("document.getElementById('box').checked",
+                                    True, timeout=15)
+    check("space toggles the focused remote checkbox", ok5b, f"checked={checked}")
 
 
 def suite_channels(client, worker):
