@@ -22,6 +22,22 @@ REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 LABEL=app.kubernetes.io/part-of=chromeless-standalone
 CREDS="$HERE/.standalone-creds"
 
+if [[ "${1:-}" == "--check-turn" ]]; then
+    # Is the DEPLOYED TURN credential still valid? This is the first thing to
+    # check when a working stack starts failing to pair: an expired credential
+    # presents as "connects, negotiates, no video", exactly like a NAT problem.
+    U="$(kubectl get deploy chromeless-standalone-signaling -n "$NS" \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TURN_USER")].value}')"
+    python3 -c "
+import sys,time
+u='$U'
+if not u: print('  no TURN_USER set on the broker'); sys.exit(1)
+left=int(u.split(':')[0])-int(time.time())
+print(f'  TURN credential: {\"EXPIRED \" + str(-left) + \"s ago — run ./deploy.sh\" if left<0 else str(left)+\"s remaining\"}')
+sys.exit(0 if left>0 else 1)"
+    exit $?
+fi
+
 if [[ "${1:-}" == "--teardown" ]]; then
     kubectl delete all,secret,cm,networkpolicy -n "$NS" -l "$LABEL" 2>&1 | tail -3
     rm -f "$CREDS"
@@ -70,7 +86,17 @@ read -r TURN_USER TURN_CRED < <(python3 - "$TURN_SECRET" <<'PY'
 import base64, hashlib, hmac, sys, time
 secret = sys.argv[1]
 # RFC 7635: username = <unix expiry>:<name>, password = base64(HMAC-SHA1).
-user = f"{int(time.time()) + 6 * 3600}:chromeless-standalone"
+#
+# The expiry is a HARD DEADLINE on the whole deployment, not a session TTL:
+# nothing re-mints it, so when it passes, coturn answers 401 to every
+# allocation and the stack degrades to "connects, negotiates, no video" —
+# indistinguishable from a NAT problem unless you test the credential directly.
+# Cost me an afternoon of ICE debugging when a 6-hour credential aged out
+# mid-session while the deployment stayed up.
+#
+# 24h, and ./deploy.sh re-mints. If a run starts failing to pair, check this
+# first: python3 -c "import time;print(<expiry> - int(time.time()))".
+user = f"{int(time.time()) + 24 * 3600}:chromeless-standalone"
 cred = base64.b64encode(
     hmac.new(secret.encode(), user.encode(), hashlib.sha1).digest()).decode()
 print(user, cred)
@@ -97,6 +123,13 @@ kubectl set env deploy/chromeless-standalone-signaling -n "$NS" \
     TURN_USER="$TURN_USER" TURN_PASS="$TURN_CRED" \
     STUN_URLS="stun:$TURN_IP:3478" >/dev/null
 
+# Restart everything, THEN wait. A Deployment does not restart when a Secret it
+# references changes, so on a re-deploy the pods keep serving the OLD password
+# and the OLD signing key while the Secret holds the new ones — login then
+# fails with 401 against credentials that look correct in the file.
+for d in signaling worker gateway; do
+    kubectl rollout restart "deploy/chromeless-standalone-$d" -n "$NS" >/dev/null
+done
 for d in signaling worker gateway; do
     kubectl rollout status "deploy/chromeless-standalone-$d" -n "$NS" --timeout=240s >/dev/null
     echo "    $d ready"

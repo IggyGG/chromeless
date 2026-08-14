@@ -42,6 +42,26 @@ spec:
             cidr: 0.0.0.0/0
       ports:
         - { protocol: TCP, port: 8443 }
+    # RELAYED MEDIA COMING BACK.
+    #
+    # Egress-only is not enough. The worker allocates on the TURN server and
+    # media returns FROM the relay's address on an ephemeral UDP port, which an
+    # ingress rule listing only pod peers and TCP 8443 silently drops.
+    #
+    # The failure is maximally confusing: signaling completes, SDP is
+    # exchanged, BOTH sides gather valid relay candidates with real raddr
+    # values — and ICE sits at `checking` forever with a single host/tcp pair,
+    # because no relay pair can ever be validated. It looks like a NAT problem
+    # on the far side.
+    #
+    # Scoped to the relay hosts rather than 0.0.0.0/0: this is the only inbound
+    # media path the worker needs, and the pod otherwise stays closed.
+    - from:
+        - ipBlock: { cidr: 95.217.200.179/32 }   # coturn (triform-1)
+        - ipBlock: { cidr: 135.181.6.55/32 }     # coturn-2 (triform-3)
+      ports:
+        - { protocol: UDP }
+        - { protocol: TCP }
 
   egress:
     # DNS. Cluster service names do not resolve without it, and the failure
