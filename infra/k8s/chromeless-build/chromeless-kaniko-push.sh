@@ -71,12 +71,41 @@ CONTEXT_PATH="${CONTEXT_PATH:-/var/lib/longhorn/chromeless-build/chromium-src/ar
 # Step 9 unless the operator passed it explicitly.
 if [[ -z "${CHROMELESS_KANIKO_TAG:-}" ]]; then
   echo "Reading IMAGE_TAG from ${NODE}:${CONTEXT_PATH}/IMAGE_TAG ..."
+
+  # `|| true` is LOAD-BEARING, not defensive noise.
+  #
+  # This was `CHROMELESS_KANIKO_TAG="$(ssh ... )"` with no guard, under
+  # `set -euo pipefail`. When ssh fails — no key, host not in known_hosts, or
+  # simply running from a laptop that cannot reach cluster nodes — the failing
+  # command substitution makes the ASSIGNMENT non-zero, and `set -e` kills the
+  # script right there. So the carefully written error block below could never
+  # execute. The operator saw:
+  #
+  #     Reading IMAGE_TAG from triform-7:/var/.../IMAGE_TAG ...
+  #     $ echo $?
+  #     0
+  #
+  # No error, no tag, exit 0 — a silent no-op that looks like success. Anyone
+  # scripting on top of it (an auto-bump loop, a CI step) would treat that as
+  # "push done" and carry on with no image. Reproduced in isolation: a bare
+  # `X="$(ssh badhost cat /nope)"` under `set -e` exits 255 at that line.
+  #
+  # With `|| true` the assignment always succeeds, the emptiness check runs,
+  # and the operator gets the diagnosis the author intended to give them.
   CHROMELESS_KANIKO_TAG="$(ssh -o BatchMode=yes "${NODE}" \
-    "cat ${CONTEXT_PATH}/IMAGE_TAG" 2>/dev/null | tr -d '[:space:]')"
+    "cat ${CONTEXT_PATH}/IMAGE_TAG" 2>/dev/null | tr -d '[:space:]' || true)"
+
   if [[ -z "${CHROMELESS_KANIKO_TAG}" ]]; then
     echo "ERROR: could not read IMAGE_TAG from ${NODE}:${CONTEXT_PATH}/IMAGE_TAG" >&2
     echo "  Either the build hasn't reached Step 9 yet, the path is wrong," >&2
-    echo "  or ssh ${NODE} is denied. Pass CHROMELESS_KANIKO_TAG=... to override." >&2
+    echo "  or ssh ${NODE} is denied (e.g. you are running this from a host" >&2
+    echo "  with no SSH access to cluster nodes — kubectl alone is not enough)." >&2
+    echo >&2
+    echo "  Read the tag with kubectl instead, then pass it explicitly:" >&2
+    echo "    kubectl run tagread --rm -i --restart=Never --image=busybox \\" >&2
+    echo "      --overrides='{\"spec\":{\"nodeName\":\"${NODE}\"}}' -- \\" >&2
+    echo "      cat ${CONTEXT_PATH}/IMAGE_TAG" >&2
+    echo "    CHROMELESS_KANIKO_TAG=<tag> $0 ${NODE} ${VARIANT_LABEL:-}" >&2
     exit 1
   fi
 fi

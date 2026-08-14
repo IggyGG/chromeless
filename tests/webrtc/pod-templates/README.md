@@ -24,6 +24,7 @@ N drafter scratch files.
 |---|---|---|
 | `cv2-phase-a-m5-r1.yaml.tpl` | `phase-a-m5-r1-percursor-event.mjs` | CV2-78 cursor-routing gate via `Input.dispatchMouseEvent` stimulus |
 | `cv2-phase-a-m5-r1-dom-probe.yaml.tpl` | `phase-a-m5-r1-dom-probe.mjs` | CV2-78 Axis 1 (Screen) vs Axis 2 (renderer) gate disambiguation |
+| `cv2-phase-a-m5-r1-native-cursor.yaml.tpl` | `phase-a-m5-r1-native-cursor.mjs` | CV2-83 native cursor probe — the only coverage of the SetCursor → CbCursorClient → cursor DataChannel path |
 
 ## Substitution
 
