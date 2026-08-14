@@ -158,16 +158,44 @@ class NoFrames(RuntimeError):
 class WorkerOracle:
     def __init__(self, base=WORKER_CDP):
         self.base = base.rstrip("/")
-        targets = http_json(f"{self.base}/json", host_header="localhost")
-        page = next(t for t in targets
-                    if t["type"] == "page" and t.get("webSocketDebuggerUrl"))
+        self._attach()
+
+    def _attach(self, timeout=60):
+        """(Re)connect to the worker's page target.
+
+        Split out from __init__ because the worker process now RESTARTS during
+        a normal run: the embedder exits when a viewer disconnects so
+        supervisord can hand the next one a fresh browser (see
+        docs/findings/one-session-per-worker-process.md). When it does, this
+        CDP session points at a page target that no longer exists, and every
+        eval fails — which reads as "the whole suite broke" rather than "the
+        oracle needs to reconnect".
+        """
         port = int(self.base.rsplit(":", 1)[1])
-        self.cdp = CDP(page["webSocketDebuggerUrl"], force_port=port)
-        self.cdp.call("Page.enable")
-        self.cdp.call("Runtime.enable")
+        end = time.time() + timeout
+        last = None
+        while time.time() < end:
+            try:
+                targets = http_json(f"{self.base}/json", host_header="localhost")
+                page = next(t for t in targets
+                            if t["type"] == "page" and t.get("webSocketDebuggerUrl"))
+                self.cdp = CDP(page["webSocketDebuggerUrl"], force_port=port)
+                self.cdp.call("Page.enable")
+                self.cdp.call("Runtime.enable")
+                return
+            except Exception as e:          # noqa: BLE001 — any failure means retry
+                last = e
+                time.sleep(1.5)
+        raise RuntimeError(f"worker CDP never came back: {last}")
 
     def eval(self, expr, **kw):
-        return self.cdp.eval(expr, **kw)
+        try:
+            return self.cdp.eval(expr, **kw)
+        except Exception:                   # noqa: BLE001
+            # Most likely the worker restarted under us. Reconnect once and
+            # retry; a second failure is real and propagates.
+            self._attach()
+            return self.cdp.eval(expr, **kw)
 
     def url(self):
         return self.eval("location.href")

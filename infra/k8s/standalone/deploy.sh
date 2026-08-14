@@ -5,8 +5,9 @@
 # means re-deriving the worker's token every time and getting the TURN
 # credential subtly wrong.
 #
-#   ./infra/k8s/standalone/deploy.sh              # deploy
-#   ./infra/k8s/standalone/deploy.sh --teardown   # remove everything it made
+#   ./infra/k8s/standalone/deploy.sh                     # deploy
+#   ./infra/k8s/standalone/deploy.sh --with-test-fixture # + tests/interactive/
+#   ./infra/k8s/standalone/deploy.sh --teardown          # remove what it made
 #
 # Writes the login password to .standalone-creds in this directory (gitignored)
 # so a test harness can read it without it passing through a shell history.
@@ -21,6 +22,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 LABEL=app.kubernetes.io/part-of=chromeless-standalone
 CREDS="$HERE/.standalone-creds"
+
+# --with-test-fixture enables the gateway's plain-HTTP fixture endpoint, which
+# tests/interactive/ needs to put a known page in front of the worker. OFF by
+# default and deliberately opt-in: the listener is unauthenticated (its consumer
+# is the worker, which has no session cookie).
+#
+# It lives here rather than in stack.yaml because it was set by hand once, and
+# the next ./deploy.sh silently dropped it — the suite then failed with a bare
+# `HTTP Error 404` from a POST, which reads as a broken gateway rather than as a
+# missing flag.
+WITH_FIXTURE=""
+for a in "$@"; do
+    [[ "$a" == "--with-test-fixture" ]] && WITH_FIXTURE=1
+done
 
 if [[ "${1:-}" == "--check-turn" ]]; then
     # Is the DEPLOYED TURN credential still valid? This is the first thing to
@@ -118,6 +133,17 @@ kubectl apply -f "$HERE/stack.yaml" >/dev/null
 
 kubectl set env deploy/chromeless-standalone-worker -n "$NS" \
     WEBRTC_ICE_SERVERS="$ICE_JSON" >/dev/null
+if [[ -n "$WITH_FIXTURE" ]]; then
+    echo "    test fixture ENABLED (plain HTTP :8081, unauthenticated)"
+    kubectl set env deploy/chromeless-standalone-gateway -n "$NS" \
+        CHROMELESS_ENABLE_TEST_FIXTURE=1 >/dev/null
+else
+    # Explicitly OFF, not merely absent: a redeploy must be able to turn it
+    # back off, and `kubectl set env` with no value leaves whatever was there.
+    kubectl set env deploy/chromeless-standalone-gateway -n "$NS" \
+        CHROMELESS_ENABLE_TEST_FIXTURE- >/dev/null 2>&1 || true
+fi
+
 kubectl set env deploy/chromeless-standalone-signaling -n "$NS" \
     TURN_URLS="turn:$TURN_IP:3478?transport=udp,turn:$TURN_IP:3478?transport=tcp" \
     TURN_USER="$TURN_USER" TURN_PASS="$TURN_CRED" \

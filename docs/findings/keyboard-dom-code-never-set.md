@@ -1,8 +1,12 @@
 # Non-printing keys do nothing: `dom_code`/`dom_key` are never set
 
-**Status:** root cause isolated by controlled experiment against a live
-deployment, 2026-08-14. Fix is in `capture/` (C++), which cannot be compiled in
-this repo — see "Fixing it".
+**Status:** FIXED and COMPILED (build lane e654ed6, 2026-08-14, image
+`cr7727-e654ed644219`) — including the parts that could not be checked without
+a Chromium tree: `ui::KeycodeConverter` resolves, the new
+`//ui/events:dom_keycode_converter` dep is correct, and the `dom_key`
+conversion compiles. Behaviour not yet re-verified against a deployment;
+re-run `tests/interactive/` on that image. The checks are `tab moves remote
+focus` and `space toggles the focused remote checkbox`.
 
 **Impact:** Tab does not move focus. Space does not activate a focused
 checkbox, button, or link. Arrow keys, Home/End, PageUp/PageDown and Escape are

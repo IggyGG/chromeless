@@ -1532,6 +1532,29 @@ void CloudBrowserBrowserMainParts::OnClosed(std::string_view reason) {
     return;
   }
 
+  // PRE-EXISTING GAP, now visible on every viewer disconnect. A remote `bye`
+  // closes the driver without going through the embedder, so nothing called
+  // audio_lifecycle_->PrepareForTeardown() first — and cb_audio_lifecycle.h is
+  // explicit that it MUST run BEFORE driver.Close(), because OnClosed fires
+  // after pc_ is already dropped. The lifecycle notices and logs:
+  //
+  //   [m55-r5] OnClosed(reason=remote bye) in state=active; embedder did not
+  //   call PrepareForTeardown before driver.Close — running best-effort
+  //   cleanup, PulseAudio orphan-stream window is open until libwebrtc worker
+  //   teardown completes
+  //
+  // Both existing PrepareForTeardown call sites are embedder-INITIATED closes
+  // (PostMainMessageLoopRun, OnGpuPermanentDeath); the remote-bye path never
+  // had one. Calling it here would not fix the ordering — by this point the PC
+  // is gone, which is the whole reason the header says "before".
+  //
+  // Benign in practice for this exit path: the orphan window closes when the
+  // process does, which is milliseconds later. It matters for the re-armable
+  // driver (option 1 in docs/findings/one-session-per-worker-process.md),
+  // where the process KEEPS RUNNING and the window would stay open across
+  // every viewer change. Whoever implements that must give CbOffererDriver a
+  // pre-close hook so the lifecycle can stop cleanly on an inbound bye.
+
   // Shutdown() runs the parked QuitClosure, which unwinds into
   // PostMainMessageLoopRun's LIFO teardown — so the `bye` still flushes and
   // the WS still closes 1000, rather than the broker inferring a socket error.

@@ -196,6 +196,14 @@ def suite_mouse(client, worker):
 
 def suite_scroll(client, worker):
     print("\n[scroll]")
+    # The fixture must be present and scrollable. Re-navigating here rather
+    # than trusting the previous suite means a worker restart between suites
+    # (which is now NORMAL — the embedder exits when a viewer disconnects, see
+    # docs/findings/one-session-per-worker-process.md) does not silently turn
+    # this into a scroll test against about:blank, where scrollY is always 0
+    # and both checks fail for a reason that has nothing to do with the wheel.
+    H.navigate(H.fixture_url(FORM_HTML))
+    worker.wait_for("!!document.querySelector('.tall')", True, timeout=20)
     worker.eval("window.scrollTo(0,0); 1")
     time.sleep(0.6)
     before = worker.eval("Math.round(window.scrollY)")

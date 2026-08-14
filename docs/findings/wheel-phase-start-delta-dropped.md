@@ -1,7 +1,10 @@
 # The first wheel event of every scroll gesture is discarded
 
-**Status:** confirmed against a live deployment. Fix is in `capture/` (C++),
-which cannot be compiled in this repo — see "Fixing it" below.
+**Status:** FIXED and COMPILED (build lane e654ed6, 2026-08-14, image
+`cr7727-e654ed644219`). Behaviour not yet re-verified against a deployment —
+the fix is in `capture/`, and this repo's own unit tests do not exercise wheel
+dispatch. Re-run `tests/interactive/` against a worker on that image to close
+this out; the check is `wheel scrolls the remote page down`.
 
 **Impact:** slow or deliberate scrolling does nothing at all. Fast continuous
 scrolling works after the first event. A user who nudges the wheel once, pauses,

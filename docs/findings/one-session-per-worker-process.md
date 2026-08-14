@@ -1,8 +1,11 @@
 # A worker serves exactly one session, then goes quiet forever
 
-**Status:** confirmed against a live deployment, 2026-08-14. The broker half is
-fixed (`signaling/server.go`, `discardReplay`). The worker half is in `capture/`
-(C++), which cannot be compiled in this repo — see "Fixing it".
+**Status:** BOTH HALVES FIXED. The broker half is fixed and verified
+(`signaling/server.go`, `discardReplay`, with two mutation-checked tests). The
+worker half is fixed and COMPILED (build lane e654ed6, 2026-08-14, image
+`cr7727-e654ed644219`) using option 2 below — exit on session close and let
+supervisord restart — but is not yet behaviour-verified against a deployment.
+The check is simply: connect, reload the page, and see whether video returns.
 
 **Impact for a standalone deployment:** the first viewer after the worker starts
 gets video. Every viewer after that gets nothing, until the worker is restarted.
