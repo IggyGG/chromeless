@@ -102,9 +102,13 @@ func (g *gateway) routes() http.Handler {
 	mux.Handle("/api/stop", g.requireSession(g.navCommand("Page.stopLoading")))
 	mux.Handle("/api/current-url", g.requireSession(http.HandlerFunc(g.handleCurrentURL)))
 
-	// The test fixture is NOT routed here: it is served on a separate
-	// plain-HTTP listener, because the worker cannot accept this port's
-	// self-signed certificate. See fixture.go.
+	// The test fixture has TWO sides, on purpose. The operator STORES it here,
+	// authenticated over TLS; the WORKER fetches it from a separate plain-HTTP
+	// listener, because it cannot accept this port's self-signed certificate.
+	// See fixture.go.
+	if g.cfg.enableTestFixture {
+		mux.Handle("/api/test-fixture", g.requireSession(http.HandlerFunc(g.handleFixture)))
+	}
 
 	// /probe carries its own JWT in the query string (client/src/probe.ts
 	// resolveProbeURL), and the broker verifies it. Wrapping it in a cookie
