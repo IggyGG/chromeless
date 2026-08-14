@@ -249,6 +249,11 @@ production measurements.
 
 ## Pointers
 
+- **Interactive suite: [`tests/interactive/`](./interactive/)** — real client,
+  real deployed worker, every result checked against the worker's own DevTools.
+  The only tests here that answer "does clicking, typing and scrolling actually
+  work". Currently 24/28 by design; the four failures are confirmed embedder
+  defects with named fix sites.
 - Smoke tests: [`tests/smoke/`](./smoke/)
 - Harness validation: [`tests/harness/`](./harness/)
 - Harness artifact: [`harness/`](../harness/)
