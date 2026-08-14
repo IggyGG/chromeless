@@ -146,7 +146,7 @@ spec:
             # directory, so the context is signaling/, not the repo root.
             - --dockerfile=/workspace/signaling/Dockerfile
             - --context=/workspace/signaling
-            - --destination=registry.triform.cloud/chromeless/signaling:standalone-v2
+            - --destination=registry.triform.cloud/chromeless/signaling:standalone-v3
             - --single-snapshot
             - --push-retry=3
           env:

@@ -388,3 +388,160 @@ func TestWS_ByeDiscardsReplayBuffer(t *testing.T) {
 		t.Fatalf("live forwarding broken after bye: got %q", got)
 	}
 }
+
+// TestWS_DisconnectDiscardsReplay covers the OTHER half of the same rule: a
+// peer that vanishes WITHOUT a `bye` (tab closed, network drop, WS 1006) must
+// also have its buffer dropped.
+//
+// This was found only by watching a live deployment, after the bye-only fix was
+// already in. A fresh worker joined and was replayed the previous viewer's
+// stale `answer` — `replayed: 1` in the broker log — consumed it, reached ICE
+// `connected` seconds after boot with nobody watching, and burned its one and
+// only session (see docs/findings/one-session-per-worker-process.md) on a peer
+// that had been gone for a minute. The next real viewer got nothing.
+//
+// The direction matters, so this asserts the browser side: a departed CLIENT's
+// answer must not be replayed to a newly-joining BROWSER.
+func TestWS_DisconnectDiscardsReplay(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/drop-replay"
+
+	dial := func(name string) (*websocket.Conn, chan string) {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		frames := make(chan string, 64)
+		go func() {
+			defer close(frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				frames <- string(raw)
+			}
+		}()
+		return c, frames
+	}
+	collect := func(frames chan string) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(750 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+
+	// A browser is present THROUGHOUT. This is what makes the peer-left
+	// discard load-bearing: with both peers gone, hub.dropIfEmpty reaps the
+	// whole session and the buffers go with it, so a test without this
+	// standing browser passes even with the fix reverted.
+	brw0, _ := dial("browser-0")
+	if err := brw0.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ice","from":"browser"}`)); err != nil {
+		t.Fatalf("browser-0 write: %v", err)
+	}
+	waitRegisteredIn(h, "drop-replay", roleBrowser, t)
+
+	// A client registers and answers, then drops its socket with NO bye —
+	// the ordinary "closed the laptop lid" case.
+	cli, _ := dial("client")
+	if err := cli.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"answer","from":"client","data":{"sdp":"v=0 DEAD-ANSWER"}}`)); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	// Wait for the client to actually REGISTER before closing it, or the
+	// answer never reaches the buffer and the assertion below is vacuous.
+	waitRegisteredIn(h, "drop-replay", roleClient, t)
+	_ = cli.Close()
+	waitGoneRole(h, "drop-replay", roleClient, t)
+
+	// Assert on the buffer a future joiner would be served from, with the
+	// browser STILL connected. That is the real contract, and it is the only
+	// way to observe it: retiring the browser to make room for a "fresh" one
+	// empties the session via hub.dropIfEmpty, which would hide the defect.
+	h.mu.Lock()
+	sess, live := h.sessions[sessionKey{anonymousTenant, "drop-replay"}]
+	h.mu.Unlock()
+	if !live {
+		t.Fatal("session was reaped while the browser was still connected")
+	}
+	sess.mu.Lock()
+	buffered := sess.recent[roleClient]
+	nICE := len(sess.recentICE[roleClient])
+	sess.mu.Unlock()
+	if len(buffered) != 0 || nICE != 0 {
+		t.Fatalf("departed client left %d envelopes + %d candidates buffered; "+
+			"the next worker to join would be replayed them: %s",
+			len(buffered), nICE, buffered["answer"])
+	}
+
+	// And the surviving browser must be unaffected — it is still live, and a
+	// new viewer joining after this still needs its offer.
+	_ = brw0
+	_ = collect
+}
+
+// waitRegisteredIn blocks until the hub holds a peer in `role` for `sessionID`.
+// Polling the hub beats sleeping: registration happens on the SERVER's read
+// pump, so there is no client-side event to synchronise on — and a test that
+// asserts "nothing was replayed" against a peer that never registered passes
+// for entirely the wrong reason.
+func waitRegisteredIn(h *hub, sessionID string, role peerRole, t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sess := h.getOrCreate(anonymousTenant, sessionID)
+		sess.mu.Lock()
+		_, ok := sess.peers[role]
+		sess.mu.Unlock()
+		if ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("peer %s never registered in %s", role, sessionID)
+}
+
+// waitGoneRole blocks until `role` is absent from the session — either because
+// the peer unregistered or because the whole session was reaped. Reads the hub
+// map directly rather than via getOrCreate, which would RESURRECT a session
+// dropIfEmpty had just reaped and report a fresh empty one as "gone".
+func waitGoneRole(h *hub, sessionID string, role peerRole, t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		sess, live := h.sessions[sessionKey{anonymousTenant, sessionID}]
+		h.mu.Unlock()
+		if !live {
+			return
+		}
+		sess.mu.Lock()
+		_, present := sess.peers[role]
+		sess.mu.Unlock()
+		if !present {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("peer %s never left %s", role, sessionID)
+}
