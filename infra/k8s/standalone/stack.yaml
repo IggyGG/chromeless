@@ -283,7 +283,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: gateway
-          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v4
+          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v5
           env:
             - name: CHROMELESS_USER
               valueFrom:
