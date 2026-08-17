@@ -1141,6 +1141,10 @@ bool CloudBrowserBrowserMainParts::Shutdown() {
 }
 
 void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
+  // Before anything else: from here on, an OnClosed is our own teardown
+  // rather than a viewer leaving. See tearing_down_ in the header.
+  tearing_down_ = true;
+
   StopDevToolsHttpHandler();
 
   // ============== CV2-69 TEARDOWN (LIFO) ==============
@@ -1482,6 +1486,79 @@ void CloudBrowserBrowserMainParts::OnClosed(std::string_view reason) {
   // OffererDriverObserver path: offerer-driven session-ended event
   // (distinct from the WS-client OnClosed two-arg form above).
   LOG(INFO) << "CV2-69 offerer_driver: session closed, reason=" << reason;
+
+  // EXIT, so the supervisor starts a process that can serve the next viewer.
+  //
+  // A closed session is TERMINAL and unrecoverable in-process. Two independent
+  // one-way doors make it so: CbOffererDriver::kClosed refuses renegotiation
+  // (cb_offerer_driver.cc BeginRenegotiation), and native_session_started_ is
+  // a latch that makes Cb.startNativeSession answer "native session already
+  // started". So after the first viewer disconnects, this process holds a live
+  // WS, a healthy Chromium and a running capturer — and can never offer again.
+  //
+  // Before this, that presented as: connect once and it works; reload the page
+  // and you get a black screen forever. Nothing in any log said why — the
+  // capturer keeps logging "retargeted producer" every 15 s throughout, so the
+  // process looks entirely healthy. Confirmed live on 2026-08-14; the broker
+  // was additionally replaying the dead session's offer to the next viewer,
+  // which disguised it as an ICE/NAT failure (fixed separately in
+  // signaling/server.go).
+  //
+  // The runtime image already expects this: [program:chromium] in
+  // infra/supervisord.phase2.conf carries autorestart=true, so exiting here
+  // yields a fresh browser process — and a fresh peer connection — within a
+  // few seconds. In triform this never surfaced because physics recycles the
+  // guest at a higher layer; a standalone deployment has nothing playing that
+  // part, which is exactly the gap docs/operations/standalone.md fills.
+  //
+  // NOTE startretries=10 in that same block: supervisord counts restarts that
+  // fail to stay up for startsecs=5. A viewer-driven exit lands well past
+  // that, so it resets the counter rather than consuming a retry, and there is
+  // no cap on how many viewers a pod can serve over its life. Worth
+  // re-checking if startsecs ever grows past a session's minimum length.
+  //
+  // COST, deliberately accepted: browser state does not survive a viewer
+  // leaving — open tabs, history and in-memory logins all go. The
+  // state-preserving fix is to make the driver re-armable (allow
+  // kClosed → kCreatingOffer and drop the latch), which is the right answer if
+  // the browser is meant to be a persistent workspace several people attach to
+  // over its lifetime. Chosen deliberately as the smaller, obviously-correct
+  // change first; see docs/findings/one-session-per-worker-process.md for both
+  // options written out.
+  //
+  // Not when this IS our own teardown talking: PostMainMessageLoopRun calls
+  // offerer_driver_->Close("session ended"), which lands right here.
+  if (tearing_down_) {
+    return;
+  }
+
+  // PRE-EXISTING GAP, now visible on every viewer disconnect. A remote `bye`
+  // closes the driver without going through the embedder, so nothing called
+  // audio_lifecycle_->PrepareForTeardown() first — and cb_audio_lifecycle.h is
+  // explicit that it MUST run BEFORE driver.Close(), because OnClosed fires
+  // after pc_ is already dropped. The lifecycle notices and logs:
+  //
+  //   [m55-r5] OnClosed(reason=remote bye) in state=active; embedder did not
+  //   call PrepareForTeardown before driver.Close — running best-effort
+  //   cleanup, PulseAudio orphan-stream window is open until libwebrtc worker
+  //   teardown completes
+  //
+  // Both existing PrepareForTeardown call sites are embedder-INITIATED closes
+  // (PostMainMessageLoopRun, OnGpuPermanentDeath); the remote-bye path never
+  // had one. Calling it here would not fix the ordering — by this point the PC
+  // is gone, which is the whole reason the header says "before".
+  //
+  // Benign in practice for this exit path: the orphan window closes when the
+  // process does, which is milliseconds later. It matters for the re-armable
+  // driver (option 1 in docs/findings/one-session-per-worker-process.md),
+  // where the process KEEPS RUNNING and the window would stay open across
+  // every viewer change. Whoever implements that must give CbOffererDriver a
+  // pre-close hook so the lifecycle can stop cleanly on an inbound bye.
+
+  // Shutdown() runs the parked QuitClosure, which unwinds into
+  // PostMainMessageLoopRun's LIFO teardown — so the `bye` still flushes and
+  // the WS still closes 1000, rather than the broker inferring a socket error.
+  Shutdown();
 }
 
 void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {
@@ -1521,6 +1598,12 @@ void CloudBrowserBrowserMainParts::OnGpuPermanentDeath() {
     }
     // Emits session_unhealthy (best-effort) + tears down the PC. Distinct from
     // Close() so physics recycles rather than treating this as a clean bye.
+    //
+    // tearing_down_ first: this path already runs the quit closure below, and
+    // CloseUnhealthy may reach OnClosed. Without it the exit-on-close branch
+    // would fire here too — harmless (it is the same destination) but it would
+    // bypass the deliberate delay below that lets session_unhealthy flush.
+    tearing_down_ = true;
     offerer_driver_->CloseUnhealthy("gpu-permanent-death");
   }
 

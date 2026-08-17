@@ -1,10 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveSignalingUrl,
+  deriveSignalingUrlFromOrigin,
   FALLBACK_SIGNALING_URL,
   type ConfigCarrier,
 } from "./config.js";
 
+// No protocol/host ⇒ origin derivation yields null ⇒ FALLBACK_SIGNALING_URL.
+// Kept as-is so the pre-existing precedence tests below still exercise the
+// terminal rung.
 const noQuery = { search: "" };
 const noConfig: ConfigCarrier = {};
 
@@ -92,5 +96,90 @@ describe("resolveSignalingUrl", () => {
         __CHROMELESS_CONFIG__: { signalingUrl: "  ws://h:8080/ws  " },
       }),
     ).toBe("ws://h:8080/ws");
+  });
+
+  // --- origin derivation (the standalone single-port gateway) ---
+
+  it("derives wss:// from an https page", () => {
+    expect(
+      resolveSignalingUrl(
+        { search: "", protocol: "https:", host: "localhost:8443" },
+        noConfig,
+      ),
+    ).toBe("wss://localhost:8443/ws");
+  });
+
+  it("derives ws:// from an http page", () => {
+    expect(
+      resolveSignalingUrl(
+        { search: "", protocol: "http:", host: "localhost:3000" },
+        noConfig,
+      ),
+    ).toBe("ws://localhost:3000/ws");
+  });
+
+  // The whole point of deriving: the operator picks the port, and no
+  // compiled-in default can be right.
+  it("honours a non-default port and a remote host", () => {
+    expect(
+      resolveSignalingUrl(
+        { search: "", protocol: "https:", host: "browser.example.com:9999" },
+        noConfig,
+      ),
+    ).toBe("wss://browser.example.com:9999/ws");
+  });
+
+  it("still lets injected config win over the origin", () => {
+    expect(
+      resolveSignalingUrl(
+        { search: "", protocol: "https:", host: "localhost:8443" },
+        { __CHROMELESS_CONFIG__: { signalingUrl: "ws://elsewhere:8080/ws" } },
+      ),
+    ).toBe("ws://elsewhere:8080/ws");
+  });
+
+  it("still lets ?signaling= win over the origin", () => {
+    expect(
+      resolveSignalingUrl(
+        {
+          search: "?signaling=ws://override:1/ws",
+          protocol: "https:",
+          host: "localhost:8443",
+        },
+        noConfig,
+      ),
+    ).toBe("ws://override:1/ws");
+  });
+});
+
+describe("deriveSignalingUrlFromOrigin", () => {
+  it("maps https → wss and http → ws", () => {
+    expect(
+      deriveSignalingUrlFromOrigin({ search: "", protocol: "https:", host: "h:1" }),
+    ).toBe("wss://h:1/ws");
+    expect(
+      deriveSignalingUrlFromOrigin({ search: "", protocol: "http:", host: "h:1" }),
+    ).toBe("ws://h:1/ws");
+  });
+
+  // A file:// page has an empty host. Returning a URL there would produce a
+  // dial at "wss:///ws"; the caller must fall back instead.
+  it("returns null when there is no host", () => {
+    expect(
+      deriveSignalingUrlFromOrigin({ search: "", protocol: "file:", host: "" }),
+    ).toBeNull();
+    expect(
+      deriveSignalingUrlFromOrigin({ search: "", protocol: "https:", host: "  " }),
+    ).toBeNull();
+  });
+
+  it("returns null for a non-http(s) scheme", () => {
+    expect(
+      deriveSignalingUrlFromOrigin({ search: "", protocol: "file:", host: "x" }),
+    ).toBeNull();
+  });
+
+  it("returns null when protocol/host are absent entirely", () => {
+    expect(deriveSignalingUrlFromOrigin({ search: "" })).toBeNull();
   });
 });

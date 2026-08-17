@@ -88,7 +88,11 @@ export async function fetchTurnConfig(
 
   const url = resolveCredentialsURL(opts.signalingBase);
   try {
-    const res = await fetchImpl(url, { credentials: "omit", cache: "no-store" });
+    // "same-origin" so the standalone gateway's session cookie is sent; it
+    // gates this endpoint. With "omit" the 401 falls through to the STUN-only
+    // FALLBACK below, which "works" on a LAN and then fails to traverse any
+    // real NAT — a silent downgrade rather than an error.
+    const res = await fetchImpl(url, { credentials: "same-origin", cache: "no-store" });
     if (!res.ok) {
       console.warn(`turn-credentials: HTTP ${res.status}; using fallback`);
       return FALLBACK;
@@ -121,7 +125,11 @@ async function fetchFromIssuer(
   try {
     const res = await fetchImpl(url, {
       method: "POST",
-      credentials: "omit",
+      // The issuer authenticates with the Bearer token below, so the cookie is
+      // not required here — but a same-origin deployment may still put this
+      // endpoint behind the gateway, and withholding the cookie there costs a
+      // silent fall-through to the anonymous endpoint.
+      credentials: "same-origin",
       cache: "no-store",
       headers: {
         "Content-Type": "application/json",

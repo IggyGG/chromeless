@@ -414,6 +414,51 @@ func (s *session) unregister(p *peer) {
 	}
 }
 
+// discardReplay drops the envelopes buffered FROM role, so a later-joining
+// peer is not handed a dead peer connection's SDP.
+//
+// A `bye` means the negotiated peer connection is GONE — its ufrag/pwd, its
+// DTLS fingerprint and every candidate either side ever gathered are void.
+// Replaying them is not merely useless, it is actively misleading: the new peer
+// receives a complete, well-formed offer, answers it, and pairs its own fresh
+// candidates against sockets that no longer exist. Nothing in either log says
+// so, and it presents as `iceConnectionState=checking` forever with a single
+// unresponsive pair (`req=0`) — indistinguishable by inspection from a NAT or
+// TURN failure, which is where an afternoon went.
+//
+// CALLED FROM TWO PLACES, and both are load-bearing:
+//
+//   - When a peer DISCONNECTS, for its own buffer. Its candidates and SDP
+//     describe a peer connection that went away with it. Missing this was
+//     observed live as a fresh worker being replayed the previous viewer's
+//     stale `answer` on join, reaching ICE `connected` seconds after boot with
+//     nobody watching, and burning its one and only session on a dead client.
+//
+//   - On `bye`, for BOTH roles. A bye ends the negotiated session, not just
+//     the sender's half. The observed failure was a CLIENT bye (viewer closes
+//     the tab) invalidating the BROWSER's buffered offer: the worker tears its
+//     peer connection down and — because cb_offerer_driver's kClosed is
+//     terminal and main_parts' native_session_started_ is a one-way latch —
+//     can never offer again for the life of the process. Its socket stays up,
+//     so the session is not reaped, and the next viewer to join is replayed
+//     the dead offer plus nine dead candidates (`replayed: 10`).
+//
+// The buffer exists for the opposite race (an offer arriving BEFORE the
+// counterpart joins, T96/T104) — a live session whose peer has not shown up
+// yet. Once either side says `bye`, that no longer describes anything.
+//
+// Note this cannot rely on hub.dropIfEmpty: that only fires when BOTH peers
+// have disconnected, and in the bye case the browser deliberately stays
+// connected.
+func (s *session) discardReplay(roles ...peerRole) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range roles {
+		delete(s.recent, r)
+		delete(s.recentICE, r)
+	}
+}
+
 // forward sends raw to the peer in role; returns false if no such peer.
 //
 // T96: when envType is replayable, the most recent raw is also kept
@@ -637,6 +682,16 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	p.readPump(sess, done)
 
 	sess.unregister(p)
+	// A peer's buffered envelopes describe ITS peer connection, so they die
+	// with its socket — see discardReplay. Doing this only on `bye` was not
+	// enough: a client that goes away without one (tab closed, network drop,
+	// 1006) leaves a live `answer` in the buffer, and the next BROWSER to join
+	// is replayed it. A fresh worker then consumes a dead answer, believes it
+	// has a viewer, and burns its one and only session (see
+	// docs/findings/one-session-per-worker-process.md) on nobody — observed
+	// live as a worker reaching ICE `connected` seconds after boot with no
+	// client present.
+	sess.discardReplay(p.role)
 	recordPeerUnregistered(p.role, tenantID) // T38/T67 metrics; pairs with the Inc above
 	h.dropIfEmpty(tenantID, sessionID)
 	p.log.Info("peer left")
@@ -687,6 +742,10 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			p.log.Debug("no counterpart yet (buffered if replayable)", slog.String("type", env.Type))
 		}
 		if env.Type == "bye" {
+			// The negotiated session is over for BOTH sides, not just the
+			// sender's — so drop both buffers. See discardReplay for what
+			// replaying a dead session's offer costs.
+			sess.discardReplay(roleClient, roleBrowser)
 			return
 		}
 	}

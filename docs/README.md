@@ -26,6 +26,7 @@ authoritative — not any prose here.
 | read | why |
 | --- | --- |
 | [`../README.md`](../README.md) | Accurate as of 2026-07. The place to start. |
+| [`operations/standalone.md`](./operations/standalone.md) | **Running it yourself, with none of the triform infrastructure.** One machine, one port, a username and a password — plus TURN, split-host, and what this deliberately is not. |
 | [`operations/runbook.md`](./operations/runbook.md) | Day-2 operations. |
 | [`operations/phase1-deployment-checklist.md`](./operations/phase1-deployment-checklist.md) | Pre-flight before real traffic. Reviewed 2026-07-30 and still current — it is a checklist, not an architecture description, so the M7 migration barely touched it. |
 | [`operations/sla.md`](./operations/sla.md) | The SLOs your alerting should enforce. |
@@ -41,6 +42,7 @@ authoritative — not any prose here.
 | [`capture/`](./capture/) | FrameSink capture design, damage rects, the encoder-factory catalog. |
 | [`internal/`](./internal/) | Per-encoder tuning rationale (H264, VP9, NVENC, VAAPI, SVT-AV1), BWE adapter, simulcast design. Design docs, so they age more slowly than status docs — but check the code before trusting a specific constant. |
 | [`security/passthrough-threat-model.md`](./security/passthrough-threat-model.md) | Threat model for camera/mic passthrough. |
+| [`findings/`](./findings/) | **Confirmed defects with no fix landed**, each reproduced against a live deployment. Read before debugging odd behaviour — the answer may already be here. Every one names the file and line to change; they are open tasks, not notes. |
 
 ## Background and prior art
 

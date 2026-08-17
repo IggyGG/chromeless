@@ -21,6 +21,13 @@ import { attachCursorChannel } from "./src/cursor.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { resolveSignalingUrl } from "./src/config.js";
 import {
+  navigate,
+  goBack,
+  goForward,
+  reload,
+  currentUrl,
+} from "./src/navigate.js";
+import {
   ChromelessSession,
   type SessionLogLevel,
   type SessionStatus,
@@ -54,6 +61,14 @@ const els = {
   dc: $<HTMLElement>("state-dc"),
   // T81: webcam/mic passthrough toggle. Disabled until a pc is up.
   passthrough: $<HTMLButtonElement>("passthrough-toggle"),
+  // Address bar. Navigation goes over HTTP to the gateway, not over the peer
+  // connection — see src/navigate.ts.
+  addressBar: $<HTMLFormElement>("addressbar"),
+  navUrl: $<HTMLInputElement>("nav-url"),
+  navGo: $<HTMLButtonElement>("nav-go"),
+  navBack: $<HTMLButtonElement>("nav-back"),
+  navForward: $<HTMLButtonElement>("nav-forward"),
+  navReload: $<HTMLButtonElement>("nav-reload"),
 };
 
 function setStatus(state: SessionStatus, text?: string): void {
@@ -252,8 +267,11 @@ function connect(sessionId: string): void {
     if (st === "connected") {
       const enabled = attach.passthrough?.getState().enabled ?? false;
       setPassthroughButtonState(enabled ? "on" : "off", false);
+      setNavEnabled(true);
+      void syncAddressBar();
     } else if (st === "failed") {
       setPassthroughButtonState("off", true);
+      setNavEnabled(false);
     }
   });
   s.on("connectionState", (st) => { els.conn.textContent = st; });
@@ -273,6 +291,7 @@ function connect(sessionId: string): void {
   });
   s.on("closed", () => {
     dropAttachments();
+    setNavEnabled(false);
     session = null;
     els.connect.disabled = false;
     els.connect.textContent = "Connect";
@@ -295,6 +314,64 @@ els.connect.addEventListener("click", () => {
   els.connect.textContent = "Disconnect";
   connect(sessionId);
 });
+
+// ---------- address bar ----------
+//
+// Navigation is a control-plane operation, not a media one: the URL goes over
+// HTTP to the gateway, which drives CDP Page.navigate on the worker. The peer
+// connection carries only pixels and input. Same split the triform portal uses.
+
+function setNavEnabled(enabled: boolean): void {
+  for (const el of [els.navUrl, els.navGo, els.navBack, els.navForward, els.navReload]) {
+    el.disabled = !enabled;
+  }
+}
+
+/** Show what the remote browser is actually on, unless the user is typing. */
+async function syncAddressBar(): Promise<void> {
+  // Never clobber a half-typed URL. The portal hit this: an async refresh
+  // overwriting the input mid-keystroke makes the bar feel broken.
+  if (document.activeElement === els.navUrl) return;
+  const url = await currentUrl();
+  if (url && url !== "about:blank") els.navUrl.value = url;
+}
+
+async function runNav(
+  action: () => Promise<{ ok: boolean; url?: string; error?: string }>,
+  what: string,
+): Promise<void> {
+  const res = await action();
+  if (res.error) {
+    log("err", `${what} failed`, res.error);
+    return;
+  }
+  if (!res.ok) {
+    // A declined history command — Back with nothing behind it. Not an error;
+    // the button is simply a no-op there.
+    log("info", `${what}: nothing to do`);
+    return;
+  }
+  if (res.url) els.navUrl.value = res.url;
+  log("ok", `${what} → ${res.url ?? "ok"}`);
+  // The page needs a moment to commit before /api/current-url reflects it.
+  setTimeout(() => { void syncAddressBar(); }, 600);
+}
+
+els.addressBar.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const raw = els.navUrl.value;
+  if (!raw.trim()) return;
+  els.navUrl.blur();
+  void runNav(() => navigate(raw), "navigate");
+});
+
+// Select-all on focus, the way a real address bar behaves — typing replaces
+// the URL rather than appending to it.
+els.navUrl.addEventListener("focus", () => { els.navUrl.select(); });
+
+els.navBack.addEventListener("click", () => { void runNav(goBack, "back"); });
+els.navForward.addEventListener("click", () => { void runNav(goForward, "forward"); });
+els.navReload.addEventListener("click", () => { void runNav(reload, "reload"); });
 
 // ---------- T81: passthrough button ----------
 

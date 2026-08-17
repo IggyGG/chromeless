@@ -163,6 +163,12 @@ test-unit: test-unit-signaling test-unit-go-modules test-unit-client test-unit-h
 # the same failure shape as the unbuilt test() targets (see lint-build-targets)
 # and it is fixed the same way: derive the list, never hand-maintain it.
 #
+# Reconfirmed from the other direction when infra/gateway/ landed on
+# feat/standalone-mode with 31 tests that no target invoked: `make verify` was
+# green and had run none of them. Two branches independently hit the same gap
+# within days and wrote the same fix, which is about as clear a signal as this
+# kind of thing gives.
+#
 # signaling/ is excluded (it has its own target above) and tests/integration/
 # too (that is `make test-integration` — it builds a binary and is not a unit
 # test). .claude/worktrees/ holds full checkouts of this repo, so it MUST be

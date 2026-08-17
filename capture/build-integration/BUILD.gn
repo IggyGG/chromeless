@@ -864,6 +864,16 @@ source_set("input_dispatch_keyboard") {
     # :headers visibility excludes //cloud-browser/* — using the content
     # re-export path same as input_dispatch_mouse above.
     "//content/public/browser",
+    # ui::KeycodeConverter + ui::DomCode / ui::DomKey. Blink's focus and
+    # default-action handling reads dom_code/dom_key rather than
+    # windows_key_code, so without these NO non-printing key works — Tab does
+    # not move focus, Space does not activate a control. See
+    # docs/findings/keyboard-dom-code-never-set.md.
+    #
+    # //ui/events:dom_keycode_converter is the narrow target that holds
+    # exactly these three headers; //ui/events would pull the whole event
+    # system into a browser-process source_set that needs none of it.
+    "//ui/events:dom_keycode_converter",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]

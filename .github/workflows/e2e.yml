@@ -155,6 +155,11 @@ jobs:
         if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         env:
           CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          # The gateway refuses to start without a credential, on purpose — a
+          # built-in default password looks like protection and is not. These
+          # must match what tests/e2e/playwright.config.ts signs in with.
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
           docker compose -f infra/compose.yaml --profile observability up -d --wait
 
@@ -167,6 +172,8 @@ jobs:
         if: always() && steps.fsprobe.outputs.shared == 'true'
         env:
           CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
           docker compose -f infra/compose.yaml ps
           docker ps -a
@@ -183,12 +190,20 @@ jobs:
         if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         working-directory: tests/e2e
         env:
-          # The compose stack publishes ports as documented in
-          # infra/compose.yaml. Specs read SIGNALING_URL etc. from
-          # tests/e2e/playwright.config.ts.
-          CHROMELESS_SIGNALING_URL: ws://localhost:8080
-          CHROMELESS_CLIENT_URL: http://localhost:3000
-          CHROMELESS_DEVTOOLS_URL: http://localhost:9222
+          # The stack publishes exactly ONE port now: the gateway on 8443.
+          # 8080 (broker) and 9222 (DevTools) are deliberately internal — 9222
+          # is unauthenticated remote code execution against the browser, and
+          # 8080 with no auth pubkey is a way straight past the login.
+          #
+          # This replaces CHROMELESS_SIGNALING_URL / _CLIENT_URL / _DEVTOOLS_URL,
+          # which named those ports but were read by no spec and no config —
+          # they only ever documented a topology. The page derives its signaling
+          # endpoint from its own origin (client/src/config.ts), so there is
+          # nothing else to point anywhere.
+          CHROMELESS_E2E_BASE_URL: https://localhost:8443
+          # Must match the pair compose booted the gateway with, above.
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
           # `*.live.spec.ts` is the convention for specs that depend on
           # T78's getDisplayMedia fix. Run them but keep the workflow
@@ -220,6 +235,8 @@ jobs:
         if: failure() && steps.fsprobe.outputs.shared == 'true'
         env:
           CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
           for c in $(docker compose -f infra/compose.yaml ps -q); do
             name=$(docker inspect --format '{{.Name}}' "$c" | sed 's|^/||')
@@ -245,6 +262,8 @@ jobs:
         if: always() && steps.probe.outputs.present == 'true'
         env:
           CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
           docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans || true
           # Belt-and-braces: compose `down` keys off project labels, which a
