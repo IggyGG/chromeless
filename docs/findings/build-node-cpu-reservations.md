@@ -92,3 +92,59 @@ was using 4m and looked like an obvious candidate to shrink; its 14-day peak is
 8.11 cores. The snapshot would have led to cutting a pod that needs 4× its
 current request. Prometheus retention here is 15 days, so 14d is the longest
 honest window.
+
+---
+
+## Addendum: the CI queue, and a wrong diagnosis worth recording
+
+While landing this work, PR #64 sat unmergeable with 8 checks "pending". I
+first reported that as the known cross-repo coalescer bug — **that was wrong**,
+in two separate ways, and both mistakes are the kind that repeat.
+
+**Wrong #1: the coalescer bug is already fixed.** The live CronJob
+(`forgejo/forgejo-superseded-run-coalescer`) scopes its dead-PR arm with
+`pr.base_repo_id = r.repo_id`, and its own comment documents the exact
+chromeless#44 incident that motivated the fix. Prior notes describing it as
+unfixed are stale. **Read the deployed object, not your notes about it.**
+
+**Wrong #2: "no runs exist" came from querying the wrong thing.** The
+`/actions/tasks` API lists runs that reached a RUNNER. Queued runs have no task
+row (`task_id = 0`), so they are invisible there — which reads exactly like
+"CI never scheduled anything". The database says otherwise:
+
+```sql
+SELECT r.id, r.status, r.ref, substring(r.commit_sha,1,8), r.workflow_id
+  FROM action_run r JOIN repository p ON p.id = r.repo_id
+ WHERE p.name = 'chromeless' AND r.commit_sha LIKE '<sha>%';
+-- status 5 = waiting, 6 = running, 3 = cancelled, 1 = success, 2 = failure
+```
+
+**What was actually happening: label starvation.** The runners advertise
+`["docker","rust","ubuntu-22.04","ubuntu-latest"]` — one pool serving several
+labels. A 156-job `docker` backlog from tf-multiverse had every slot, while 9
+`ubuntu-latest` jobs (8 of them mine) waited behind it:
+
+| | |
+| --- | --- |
+| runners in the pool | 26 |
+| tasks running | 43 |
+| `docker` jobs waiting | 156 |
+| `ubuntu-latest` jobs waiting | 9 |
+| `docker` completions / 15 min | 66 |
+
+That is ~35 minutes of backlog, not a wedge — and it drains on its own. The
+tell that separates the two: **runners polling recently** (`last_online` within
+seconds) with **jobs whose `task_id` is 0**. Healthy runners plus unassigned
+jobs means queued-behind-something. Dead runners plus unassigned jobs means
+wedged.
+
+```sql
+-- is the queue moving, or stuck?
+SELECT (SELECT count(*) FROM action_task WHERE status=6)                AS running,
+       (SELECT count(*) FROM action_run_job WHERE status=5)             AS waiting,
+       (SELECT count(*) FROM action_run_job
+         WHERE status IN (1,2)
+           AND stopped > extract(epoch from now())::bigint - 900)       AS done_15m;
+```
+
+If `done_15m` is healthy, wait. If it is zero with runners online, escalate.
