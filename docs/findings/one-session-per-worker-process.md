@@ -1,11 +1,24 @@
 # A worker serves exactly one session, then goes quiet forever
 
-**Status:** BOTH HALVES FIXED. The broker half is fixed and verified
-(`signaling/server.go`, `discardReplay`, with two mutation-checked tests). The
-worker half is fixed and COMPILED (build lane e654ed6, 2026-08-14, image
-`cr7727-e654ed644219`) using option 2 below — exit on session close and let
-supervisord restart — but is not yet behaviour-verified against a deployment.
-The check is simply: connect, reload the page, and see whether video returns.
+**Status:** BOTH HALVES FIXED AND VERIFIED (2026-08-14, image
+`cr7727-e654ed644219`). The broker half has two mutation-checked tests
+(`signaling/server.go`, `discardReplay`). The worker half uses option 2 below —
+exit on session close, let supervisord restart — and was confirmed live:
+
+```
+21:56:48  session closed, reason=remote bye
+21:56:48  Cb.shutdown: quitting the main message loop
+21:56:48  exited: chromium (exit status 0; expected)
+21:56:49  spawned: 'chromium' with pid 286      ← ~1s later, ready for the next viewer
+```
+
+One consequence worth knowing before it surprises someone: **the worker now
+restarts as part of normal operation**, every time a viewer disconnects. Any
+tool holding a CDP session to it must expect its page target to disappear —
+`tests/interactive/harness.py`'s `WorkerOracle` reconnects for exactly this
+reason.
+
+It also exposed a pre-existing audio-teardown gap; see "Audio teardown" below.
 
 **Impact for a standalone deployment:** the first viewer after the worker starts
 gets video. Every viewer after that gets nothing, until the worker is restarted.
@@ -136,6 +149,31 @@ had not finished registering). **A test written against a bug you have already
 fixed proves nothing until you have watched it fail.**
 
 The worker half has no test here and cannot have one without a build.
+
+## Audio teardown: a pre-existing gap this made visible
+
+Exiting on close surfaced a warning that was always reachable but rarely seen:
+
+```
+[m55-r5] OnClosed(reason=remote bye) in state=active; embedder did not call
+PrepareForTeardown before driver.Close — running best-effort cleanup,
+PulseAudio orphan-stream window is open until libwebrtc worker teardown
+completes
+```
+
+`cb_audio_lifecycle.h` is explicit that `PrepareForTeardown()` MUST run BEFORE
+`driver.Close()`, because `OnClosed` fires after `pc_` has already been
+dropped. Both existing call sites are embedder-INITIATED closes
+(`PostMainMessageLoopRun`, `OnGpuPermanentDeath`). A remote `bye` closes the
+driver without asking the embedder, so that path never had one — and now it
+runs on every viewer disconnect.
+
+Benign for exit-on-close: the orphan window shuts when the process does,
+milliseconds later. It is NOT benign for option 1 (re-armable driver), where
+the process keeps running and the window would stay open across every viewer
+change. **Whoever implements option 1 must give `CbOffererDriver` a pre-close
+hook so the lifecycle can stop cleanly on an inbound bye.** This is recorded at
+the call site in `cloud_browser_browser_main_parts.cc` as well.
 
 ## Related
 

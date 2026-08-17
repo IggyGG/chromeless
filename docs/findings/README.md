@@ -17,6 +17,12 @@ repo's unit tests do not exercise any of these paths.
 | [`keyboard-dom-code-never-set.md`](./keyboard-dom-code-never-set.md) | `cb_input_dispatch_keyboard.cc` + BUILD.gn | `tests/interactive/` tab/space checks on the new image |
 | [`one-session-per-worker-process.md`](./one-session-per-worker-process.md) | `cloud_browser_browser_main_parts.{h,cc}` | connect, reload, confirm video returns |
 
+Not a code defect, but the same shape — measured, with a named owner:
+
+| finding | owner | what it blocks |
+| --- | --- | --- |
+| [`build-node-cpu-reservations.md`](./build-node-cpu-reservations.md) | `triform-builder`, `triform-wtf` | the chromeless build lane cannot schedule on t7/t8 |
+
 ## Adding one
 
 Write it up when a defect is confirmed but cannot be fixed in the same change —

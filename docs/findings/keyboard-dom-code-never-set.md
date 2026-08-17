@@ -1,12 +1,20 @@
 # Non-printing keys do nothing: `dom_code`/`dom_key` are never set
 
-**Status:** FIXED and COMPILED (build lane e654ed6, 2026-08-14, image
-`cr7727-e654ed644219`) — including the parts that could not be checked without
-a Chromium tree: `ui::KeycodeConverter` resolves, the new
-`//ui/events:dom_keycode_converter` dep is correct, and the `dom_key`
-conversion compiles. Behaviour not yet re-verified against a deployment;
-re-run `tests/interactive/` on that image. The checks are `tab moves remote
-focus` and `space toggles the focused remote checkbox`.
+**Status:** FIXED and VERIFIED WORKING against a live deployment
+(2026-08-14, image `cr7727-e654ed644219`). Both checks that could not pass
+before now pass:
+
+```
+PASS  tab moves remote focus                     activeElement='box'
+PASS  space toggles the focused remote checkbox  checked=True
+```
+
+The parts that could not be checked without a Chromium tree all held:
+`ui::KeycodeConverter` resolves, the new `//ui/events:dom_keycode_converter`
+dep is correct, and the `dom_key` conversion compiles.
+
+Keep this file until the fix reaches `main` — the analysis below is the reason
+the one-line change is what it is.
 
 **Impact:** Tab does not move focus. Space does not activate a focused
 checkbox, button, or link. Arrow keys, Home/End, PageUp/PageDown and Escape are
