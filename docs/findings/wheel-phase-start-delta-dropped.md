@@ -1,10 +1,20 @@
 # The first wheel event of every scroll gesture is discarded
 
-**Status:** FIXED and COMPILED (build lane e654ed6, 2026-08-14, image
-`cr7727-e654ed644219`). Behaviour not yet re-verified against a deployment —
-the fix is in `capture/`, and this repo's own unit tests do not exercise wheel
-dispatch. Re-run `tests/interactive/` against a worker on that image to close
-this out; the check is `wheel scrolls the remote page down`.
+**Status:** FIXED and VERIFIED WORKING against a live deployment (image
+`cr7727-224c19413e24`, 2026-08-17):
+
+```
+PASS  wheel scrolls the remote page down   scrollY 0 -> 1280
+PASS  wheel scrolls back up                scrollY 1280 -> 0
+```
+
+**It took TWO fixes, and the first one uncovered the second.** Discarding the
+start-delta (below) was one bug; a sign inversion between the protocol and
+Blink was another, older one that the first bug had been hiding. With every
+start-delta thrown away, slow scrolling produced no motion at all — so there
+was never a direction to be wrong about. Only once the delta survived did the
+page move, upward, from `scrollY 0`, which looks exactly like nothing
+happening. See "The sign inversion" below.
 
 **Impact:** slow or deliberate scrolling does nothing at all. Fast continuous
 scrolling works after the first event. A user who nudges the wheel once, pauses,
@@ -75,6 +85,33 @@ rather than guessed at.
 A regression test belongs in `tests/interactive/run.py`, which already covers
 it — the check is `wheel scrolls the remote page down`, currently failing by
 design until the embedder is fixed.
+
+## The sign inversion (the second bug)
+
+Deploying the delta fix and reading what the page actually received:
+
+```
+events at page: [{dy:0}, {dy:-320}, {dy:0}, {dy:-320}, {dy:0}, {dy:-320}]
+```
+
+Two events per gesture, exactly as designed — the synthetic zero-delta Begin,
+then the real delta that used to be dropped. But the test sent `+320`.
+
+- `docs/protocols/input-channel.md`: `dy` matches `WheelEvent.deltaY`, so
+  **positive = down**. `client/src/input.ts` forwards `e.deltaY` verbatim.
+- `blink::WebMouseWheelEvent::delta_y`: **positive moves the CONTENT down**,
+  i.e. scrolls up. The opposite.
+
+Measured on the deployed worker with a 2766px page: `dy=+320` left `scrollY`
+at 0; `dy=-320` scrolled to 960. `cb_input_dispatch_mouse.cc` now negates
+(`kProtocolToBlinkSign`), applied to `delta_x/y` and `wheel_ticks_x/y` alike —
+they describe the same gesture, and a mismatch would tell chromium's smoothing
+the opposite of the motion.
+
+**The lesson worth keeping:** a fix that makes a check go from failing to
+failing is not necessarily a fix that did nothing. Reading the events the page
+received — rather than only the pass/fail — is what separated "the delta is
+still being dropped" from "the delta arrives, backwards".
 
 ## Related
 

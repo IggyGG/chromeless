@@ -165,7 +165,7 @@ spec:
         - name: chromium
           # The pin from build/guest-release.json, verified to boot and paint
           # by infra/k8s/standalone/smoke-job.yaml.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-e654ed644219
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-224c19413e24
           env:
             - name: SESSION_ID
               value: dev

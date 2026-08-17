@@ -51,17 +51,13 @@ reporting 20 mysterious failures.
 
 ## Expected result
 
-**24 of 28**, reproducibly. The four failures are two confirmed embedder
-defects, each written up with a named fix site:
+**28 of 28**, on a worker running image `cr7727-224c19413e24` or later.
+Confirmed on two consecutive runs.
 
-| failing check | cause |
-| --- | --- |
-| `wheel scrolls the remote page down` / `back up` | [`wheel-phase-start-delta-dropped.md`](../../docs/findings/wheel-phase-start-delta-dropped.md) |
-| `tab moves remote focus` | [`keyboard-dom-code-never-set.md`](../../docs/findings/keyboard-dom-code-never-set.md) |
-| `space toggles the focused remote checkbox` | same |
-
-Both need a 4–8 h Chromium build, so they are documented rather than fixed.
-**A run that reports anything other than these four is a regression.**
+**Any failure is a regression.** Earlier images score 24/28 — the four extra
+failures are the wheel and keyboard defects in `docs/findings/`, fixed in that
+image. If you see those exact four, check the worker's image tag before
+debugging anything.
 
 ## When a check fails
 
