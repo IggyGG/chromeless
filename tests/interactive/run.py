@@ -62,7 +62,12 @@ SITES = [
     ("wikipedia (text)",   "https://en.m.wikipedia.org/wiki/WebRTC"),
     ("mdn (dense)",        "https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection"),
     ("duckduckgo (form)",  "https://lite.duckduckgo.com/lite/"),
-    ("httpbin (forms)",    "https://httpbin.org/forms/post"),
+    # A form-heavy page, for input targeting against real controls. Was
+    # httpbin.org/forms/post until 2026-08-17, when httpbin began flapping
+    # between 200 and 503 and cost two false failures — the suite now detects
+    # that (see _site_reachable) but a stable third party is better than a
+    # well-handled unstable one.
+    ("w3schools (forms)",  "https://www.w3schools.com/html/html_forms.asp"),
     ("wikipedia main",     "https://en.m.wikipedia.org/wiki/Main_Page"),
 ]
 
@@ -137,7 +142,26 @@ def suite_navigation(client, worker):
         try:
             H.navigate(url)
         except Exception as e:
-            check(f"navigate: {label}", False, f"gateway error {e}")
+            # A third-party outage is NOT a chromeless failure, and reporting it
+            # as one is worse than useless — it turns a red suite into noise
+            # that gets ignored. Observed 2026-08-17: httpbin.org returned 503
+            # for every request, the worker hung waiting for it, the gateway's
+            # CDP read deadline expired, and the NEXT site failed too as
+            # collateral from the same stuck connection. Two red checks, zero
+            # defects.
+            #
+            # So: ask the site directly, from here. If it is also unreachable
+            # from this machine, the site is down and the check is skipped
+            # loudly rather than failed silently-wrongly.
+            reachable, detail = _site_reachable(url)
+            if not reachable:
+                print(f"  SKIP  navigate: {label}   third-party site "
+                      f"unreachable from here too ({detail}) — not a "
+                      f"chromeless failure")
+                continue
+            check(f"navigate: {label}", False,
+                  f"gateway error {e} (but the site IS reachable from here: "
+                  f"{detail})")
             continue
         # A redirect is not a failure: en.m.wikipedia.org -> en.wikipedia.org,
         # http -> https, and locale redirects are all normal. What matters is
@@ -1100,6 +1124,27 @@ def _poll(get, want, timeout=15, interval=0.4):
     return False, last
 
 
+def _site_reachable(url, timeout=12):
+    """Can THIS machine reach the site? Distinguishes 'chromeless is broken'
+    from 'the internet is broken', which look identical from the worker.
+
+    Any 2xx/3xx/4xx means the server answered — even a 404 proves it is up.
+    Only a connection failure or a 5xx counts as down.
+    """
+    import urllib.error
+    req = urllib.request.Request(url, method="GET",
+                                 headers={"User-Agent": "chromeless-itest/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return True, f"HTTP {r.status}"
+    except urllib.error.HTTPError as e:
+        if e.code >= 500:
+            return False, f"HTTP {e.code}"
+        return True, f"HTTP {e.code}"
+    except Exception as e:                      # noqa: BLE001 — DNS, TLS, timeout
+        return False, type(e).__name__
+
+
 def _same_site(got, want):
     """Same registrable-ish site, ignoring subdomain and scheme redirects."""
     def core(u):
@@ -1176,7 +1221,13 @@ def main():
     for name, ok, detail in results:
         if not ok:
             print(f"  FAILED: {name}  {detail}")
-    print(f"  {passed}/{len(results)} checks passed")
+    skipped = len(SITES) - sum(1 for n, _, _ in results if n.startswith("navigate: "))
+    print(f"  {passed}/{len(results)} checks passed"
+          + (f"  ({skipped} skipped: third-party site down)" if skipped else ""))
+    # A skipped site is NOT a failure — the suite still reports success, and
+    # says plainly what it did not measure. Failing here would mean any
+    # third-party outage turns this red, and a suite that is red for reasons
+    # outside the repo is one people stop reading.
     return 0 if passed == len(results) else 1
 
 
