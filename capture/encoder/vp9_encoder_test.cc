@@ -312,5 +312,59 @@ TEST(Vp9EncoderTest, EncoderInfoTagsLowLatency) {
   EXPECT_FALSE(info.is_hardware_accelerated);
 }
 
+// ── The crash the external-reinit test above CANNOT catch ────────────────
+//
+// See the twin in h264_encoder_test.cc for the full story. Short version:
+// the test above re-registers the callback by hand (libwebrtc's order), so
+// it never exercises Encode()'s SELF-reinit path. That path calls
+// Release() — which nulls callback_ — after the entry guard has already
+// been passed, then dereferences it. Null deref, browser process dead, on
+// the first frame at a new geometry.
+//
+// Latent until Cb.setViewport made the capturer's resolution mutable; the
+// capturer pinned min==max at 1280x720, so no frame ever changed size.
+TEST(Vp9EncoderTest, SelfReinitOnFrameSizeChangeKeepsCallbackRegistered) {
+  Vp9Encoder enc(Vp9EncoderConfig{});
+  CapturingCallback cb;
+  const webrtc::VideoEncoder::Settings kSettings(
+      webrtc::VideoEncoder::Capabilities(false), 1, 1200);
+
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
+  auto small = DefaultSettings(640, 360, 30, 1'500'000);
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.InitEncode(&small, kSettings));
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Encode(MakeFrame(640, 360, i),
+                                                nullptr));
+  }
+  const size_t before = cb.captured().size();
+  ASSERT_GT(before, 0u);
+
+  // Larger frame, no external Release/InitEncode, no re-registration.
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Encode(MakeFrame(1280, 720, i),
+                                                nullptr));
+  }
+
+  ASSERT_GT(cb.captured().size(), before)
+      << "self-reinit produced no output — the callback was lost across "
+         "the internal Release(), so every post-resize frame is dropped "
+         "(and before the fix, this line was preceded by a SIGSEGV)";
+  const auto& first_after = cb.captured()[before];
+  EXPECT_EQ(webrtc::VideoFrameType::kVideoFrameKey, first_after.frame_type)
+      << "first frame after self-reinit must be a keyframe";
+  EXPECT_EQ(1280u, first_after.vp9_width0);
+  EXPECT_EQ(720u, first_after.vp9_height0);
+
+  // And back down: shrinking must work too (the user can drag smaller).
+  const size_t before_shrink = cb.captured().size();
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.Encode(MakeFrame(640, 360, i),
+                                                nullptr));
+  }
+  ASSERT_GT(cb.captured().size(), before_shrink)
+      << "self-reinit on shrink produced no output";
+  EXPECT_EQ(640u, cb.captured()[before_shrink].vp9_width0);
+}
+
 }  // namespace
 }  // namespace cloud_browser

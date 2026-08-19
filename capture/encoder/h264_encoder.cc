@@ -217,6 +217,15 @@ int32_t H264Encoder::Encode(
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
   if (frame.width() != width_ || frame.height() != height_) {
+    // Release() nulls callback_ (see its body). The entry guard above has
+    // already been passed for THIS frame, so nothing re-checks it before
+    // the OnEncodedImage call below — carrying the registration across the
+    // re-init by hand is what stops that from being a nullptr dereference.
+    // Symptom if you remove it: browser-process SIGSEGV on the first frame
+    // at a new geometry, i.e. the guest dies the moment the user resizes.
+    // Latent until the capturer's resolution became mutable (it pinned
+    // min==max at 1280x720, so no frame ever changed size mid-session).
+    webrtc::EncodedImageCallback* const saved_callback = callback_;
     Release();
     webrtc::VideoCodec settings{};
     settings.width = frame.width();
@@ -225,6 +234,7 @@ int32_t H264Encoder::Encode(
           != WEBRTC_VIDEO_CODEC_OK) {
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
+    callback_ = saved_callback;
   }
 
   webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =

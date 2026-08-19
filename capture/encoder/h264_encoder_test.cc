@@ -348,5 +348,67 @@ TEST(H264EncoderTest, EncoderInfoTagsLowLatency) {
   EXPECT_FALSE(info.is_hardware_accelerated);
 }
 
+// ── The crash the external-reinit test above CANNOT catch ────────────────
+//
+// The test above drives libwebrtc's order: Release / InitEncode /
+// RegisterEncodeCompleteCallback. That re-registers the callback by hand,
+// so it never exercises the path that actually breaks.
+//
+// Encode() ALSO re-inits itself when a frame arrives at a geometry that
+// differs from the current one — and libwebrtc does not always take the
+// external route. When the FrameSink capturer's resolution became mutable
+// (Cb.setViewport), this became the live path for every viewport change.
+//
+// The bug: Encode()'s entry guard checks callback_ ONCE, at the top. The
+// self-reinit then calls Release(), which sets callback_ = nullptr, and
+// InitEncode() does not restore it — but control has already passed the
+// guard for this frame, so ~70 lines later callback_->OnEncodedImage()
+// dereferences null and the BROWSER PROCESS dies. Not a dropped frame:
+// a SIGSEGV, on the first frame after a user drags their window.
+//
+// Feeding a differently-sized frame WITHOUT re-registering is therefore
+// the whole point of this test. If it segfaults, the fix regressed.
+TEST(H264EncoderTest, SelfReinitOnFrameSizeChangeKeepsCallbackRegistered) {
+  H264Encoder enc(H264EncoderConfig{});
+  CapturingCallback cb;
+  const webrtc::VideoEncoder::Settings kSettings(
+      webrtc::VideoEncoder::Capabilities(false), 1, 1200);
+
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.RegisterEncodeCompleteCallback(&cb));
+  auto small = DefaultSettings(640, 360, 30, 1'500'000);
+  ASSERT_EQ(WEBRTC_VIDEO_CODEC_OK, enc.InitEncode(&small, kSettings));
+  for (int i = 0; i < 10; ++i) {
+    enc.Encode(MakeFrame(640, 360, i), nullptr);
+  }
+  const size_t before = cb.captured().size();
+  ASSERT_GT(before, 0u);
+
+  // Larger frame, no external Release/InitEncode, no re-registration.
+  // Encode() must notice the geometry change and re-init internally.
+  for (int i = 0; i < 10; ++i) {
+    enc.Encode(MakeFrame(1280, 720, i), nullptr);
+  }
+
+  ASSERT_GT(cb.captured().size(), before)
+      << "self-reinit produced no output — the callback was lost across "
+         "the internal Release(), so every post-resize frame is dropped "
+         "(and before the fix, this line was preceded by a SIGSEGV)";
+  const auto& first_after = cb.captured()[before];
+  auto nals = ScanNalTypes(first_after.payload.data(),
+                           first_after.payload.size());
+  EXPECT_TRUE(std::find(nals.begin(), nals.end(), 7) != nals.end())
+      << "no SPS after self-reinit — receiver cannot decode the new size";
+  EXPECT_TRUE(std::find(nals.begin(), nals.end(), 5) != nals.end())
+      << "no IDR after self-reinit";
+
+  // And back down: shrinking must work too (the user can drag smaller).
+  const size_t before_shrink = cb.captured().size();
+  for (int i = 0; i < 10; ++i) {
+    enc.Encode(MakeFrame(640, 360, i), nullptr);
+  }
+  EXPECT_GT(cb.captured().size(), before_shrink)
+      << "self-reinit on shrink produced no output";
+}
+
 }  // namespace
 }  // namespace cloud_browser
