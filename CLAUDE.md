@@ -144,11 +144,30 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
        JOIN action_run_job j ON j.task_id=t.id
        JOIN repository p ON p.id=j.repo_id
       WHERE p.name='chromeless' AND j.status=2 ORDER BY t.id DESC LIMIT 5;"
-  # then copy it out (the forgejo container has no zstdcat) and decode:
+  # then copy it out (the forgejo container has no zstdcat) and decode.
+  # The log is PLAIN timestamped text, NOT newline-delimited JSON — the
+  # json.loads() one-liner this file used to recommend dies on line 1 with
+  # "Extra data". Just strip NULs:
   kubectl cp -n forgejo -c forgejo forgejo-<pod>:/data/actions_log/<file> ./x.zst
-  zstdcat x.zst | python3 -c "import sys,json;[print(json.loads(l).get('content','').rstrip()) for l in sys.stdin]"
+  zstdcat x.zst | tr -d '\000' > x.txt
+  grep -nE "::error|FAIL|No space left|Job failed" x.txt | cut -c30-180 | tail
   ```
-  Job status codes: 1=success, 2=failure, 4=skipped.
+
+  **Job status codes — the full set. Getting these wrong invents outages.**
+
+  | code | meaning | trap |
+  | --- | --- | --- |
+  | 1 | success | |
+  | 2 | failure | |
+  | 3 | cancelled | |
+  | 4 | **skipped** | reads as `pending` forever in the commit-status API |
+  | 5 | **WAITING** | *not* running — misreading 5 as "in flight" turned a normal queue into a phantom "311 jobs claimed but never started" (2026-08-19) |
+  | 6 | running | |
+
+  `pull_request.status` is a DIFFERENT enum on the same instance:
+  **0=conflict, 1=checking, 2=mergeable**. A PR at 1 cannot be merged (the API
+  returns 405) no matter how green its checks are.
+
   A Forgejo API token lives in `../tf-multiverse/.env` as `FORGEJO_API_TOKEN`.
 
 ## Docs: which to trust
@@ -234,6 +253,112 @@ Rules:
 What *does* warrant asking: anything outward-facing or hard to reverse (merges,
 deploys, prod image promotion, destructive storage operations), and any fork
 where different answers mean materially different work.
+
+## Before you report a number, ask what it counted
+
+Every wrong claim made in this repo on 2026-08-19 — five of them in one
+session, by two different agents — had the same shape: a query returned a
+number, the number was believed, and nobody asked which rows it silently
+excluded. None was a reasoning failure. Each was a *counting* failure.
+
+**The four checks, in the order they cost time:**
+
+1. **Did the work actually run?** A job at `status=5` never started; it is not
+   a pass and not a fail. Filter `COALESCE(started,0) > 0` before computing any
+   pass rate, or "never ran" is indistinguishable from "ran clean". Reported
+   recovery: `8 pass / 0 fail`. Actual: `64/2` and `56/8`.
+
+2. **Is the boundary where you think it is?** A fleet rebuild spanned
+   15:56–16:25Z. Cutting at 16:00 counted five mid-rebuild failures as
+   post-fix. Cut at the END of a transition, not its start, and say which you
+   used.
+
+3. **Is it one sample or a rate?** Five consecutive passes against a ~7% base
+   rate happens ~70% of the time with no change at all. Give the n. "0 failures
+   since the fix" over five runs is not evidence of a fix.
+
+4. **Same reading twice?** PR mergeability was diagnosed three different wrong
+   ways because each theory fit one snapshot. Sampling the *same* PRs twenty
+   minutes apart refuted all three at once. If a conclusion rests on a
+   distribution, re-read the individuals.
+
+**And the meta-check:** if a fix "worked", find the row that should have
+changed and confirm it did. `docker image prune` reporting
+`Total reclaimed space: 0B` is the fix working; `290.1MB` is it failing. That
+one line is worth more than any amount of reasoning about what the code does.
+
+### A guard whose skipped path is silent is not a guard
+
+Four independent instances of this landed in one day, in two repos:
+
+| site | what was skipped | what it looked like |
+| --- | --- | --- |
+| `if command -v pgrep` around a kill sweep | the whole sweep, on any image without procps | a flaky test |
+| a job borrowing dind-gc's own pin label | the pin (GC deletes that label) | the step succeeded |
+| log capture scheduled after the specs | the diagnosis, on a `compose up` failure | an 836-byte artifact |
+| a DataChannel falling into `other =>` | the entire feature | a working channel |
+
+**Review question: does the guarded-OUT path report differently from the
+succeeded path?** If not, it is a silent no-op waiting for the wrong
+environment. Prefer a fallback; if a guard is genuinely required, make the
+skipped branch *say so*.
+
+Two specific forms worth memorising:
+
+- `if ! cmd; then rc=$?` reads the **negated** pipeline's status, which is
+  always 0 — it turns a failure into a green. Use `rc=0; cmd || rc=$?`.
+- A guard keyed to **line numbers** in a file other people edit
+  (`sed -n '1000,1140p'`) goes stale as the file grows, and fails as a false
+  ALARM — which trains everyone to ignore the check that would have caught the
+  real thing. Anchor on structure.
+
+### A green PR that will not merge is probably not your PR
+
+`pull_request.status` (0=conflict, 1=checking, 2=mergeable) is separate from
+every check on the PR. A PR at **1 cannot be merged — the API returns 405** —
+however green it is, and the state is entered once and never restored:
+
+- a **base** push invalidates it, and so does a **head** push. Pushing a fix to
+  your own open PR is therefore self-defeating: **finish the branch before you
+  open the PR.**
+- close/reopen, `GET`ting the PR, and pushing an empty commit were each tested
+  and do **not** re-trigger the check.
+- `forgejo doctor check --run recalculate-merge-bases` repairs a *different*
+  defect (650 stale mergebases on 2026-08-19). It does not fix this — confirmed
+  by checking which PRs were in its report before running `--fix`.
+
+Read `pull_request.status` in postgres; the API's `mergeable` field is the same
+information but the enum above is what makes it interpretable.
+
+**Unresolved, deliberately:** chromeless #74 held status=2 for five hours and
+merged; tf-multiverse #14055 dropped 2→1 in ninety seconds, untouched. Neither
+base branch moved during its window, so base churn does not explain the
+difference. Candidate variables nobody has tested: base-branch activity in
+general, and per-repo queue depth (`dev` is by far the busiest). Do not report
+this as understood — three separate confident explanations (starved consumer,
+arrival-only checking, a throughput deficit) were each refuted by re-reading
+the same PRs twenty minutes later.
+
+### When CI says your code is wrong, check whether it said so before
+
+An error message names a cause; it is not evidence of one. On 2026-08-19 disk
+exhaustion arrived wearing three disguises, only the first of which is honest:
+
+```
+No space left on device                                    (honest)
+rustc-LLVM ERROR: IO failure on output stream              (on a zero-Rust branch)
+ERROR — extracted region lacks the pool acquire            (a guard blaming the tree)
+```
+
+The third sends you into your own code. Before believing it: **did this same
+check pass on this same branch in an earlier run?** If it did and nothing
+relevant changed, suspect the runner. Cheap and decisive — it costs one query
+and it would have saved an afternoon.
+
+Corollary for the opposite direction: when a job fails, confirm the log
+contains the evidence your fix *produces* before concluding the fix failed. A
+missing "Killed" line meant the run predated the commit, not that the fix was
+wrong.
 
 ## Conventions
 
