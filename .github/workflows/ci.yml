@@ -37,7 +37,10 @@ jobs:
 
       # Dockerfile lint
       - name: hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+        # Forgejo resolves bare third-party actions against data.forgejo.org,
+        # which does not mirror this repository. Pin the upstream host so the
+        # lint gate can actually start.
+        uses: https://github.com/hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: infra/Dockerfile
 
@@ -160,7 +163,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: lychee link check
-        uses: lycheeverse/lychee-action@v2
+        # See the hadolint note above: this action is not present on Forgejo's
+        # default action mirror either.
+        uses: https://github.com/lycheeverse/lychee-action@v2
         with:
           # --no-progress keeps logs short. --max-concurrency caps load
           # on third-party hosts. Glob limited to repo markdown.

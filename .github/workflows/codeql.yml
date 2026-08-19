@@ -47,7 +47,9 @@ jobs:
           cache: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        # The bare github/codeql-action reference is resolved against
+        # data.forgejo.org, where that repository does not exist.
+        uses: https://github.com/github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -64,6 +66,6 @@ jobs:
       # autobuild covers our Go modules well enough; no custom build
       # step required for the JS/TS path (build-mode: none).
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: https://github.com/github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
