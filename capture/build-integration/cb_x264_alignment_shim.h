@@ -1,0 +1,111 @@
+// Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+//
+// Works around a hard incompatibility between libx264's transparent-huge-page
+// optimisation and PartitionAlloc's maximum supported alignment.
+//
+// THE CRASH
+//
+//   [FATAL:partition_root.h(2412)] Check failed:
+//       alignment <= internal::kMaxSupportedAlignment.
+//     #03  /usr/lib/x86_64-linux-gnu/libx264.so.164+0x6b21
+//
+//   The whole browser process aborts. Downstream the worker reports
+//   "Upstream WS connect failed: Connection refused (111)", physics reports
+//   "native FrameSink capture failed to start", and the portal sees
+//   WS close 1011 CDP_SESSION_FAILED. None of those name the real cause.
+//
+// WHY IT HAPPENS
+//
+//   x264_malloc() (libx264 common/base.c:104) asks memalign() for 2 MiB
+//   alignment on any allocation >= 7/8 * 2 MiB, so the buffer can be backed
+//   by a transparent huge page:
+//
+//     6b0e: cmp $0x1bffff,%rdi   ; size > 1,835,007 B ?
+//     6b17: mov $0x200000,%edi   ; yes -> alignment = 2 MiB
+//     6b1c: call memalign@plt    ; <- the allocator shim intercepts here
+//
+//   We link libx264 dynamically (config(":x264") in this directory's
+//   BUILD.gn), so that memalign resolves through Chromium's allocator shim
+//   into PartitionAlloc, whose kMaxSupportedAlignment is kSuperPageSize/2 =
+//   1 MiB on x86-64 Linux. The request is ALWAYS exactly double the ceiling,
+//   so the PA_CHECK is not a near-miss — it fires every time that path runs.
+//
+// MEASURED, NOT ASSUMED (2026-08-19)
+//
+//   Against the exact production libx264 from the deployed guest rootfs,
+//   x264_encoder_open() alone requests oversized alignment at:
+//
+//     640x360    0 allocations      (safe)
+//     854x480    1 allocation
+//     1280x720   3 allocations      <- OUR PINNED CAPTURE RESOLUTION
+//     1920x1080  3 allocations
+//
+//   An earlier diagnosis in this repo claimed the crash was frame-size
+//   dependent and that 720p was safe. That was WRONG: it modelled the
+//   allocation as the I420 payload (w*h*1.5), but x264's internal buffers are
+//   padded well beyond that. 720p — what capturer.h:237 pins — is already
+//   over the line. Capping resolution is therefore NOT a workaround; it would
+//   require going down to 640x360.
+//
+//   The reason this presents intermittently is codec negotiation, not
+//   geometry: CloudBrowserVideoEncoderFactory::GetSupportedFormats()
+//   advertises VP9 first and H.264 second, so x264 only opens when a peer
+//   selects H.264. Given H.264, the crash is deterministic.
+//
+// WHY WE INTERCEPT memalign AND NOT x264_malloc
+//
+//   The obvious fix — define x264_malloc/x264_free in our binary so they
+//   pre-empt libx264's — CANNOT WORK, and this was verified by experiment
+//   rather than argued. Debian builds libx264 with -Bsymbolic: objdump shows
+//   140 direct calls to x264_malloc@@Base, zero through the PLT, and no
+//   dynamic relocations for the symbol. Internal call sites bind locally and
+//   are unreachable by interposition. That override was built and measured
+//   changing nothing.
+//
+//   memalign() must resolve dynamically (it lives in libc), which is exactly
+//   how Chromium's shim intercepts it at all. So the aligned-allocation seam
+//   is the only interception point that actually sees these requests.
+//
+// SAFETY OF THE CLAMP
+//
+//   Over-alignment is always safe — a buffer aligned to 64 bytes satisfies
+//   every caller that asked for less, and 64 is x264's own NATIVE_ALIGN for
+//   this architecture (the alignment it uses for every allocation below the
+//   huge-page threshold). Only the TLB optimisation is lost.
+//
+//   Verified output-neutral over 30 encoded frames at 720p against the
+//   production libx264:
+//
+//     baseline : TOTAL_BYTES=462849 CHECKSUM=2870504393985350508
+//     clamped  : TOTAL_BYTES=462849 CHECKSUM=2870504393985350508
+//
+//   Bit-identical bitstreams, identical per-frame NAL counts.
+//
+// BLAST RADIUS
+//
+//   The clamp only engages above kMaxSupportedAlignment, i.e. for requests
+//   that would otherwise CHECK-fail and kill the process. Any allocation that
+//   PartitionAlloc can already service is passed through untouched, so the
+//   only behaviour this can change is "abort" -> "slightly-less-aligned
+//   buffer".
+
+#ifndef CAPTURE_BUILD_INTEGRATION_CB_X264_ALIGNMENT_SHIM_H_
+#define CAPTURE_BUILD_INTEGRATION_CB_X264_ALIGNMENT_SHIM_H_
+
+namespace cloud_browser {
+
+// Installs the aligned-allocation clamp on the process-wide allocator
+// dispatch chain. Idempotent: repeat calls are no-ops.
+//
+// MUST be called before any x264 encoder is opened. We call it from
+// CloudBrowserBrowserMainParts::PreEarlyInitialization(), the embedder's
+// first hook, which runs long before any peer connection exists.
+//
+// No-op when the allocator shim is not compiled in (PA_BUILDFLAG
+// USE_ALLOCATOR_SHIM off), in which case memalign goes straight to libc and
+// PartitionAlloc never sees the request.
+void InstallX264AlignmentShim();
+
+}  // namespace cloud_browser
+
+#endif  // CAPTURE_BUILD_INTEGRATION_CB_X264_ALIGNMENT_SHIM_H_
