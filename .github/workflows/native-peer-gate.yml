@@ -51,6 +51,8 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build chromeless:ci (gha layer cache)
+        id: build_image
+        continue-on-error: true
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -59,6 +61,26 @@ jobs:
           tags: chromeless:ci
           cache-from: type=gha,scope=chromeless-ci
           cache-to: type=gha,scope=chromeless-ci,mode=max
+
+      # Forgejo's GHA cache endpoint can return a transient 404 while BuildKit
+      # exports a fully-built image. Retry with a fresh builder and consume the
+      # existing cache, but do not make the retry depend on exporting it again.
+      - name: Recreate Buildx after cache service failure
+        if: steps.build_image.outcome == 'failure'
+        uses: docker/setup-buildx-action@v3
+        with:
+          name: native-gate-retry-builder
+          driver: docker-container
+
+      - name: Retry chromeless:ci build without cache export
+        if: steps.build_image.outcome == 'failure'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile
+          load: true
+          tags: chromeless:ci
+          cache-from: type=gha,scope=chromeless-ci
 
       - name: Save chromeless:ci as artifact (shared with gate jobs)
         run: |
