@@ -25,6 +25,11 @@ concurrency:
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
+    # github/codeql-action uploads its database and SARIF through GitHub-only
+    # API endpoints. Forgejo correctly returns 404 for those endpoints, so the
+    # GitHub workflow remains available without creating a permanently red,
+    # impossible gate on Forgejo.
+    if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

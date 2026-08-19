@@ -18,8 +18,8 @@
 # see Phase 3 in PROJECT_BRIEF.md). DO NOT ship this image to production
 # multi-tenant infra as-is.
 #
-# Build (build context = repo root so we can COPY capture/streamer-page/
-# and capture/chromeless-metrics-sidecar/):
+# Build (build context = repo root so we can COPY
+# capture/chromeless-metrics-sidecar/ and the runtime scripts):
 #   docker build -t chromeless:dev -f infra/Dockerfile .
 #
 # Run (interactive smoke test):
@@ -59,9 +59,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PULSE_RUNTIME_PATH=/run/user/1000/pulse \
     PULSE_SERVER=unix:/run/user/1000/pulse/native
 
-# Runtime stack: Chromium + virtual display + audio + process supervisor
-# + python3 (used by the in-container static server hosting the streamer
-# page; see infra/supervisord.conf [program:streamer-static]).
+# Runtime stack: Chromium + virtual display + audio + process supervisor.
 # fonts-noto-* and fonts-dejavu give us Latin + CJK + emoji coverage so
 # the latency harness pages don't render as tofu. procps is in here for
 # `ps` during smoke debugging; drop it later if image size matters.
@@ -144,12 +142,9 @@ COPY infra/supervisord.conf /etc/supervisor/supervisord.conf
 # the alternative for the unittest-binary path).
 COPY infra/m5.5-tone.wav /usr/share/cloud-browser/m5.5-tone.wav
 
-# Streamer page (T23 product) and its launch wrapper (T28). The static
-# server in supervisord serves /opt/cloud-browser, so the URL path
-# /streamer/index.html resolves to the page chromium-dev shipped.
-COPY capture/streamer-page/ /opt/cloud-browser/streamer/
+# M7 R3 removed the JavaScript streamer page and its Python static server;
+# the native peer now owns capture and signaling inside the browser process.
 COPY infra/launch-chromeless.sh /usr/local/bin/launch-chromeless.sh
-COPY infra/streamer-static-server.py /usr/local/bin/streamer-static-server.py
 
 # T52: small socat sidecar that bridges container_eth0:9222 ->
 # 127.0.0.1:9222 because Chromium 147 binds DevTools to loopback
@@ -176,9 +171,7 @@ RUN ln -sf /usr/local/lib/cloud-browser/lifecycle/entrypoint.sh    /usr/local/bi
  && ln -sf /usr/local/lib/cloud-browser/lifecycle/restart.sh       /usr/local/bin/restart.sh \
  && chmod +x /usr/local/lib/cloud-browser/lifecycle/*.sh \
  && chmod +x /usr/local/bin/launch-chromeless.sh \
- && chmod +x /usr/local/bin/devtools-proxy.sh \
- && chmod +x /usr/local/bin/streamer-static-server.py \
- && chown -R cbuser:cbuser /opt/cloud-browser
+ && chmod +x /usr/local/bin/devtools-proxy.sh
 
 # T57: seccomp profile. COPYing into the image lets `docker run
 # --security-opt seccomp=/etc/chromeless-seccomp.json` work without an external

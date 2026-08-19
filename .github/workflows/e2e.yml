@@ -38,10 +38,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      # Node is preinstalled in ci-tools. Keep npm job-local instead of using
+      # setup-node's shared host toolcache, which races across Forgejo jobs.
+      - name: Install npm
+        run: apk add --no-cache npm
 
       # Build cached via gha so re-runs are fast.
       - name: Build images

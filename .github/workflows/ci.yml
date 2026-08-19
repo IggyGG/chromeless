@@ -68,12 +68,11 @@ jobs:
       # Client: TypeScript typecheck. ESLint is run only when the project
       # actually has a config file — webrtc-dev hasn't added one yet, so
       # we skip cleanly with a notice instead of failing.
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          # cache: npm requires a lockfile; client/ doesn't have one yet,
-          # so leave caching off until package-lock.json lands.
+      # The runner image already carries Node. setup-node writes to a shared
+      # host toolcache, and concurrent jobs can delete that runtime underneath
+      # one another. Install only npm inside this isolated job container.
+      - name: Install npm
+        run: apk add --no-cache npm
 
       - name: Install client deps
         working-directory: client
@@ -163,16 +162,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: lychee link check
-        # See the hadolint note above: this action is not present on Forgejo's
-        # default action mirror either.
-        uses: https://github.com/lycheeverse/lychee-action@v2
-        with:
-          # --no-progress keeps logs short. --max-concurrency caps load
-          # on third-party hosts. Glob limited to repo markdown.
-          args: >-
-            --verbose
-            --no-progress
-            --max-concurrency 4
-            --exclude-path node_modules
+        shell: sh
+        run: |
+          set -eu
+          version=0.24.2
+          asset=lychee-x86_64-unknown-linux-gnu.tar.gz
+          base="https://github.com/lycheeverse/lychee/releases/download/lychee-v${version}"
+          curl -fsSLO "${base}/${asset}"
+          curl -fsSLO "${base}/${asset}.sha256"
+          sha256sum -c "${asset}.sha256"
+          tar -xzf "${asset}"
+          ./lychee-x86_64-unknown-linux-gnu/lychee \
+            --verbose \
+            --no-progress \
+            --max-concurrency 4 \
+            --exclude-path node_modules \
             './**/*.md'
-          fail: true

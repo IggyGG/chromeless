@@ -78,10 +78,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
       - uses: actions/download-artifact@v4
         with:
           name: chromeless-ci-image
@@ -119,10 +115,6 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/integration/native-peer')
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
 
       - uses: actions/download-artifact@v4
         with:
