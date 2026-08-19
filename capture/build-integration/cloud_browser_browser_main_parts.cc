@@ -18,6 +18,7 @@
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtp_parameters.h"
+#include "api/rtp_sender_interface.h"  // RtpSenderInterface::SetParameters
 #include "api/rtp_transceiver_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/stats/rtc_stats_collector_callback.h"
@@ -119,6 +120,15 @@ constexpr int kRecaptureRetryDelayMs = 50;
 // single vCPU while the user watches a frozen picture.
 constexpr int kMaxRendererReloadsPerWindow = 2;
 constexpr base::TimeDelta kRendererCrashWindow = base::Minutes(5);
+
+// Video sender ceilings. A CEILING, not a target — BWE still drives the
+// actual rate; this bounds what a scene change can ask for. 6 Mbps is
+// generous for 1280x720 text content and well under what a single vCPU
+// running software x264/VP9 can sustain, so the encoder saturates before
+// this does. The frame-rate cap matches the BeginFrame driver's 30 Hz;
+// asking the sender for more than the driver produces is meaningless.
+constexpr int kVideoMaxBitrateBps = 6'000'000;
+constexpr double kVideoMaxFramerate = 30.0;
 
 // TCP server-socket factory bound to <address>:<port>. The address
 // comes from --remote-debugging-address (default 127.0.0.1).
@@ -1222,6 +1232,62 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
         LOG(INFO) << "CV2-91: video transceiver codec preferences applied: "
                   << FormatCodecPreferenceNamesForLog(
                          video_codec_preferences);
+      }
+
+      // Sender parameters. Nothing set these before, so the session ran on
+      // libwebrtc defaults: no bitrate ceiling, and a degradation
+      // preference inferred from the track's content hint rather than
+      // stated. Both matter more here than in a typical call, because the
+      // guest encodes in software on a single vCPU.
+      //
+      // MAINTAIN_RESOLUTION is chosen deliberately and is NOT the safe
+      // default — it is the opposite trade to a video call. For a browser,
+      // resolution IS legibility: downscaling turns text into mush, which
+      // is worse than a lower frame rate on a page that is mostly static
+      // anyway. So under pressure we drop fps and hold pixels.
+      //
+      // State it explicitly rather than relying on the is_screencast()
+      // content hint to imply it. The hint carries a TODO about being
+      // hardcoded, and someone flipping it should not silently also flip
+      // the degradation policy — that coupling is exactly the kind of
+      // action-at-a-distance this codebase keeps getting bitten by.
+      //
+      // Consequence worth stating: a large viewport on SwiftShader will
+      // tank to single-digit fps rather than degrade to a smaller picture.
+      // That is the intended trade; the fix for it is vCPUs, not a
+      // different preference here.
+      webrtc::RtpSenderInterface* video_sender = tx_result.value()->sender();
+      if (video_sender) {
+        webrtc::RtpParameters params = video_sender->GetParameters();
+        params.degradation_preference =
+            webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+        if (!params.encodings.empty()) {
+          // Ceiling, not a target — BWE still drives the actual rate. This
+          // stops a burst of scene change from asking the encoder for more
+          // than the single vCPU can produce or the relay can carry.
+          params.encodings[0].max_bitrate_bps = kVideoMaxBitrateBps;
+          params.encodings[0].max_framerate = kVideoMaxFramerate;
+        } else {
+          LOG(WARNING) << "CV2-QUALITY: sender has no encodings; bitrate "
+                          "ceiling not applied";
+        }
+        webrtc::RTCError set_params_result =
+            video_sender->SetParameters(params);
+        if (!set_params_result.ok()) {
+          // Non-fatal: the session still streams on libwebrtc defaults.
+          LOG(ERROR) << "CV2-QUALITY: SetParameters(video) failed: "
+                     << set_params_result.message()
+                     << " — running on libwebrtc defaults (no explicit "
+                        "bitrate ceiling, inferred degradation preference)";
+        } else {
+          LOG(INFO) << "CV2-QUALITY: video sender parameters applied — "
+                       "max_bitrate=" << kVideoMaxBitrateBps
+                    << "bps max_framerate=" << kVideoMaxFramerate
+                    << " degradation=MAINTAIN_RESOLUTION";
+        }
+      } else {
+        LOG(WARNING) << "CV2-QUALITY: video transceiver has no sender; "
+                        "sender parameters not applied";
       }
       LOG(INFO) << "CV2-69: video sendonly transceiver added; awaiting "
                    "OnRenegotiationNeeded → CreateOffer → wire emission.";
