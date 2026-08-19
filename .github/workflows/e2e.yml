@@ -215,7 +215,26 @@ jobs:
           CHROMELESS_USER: e2e
           CHROMELESS_PASS: e2e-password
         run: |
-          docker compose -f infra/compose.yaml --profile observability up -d --wait
+          # Dump logs BEFORE the step exits on failure. The existing "Capture
+          # container logs on failure" step runs after the specs, so when
+          # `up --wait` itself fails there is nothing to capture from — the
+          # stack is already torn down and the artifact lands ~empty. That is
+          # how a `client-build exit 254` on PR #68 ended up undiagnosable.
+          #
+          # Credit: session unblock-goldens-portal-gates found this while
+          # root-causing the same lane (chromeless #72).
+          if ! docker compose -f infra/compose.yaml --profile observability up -d --wait; then
+            echo "::error::docker compose up failed — dumping service state and logs"
+            echo "::group::compose ps"
+            docker compose -f infra/compose.yaml --profile observability ps -a || true
+            echo "::endgroup::"
+            for svc in $(docker compose -f infra/compose.yaml --profile observability config --services 2>/dev/null); do
+              echo "::group::logs ${svc}"
+              docker compose -f infra/compose.yaml --profile observability logs --tail 120 "${svc}" 2>&1 || true
+              echo "::endgroup::"
+            done
+            exit 1
+          fi
 
       # `up --wait` is NOT evidence the worker connected. The chromium service
       # passes its healthcheck off DevTools, which keeps answering while the
