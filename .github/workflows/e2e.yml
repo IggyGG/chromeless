@@ -45,6 +45,29 @@ jobs:
 
       # Build cached via gha so re-runs are fast.
       - name: Build images
+        id: build_images
+        continue-on-error: true
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/Dockerfile
+          tags: chromeless:dev
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A Forgejo runner occasionally loses its job-local BuildKit gRPC
+      # frontend while the shared builders are busy. Recreate the builder and
+      # retry once; an actual Dockerfile failure still leaves this job red.
+      - name: Recreate Buildx after transient frontend loss
+        if: steps.build_images.outcome == 'failure'
+        uses: docker/setup-buildx-action@v3
+        with:
+          name: e2e-retry-builder
+          driver: docker-container
+
+      - name: Retry image build once
+        if: steps.build_images.outcome == 'failure'
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -90,7 +113,7 @@ jobs:
 
       - name: Upload Playwright artefacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: playwright-report-${{ github.run_id }}
           path: |
@@ -111,7 +134,7 @@ jobs:
 
       - name: Upload container logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: compose-logs-${{ github.run_id }}
           path: ./compose-logs/

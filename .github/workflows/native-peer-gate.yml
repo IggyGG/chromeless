@@ -65,7 +65,10 @@ jobs:
           docker save chromeless:ci -o /tmp/chromeless-ci.tar
           ls -lh /tmp/chromeless-ci.tar
 
-      - uses: actions/upload-artifact@v4
+      # Forgejo does not implement GitHub's v4 artifact service yet. Its
+      # runner exposes the v3 artifact protocol used by our other live
+      # workflows, so keep producer and consumers on that protocol.
+      - uses: actions/upload-artifact@v3
         with:
           name: chromeless-ci-image
           path: /tmp/chromeless-ci.tar
@@ -78,7 +81,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v3
         with:
           name: chromeless-ci-image
           path: /tmp/
@@ -96,7 +99,7 @@ jobs:
         if: always()
         run: cat gate-output.json || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v3
         if: always()
         with:
           name: native-peer-gate-scaffold-output
@@ -116,7 +119,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v3
         with:
           name: chromeless-ci-image
           path: /tmp/
@@ -131,7 +134,7 @@ jobs:
         if: always()
         run: cat gate-strict-output.json || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v3
         if: always()
         with:
           name: native-peer-gate-strict-output
