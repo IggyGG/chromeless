@@ -155,6 +155,52 @@ void CloudBrowserFrameSinkCapturer::SetIdleRefreshPeriod(
   ArmIdleRefreshDeadline();
 }
 
+void CloudBrowserFrameSinkCapturer::SetCaptureResolution(
+    const gfx::Size& resolution) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  // Even-align. I420 subsamples chroma 2x2, so an odd width or height
+  // leaves a half-sampled edge. Round DOWN: rounding up could exceed a
+  // caller's tier cap, and one pixel of letterbox is invisible while a
+  // cap violation is not.
+  const gfx::Size aligned(resolution.width() & ~1, resolution.height() & ~1);
+
+  if (aligned.IsEmpty()) {
+    LOG(WARNING) << "CloudBrowserFrameSinkCapturer: ignoring empty capture "
+                    "resolution "
+                 << resolution.ToString()
+                 << " (staying at " << resolution_.ToString() << ")";
+    return;
+  }
+  if (aligned == resolution_) {
+    return;  // Unconditional-resize-handler friendly: nothing to do.
+  }
+
+  const gfx::Size previous = resolution_;
+  resolution_ = aligned;
+
+  if (!started_) {
+    // Pre-Start: the field is all there is. Start() applies it.
+    LOG(INFO) << "CloudBrowserFrameSinkCapturer: capture resolution set to "
+              << resolution_.ToString() << " (not yet started)";
+    return;
+  }
+
+  // Running: push the new constraints at the producer. Same triple
+  // Start() applies, for the same reason — see the M2-R4 comment there.
+  producer_->SetResolutionConstraints(resolution_, resolution_,
+                                      /*use_fixed_aspect_ratio=*/true);
+
+  // Ask for a frame immediately. Without this the new geometry does not
+  // reach the wire until the page happens to paint — on a static page
+  // that can be seconds, and the user sees their resize do nothing.
+  producer_->RequestRefreshFrame();
+
+  LOG(INFO) << "CloudBrowserFrameSinkCapturer: capture resolution "
+            << previous.ToString() << " -> " << resolution_.ToString()
+            << " (constraints re-pinned; refresh requested)";
+}
+
 void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (started_) {

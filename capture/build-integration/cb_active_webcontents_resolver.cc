@@ -190,4 +190,41 @@ void CbActiveWebContentsResolver::RenderViewHostChanged(
   }
 }
 
+void CbActiveWebContentsResolver::PrimaryMainFrameRenderProcessGone(
+    base::TerminationStatus status) {
+  // The renderer for the captured WebContents died. The WebContents
+  // itself survives — it is what a reload has to be issued against — so
+  // active_ deliberately stays set.
+  //
+  // The FSID is dead with the process, though. Invalidate it for the same
+  // reason RenderViewHostChanged does: so active_frame_sink_id() reports
+  // the truth and the next SetActiveCapture doesn't warn about a mismatch
+  // against a sink that belongs to a process that no longer exists.
+  const bool had_active_capture = active_ != nullptr;
+
+  if (active_fsid_.is_valid()) {
+    active_fsid_ = viz::FrameSinkId();
+  }
+
+  LOG(ERROR) << "CbActiveWebContentsResolver: captured renderer process GONE "
+                "(TerminationStatus=" << static_cast<int>(status)
+             << ", had_active_capture=" << had_active_capture
+             << ") — capture is bound to a dead FrameSink and will produce "
+                "no further frames until the page is reloaded";
+
+  // Nothing here creates a replacement RenderViewHost: content does not
+  // make one until a navigation happens. That is exactly why the RVH-swap
+  // re-arm cannot cover this case, and why recovery has to start from the
+  // crash. The owner holds the policy (bounded reload → escalate).
+  //
+  // POST rather than call inline, mirroring the re-arm path above: we are
+  // inside a content observer callback and the owner's recovery issues a
+  // navigation, which is not something to start from underneath the
+  // notification that the renderer just died.
+  if (had_active_capture && renderer_gone_) {
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+                                                             renderer_gone_);
+  }
+}
+
 }  // namespace cloud_browser

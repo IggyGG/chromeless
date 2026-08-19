@@ -11,8 +11,10 @@
 # only thing the encoder factory needs to flip the H264 path on at
 # build time.
 #
-# Selected by setting CB_BUILD_PROFILE=x264 in the build job env;
-# cb-build.sh emits an args.gn that imports this file.
+# Selected by setting CHROMELESS_BUILD_PROFILE=x264 in the build job env
+# (CB_BUILD_PROFILE is the pre-rename name, still honoured as a fallback);
+# build/chromeless-build.sh exports it and
+# capture/build-integration/build.sh picks the overlay from it.
 
 import("//cloud-browser/capture/build-integration/args.gn")
 

@@ -18,6 +18,7 @@
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtp_parameters.h"
+#include "api/rtp_sender_interface.h"  // RtpSenderInterface::SetParameters
 #include "api/rtp_transceiver_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/stats/rtc_stats_collector_callback.h"
@@ -40,8 +41,12 @@
 #include "capture/audio/cb_audio_track.h"
 #include "capture/build-integration/cb_aura_platform_data.h"
 #include "capture/build-integration/cb_begin_frame_driver.h"  // CV2-ICE
+#include "capture/build-integration/cb_control_channel.h"
 #include "capture/build-integration/cb_cursor_xy_join.h"
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
+#include "capture/build-integration/cb_viewport_controller.h"
+#include "capture/build-integration/cb_javascript_dialog_manager.h"
+#include "capture/build-integration/cb_web_contents_delegate.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
 #include "capture/cursor/cb_cursor_dc_emitter.h"
@@ -66,6 +71,7 @@
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_socket_factory.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/reload_type.h"  // content::ReloadType — renderer-crash reload
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
@@ -106,6 +112,23 @@ constexpr int kBackLog = 10;
 // imperceptible, bounded so a genuinely gone target can't spin forever.
 constexpr int kRecaptureRvhSwapAttempts = 5;
 constexpr int kRecaptureRetryDelayMs = 50;
+
+// Renderer-crash reload budget. Two reloads inside five minutes is enough
+// to ride out a one-off renderer OOM or a bad frame; a third inside the
+// same window means the page reliably kills its renderer, and re-navigating
+// into the same crash is not recovery — it is a loop that burns the guest's
+// single vCPU while the user watches a frozen picture.
+constexpr int kMaxRendererReloadsPerWindow = 2;
+constexpr base::TimeDelta kRendererCrashWindow = base::Minutes(5);
+
+// Video sender ceilings. A CEILING, not a target — BWE still drives the
+// actual rate; this bounds what a scene change can ask for. 6 Mbps is
+// generous for 1280x720 text content and well under what a single vCPU
+// running software x264/VP9 can sustain, so the encoder saturates before
+// this does. The frame-rate cap matches the BeginFrame driver's 30 Hz;
+// asking the sender for more than the driver produces is meaningless.
+constexpr int kVideoMaxBitrateBps = 6'000'000;
+constexpr double kVideoMaxFramerate = 30.0;
 
 // TCP server-socket factory bound to <address>:<port>. The address
 // comes from --remote-debugging-address (default 127.0.0.1).
@@ -237,6 +260,9 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
     viz::FrameSinkId frame_sink_id) {
   if (!web_contents || !frame_sink_id.is_valid()) {
     active_webcontents_resolver_.SetActiveCapture(nullptr, viz::FrameSinkId());
+    if (viewport_controller_) {
+      viewport_controller_->SetTargetWebContents(nullptr);
+    }
     LOG(WARNING) << "CV2-81: active capture cleared by invalid "
                     "SetActiveCapture input";
     return;
@@ -244,6 +270,14 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
 
   web_contents->Focus();
   active_webcontents_resolver_.SetActiveCapture(web_contents, frame_sink_id);
+
+  // The viewport follows the captured tab: a resize must resize whatever
+  // is on screen, and after a tab switch that is a different WebContents.
+  // Without this the controller would keep resizing the tab the user
+  // navigated away from.
+  if (viewport_controller_) {
+    viewport_controller_->SetTargetWebContents(web_contents);
+  }
   if (screen_ && input_delegate_) {
     screen_->SetLastPointerSource(input_delegate_->last_pointer_state());
   }
@@ -422,6 +456,14 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
     screen_->SetRootWindow(aura_root_window());
   }
 
+  // Viewport controller — the single owner of "how big is the browser".
+  // Constructed here, right after the display and the aura host exist and
+  // before any WebContents does, so nothing can observe a half-applied
+  // viewport. The track source does not exist yet (the capture pipeline
+  // is built in step 5b); it is injected via SetTrackSource once it does.
+  viewport_controller_ = std::make_unique<CbViewportController>(
+      screen_.get(), aura_.get(), /*track_source=*/nullptr);
+
   // Note for CV2-75 (M5 R1 / CbCursorClient): the cursor-client is
   // ALREADY constructed + registered by CbAuraPlatformData's ctor
   // (cb_aura_platform_data.cc:152-153). main_parts MUST NOT re-create
@@ -449,6 +491,19 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   CHECK(initial_web_contents_)
       << "WebContents::Create returned null — chromium browser process "
       << "is misconfigured (renderer host process not yet up?).";
+
+  // Attach the WebContentsDelegate BEFORE WasShown/Focus/LoadURL below, so
+  // that a page which calls confirm() or window.open() in its very first
+  // script already has somewhere for those to go. Without a delegate,
+  // content's defaults silently drop all of it (see the class comment).
+  //
+  // The delegate is a process-lifetime singleton, not owned here: content
+  // holds it as a raw back-pointer and DevToolsManager outlives main_parts,
+  // so an owned delegate would be freed while live WebContents still point
+  // at it — the same hazard that makes aura_ a deliberate leak.
+  GetCloudBrowserWebContentsDelegate()->SetSessionContext(
+      aura_->host()->window(), /*control_channel=*/nullptr);
+  initial_web_contents_->SetDelegate(GetCloudBrowserWebContentsDelegate());
 
   // WebContents::WasShown() below makes Chromium treat the page as visible, but
   // it does not show the Aura container window created by WebContentsViewAura.
@@ -716,6 +771,14 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
 
+  // The capture pipeline now exists, so the viewport controller can reach
+  // it. Until this point Apply() updates the display + aura host and skips
+  // the capturer step; the resolution it stored is picked up by the first
+  // capture start.
+  if (viewport_controller_) {
+    viewport_controller_->SetTrackSource(cb_track_source_.get());
+  }
+
   // CV2 idle-refresh: enable the capturer's constant-frame-rate hold-and-repeat
   // so WebRTC keeps streaming the last painted frame when the captured renderer
   // goes IDLE and stops committing CompositorFrames. THE DEFECT (byte-proven on
@@ -784,6 +847,13 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   active_webcontents_resolver_.SetRecaptureOnRvhSwapCallback(
       base::BindRepeating(&CloudBrowserBrowserMainParts::RearmCaptureAfterRvhSwap,
                           base::Unretained(this), kRecaptureRvhSwapAttempts));
+
+  // Renderer-crash recovery. Same Unretained rationale as the re-arm
+  // closure directly above (the resolver is a value member of this
+  // main_parts, so it cannot outlive us).
+  active_webcontents_resolver_.SetRendererGoneCallback(base::BindRepeating(
+      &CloudBrowserBrowserMainParts::OnCapturedRendererGone,
+      base::Unretained(this)));
 
   // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) F5 + F6 ==============
   //
@@ -859,6 +929,21 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
 // the synchronous signaling_thread_->BlockingCall (audio transceiver) is legal
 // when this runs from a CDP HandleCommand task (per-task DisallowBaseSync-
 // Primitives is active there). The scope is a no-op on the env-boot path.
+CbViewportSpec CloudBrowserBrowserMainParts::SetViewport(
+    const CbViewportSpec& spec) {
+  if (!viewport_controller_) {
+    // Pre-construction (before PreMainMessageLoopRun step 1) or post-
+    // teardown. Echo the request back rather than inventing a value: the
+    // caller learns nothing was applied by observing that nothing changed,
+    // and we avoid claiming a geometry that no layer actually holds.
+    LOG(WARNING) << "CloudBrowserBrowserMainParts::SetViewport: no viewport "
+                    "controller (pre-init or post-teardown); ignoring request "
+                 << spec.size_dip.ToString();
+    return spec;
+  }
+  return viewport_controller_->Apply(spec, "Cb.setViewport");
+}
+
 webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
     const NativeSessionConfig& cfg) {
   // Idempotency guard — reject a second bring-up without mutating state.
@@ -1040,9 +1125,32 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
         std::move(file_upload_ws_), dc_host_.get());
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
                            file_upload_relay_.get());
-    LOG(INFO) << "CV2-75: \"files\" DC observer = "
-                 "CbFileUploadRelay (WS disabled / url=off, "
-                 "outbound dc_host enabled)";
+    // Honesty fix: this used to claim "outbound dc_host enabled", which
+    // read as working. It is not — CbFileUploadRelay's WS backend is a
+    // stub (TODO(M6-R3-ws-backend)) and it is constructed with url="off",
+    // so the relay is permanently disabled() and inbound frames are
+    // dropped before they reach it. Say so, so nobody debugs a file
+    // upload against a log line that implies the path is live.
+    LOG(WARNING) << "CV2-75: \"files\" DC observer = CbFileUploadRelay, but "
+                    "its WS backend is NOT implemented (url=off) — file "
+                    "transfer is INERT on this channel";
+
+    // Browser-fidelity wave 1 — the ask-a-human channel. Must be bound
+    // before any WebContents can run script, since the very first thing a
+    // page does may be a confirm().
+    control_channel_ = std::make_unique<CbControlChannel>(
+        dc_host_.get(), content::GetUIThreadTaskRunner({}));
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kControl,
+                           control_channel_.get());
+    // Publish the channel to the process-lifetime WebContentsDelegate,
+    // which forwards it to the dialog manager it owns. The delegate
+    // outlives the session; the channel does not, which is why this is
+    // injected per session and cleared in PostMainMessageLoopRun rather
+    // than owned over there. Re-uses the aura context set at boot.
+    GetCloudBrowserWebContentsDelegate()->SetSessionContext(
+        aura_root_window(), control_channel_.get());
+    LOG(INFO) << "CV2-fidelity: \"control\" DC observer = CbControlChannel "
+                 "(JS dialogs routed to the viewer)";
   }
 
   if (offerer_driver_->pc()) {
@@ -1069,21 +1177,45 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
   // alone leaves the PC idle.
   video_track_ = pcf_->CreateVideoTrack(cb_track_source_, "cb-video-0");
   if (!video_track_) {
-    LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — "
-                  "video transceiver will not be added; "
-                  "OnRenegotiationNeeded will not fire; no SDP offer "
-                  "will be emitted. Worker stays alive on CDP path.";
+    // FAIL the session. This used to LOG(ERROR) and return OK, which left
+    // the pod Ready and the isolator believing it had a working browser —
+    // while nothing could ever put a frame on the wire, because without a
+    // video track there is no transceiver, so OnRenegotiationNeeded never
+    // fires and no offer is ever emitted. The session was dead on arrival
+    // and reported healthy; the user saw a black rectangle and a timeout.
+    //
+    // No isolator change is needed to make this useful: inject_native_
+    // session already treats ANY Cb.startNativeSession error as fatal and
+    // releases the VM. Returning non-OK converts a silent permanent
+    // failure into a fast, attributable one that recycles the guest.
+    //
+    // native_session_started_ is deliberately NOT set on this path, so a
+    // retry is allowed rather than being rejected with INVALID_STATE.
+    LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — no video "
+                  "track, so no transceiver, so no offer will EVER be "
+                  "emitted. Failing the session rather than reporting a "
+                  "browser that cannot stream.";
+    return webrtc::RTCError(
+        webrtc::RTCErrorType::INTERNAL_ERROR,
+        "CreateVideoTrack returned null — session cannot produce video");
   } else {
     webrtc::RtpTransceiverInit video_init;
     video_init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
     auto tx_result =
         offerer_driver_->pc()->AddTransceiver(video_track_, video_init);
     if (!tx_result.ok()) {
+      // Same reasoning as the null-track path above: without the video
+      // transceiver there is no offer, so this session can never stream.
+      // Reporting OK here is what let a permanently-broken guest sit in
+      // the pool looking healthy.
       LOG(ERROR) << "CV2-69: AddTransceiver(video, sendonly) failed: "
                  << tx_result.error().message()
-                 << " — proceeding without video; OnRenegotiationNeeded "
-                    "may not fire and no SDP offer will emit. Worker "
-                    "stays alive on CDP path.";
+                 << " — no video transceiver, so no offer will EVER be "
+                    "emitted. Failing the session.";
+      video_track_ = nullptr;  // Undo the CreateVideoTrack above.
+      return webrtc::RTCError(
+          webrtc::RTCErrorType::INTERNAL_ERROR,
+          "AddTransceiver(video) failed — session cannot produce video");
     } else {
       std::vector<webrtc::RtpCodecCapability> video_codec_preferences =
           BuildFirstLightVideoCodecPreferences(
@@ -1100,6 +1232,65 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
         LOG(INFO) << "CV2-91: video transceiver codec preferences applied: "
                   << FormatCodecPreferenceNamesForLog(
                          video_codec_preferences);
+      }
+
+      // Sender parameters. Nothing set these before, so the session ran on
+      // libwebrtc defaults: no bitrate ceiling, and a degradation
+      // preference inferred from the track's content hint rather than
+      // stated. Both matter more here than in a typical call, because the
+      // guest encodes in software on a single vCPU.
+      //
+      // MAINTAIN_RESOLUTION is chosen deliberately and is NOT the safe
+      // default — it is the opposite trade to a video call. For a browser,
+      // resolution IS legibility: downscaling turns text into mush, which
+      // is worse than a lower frame rate on a page that is mostly static
+      // anyway. So under pressure we drop fps and hold pixels.
+      //
+      // State it explicitly rather than relying on the is_screencast()
+      // content hint to imply it. The hint carries a TODO about being
+      // hardcoded, and someone flipping it should not silently also flip
+      // the degradation policy — that coupling is exactly the kind of
+      // action-at-a-distance this codebase keeps getting bitten by.
+      //
+      // Consequence worth stating: a large viewport on SwiftShader will
+      // tank to single-digit fps rather than degrade to a smaller picture.
+      // That is the intended trade; the fix for it is vCPUs, not a
+      // different preference here.
+      // sender() returns a scoped_refptr, not a raw pointer — hold the
+      // ref for the duration of the Get/Set pair.
+      webrtc::scoped_refptr<webrtc::RtpSenderInterface> video_sender =
+          tx_result.value()->sender();
+      if (video_sender) {
+        webrtc::RtpParameters params = video_sender->GetParameters();
+        params.degradation_preference =
+            webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+        if (!params.encodings.empty()) {
+          // Ceiling, not a target — BWE still drives the actual rate. This
+          // stops a burst of scene change from asking the encoder for more
+          // than the single vCPU can produce or the relay can carry.
+          params.encodings[0].max_bitrate_bps = kVideoMaxBitrateBps;
+          params.encodings[0].max_framerate = kVideoMaxFramerate;
+        } else {
+          LOG(WARNING) << "CV2-QUALITY: sender has no encodings; bitrate "
+                          "ceiling not applied";
+        }
+        webrtc::RTCError set_params_result =
+            video_sender->SetParameters(params);
+        if (!set_params_result.ok()) {
+          // Non-fatal: the session still streams on libwebrtc defaults.
+          LOG(ERROR) << "CV2-QUALITY: SetParameters(video) failed: "
+                     << set_params_result.message()
+                     << " — running on libwebrtc defaults (no explicit "
+                        "bitrate ceiling, inferred degradation preference)";
+        } else {
+          LOG(INFO) << "CV2-QUALITY: video sender parameters applied — "
+                       "max_bitrate=" << kVideoMaxBitrateBps
+                    << "bps max_framerate=" << kVideoMaxFramerate
+                    << " degradation=MAINTAIN_RESOLUTION";
+        }
+      } else {
+        LOG(WARNING) << "CV2-QUALITY: video transceiver has no sender; "
+                        "sender parameters not applied";
       }
       LOG(INFO) << "CV2-69: video sendonly transceiver added; awaiting "
                    "OnRenegotiationNeeded → CreateOffer → wire emission.";
@@ -1182,6 +1373,29 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // OnStateChange / OnMessage callback that races libwebrtc's
   // internal teardown lands on freed memory. UnregisterObserver MUST
   // outlive the consumer dtor.
+  // Control channel first — it is the only consumer that owns callbacks
+  // belonging to OTHER objects (renderer JS threads blocked inside
+  // RunJavaScriptDialog). Three steps, and the order is load-bearing:
+  //
+  //   1. Detach the process-lifetime WebContentsDelegate's pointer, so a
+  //      dialog raised during the rest of teardown takes the no-channel
+  //      default path instead of dereferencing a half-destroyed channel.
+  //   2. Resolve every in-flight request with its default. Skipping this
+  //      leaves renderer JS threads blocked forever — and CbControlChannel's
+  //      dtor deliberately will NOT do it for us, because by then the
+  //      consumers owning those callbacks may already be gone.
+  //   3. Unbind, then destroy.
+  GetCloudBrowserWebContentsDelegate()->SetSessionContext(
+      /*aura_context=*/nullptr, /*control_channel=*/nullptr);
+  if (control_channel_) {
+    control_channel_->CancelAllPending();
+  }
+  if (dc_host_) {
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kControl,
+                           nullptr);
+  }
+  control_channel_.reset();
+
   if (dc_host_) {
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
                            nullptr);
@@ -1256,6 +1470,14 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // leaked at the bottom of this fn, but the driver must still stop ticking the
   // compositor before the WebContents frame-sink hierarchy it drives unwinds.)
   begin_frame_driver_.reset();
+
+  // The viewport controller holds RAW pointers to screen_, aura_ and the
+  // capturer owned by cb_track_source_ — every one of which is torn down
+  // (or, for aura_, deliberately leaked) below. It owns nothing and has no
+  // timers, so dropping it is cheap; doing it HERE rather than relying on
+  // member-declaration order is what keeps that true if someone later
+  // reorders the members. Nothing may call Apply() after this point.
+  viewport_controller_.reset();
 
   // ChromelessV2 M2 R4 (CV2-39): drop the video track source, before pcf_.
   // The track source's broadcaster carries sink registrations the M3 peer
@@ -1582,7 +1804,93 @@ void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {
 // dead microVM's resources are freed promptly rather than lingering as a
 // "connected but producing nothing" peer. Runs on the main sequence (the
 // driver posts it here), so direct offerer_driver_ access is safe.
+void CloudBrowserBrowserMainParts::OnCapturedRendererGone() {
+  // The captured renderer process died. Posted from
+  // CbActiveWebContentsResolver::PrimaryMainFrameRenderProcessGone.
+  //
+  // Why this needs its own recovery rather than riding the existing
+  // capture re-arm: content does NOT create a replacement RenderViewHost
+  // after a crash until something navigates. So RenderViewHostChanged
+  // never fires, RearmCaptureAfterRvhSwap never runs, and the capturer
+  // stays bound to a dead FrameSink forever. The stream freezes on the
+  // last painted frame and the session looks alive from every angle we
+  // measure — the WebContents exists, the PC is connected, DevTools still
+  // answers. Only the pixels are gone.
+  //
+  // Reload is what creates the new RenderViewHost, which in turn fires
+  // RenderViewHostChanged, which re-arms capture through the path that
+  // already exists. So this policy is deliberately small: issue the
+  // navigation and let the shipped machinery do the rest.
+
+  content::WebContents* wc = active_webcontents_resolver_.GetActiveWebContents();
+  if (!wc) {
+    LOG(WARNING) << "CV2-RENDERER-CRASH: renderer gone but no active "
+                    "WebContents — nothing to reload";
+    return;
+  }
+
+  // Bounded, and bounded over a WINDOW rather than for the process
+  // lifetime. A crash an hour into a session is unrelated to one at boot,
+  // and a lifetime counter would refuse to recover from the former just
+  // because the latter happened. A crash LOOP, though — the page reliably
+  // kills its renderer — must not spin forever re-navigating into the same
+  // crash, which is what the window catches.
+  const base::TimeTicks now = base::TimeTicks::Now();
+  if (now - renderer_crash_window_start_ > kRendererCrashWindow) {
+    renderer_crash_window_start_ = now;
+    renderer_crashes_in_window_ = 0;
+  }
+  ++renderer_crashes_in_window_;
+  ++renderer_crashes_total_;
+
+  if (renderer_crashes_in_window_ > kMaxRendererReloadsPerWindow) {
+    LOG(ERROR) << "CV2-RENDERER-CRASH: " << renderer_crashes_in_window_
+               << " renderer crashes within "
+               << kRendererCrashWindow.InSeconds()
+               << "s — exceeds the reload budget of "
+               << kMaxRendererReloadsPerWindow
+               << ". Escalating to permanent-death so physics recycles this "
+                  "guest instead of watching it crash-loop.";
+    // Reuse the GPU-death escalation verbatim: it emits session_unhealthy
+    // (so physics recycles rather than treating this as a clean bye), tears
+    // the PC down in the right order, and quits the loop on a delay so the
+    // envelope flushes. The cause differs; the required response does not.
+    OnGpuPermanentDeath();
+    return;
+  }
+
+  LOG(ERROR) << "CV2-RENDERER-CRASH: captured renderer died (crash "
+             << renderer_crashes_in_window_ << "/"
+             << kMaxRendererReloadsPerWindow << " in the last "
+             << kRendererCrashWindow.InSeconds()
+             << "s, " << renderer_crashes_total_
+             << " total) — reloading to rebuild the RenderViewHost; the "
+                "resulting RenderViewHostChanged re-arms capture";
+
+  // check_for_repost=false: this is our recovery, not a user gesture, and
+  // a repost confirmation would need a JS dialog answered by a human who
+  // is currently looking at a frozen picture.
+  wc->GetController().Reload(content::ReloadType::NORMAL,
+                             /*check_for_repost=*/false);
+}
+
+CbSessionHealth CloudBrowserBrowserMainParts::GetSessionHealth() const {
+  CbSessionHealth h;
+  h.renderer_crashes = renderer_crashes_total_;
+  h.permanent_death_signaled = permanent_death_signaled_;
+  // A non-null video track means CreateVideoTrack succeeded AND
+  // AddTransceiver succeeded — the failure path nulls it back out before
+  // returning an error, precisely so this stays a single honest bit.
+  h.video_track_ok = video_track_ != nullptr;
+  return h;
+}
+
 void CloudBrowserBrowserMainParts::OnGpuPermanentDeath() {
+  // Latch BEFORE the teardown below: the quit is posted on a delay, so a
+  // Cb.getCaptureStats poll can land in that window and should see the
+  // guest already reporting itself as dying.
+  permanent_death_signaled_ = true;
+
   LOG(ERROR) << "CV2-GPU-DEATH: main_parts received permanent-death signal from "
                 "BeginFrame driver — signalling session-unhealthy to physics "
                 "and self-terminating for a fresh-guest re-pin";

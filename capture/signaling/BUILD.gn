@@ -13,8 +13,8 @@
 #       interface).
 #   R3 (:cb_ice_config) — env-driven ICE-server loader.
 #   R4 (:cb_offerer_driver) — offerer handshake driver (SDP+ICE dance).
-#   R5 (:cb_dc_host) — DataChannel host: owns the five outbound DCs
-#       (input, stats, cursor, clipboard, file-upload) created on R4's
+#   R5 (:cb_dc_host) — DataChannel host: owns the outbound DCs
+#       (input, stats, cursor, clipboard, files, control) created on R4's
 #       PeerConnection; provides observer-binding + Send() API for the
 #       M4/M5/M6 consumer modules.
 #   R6 (:cb_offerer_driver, ext.) — renegotiation + teardown amendments

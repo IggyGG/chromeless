@@ -169,6 +169,33 @@ class CloudBrowserFrameSinkCapturer
   // first delivered frame (or Start's priming refresh) arms it.
   void SetIdleRefreshPeriod(base::TimeDelta period);
 
+  // Change the captured output resolution on a RUNNING capturer.
+  //
+  // Configure() is the before-Start() path and stays that way (its
+  // DCHECK(!started_) is load-bearing — it guards the fields Start()
+  // latches). This is the mid-session path, and it exists because the
+  // viewport is no longer fixed: the user can resize their window.
+  //
+  // WHY min == max IS PRESERVED. It is tempting to hand viz a RANGE and
+  // let it adapt. Don't. With min != max the FrameSinkVideoCapturer
+  // re-derives frame geometry from whatever surface it is pointed at,
+  // and after a cross-document navigation to a differently-sized page
+  // that produced corrupt frames — a small capture anchored top-left
+  // that flickered between the old and new surface (M2-R4-MULTI-TAB;
+  // see the long comment in Start()). The fix then was to pin the
+  // constraints. Nothing about that changed: we still pin them, we just
+  // pin them to a value the embedder can move deliberately.
+  //
+  // |resolution| must be even in both dimensions — I420 chroma is
+  // subsampled 2x2 and an odd dimension yields a half-sampled edge row
+  // or column. Callers are expected to have aligned already; this
+  // rounds DOWN defensively rather than trusting them.
+  //
+  // No-op when the resolution is unchanged, so a caller may drive this
+  // from an unconditional resize handler without churning the producer.
+  // Safe before Start(): it updates the field, and Start() applies it.
+  void SetCaptureResolution(const gfx::Size& resolution);
+
   // Bind our consumer receiver, hand the remote to the producer, and
   // call producer->Start(...). A second call retargets the running
   // producer without rebinding the consumer.

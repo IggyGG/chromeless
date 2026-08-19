@@ -11,6 +11,7 @@
 #include "base/functional/callback.h"
 #include "capture/build-integration/cb_devtools_agent.h"
 #include "capture/build-integration/cloud_browser_browser_main_parts.h"
+#include "capture/build-integration/cb_viewport_controller.h"
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_main_parts.h"
@@ -97,6 +98,11 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   // lifetime contract as the two callbacks above.
   base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
       start_native_session_callback;
+  // Live resize at Cb.setViewport dispatch time. Same contract again.
+  base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
+      set_viewport_callback;
+  // Health counters for Cb.getCaptureStats. Same contract again.
+  base::RepeatingCallback<CbSessionHealth()> session_health_getter;
   // OSS-W0 — graceful process exit at Cb.shutdown dispatch time. Same
   // Unretained(main_parts_) lifetime contract as the callbacks above.
   base::RepeatingCallback<bool()> shutdown_callback;
@@ -110,6 +116,12 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
     start_native_session_callback = base::BindRepeating(
         &CloudBrowserBrowserMainParts::StartNativeSession,
         base::Unretained(main_parts_));
+    set_viewport_callback = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::SetViewport,
+        base::Unretained(main_parts_));
+    session_health_getter = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::GetSessionHealth,
+        base::Unretained(main_parts_));
     shutdown_callback =
         base::BindRepeating(&CloudBrowserBrowserMainParts::Shutdown,
                             base::Unretained(main_parts_));
@@ -117,7 +129,9 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   return std::make_unique<CbDevToolsManagerDelegate>(
       default_context, aura_context, std::move(track_source_getter),
       std::move(active_capture_callback),
-      std::move(start_native_session_callback), std::move(shutdown_callback));
+      std::move(start_native_session_callback),
+      std::move(set_viewport_callback), std::move(session_health_getter),
+      std::move(shutdown_callback));
 }
 
 }  // namespace cloud_browser

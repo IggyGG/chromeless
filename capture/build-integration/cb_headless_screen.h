@@ -135,6 +135,29 @@ class CbHeadlessScreen : public display::ScreenBase {
   // nullptr clears the root during teardown.
   void SetRootWindow(gfx::NativeWindow root_window);
 
+  // Resize / rescale the single display — the viewport path
+  // (CbViewportController). |bounds_in_pixel| is PIXELS, matching
+  // display::Display::SetScaleAndBounds; the DIP size the renderer sees
+  // is bounds / dsf.
+  //
+  // WHY THIS METHOD EXISTS AT ALL. The obvious thing is to reach into
+  // display_list() and overwrite displays()[0]. That compiles, and it is
+  // wrong: it mutates the display in place without firing
+  // OnDisplayMetricsChanged, so every observer — including the path that
+  // pushes devicePixelRatio and screen.width into the renderer — never
+  // learns. The result is a resized compositor with a page that still
+  // believes it is the old size, which is worse than not resizing.
+  //
+  // display::ScreenBase::ProcessDisplayChanged is the upstream helper
+  // that does the fan-out, and it is `protected` — reachable only from a
+  // subclass. We are that subclass. That is the whole reason this lives
+  // here rather than in the controller.
+  //
+  // No-op when neither bounds nor scale actually change, so callers may
+  // drive it from an unconditional resize handler.
+  void UpdatePrimaryDisplay(const gfx::Rect& bounds_in_pixel,
+                            float device_scale_factor);
+
   // display::Screen via ScreenBase:
 
   // Returns true for any non-null Aura window. The cb-chromium worker

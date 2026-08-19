@@ -284,6 +284,17 @@ class CloudBrowserFrameSinkVideoTrackSource : public webrtc::VideoTrackSource {
   // No-op if capturer_ is null (header-only / test bypass case).
   void StartCapture(viz::VideoCaptureTarget target);
 
+  // Change the captured output resolution mid-session — the viewport
+  // resize path (CbViewportController). Delegates to the capturer's
+  // SetCaptureResolution; see that method for the even-alignment rule
+  // and for why the min==max constraint pinning is preserved.
+  //
+  // This is deliberately NOT routed through capturer_for_test(): that
+  // accessor is a test seam, and production code reaching through a
+  // seam named "for_test" is how seams quietly become API. No-op if
+  // capturer_ is null.
+  void SetCaptureResolution(const gfx::Size& resolution);
+
  protected:
   ~CloudBrowserFrameSinkVideoTrackSource() override;
 

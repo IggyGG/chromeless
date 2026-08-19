@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "base/files/file_path.h"
+#include "base/functional/callback_helpers.h"  // base::DoNothing
 #include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
@@ -18,43 +20,67 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/drop_data.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
+// blink::DragOperationsMask, the enum the Enter/Over calls take. Pulled in
+// transitively by render_widget_host.h:25, but named here per IWYU since we
+// static_cast to it directly.
+#include "third_party/blink/public/common/page/drag_operation.h"
 #include "third_party/blink/public/mojom/drag/drag.mojom-shared.h"
+#include "ui/base/clipboard/file_info.h"  // ui::FileInfo for DropData::filenames
+#include "ui/base/clipboard/clipboard_url_info.h"  // ui::ClipboardUrlInfo for DropData::url_infos
 #include "ui/gfx/geometry/point_f.h"
 #include "url/gurl.h"
 
 namespace cloud_browser {
 
 // ---------------------------------------------------------------------
-// CV2-81 NON-GOAL — R7 DragTarget* call resolution is deferred.
+// CV2-82 CLOSEOUT — the DragTarget* calls are live.
 //
-// CV2-81 closed the M4 typed-dispatcher runtime-wire frontier: R7 is
-// now instantiated by CbInputDispatchCompositeDelegate, receives
-// envelopes from CbInputDispatch via the M4 R1 input DC, and runs its
-// full state machine end-to-end (phase transitions, payload caching,
-// coord-mapping, EnsureBroughtToFront, modifier reads from R3). What
-// remains is the SIX commented-out `rwh->DragTarget*` chromium-side
-// dispatch calls below, which await chromium-7727 API verification
-// of:
-//   * The cast pattern (RenderWidgetHostImpl::From(rwh) — mirroring
-//     M4 R6 touch's precedent at cb_input_dispatch_touch.cc:429),
-//   * Exact signatures for DragTargetDragEnter (drop_data, client_pt,
-//     screen_pt, drag_operations_mask, modifiers, callback),
-//     DragTargetDragOver, DragTargetDrop, DragTargetDragLeave
-//     (post-CDP refactor — see https://codereview.chromium.org/2505113002/
-//     for the historical "Target drag messages to specific
-//     RenderWidgets" rework that moved these from RenderViewHost),
-//   * Whether RenderWidgetHostImpl::DragTarget* visibility from
-//     //cloud-browser/* needs the same content/browser:cb_friends
-//     allowlist that the M4 R3/R6 mouse+touch impl-casts already
-//     established.
+// CV2-81 wired R7's state machine end-to-end (phase transitions, payload
+// caching, coord-mapping, EnsureBroughtToFront, modifier reads from R3)
+// but left the SIX `rwh->DragTarget*` dispatch calls commented out
+// pending chromium-7727 API verification. Until this change, drag was
+// the ONLY input path that ran its full plumbing and then dispatched
+// nothing — the renderer never saw a synthetic drag event, so
+// drag-and-drop silently did nothing on every site.
 //
-// Per CV2-81 lesson-(j) wiring-frontier discipline: ONE frontier per
-// ticket. The composite-delegate wire-up is the CV2-81 frontier; the
-// DragTarget* call resolution is a separate frontier owed its own
-// ticket (CV2-82 follow-up). R7 dispatches today log "drag_* dispatched"
-// at each call site without the chromium-side injection — the renderer
-// will not see synthetic drag events until the follow-up lands, but
-// the full plumbing depth above the chromium API line is exercised.
+// All three open questions are now resolved against the pinned tree
+// (147.0.7727.144 — see docs/build/chromium-7727-api-pins.md, read from
+// the build node rather than from memory):
+//
+//   * NO CAST IS NEEDED. The premise of the deferral above — that the
+//     DragTarget* family is RenderWidgetHostImpl-only — is FALSE at
+//     7727. All four methods plus FilterDropData are public virtuals
+//     on content::RenderWidgetHost itself (render_widget_host.h:306,
+//     319, 324, 326, 344). So this file needs no content/browser
+//     include and no cb_friends visibility entry, unlike the M4 R3
+//     mouse and R6 touch paths which genuinely do reach into Impl.
+//   * Signatures: render_widget_host.h:306-331. DragTargetDrop takes
+//     NO operations mask (unlike Enter/Over) and a plain
+//     base::OnceClosure; Enter/Over take blink::DragOperationsMask +
+//     int key_modifiers + DragOperationCallback (which is
+//     OnceCallback<void(ui::mojom::DragOperation, bool)> — base::
+//     DoNothing() adapts). DragTargetDragLeave takes BOTH points.
+//   * FilterDropData is MANDATORY and was NOT in the original plan:
+//     render_widget_host_impl.h:283 and :306 both say "drop_data must
+//     have been filtered. The embedder should call FilterDropData
+//     before passing the drop data to RWHI." Skipping it would hand
+//     the renderer unfiltered paths/URLs.
+//   * DropData::view_id must be set to the target widget's routing id
+//     before Enter — chromium's own CDP caller does this at
+//     input_handler.cc:949, and the field defaults to kRoutingIdNone.
+//
+// Call shapes below mirror content/browser/devtools/protocol/
+// input_handler.cc:950 and :1084 — chromium's own synthetic-drag
+// caller — so this path is exercised by the same code the CDP
+// Input.dispatchDragEvent tests cover.
+//
+// Still deliberately NOT done here (each is its own frontier):
+//   * The drag SOURCE side (DragSourceEndedAt / DragSourceSystemDragEnded)
+//     — we only synthesise drags INTO the page, which is what the
+//     protocol models. A page-initiated drag OUT is unmodelled.
+//   * File drags carry empty FilePaths (see BuildDropData): the guest
+//     has no host file to point at until the M6 file-transfer relay
+//     lands. Text/HTML/URI-list payloads are complete.
 // ---------------------------------------------------------------------
 
 namespace {
@@ -230,22 +256,13 @@ void CbInputDispatchDrag::DispatchDragStart(const base::DictValue& data,
     LOG(WARNING) << "CbInputDispatchDrag: drag_start while phase=" << static_cast<int>(phase_)
                  << " — synthesising DragTargetDragLeave at last_widget_pos="
                  << last_widget_pos_.x << "," << last_widget_pos_.y;
-    // TODO(M4-R7-rwh-api): the exact chromium API surface for
-    // synthetic drag-target dispatch needs verification once M4
-    // compiles against the patched chromium. Most likely candidates:
-    //   * content::RenderWidgetHostImpl::DragTargetDragLeave() — the
-    //     impl method invoked by content/browser/devtools/protocol/
-    //     input_handler.cc's Input.dispatchDragEvent. Public-vs-impl
-    //     visibility needs to be confirmed; the impl method may not
-    //     be part of the stable browser-process API.
-    //   * content::WebContents::DragSourceSystemDragEnded() — too
-    //     coarse, ends drag from the source side only.
-    //   * aura::client::DragDropDelegate::OnDragExited() — Aura-only,
-    //     called by the OS drag pipeline (not our synthetic path).
-    // For the draft we represent the intended call site; the fold-in
-    // task will swap to the correct symbol.
-    //
-    // rwh->DragTargetDragLeave();  // TODO(M4-R7-rwh-api)
+    // Force-clear the stale drag before starting the new one. Chromium's
+    // drag pipeline keeps per-widget target state; entering twice without an
+    // intervening leave leaves the previous target latched and the new
+    // dragenter is dropped by blink as a duplicate.
+    const gfx::PointF stale_pt(static_cast<float>(last_widget_pos_.x),
+                               static_cast<float>(last_widget_pos_.y));
+    rwh->DragTargetDragLeave(stale_pt, stale_pt);
     phase_ = CbDragPhase::kIdle;
     cached_items_.clear();
     cached_types_.clear();
@@ -267,39 +284,34 @@ void CbInputDispatchDrag::DispatchDragStart(const base::DictValue& data,
 
   // ── Dispatch DragTargetDragEnter ──
   //
-  // TODO(M4-R7-rwh-api): the canonical entry point for synthetic drag
-  // dispatch is the same one CDP's Input.dispatchDragEvent uses —
-  // content::RenderWidgetHostImpl::DragTargetDragEnter(drop_data,
-  // client_pt, screen_pt, drag_operations_mask, modifiers,
-  // base::DoNothing /* callback */). The public RenderWidgetHost
-  // interface does NOT expose DragTarget* methods — they are Impl-
-  // only. Two options at fold-in:
-  //   (a) cast to RenderWidgetHostImpl (matches what CDP does; lives
-  //       at content/browser/renderer_host/render_widget_host_impl.h)
-  //   (b) route through a new content::WebContents-level surface
-  //       that we add as part of M4 R2/R7 (cleaner but adds a
-  //       chromium-side patch to track)
-  // Default to (a) for the draft because it minimises chromium-patch
-  // surface; revisit if the cast is ergonomically painful.
+  // Same entry point CDP's Input.dispatchDragEvent uses. The screen_pt
+  // argument matters: chromium's drag pipeline uses it for cursor
+  // positioning during the drag preview. We have no real screen-space
+  // anchor, and in this embedder the aura host IS the screen (a single
+  // headless display rooted at 0,0 — see CbHeadlessScreen), so widget-space
+  // and screen-space coincide.
   //
-  // The screen_pt argument matters: chromium's drag pipeline uses it
-  // for cursor positioning during the drag preview. For our synthetic
-  // case we don't have a real screen-space anchor; passing the widget-
-  // space point matches the cb-chromium aura host's 1280x720 root-
-  // window assumption (the host IS the screen in our embedder).
-  //
-  // rwh->DragTargetDragEnter(drop_data,
-  //                          gfx::PointF(widget.x, widget.y),
-  //                          gfx::PointF(widget.x, widget.y),
-  //                          drag_operations_mask_,
-  //                          CurrentModifiersBlink(),
-  //                          base::DoNothing());
+  // Route the payload at this specific widget, then filter it. Both steps
+  // mirror chromium's own synthetic-drag caller at input_handler.cc:949-952:
+  // view_id defaults to kRoutingIdNone, and FilterDropData strips paths/URLs
+  // the renderer must not see (render_widget_host_impl.h:283).
+  drop_data.view_id = rwh->GetRoutingID();
+  rwh->FilterDropData(&drop_data);
+  const gfx::PointF pt(static_cast<float>(widget.x),
+                       static_cast<float>(widget.y));
+  // static_cast<int> on the modifiers: CurrentModifiersBlink returns uint32_t
+  // (blink's modifier bitfield width) while the parameter is int. Same
+  // explicit narrowing the M4 R3 mouse path does at
+  // cb_input_dispatch_mouse.cc:199 — implicit would trip -Wconversion.
+  rwh->DragTargetDragEnter(
+      drop_data, pt, pt,
+      static_cast<blink::DragOperationsMask>(drag_operations_mask_),
+      static_cast<int>(CurrentModifiersBlink()), base::DoNothing());
 
   phase_ = CbDragPhase::kActive;
-  // Silence unused-parameter warnings while the RWH call is TODO'd
-  // out; remove at fold-in.
+  // event_time is carried by the protocol for trace correlation; chromium's
+  // drag pipeline timestamps internally and takes no time argument.
   (void)event_time;
-  (void)drop_data;
 }
 
 // ---------------------------------------------------------------------
@@ -337,12 +349,13 @@ void CbInputDispatchDrag::DispatchDragOver(const base::DictValue& data,
   const WidgetPoint widget = ContentToWidget(rwh, *x, *y);
   last_widget_pos_ = widget;
 
-  // TODO(M4-R7-rwh-api): same impl-method concern as drag_start.
-  // rwh->DragTargetDragOver(gfx::PointF(widget.x, widget.y),
-  //                         gfx::PointF(widget.x, widget.y),
-  //                         drag_operations_mask_,
-  //                         CurrentModifiersBlink(),
-  //                         base::DoNothing());
+  // No DropData on drag_over: chromium keeps the payload from DragTargetDragEnter
+  // for the life of the drag, so only geometry + modifiers move here.
+  const gfx::PointF pt(static_cast<float>(widget.x),
+                       static_cast<float>(widget.y));
+  rwh->DragTargetDragOver(
+      pt, pt, static_cast<blink::DragOperationsMask>(drag_operations_mask_),
+      static_cast<int>(CurrentModifiersBlink()), base::DoNothing());
 
   (void)event_time;
 }
@@ -405,20 +418,22 @@ void CbInputDispatchDrag::DispatchDrop(const base::DictValue& data,
 
   // ── Dispatch DragTargetDrop ──
   //
-  // chromium's RenderWidgetHostImpl::DragTargetDrop signature is
-  // (drop_data, client_pt, screen_pt, modifiers, callback) — note
-  // that drop does NOT take a drag_operations_mask the way Enter/Over
-  // do. The renderer picks one operation from the mask Enter
-  // negotiated, exposes it on DataTransfer.dropEffect, and DragTarget
-  // Drop honours whatever the renderer selected.
+  // Verified at render_widget_host_impl.h:307 — drop takes
+  // (drop_data, client_pt, screen_pt, key_modifiers, callback) and does NOT
+  // take a drag_operations_mask the way Enter/Over do. The renderer picks one
+  // operation from the mask Enter negotiated, exposes it on
+  // DataTransfer.dropEffect, and DragTargetDrop honours that selection. The
+  // callback is a plain base::OnceClosure here, not a DragOperationCallback.
   //
-  // TODO(M4-R7-rwh-api): same impl-method concern as drag_start.
-  //
-  // rwh->DragTargetDrop(drop_data,
-  //                     gfx::PointF(widget.x, widget.y),
-  //                     gfx::PointF(widget.x, widget.y),
-  //                     CurrentModifiersBlink(),
-  //                     base::DoNothing());
+  // FilterDropData again: this is a second, independently-filtered payload
+  // (render_widget_host_impl.h:306), not the one Enter already filtered.
+  drop_data.view_id = rwh->GetRoutingID();
+  rwh->FilterDropData(&drop_data);
+  const gfx::PointF pt(static_cast<float>(widget.x),
+                       static_cast<float>(widget.y));
+  rwh->DragTargetDrop(drop_data, pt, pt,
+                      static_cast<int>(CurrentModifiersBlink()),
+                      base::DoNothing());
 
   // ── State transition ──
   //
@@ -428,7 +443,6 @@ void CbInputDispatchDrag::DispatchDrop(const base::DictValue& data,
   // start of DispatchDrop).
   phase_ = CbDragPhase::kAwaitingEnd;
   (void)event_time;
-  (void)drop_data;
 }
 
 // ---------------------------------------------------------------------
@@ -464,9 +478,12 @@ void CbInputDispatchDrag::DispatchDragEnd(const base::DictValue& data,
       }
       content::RenderWidgetHost* rwh = ResolveRwhOrNull();
       if (rwh) {
-        // TODO(M4-R7-rwh-api): see drag_start.
-        // rwh->DragTargetDragLeave(/* client_pt */, /* screen_pt */);
-        (void)rwh;
+        // Leave at the last-known pointer: the protocol carries no
+        // coordinates on drag_end, and chromium needs a point to route the
+        // leave to the correct target widget.
+        const gfx::PointF pt(static_cast<float>(last_widget_pos_.x),
+                             static_cast<float>(last_widget_pos_.y));
+        rwh->DragTargetDragLeave(pt, pt);
       } else {
         LOG(WARNING) << "CbInputDispatchDrag: drag_end cancel-path could not "
                      << "resolve RWH — state cleared without dispatch";
@@ -489,9 +506,9 @@ void CbInputDispatchDrag::DispatchDragEnd(const base::DictValue& data,
                      << "side effects are NOT reversed.";
         content::RenderWidgetHost* rwh = ResolveRwhOrNull();
         if (rwh) {
-          // TODO(M4-R7-rwh-api): see drag_start.
-          // rwh->DragTargetDragLeave(/* client_pt */, /* screen_pt */);
-          (void)rwh;
+          const gfx::PointF pt(static_cast<float>(last_widget_pos_.x),
+                               static_cast<float>(last_widget_pos_.y));
+          rwh->DragTargetDragLeave(pt, pt);
         }
       }
       // success=true → no dispatch needed.
@@ -541,52 +558,54 @@ void CbInputDispatchDrag::BuildDropData(content::DropData* out) const {
 
   for (const CbDragItem& item : cached_items_) {
     if (item.kind == "file") {
-      // v1 file policy: empty path + empty display_name; the page
-      // sees the MIME in DataTransfer.types but file content is empty.
+      // v1 file policy: empty path + empty display_name; the page sees the
+      // MIME in DataTransfer.types but file content is empty. A real file
+      // drag needs a host-side file the guest can point at, which arrives
+      // with the M6 file-transfer relay.
       //
-      // TODO(M4-R7-file-info-shape): chromium's DropData::FileInfo
-      // signature has shifted (base::FilePath path vs std::string
-      // url). Pick the right one at fold-in.
-      //
-      // content::DropData::FileInfo file_info;
-      // file_info.path = base::FilePath();
-      // file_info.display_name = std::u16string();
-      // out->filenames.push_back(std::move(file_info));
-      (void)out;
+      // Verified at drop_data.h:106 — `filenames` is
+      // std::vector<ui::FileInfo>, NOT a nested content::DropData::FileInfo
+      // (which is what the retired TODO here guessed). ui::FileInfo's ctor
+      // is (base::FilePath path, base::FilePath display_name) — display_name
+      // is a FilePath too, not a u16string.
+      out->filenames.emplace_back(base::FilePath(), base::FilePath());
       continue;
     }
 
     // kind == "string" (and tolerated unknown kinds — same path).
     const std::u16string data16 = base::UTF8ToUTF16(item.data);
     if (item.type == kMimePlain) {
-      // out->text = data16;
-      (void)data16;
+      // drop_data.h:117 — std::optional<std::u16string>; assigning a
+      // u16string engages the optional.
+      out->text = data16;
     } else if (item.type == kMimeHtml) {
-      // out->html = data16;
-      // out->html_base_url = GURL();  // v1 has no base-URL signal
-      (void)data16;
+      out->html = data16;                // drop_data.h:122, same optional shape
+      out->html_base_url = GURL();       // v1 has no base-URL signal
     } else if (item.type == kMimeUriList) {
-      // text/uri-list can carry multiple newline-separated URLs. v1
-      // protocol emits one item per URL; the renderer's DataTransfer
-      // exposes them via `DataTransfer.getData("text/uri-list")`. We
-      // store the first URL on DropData.url (chromium uses it for
-      // the dropped-URL convenience accessors), and the full payload
-      // is recoverable via the renderer-side getData() call against
-      // the custom_data map.
+      // text/uri-list can carry multiple newline-separated URLs. v1 protocol
+      // emits one item per URL; the renderer's DataTransfer exposes them via
+      // DataTransfer.getData("text/uri-list"). We store the URL on
+      // DropData.url (chromium's dropped-URL convenience accessors read it)
+      // and also mirror the raw payload into custom_data so getData() sees
+      // the exact bytes the client sent.
       //
-      // PRINCIPAL-RISK: DropData has historically been single-URL on
-      // url and the multi-URL case has been wonky. v2 may want a
-      // proper uri-list channel.
+      // The single-valued DropData::url is GONE at 7727 — it is now
+      // `std::vector<ui::ClipboardUrlInfo> url_infos` (drop_data.h:93,
+      // {GURL url; std::u16string title;}). That retires the PRINCIPAL-RISK
+      // this block used to carry: .url was single-valued, so a multi-URL
+      // drag silently degraded to whichever uri-list item happened to come
+      // last. Appending preserves all of them in order.
       //
-      // out->url = GURL(item.data);
-      // out->custom_data[base::UTF8ToUTF16(item.type)] = data16;
-      (void)data16;
+      // custom_data still collides by MIME type — one text/uri-list entry
+      // holds the raw payload the client sent, which is what getData()
+      // reads. That is unchanged and intentional.
+      out->url_infos.push_back(
+          ui::ClipboardUrlInfo{GURL(item.data), std::u16string()});
+      out->custom_data[base::UTF8ToUTF16(item.type)] = data16;
     } else {
       // Application MIME — text/custom or vendor-specific. Lands in
-      // custom_data.
-      //
-      // out->custom_data[base::UTF8ToUTF16(item.type)] = data16;
-      (void)data16;
+      // custom_data (drop_data.h:132, std::unordered_map<u16string,u16string>).
+      out->custom_data[base::UTF8ToUTF16(item.type)] = data16;
     }
   }
 

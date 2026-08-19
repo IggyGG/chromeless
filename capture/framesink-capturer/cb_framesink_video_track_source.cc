@@ -123,6 +123,15 @@ void CloudBrowserFrameSinkVideoTrackSource::StartCapture(
   capturer_->Start(target);
 }
 
+void CloudBrowserFrameSinkVideoTrackSource::SetCaptureResolution(
+    const gfx::Size& resolution) {
+  if (!capturer_) {
+    // Header-only / test-bypass case. No-op.
+    return;
+  }
+  capturer_->SetCaptureResolution(resolution);
+}
+
 void CloudBrowserFrameSinkVideoTrackSource::OnCapturerFrame(
     scoped_refptr<media::VideoFrame> media_frame) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(capturer_sequence_checker_);

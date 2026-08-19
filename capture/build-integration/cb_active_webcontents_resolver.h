@@ -73,6 +73,7 @@
 
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
+#include "base/process/kill.h"  // base::TerminationStatus
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "content/public/browser/web_contents_observer.h"
 
@@ -216,6 +217,24 @@ class CbActiveWebContentsResolver : public WebContentsResolver,
     recapture_on_rvh_swap_ = std::move(cb);
   }
 
+  // Install the callback invoked when the actively-captured WebContents'
+  // renderer process DIES.
+  //
+  // WHY THIS IS NOT COVERED BY THE RVH-SWAP CALLBACK ABOVE. After a
+  // renderer crash, content does NOT create a replacement RenderViewHost
+  // until something navigates. So RenderViewHostChanged never fires, the
+  // re-arm never runs, and the capturer stays pointed at the FrameSink of
+  // a process that no longer exists — permanently. The stream freezes on
+  // the last painted frame and nothing in the guest ever notices, because
+  // from the capturer's point of view an idle renderer and a dead one look
+  // identical: no CompositorFrames either way.
+  //
+  // Recovery therefore has to be driven from the crash itself, which is
+  // what this hook is for. Optional; unset = old behaviour (freeze).
+  void SetRendererGoneCallback(base::RepeatingClosure cb) {
+    renderer_gone_ = std::move(cb);
+  }
+
   // Test seam — flush the active state without going through the CDP
   // path. Used by cb_active_webcontents_resolver_test.cc to verify the
   // null-after-clear contract independent of the delegate wiring.
@@ -256,6 +275,15 @@ class CbActiveWebContentsResolver : public WebContentsResolver,
   void RenderViewHostChanged(content::RenderViewHost* old_host,
                              content::RenderViewHost* new_host) override;
 
+  // content::WebContentsObserver: the captured renderer died.
+  //
+  // We do NOT clear active_ — the WebContents survives its renderer and
+  // is what a reload has to be issued against. We only notify the owner,
+  // which owns the recovery policy (bounded reload, then escalate to the
+  // permanent-death path that recycles the guest).
+  void PrimaryMainFrameRenderProcessGone(
+      base::TerminationStatus status) override;
+
  private:
   // Active WebContents the FSVC is capturing from. raw_ptr because
   // lifetime is managed elsewhere (CbDevToolsManagerDelegate's
@@ -277,6 +305,11 @@ class CbActiveWebContentsResolver : public WebContentsResolver,
   // re-arms the capturer. Empty by default (no-op → legacy behaviour:
   // invalidate only). See SetRecaptureOnRvhSwapCallback.
   base::RepeatingClosure recapture_on_rvh_swap_;
+
+  // Invoked from PrimaryMainFrameRenderProcessGone when a capture is
+  // active. Empty by default (no-op → the pre-existing behaviour, which
+  // is a permanently frozen stream). See SetRendererGoneCallback.
+  base::RepeatingClosure renderer_gone_;
 };
 
 }  // namespace cloud_browser

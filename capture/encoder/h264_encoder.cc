@@ -15,9 +15,9 @@
 #include <climits>
 #include <cstring>
 #include <limits>
-#include <thread>
 
 #include "api/video/i420_buffer.h"
+#include "capture/build-integration/cb_x264_alignment_shim.h"
 #include "modules/video_coding/codecs/h264/include/h264_globals.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
@@ -43,7 +43,12 @@ extern "C" {
 namespace cloud_browser {
 namespace {
 
-constexpr int kFallbackThreads = 4;
+// Keep x264 inside the CPU budget WebRTC assigned to this encoder. In
+// containers std::thread::hardware_concurrency() reports the host (192 cores on
+// the build node), not the pod limit; using it caused each resize test process
+// to create a host-sized x264 pool and crash in PartitionAlloc. Sixteen is an
+// upper safety bound for callers that also report an unbounded host value.
+constexpr int kMaxEncoderThreads = 16;
 
 // Decode the 6-hex-char `profile-level-id` per RFC 6184 §8.1:
 //   bytes 0..1: profile_idc, byte 2 packs constraint_set flags +
@@ -109,7 +114,7 @@ bool H264Encoder::ResolveProfileLevel(std::string* profile,
 
 int32_t H264Encoder::InitEncode(
     const webrtc::VideoCodec* codec_settings,
-    const webrtc::VideoEncoder::Settings& /*settings*/) {
+    const webrtc::VideoEncoder::Settings& settings) {
 #if defined(HAS_X264)
   if (codec_settings == nullptr ||
       codec_settings->width == 0 ||
@@ -157,11 +162,20 @@ int32_t H264Encoder::InitEncode(
   // ~1 frame of lag per worker).
   int n_threads = config_.num_threads > 0
       ? config_.num_threads
-      : std::max<int>(1, static_cast<int>(std::thread::hardware_concurrency()) - 1);
-  if (n_threads <= 0) n_threads = kFallbackThreads;
-  params.i_threads = n_threads;
+      : settings.number_of_cores;
+  if (settings.encoder_thread_limit.has_value()) {
+    n_threads = std::min(n_threads, *settings.encoder_thread_limit);
+  }
+  params.i_threads = std::clamp(n_threads, 1, kMaxEncoderThreads);
   params.i_lookahead_threads = 1;
   params.b_sliced_threads = 1;
+
+  // Debian's libx264 requests 2 MiB alignment for large internal buffers so
+  // they can use transparent huge pages. Chromium's PartitionAlloc rejects
+  // alignments above 1 MiB and aborts the process. Install the process-wide
+  // allocator seam immediately before the first x264 allocation; keeping the
+  // call here also covers the standalone encoder unit-test binary.
+  InstallX264AlignmentShim();
 
   // Profile / level.
   std::string profile;
@@ -217,6 +231,15 @@ int32_t H264Encoder::Encode(
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
   if (frame.width() != width_ || frame.height() != height_) {
+    // Release() nulls callback_ (see its body). The entry guard above has
+    // already been passed for THIS frame, so nothing re-checks it before
+    // the OnEncodedImage call below — carrying the registration across the
+    // re-init by hand is what stops that from being a nullptr dereference.
+    // Symptom if you remove it: browser-process SIGSEGV on the first frame
+    // at a new geometry, i.e. the guest dies the moment the user resizes.
+    // Latent until the capturer's resolution became mutable (it pinned
+    // min==max at 1280x720, so no frame ever changed size mid-session).
+    webrtc::EncodedImageCallback* const saved_callback = callback_;
     Release();
     webrtc::VideoCodec settings{};
     settings.width = frame.width();
@@ -225,6 +248,7 @@ int32_t H264Encoder::Encode(
           != WEBRTC_VIDEO_CODEC_OK) {
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
+    callback_ = saved_callback;
   }
 
   webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =

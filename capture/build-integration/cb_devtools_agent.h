@@ -49,6 +49,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "capture/build-integration/cb_viewport_controller.h"  // CbViewportSpec
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
@@ -74,6 +75,7 @@ namespace cloud_browser {
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
 struct NativeSessionConfig;  // CV2-WARM — cloud_browser_browser_main_parts.h
+struct CbSessionHealth;      // cloud_browser_browser_main_parts.h
 
 // Routes the Cb.startFrameSinkCapture CDP method into the
 // browser-process-owned CloudBrowserFrameSinkVideoTrackSource (held by
@@ -148,6 +150,8 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // contract as track_source_getter_ (main_parts out-lives the delegate's
   // useful window; the callback only runs inside an active CDP session). A
   // null/empty callback yields a ServerError on the wire rather than a UAF.
+  // |set_viewport_callback| applies a live resize at Cb.setViewport dispatch
+  // time. Same Unretained(main_parts_) contract; null/empty → ServerError.
   // |shutdown_callback| (OSS-W0) requests a graceful process exit at
   // Cb.shutdown DISPATCH time. It is
   // base::BindRepeating(&CloudBrowserBrowserMainParts::Shutdown,
@@ -162,6 +166,10 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
           active_capture_callback = {},
       base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
           start_native_session_callback = {},
+      base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
+          set_viewport_callback = {},
+      base::RepeatingCallback<CbSessionHealth()>
+          session_health_getter = {},
       base::RepeatingCallback<bool()> shutdown_callback = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
@@ -281,6 +289,17 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       const crdtp::Dispatchable& dispatchable,
       std::string* out_error);
 
+  // Implementation of Cb.setViewport — live resize. Parses {width, height,
+  // deviceScaleFactor?} out of |dispatchable|'s CBOR Params() and invokes
+  // set_viewport_callback_. Responds with the viewport ACTUALLY applied,
+  // which may be clamped; callers are expected to read it back rather than
+  // assume their request was honoured. Unwired callback or missing
+  // width/height → |out_error| + empty vector (caller emits
+  // CreateErrorResponse).
+  std::vector<uint8_t> HandleSetViewport(
+      const crdtp::Dispatchable& dispatchable,
+      std::string* out_error);
+
   // OSS-W0 — implementation of Cb.shutdown. Takes no params. POSTS the
   // shutdown callback to the UI thread rather than running it inline, so
   // HandleCommand's response write ({"shuttingDown":true}) lands before the
@@ -319,6 +338,19 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
       start_native_session_callback_;
 
+  // Applies a viewport at Cb.setViewport dispatch time.
+  // base::BindRepeating(&CloudBrowserBrowserMainParts::SetViewport,
+  // base::Unretained(main_parts_)). Returns the spec actually applied.
+  // Same lifetime contract as track_source_getter_. Null/empty →
+  // ServerError on the wire.
+  base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
+      set_viewport_callback_;
+
+  // Reads the session-health counters for Cb.getCaptureStats. Unwired
+  // means the response carries framesReceived alone — deliberately NOT
+  // zeros, which would read as "no crashes, video fine".
+  base::RepeatingCallback<CbSessionHealth()>
+      session_health_getter_;
   // OSS-W0 — requests a graceful process exit at Cb.shutdown dispatch time.
   // base::BindRepeating(&CloudBrowserBrowserMainParts::Shutdown,
   // base::Unretained(main_parts_)). Returns false when the quit closure is

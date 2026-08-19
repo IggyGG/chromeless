@@ -59,6 +59,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"           // CV2-WARM — raw_ptr<AudioDeviceModule>
 #include "base/timer/timer.h"
+#include "base/time/time.h"  // base::TimeTicks — renderer-crash window
 #include "base/functional/callback_helpers.h"  // CV2 — base::ScopedClosureRunner (capture_keepalive_handle_); placed after base/timer to avoid an add/add textual collision with the CV2-WARM raw_ptr.h include (functionally order-independent)
 #include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
@@ -73,6 +74,7 @@
 #include "capture/build-integration/cb_file_upload_relay.h"
 #include "capture/build-integration/cb_input_dispatch.h"
 #include "capture/build-integration/cb_input_dispatch_composite.h"
+#include "capture/build-integration/cb_viewport_controller.h"  // CbViewportSpec (by value)
 #include "capture/signaling/cb_ice_config.h"        // CV2-WARM — NativeSessionConfig::ice
 #include "capture/signaling/cb_offerer_driver.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
@@ -107,6 +109,7 @@ class CbDataChannelHost;
 
 class CbAuraPlatformData;
 class CbBeginFrameDriver;  // CV2-ICE — drives renderer frame production
+class CbControlChannel;    // browser-fidelity wave 1 — ask-a-human channel
 class CbHeadlessScreen;  // CV2-78 (M5 R1 cursor-routing gate)
 class CbCursorXyJoin;
 class CloudBrowserBrowserContext;
@@ -119,6 +122,17 @@ class CloudBrowserFrameSinkVideoTrackSource;
 // path. Constructed either from LoadConfigFromEnv()+LoadIceConfigFromEnv()
 // at boot, or from Cb.startNativeSession CDP params after a warm-snapshot
 // restore (see cv2-warm-snapshot-cold-start design).
+// Health snapshot surfaced through Cb.getCaptureStats.
+//
+// Free struct rather than a nested one so cb_devtools_agent.h can
+// forward-declare it (the same treatment NativeSessionConfig gets) instead
+// of pulling in this whole header.
+struct CbSessionHealth {
+  int renderer_crashes = 0;
+  bool permanent_death_signaled = false;
+  bool video_track_ok = false;
+};
+
 struct NativeSessionConfig {
   signaling::WsClientConfig ws;
   signaling::IceConfig ice;
@@ -191,6 +205,14 @@ class CloudBrowserBrowserMainParts
   // target.
   void OnGpuPermanentDeath();
 
+  // Recovery for a dead captured renderer. Posted from the resolver's
+  // PrimaryMainFrameRenderProcessGone. Reloads (bounded per window) to
+  // rebuild the RenderViewHost, which fires RenderViewHostChanged and
+  // re-arms capture through the path that already exists. On budget
+  // exhaustion escalates to OnGpuPermanentDeath so physics recycles the
+  // guest rather than watching it crash-loop.
+  void OnCapturedRendererGone();
+
   // Public read-only accessor for the default BrowserContext. Returns
   // nullptr until PreMainMessageLoopRun has executed (the context is
   // constructed there). Used by CloudBrowserContentBrowserClient to
@@ -258,6 +280,12 @@ class CloudBrowserBrowserMainParts
   //       signaling_thread_->BlockingCall hops in ScopedAllowBaseSyncPrimitives
   //       (H1). The env-boot path is unaffected by that scope (no-op there).
   webrtc::RTCError StartNativeSession(const NativeSessionConfig& cfg);
+
+  // Apply a viewport (Cb.setViewport dispatch target). Returns the spec
+  // ACTUALLY applied, which may be clamped — the CDP handler puts that on
+  // the wire so physics can see its request was adjusted instead of
+  // assuming it landed verbatim. Safe before the capture pipeline exists.
+  CbViewportSpec SetViewport(const CbViewportSpec& spec);
 
   // OSS-W0 — request a graceful process exit by running the quit closure
   // parked in WillRunMainMessageLoop(). Quitting the RunLoop unwinds into
@@ -367,6 +395,36 @@ class CloudBrowserBrowserMainParts
   // aura_ — declared AFTER aura_ (reverse-order destruction) AND explicitly
   // reset() in PostMainMessageLoopRun before aura_.release().
   std::unique_ptr<CbBeginFrameDriver> begin_frame_driver_;
+
+  // Viewport / resize. Holds RAW pointers to screen_, aura_ and (once
+  // injected) the capturer inside cb_track_source_, so it must not
+  // outlive any of them. PostMainMessageLoopRun resets it explicitly
+  // before all three; the declaration position here makes reverse-order
+  // destruction agree with that, so the invariant survives a member
+  // reshuffle. Owns nothing itself.
+  std::unique_ptr<CbViewportController> viewport_controller_;
+
+  // Renderer-crash recovery budget. Windowed, not lifetime: a crash an
+  // hour into a session is unrelated to one at boot, and a lifetime
+  // counter would refuse to recover from the former because of the
+  // latter. See OnCapturedRendererGone.
+  base::TimeTicks renderer_crash_window_start_;
+  int renderer_crashes_in_window_ = 0;
+  // Monotonic, for Cb.getCaptureStats — never reset by the window.
+  int renderer_crashes_total_ = 0;
+
+  // Set when the guest has decided it is permanently dead (GPU death, or a
+  // renderer crash-loop that exhausted the reload budget). Exposed through
+  // Cb.getCaptureStats so a poller can distinguish "this guest knows it is
+  // dying" from "this guest is wedged and does not know it" — the two need
+  // different responses, and today they look identical from outside.
+  bool permanent_death_signaled_ = false;
+
+ public:
+  // Health snapshot for Cb.getCaptureStats. Read-only; safe at any time.
+  CbSessionHealth GetSessionHealth() const;
+
+ private:
 
   // Drives PollOutboundRtpStats() every 2s once ICE connects. Armed once
   // (guarded by rtp_stats_timer_armed_) on the first kIceConnectionConnected
@@ -602,6 +660,15 @@ class CloudBrowserBrowserMainParts
   std::unique_ptr<CbFileUploadBridgeWsClient> file_upload_ws_;
   std::unique_ptr<CbFileUploadRelay> file_upload_relay_;
   // ============== END CV2-75 ==============
+
+  // Browser-fidelity wave 1 — the ask-a-human channel (kControl DC).
+  // Owned here because its lifetime is the SESSION's, while its consumer
+  // (the JS dialog manager, hanging off the process-lifetime
+  // WebContentsDelegate singleton) outlives the session. The delegate is
+  // handed a raw pointer via SetSessionContext and MUST have it cleared in
+  // PostMainMessageLoopRun before this unique_ptr drops, or a dialog
+  // raised during teardown would dereference freed memory.
+  std::unique_ptr<CbControlChannel> control_channel_;
 
   bool devtools_http_handler_started_ = false;
 

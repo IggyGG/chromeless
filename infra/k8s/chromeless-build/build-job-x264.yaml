@@ -311,7 +311,19 @@ spec:
               # builders + longhorn instance-manager. Limit stays at
               # 40 so autoninja bursts into idle CPU when peers leave.
               cpu: "6"
-              memory: "96Gi"
+              # MEASURED, not guessed. A full build of this target list peaks at
+              # ~57 GiB (kubectl top, sampled through compile + link on
+              # 2026-08-19: steady ~50 GiB, peak 56,963 Mi). The request was
+              # 96 GiB, which is not conservatism — it is a scheduling lie
+              # that cost two OOM evictions at ADMISSION on 2026-08-19 while
+              # triform-8 had ~29 GiB free and the pod would never have
+              # touched more than 57.
+              #
+              # 72Gi = measured peak + ~26% headroom, which covers a colder
+              # cache and a larger target list without pretending to need
+              # a third of the node. Same reasoning main applied to CPU in
+              # e654ed6 (4 -> 2), where requests ran ~10x actual usage.
+              memory: "72Gi"
             limits:
               cpu: "40"
               memory: "192Gi"

@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "base/threading/thread_restrictions.h"
+#include "capture/build-integration/cb_web_contents_delegate.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
@@ -54,6 +55,7 @@
 #include "base/functional/bind.h"     // OSS-W0 — BindOnce for the shutdown post
 #include "base/functional/callback.h"
 #include "base/json/json_reader.h"   // CV2-WARM — Cb.startNativeSession params
+#include "ui/gfx/geometry/size.h"  // Cb.setViewport response geometry
 #include "base/json/json_writer.h"   // OSS-W0 — re-serialise array-form iceServers
 #include "base/location.h"           // OSS-W0 — FROM_HERE
 #include "base/logging.h"
@@ -104,6 +106,20 @@ constexpr char kStartNativeSessionMethod[] = "Cb.startNativeSession";
 // counter and nothing else — no side effects, no capture start.
 constexpr char kGetCaptureStatsMethod[] = "Cb.getCaptureStats";
 
+// Live viewport resize. Browser-scope on purpose (it acts on process-global
+// state — the display, the aura root — and reaches the page through
+// main_parts' active-WebContents resolver, not through channel->
+// GetAgentHost()), so it works over the isolator's browser-scope session
+// without a per-page attach.
+//
+// WHY CDP AND NOT THE INPUT DATACHANNEL. The input channel is an UNTRUSTED
+// client->guest path. A guest that resized itself straight off it would let
+// a hostile client ask for 8192x8192 and OOM a 2048 MB microVM. Physics
+// already receives the resize (screencast_ws.rs) and holds the per-tier cap,
+// so routing through it puts the arbiter in the path by construction. CDP
+// also gives a structured ack, which is what lets physics SEE that its
+// request was clamped instead of guessing.
+constexpr char kSetViewportMethod[] = "Cb.setViewport";
 // OSS-W0 — graceful process exit. Quits the main message loop, which unwinds
 // into PostMainMessageLoopRun's LIFO teardown so the peer gets a `bye` and the
 // WS closes with code 1000. SIGTERM skips all of that, leaving the broker and
@@ -165,7 +181,17 @@ std::vector<uint8_t> EncodeStartNativeSessionResponse(
 // spare (INT32_MAX ≈ 2.1e9 frames = ~800 days at 30fps), so we saturate to
 // INT32_MAX before encoding rather than take a lossy wrap. The gate only reads
 // this as "0 vs growing", so saturation is immaterial to the decision.
-std::vector<uint8_t> EncodeCaptureStatsResponse(uint64_t frames_received) {
+//
+// Health fields are ADDITIVE and appear after framesReceived. CBOR maps are
+// order-insensitive and unknown keys are ignored by every reader here, so
+// both skew directions are safe: an old isolator polling a new guest keeps
+// reading framesReceived and ignores the rest; a new poller against an old
+// guest simply finds the health keys absent. framesReceived must stay first
+// and must never be renamed — isolator/src/vmm/pool.rs reads it by pointer
+// path (/result/framesReceived).
+std::vector<uint8_t> EncodeCaptureStatsResponse(
+    uint64_t frames_received,
+    const CbSessionHealth* health) {
   std::vector<uint8_t> out;
   crdtp::cbor::EnvelopeEncoder envelope;
   envelope.EncodeStart(&out);
@@ -178,6 +204,55 @@ std::vector<uint8_t> EncodeCaptureStatsResponse(uint64_t frames_received) {
           ? std::numeric_limits<int32_t>::max()
           : static_cast<int32_t>(frames_received);
   crdtp::cbor::EncodeInt32(frames_i32, &out);
+
+  if (health) {
+    // How many times the captured renderer has died this session. A poller
+    // seeing framesReceived flat AND this climbing knows the guest is
+    // crash-looping, not merely idle — two states that are otherwise
+    // indistinguishable from outside, because a pull-consumer capturer
+    // reports the same zero for both.
+    crdtp::cbor::EncodeString8(crdtp::SpanFrom("rendererCrashes"), &out);
+    crdtp::cbor::EncodeInt32(health->renderer_crashes, &out);
+
+    // The guest has concluded it is permanently dead and is tearing down.
+    // Distinguishes "dying and says so" from "wedged and does not know it".
+    crdtp::cbor::EncodeString8(crdtp::SpanFrom("permanentDeathSignaled"), &out);
+    out.push_back(health->permanent_death_signaled ? crdtp::cbor::EncodeTrue()
+                                                   : crdtp::cbor::EncodeFalse());
+
+    // False means no video track / no transceiver, i.e. this session can
+    // never emit an offer and will never produce a frame no matter how long
+    // it is polled. StartNativeSession now fails outright in that case, so
+    // seeing false here means something tore the track down afterwards.
+    crdtp::cbor::EncodeString8(crdtp::SpanFrom("videoTrackOk"), &out);
+    out.push_back(health->video_track_ok ? crdtp::cbor::EncodeTrue()
+                                         : crdtp::cbor::EncodeFalse());
+  }
+
+  out.push_back(crdtp::cbor::EncodeStop());
+  envelope.EncodeStop(&out);
+  return out;
+}
+
+// Encodes the viewport ACTUALLY applied, which may differ from what was
+// asked for — the caller is expected to read these back rather than assume
+// its request was honoured verbatim. A silently-clamped resize that the
+// caller believes succeeded is how geometry disagreements start.
+std::vector<uint8_t> EncodeSetViewportResponse(const gfx::Size& size_dip,
+                                               float device_scale_factor) {
+  std::vector<uint8_t> out;
+  crdtp::cbor::EnvelopeEncoder envelope;
+  envelope.EncodeStart(&out);
+  out.push_back(crdtp::cbor::EncodeIndefiniteLengthMapStart());
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("width"), &out);
+  crdtp::cbor::EncodeInt32(size_dip.width(), &out);
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("height"), &out);
+  crdtp::cbor::EncodeInt32(size_dip.height(), &out);
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("deviceScaleFactor"), &out);
+  crdtp::cbor::EncodeDouble(device_scale_factor, &out);
 
   out.push_back(crdtp::cbor::EncodeStop());
   envelope.EncodeStop(&out);
@@ -222,10 +297,16 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
         active_capture_callback,
     base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
         start_native_session_callback,
+    base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
+        set_viewport_callback,
+    base::RepeatingCallback<CbSessionHealth()>
+        session_health_getter,
     base::RepeatingCallback<bool()> shutdown_callback)
     : track_source_getter_(std::move(track_source_getter)),
       active_capture_callback_(std::move(active_capture_callback)),
       start_native_session_callback_(std::move(start_native_session_callback)),
+      set_viewport_callback_(std::move(set_viewport_callback)),
+      session_health_getter_(std::move(session_health_getter)),
       shutdown_callback_(std::move(shutdown_callback)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
@@ -304,10 +385,12 @@ void CbDevToolsManagerDelegate::HandleCommand(
       dispatchable.Method(), crdtp::SpanFrom(kStartNativeSessionMethod));
   const bool is_get_capture_stats = crdtp::SpanEquals(
       dispatchable.Method(), crdtp::SpanFrom(kGetCaptureStatsMethod));
+  const bool is_set_viewport = crdtp::SpanEquals(
+      dispatchable.Method(), crdtp::SpanFrom(kSetViewportMethod));
   const bool is_shutdown = crdtp::SpanEquals(dispatchable.Method(),
                                              crdtp::SpanFrom(kShutdownMethod));
   if (!is_frame_sink_capture && !is_native_session && !is_get_capture_stats &&
-      !is_shutdown) {
+      !is_set_viewport && !is_shutdown) {
     // Not ours — fall through to chromium's dispatcher.
     std::move(callback).Run(message);
     return;
@@ -322,6 +405,8 @@ void CbDevToolsManagerDelegate::HandleCommand(
     ok_payload = HandleStartFrameSinkCapture(channel, &error);
   } else if (is_native_session) {
     ok_payload = HandleStartNativeSession(dispatchable, &error);
+  } else if (is_set_viewport) {
+    ok_payload = HandleSetViewport(dispatchable, &error);
   } else if (is_get_capture_stats) {
     ok_payload = HandleGetCaptureStats(channel, &error);
   } else {  // is_shutdown
@@ -531,9 +616,96 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleGetCaptureStats(
   // Load-bearing marker for the deploy strings-gate: `grep -a CV2-CAPTURE-STATS
   // <binary>` proves the build carries this method. Also a useful liveness
   // breadcrumb in the guest serial log when the isolator polls the gate.
-  LOG(INFO) << "CV2-CAPTURE-STATS: Cb.getCaptureStats framesReceived=" << frames;
+  // Health is optional: if the getter is unwired (tests, or a build with
+  // no main_parts) we emit exactly the old single-field response rather
+  // than inventing zeros, which would read as "no crashes, video fine".
+  std::optional<CbSessionHealth> health;
+  if (session_health_getter_) {
+    health = session_health_getter_.Run();
+  }
 
-  return EncodeCaptureStatsResponse(frames);
+  LOG(INFO) << "CV2-CAPTURE-STATS: Cb.getCaptureStats framesReceived=" << frames
+            << (health ? " rendererCrashes=" +
+                             std::to_string(health->renderer_crashes) +
+                             " permanentDeath=" +
+                             (health->permanent_death_signaled ? "1" : "0") +
+                             " videoTrackOk=" +
+                             (health->video_track_ok ? "1" : "0")
+                       : std::string(" (health unwired)"));
+
+  return EncodeCaptureStatsResponse(frames, health ? &*health : nullptr);
+}
+
+std::vector<uint8_t> CbDevToolsManagerDelegate::HandleSetViewport(
+    const crdtp::Dispatchable& dispatchable,
+    std::string* out_error) {
+  DCHECK(out_error);
+
+  if (!set_viewport_callback_) {
+    *out_error =
+        "Cb.setViewport: no set-viewport callback wired (check "
+        "CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate "
+        "against CloudBrowserBrowserMainParts::SetViewport)";
+    return {};
+  }
+
+  // Params decode — same CBOR→JSON→ReadDict path as Cb.startNativeSession;
+  // see the long comment there for why ReadDict rather than a hand-rolled
+  // CBOR walker.
+  crdtp::span<uint8_t> params = dispatchable.Params();
+  std::string params_json;
+  if (params.size() > 0) {
+    crdtp::Status status = crdtp::json::ConvertCBORToJSON(params, &params_json);
+    if (!status.ok()) {
+      *out_error = "Cb.setViewport: params CBOR→JSON conversion failed";
+      return {};
+    }
+  }
+  auto dict = base::JSONReader::ReadDict(params_json, base::JSON_PARSE_RFC);
+  if (!dict) {
+    *out_error =
+        "Cb.setViewport: missing, malformed, or non-object params "
+        "(required: width, height)";
+    return {};
+  }
+
+  // Required. Note these are read with EXPLICIT presence checks rather than
+  // value_or defaults: `Cb.*` is hand-dispatched with bare Find* calls, and
+  // a misspelled key that silently takes a default is exactly how
+  // `signalingUseTls` shipped as a no-op read of `useTls`. A caller who
+  // misspells "width" gets an error, not a silent 1280.
+  const std::optional<int> width = dict->FindInt("width");
+  const std::optional<int> height = dict->FindInt("height");
+  if (!width || !height) {
+    *out_error =
+        "Cb.setViewport: both width and height are required (integers, DIP)";
+    return {};
+  }
+
+  // Optional; absent means "leave the scale alone", not "reset to 1.0".
+  // FindDouble accepts an integer-typed JSON value too, so a caller sending
+  // 2 rather than 2.0 works.
+  const std::optional<double> dsf = dict->FindDouble("deviceScaleFactor");
+
+  CbViewportSpec requested;
+  requested.size_dip = gfx::Size(*width, *height);
+  requested.device_scale_factor =
+      dsf ? static_cast<float>(*dsf) : kViewportKeepCurrentScale;
+
+  const CbViewportSpec applied = set_viewport_callback_.Run(requested);
+
+  // Load-bearing marker for the deploy strings-gate, matching
+  // CV2-CAPTURE-STATS: `grep -a CV2-VIEWPORT <binary>` proves the build
+  // carries this method, which is how we tell a stale guest image from a
+  // physics-side wiring bug when a resize does nothing.
+  LOG(INFO) << "CV2-VIEWPORT: Cb.setViewport requested "
+            << requested.size_dip.ToString() << " @"
+            << requested.device_scale_factor << "x -> applied "
+            << applied.size_dip.ToString() << " @"
+            << applied.device_scale_factor << "x";
+
+  return EncodeSetViewportResponse(applied.size_dip,
+                                   applied.device_scale_factor);
 }
 
 std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
@@ -925,6 +1097,13 @@ CbDevToolsManagerDelegate::CreateNewTarget(
   // call + the parenting context) are required for renderer-side
   // input to land. The 9703db5 patch did the WasShown / Focus half;
   // this patch closes the parenting half.
+  // Same delegate the boot WebContents gets. Without it, a tab created
+  // through CDP would have working input and pixels but no popups, no JS
+  // dialogs, no file chooser and no fullscreen — a subtly different
+  // browser depending on how the tab was born. Attach before WasShown/
+  // Focus so first-script dialogs land correctly.
+  web_contents->SetDelegate(GetCloudBrowserWebContentsDelegate());
+
   web_contents->WasShown();
   web_contents->Focus();
 

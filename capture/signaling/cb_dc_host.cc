@@ -23,7 +23,7 @@ namespace {
 // :1858 + :1866-1868. Index alignment with CbDcLabel enum is
 // load-bearing — see kLabelStrings access in LabelToString().
 constexpr std::array<const char*, kNumChannels> kLabelStrings = {
-    "input", "stats", "cursor", "clipboard", "files",
+    "input", "stats", "cursor", "clipboard", "files", "control",
 };
 
 }  // namespace
@@ -49,7 +49,14 @@ const base::flat_set<CbDcLabel>& DefaultOutboundLabels() {
   // CreateOutboundChannels() default matches the historical v1
   // hard-coded-loop behavior. Wave 1.5 (CV2-77 adoption) will pass a
   // narrower set; this default remains the safe fallback for tests
-  // and any future caller that wants the full five-channel shape.
+  // and any future caller that wants the full channel shape.
+  //
+  // kControl joins the default set: opening it costs one DCEP OPEN on the
+  // existing SCTP association (no new m-line, no renegotiation), and a
+  // portal build that predates the control overlay simply logs and drops
+  // the unknown label. Opening it unconditionally means the guest never has
+  // to reason about whether the channel exists before it needs to ask the
+  // human something.
   static const base::NoDestructor<base::flat_set<CbDcLabel>> kSet(
       base::flat_set<CbDcLabel>{
           CbDcLabel::kInput,
@@ -57,6 +64,7 @@ const base::flat_set<CbDcLabel>& DefaultOutboundLabels() {
           CbDcLabel::kCursor,
           CbDcLabel::kClipboard,
           CbDcLabel::kFiles,
+          CbDcLabel::kControl,
       });
   return *kSet;
 }
@@ -286,6 +294,15 @@ bool CbDataChannelHost::IsOpen(CbDcLabel label) const {
 bool CbDataChannelHost::AllChannelsOpen() const {
   // Read of bool is torn-write-safe; no lock needed.
   return all_open_latched_;
+}
+
+uint64_t CbDataChannelHost::GetBufferedAmount(CbDcLabel label) const {
+  base::AutoLock lock(slots_lock_);
+  const auto& slot = slots_[static_cast<size_t>(label)];
+  // Mirrors IsOpen()'s access shape. A never-created or already-shutdown
+  // slot reports 0, which reads correctly to a backpressure caller as
+  // "nothing queued" — a closed channel cannot be blocked on.
+  return slot.dc ? slot.dc->buffered_amount() : 0u;
 }
 
 SendResult CbDataChannelHost::Send(CbDcLabel label, std::string_view text) {

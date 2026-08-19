@@ -200,9 +200,7 @@ folklore; measure.
 
 When this doc was written we assumed real `getDisplayMedia` against
 Xvfb under stock `chromium 147` would work after the T78 launch-flag
-fix (X11 ozone + SwiftShader + Vulkan disabled — see
-`capture/streamer-page/launch.md` "Why the GPU / Vulkan flags are
-non-negotiable on Chromium 147"). It does not — the screen
+fix (X11 ozone + SwiftShader + Vulkan disabled). It does not — the screen
 capturer still throws `NotReadableError: Could not start video
 source` even with the X11 ozone backend confirmed in the UA.
 Investigation under T86 ruled out Xvfb, ozone selection, picker

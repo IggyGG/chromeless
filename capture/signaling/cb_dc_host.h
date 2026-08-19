@@ -153,23 +153,46 @@
 
 namespace cloud_browser::signaling {
 
-// The five canonical DC labels. Kept in offer-SDP creation order so
-// label_id (size_t) doubles as the SDP track index — matches what
-// streamer.js historically produced. Adding a new label is a wire-
-// contract change: bump the index, update portal answerer, never
-// reorder existing entries.
+// The canonical DC labels, in creation order.
+//
+// CORRECTION (control-channel change): the previous comment here claimed
+// "label_id doubles as the SDP track index" and that adding a label is a
+// wire-contract change requiring a portal update. That is FALSE for
+// DataChannels, and believing it makes people fear a renegotiation that
+// cannot happen. ALL SCTP DataChannels multiplex over a SINGLE
+// `m=application` section: the first CreateDataChannelOrError creates that
+// m-line, and channels 2..N are announced IN-BAND via DCEP OPEN, surfacing
+// on the answerer as `ondatachannel`. So appending a label:
+//   * adds no m-line and changes no m-line ORDER,
+//   * needs no renegotiation and creates no glare risk,
+//   * is forward-compatible in BOTH directions — the portal demuxes by
+//     label string with a log-and-drop arm for unknown labels
+//     (browser_screencast_webrtc.rs), so the guest may ship a channel the
+//     portal ignores, and vice versa.
+// What IS load-bearing: never reorder or renumber EXISTING entries, since
+// the values index the fixed-size arrays below. Append only.
 enum class CbDcLabel : uint8_t {
   kInput = 0,
   kStats = 1,
   kCursor = 2,
   kClipboard = 3,
   kFiles = 4,
+  // Bidirectional request/response channel for browser-UI decisions the
+  // guest cannot make alone because they need a human: JS dialogs
+  // (alert/confirm/prompt/beforeunload), permission prompts, file-chooser
+  // requests, cert-error interstitials, plus one-way notices like
+  // fullscreen-changed and download progress.
+  //
+  // Deliberately NOT multiplexed onto kInput (that is a high-frequency,
+  // client->guest, untrusted path) and NOT onto kFiles (bulk transfer there
+  // would head-of-line-block a pending dialog on the same SCTP stream).
+  kControl = 5,
 };
 
 // Total number of DCs the host creates. The array<,kNumChannels>
 // fields below all use this as their fixed size — adding a new
 // channel grows the enum + this constant in lockstep.
-inline constexpr size_t kNumChannels = 5;
+inline constexpr size_t kNumChannels = 6;
 
 // Default subset of labels opened by CreateOutboundChannels() when the
 // caller doesn't pass an explicit set. Mirrors the historical v1
@@ -225,7 +248,7 @@ class CbDataChannelHostObserver {
       CbDcLabel label,
       webrtc::DataChannelInterface::DataState state) {}
 
-  // All five channels have reached kOpen at least once during this
+  // Every requested channel has reached kOpen at least once during this
   // session. Latched: a second open of any channel after a partial-
   // close does not re-fire. The embedder's readiness gate uses this
   // to flip "session is live" semantics, and M6 R1 reads it to gate
@@ -297,8 +320,8 @@ class CbDataChannelHost {
   // must tear the entire session down — partial-DC sessions are not a
   // supported mode in v1).
   //
-  // |labels| selects which of the five canonical labels get opened.
-  // Default (DefaultOutboundLabels()) is all five — preserves the
+  // |labels| selects which of the canonical labels get opened.
+  // Default (DefaultOutboundLabels()) is all of them — preserves the
   // historical v1 behavior. Wave 1.5 will pass a narrower set so the
   // M6 R2/R3 channels (clipboard / file-upload) stay closed until
   // their consumer modules ship. Labels NOT in |labels| are left as
@@ -348,6 +371,23 @@ class CbDataChannelHost {
   // True iff every channel has hit kOpen at least once. Latched.
   bool AllChannelsOpen() const;
 
+  // Bytes queued on |label|'s SCTP send buffer but not yet handed to the
+  // network. 0 for a channel that was never created or is closed.
+  //
+  // This is the backpressure primitive bulk senders need. Chunked transfers
+  // (a file download relayed over kFiles) MUST gate on it: at 64 KiB per
+  // chunk a 32 MiB file is ~512 sends, and pushing those unthrottled
+  // balloons the SCTP send buffer, adds unbounded latency, and — because
+  // every channel shares one association — stalls input and control traffic
+  // behind the transfer. Pause above a cap (~1 MiB) and resume from
+  // CbDcHostObserver::OnBufferedAmountChange.
+  //
+  // Same access shape as IsOpen(): reads the live DataChannelInterface under
+  // slots_lock_. Safe per the slots_ threading contract — the interface
+  // pointer is immutable between CreateOutboundChannels and Shutdown, and
+  // buffered_amount() is itself thread-safe in libwebrtc.
+  uint64_t GetBufferedAmount(CbDcLabel label) const;
+
   // Text-frame emit on |label|. Hops onto signaling_thread_ if the
   // caller isn't already on it, then invokes dc->Send(buf,
   // is_binary=false). Returns kNone on a successful POST to the
@@ -356,10 +396,10 @@ class CbDataChannelHost {
   // if the channel isn't kOpen, or the libwebrtc error from
   // DataChannelInterface::Send otherwise.
   //
-  // TODO(M3-R5-backpressure): expose BufferedAmount() / a
-  // GetBufferedAmount(label) accessor for M5 R3+ to back off cursor
-  // emit when the SCTP buffer balloons. R1 ships fire-and-forget;
-  // M5 R3 will add the gate.
+  // Note this is fire-and-forget with respect to the SCTP buffer. Callers
+  // that emit in bulk must gate on GetBufferedAmount(label) — see its
+  // comment below. (That accessor is what the old
+  // TODO(M3-R5-backpressure) here asked for.)
   SendResult Send(CbDcLabel label, std::string_view text);
 
   // Async text-frame emit. Posts the actual DataChannel send onto

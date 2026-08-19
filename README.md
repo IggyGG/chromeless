@@ -1,5 +1,11 @@
 # chromeless
 
+[![CI](https://forgejo.triform.dev/triform/chromeless/actions/workflows/ci.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![E2E](https://forgejo.triform.dev/triform/chromeless/actions/workflows/e2e.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![Harness](https://forgejo.triform.dev/triform/chromeless/actions/workflows/harness-loopback.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![CodeQL](https://forgejo.triform.dev/triform/chromeless/actions/workflows/codeql.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![Release](https://forgejo.triform.dev/triform/chromeless/actions/workflows/release.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+
 **A Chromium embedder that streams a real browser over WebRTC, with a native
 libwebrtc peer running inside the browser process.**
 
@@ -89,6 +95,28 @@ See [`docs/operations/standalone.md`](./docs/operations/standalone.md).
 ## Building
 
 The browser is a from-source Chromium build. There is no smaller path:
+
+- **WebGL is software-rendered.** v1's launch flag set pins Chromium
+  to ANGLE + SwiftShader (T78 / T91 — Vulkan is disabled because
+  Xvfb has no Vulkan driver). Simple WebGL pages render correctly;
+  heavy WebGL (Three.js stress scenes, full-frame post-processing)
+  will drop below ~5 fps and feel choppy. Phase 4's GPU passthrough
+  unblocks hardware WebGL. See [`docs/research/rendering-matrix.md`](./docs/research/rendering-matrix.md).
+- **WebGPU is not supported.** Dawn requires Vulkan on Linux; v1
+  disables Vulkan. `navigator.gpu` is present, but `requestAdapter()`
+  returns null. Same Phase 4 GPU-passthrough fix unblocks it.
+- **Dev compose ships synthetic media.** `infra/compose.yaml`
+  defaults `CHROMELESS_USE_FAKE_MEDIA=1`, which routes `getDisplayMedia`
+  through Chromium 147's synthetic test pattern + tone instead of
+  real screen capture. Real `getDisplayMedia` fails on Chromium 147
+  + Xvfb regardless of launch-flag tuning (see
+  [`docs/capture/path-of-least-resistance.md`](./docs/capture/path-of-least-resistance.md)
+  §3a). Phase 2's
+  `FrameSinkVideoCapturer` (T47, T55) replaces the
+  `getDisplayMedia` path entirely and is the durable fix.
+- **Single tab per session, single session per container.** v1
+  intentionally ships one Chromium per user; multi-tenant
+  orchestration is Phase 3.
 
 - **4–8 hours cold**, ~1 hour warm with a populated sccache.
 - Needs a full `gclient sync` of the Chromium tree plus a many-core builder.

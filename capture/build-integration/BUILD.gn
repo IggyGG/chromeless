@@ -161,6 +161,8 @@ source_set("encoder_factory") {
     "../encoder/encoder_factory_stub.cc",
     "../encoder/h264_encoder.cc",
     "../encoder/h264_encoder.h",
+    "cb_x264_alignment_shim.cc",
+    "cb_x264_alignment_shim.h",
     "../encoder/nvenc_encoder.cc",
     "../encoder/nvenc_encoder.h",
     "../encoder/simulcast_factory.cc",
@@ -173,6 +175,7 @@ source_set("encoder_factory") {
     "../encoder/vp9_encoder.h",
   ]
   deps = [
+    "//base",
     "//third_party/abseil-cpp:absl",
     "//third_party/libvpx:libvpx",     # VP9 (T35).
     "//third_party/libyuv:libyuv",     # I420Scale (T83).
@@ -621,6 +624,93 @@ source_set("stats_relay") {
 # follow-up CL. The DRAFT compiles against the existing deps because
 # the WS hop is stubbed behind an interface for testability.
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Control channel — the guest's ask-a-human path.
+#
+# Bound to CbDcLabel::kControl. Carries the request/response traffic for
+# decisions chromium will not let the browser make alone: JS dialogs,
+# permission prompts, file-chooser requests, cert-error interstitials,
+# plus one-way notices (fullscreen changed, download progress).
+#
+# The liveness contract is the whole point of the module: every request
+# resolves exactly once even if the portal never answers, because a
+# blocked JS thread on the other side of an unanswered confirm() is a
+# permanently dead tab. See the header.
+# ---------------------------------------------------------------------
+source_set("control_channel") {
+  sources = [
+    "cb_control_channel.cc",
+    "cb_control_channel.h",
+  ]
+  deps = [
+    "//base",
+    "//cloud-browser/capture/signaling:cb_dc_host",
+    "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# JavaScript dialog manager (alert / confirm / prompt / beforeunload).
+#
+# Without this, a //content embedder gets chromium's default, which
+# auto-dismisses every dialog — so any page gating on confirm() silently
+# takes the cancel branch and appears broken. Routes the decision to the
+# viewer over :control_channel, with per-type defaults matching the
+# previous auto-dismiss behaviour for unattended sessions.
+# ---------------------------------------------------------------------
+source_set("javascript_dialog_manager") {
+  sources = [
+    "cb_javascript_dialog_manager.cc",
+    "cb_javascript_dialog_manager.h",
+  ]
+  deps = [
+    "//base",
+    ":control_channel",
+    "//content/public/browser",
+    "//content/public/common",
+    "//url",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# WebContentsDelegate — the parts of a browser that aren't pixels.
+#
+# Until this target, capture/ had NO WebContentsDelegate at all, and a
+# //content embedder without one does not degrade gracefully: chromium
+# silently drops popups, auto-dismisses every JS dialog, ignores
+# <input type=file> clicks, renders no context menu, and never honours
+# requestFullscreen(). Each is a page that "just doesn't work" with no
+# error anywhere.
+#
+# Process-lifetime singleton (base::NoDestructor) rather than a main_parts
+# member: content holds the delegate as a raw back-pointer and
+# DevToolsManager's WebContents outlive main_parts, so an owned delegate
+# would be freed while live WebContents still point at it — the same
+# hazard that makes aura_ a deliberate leak.
+# ---------------------------------------------------------------------
+source_set("web_contents_delegate") {
+  sources = [
+    "cb_web_contents_delegate.cc",
+    "cb_web_contents_delegate.h",
+  ]
+  deps = [
+    "//base",
+    ":control_channel",
+    ":javascript_dialog_manager",
+    "//content/public/browser",
+    # aura::Window — new WebContents must be parented to the embedder's
+    # root or they fall outside the focus chain (BUGS-529).
+    "//ui/aura",
+    "//url",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
 source_set("clipboard_relay") {
   sources = [
     "cb_clipboard_relay.cc",
@@ -980,13 +1070,20 @@ source_set("input_dispatch_drag") {
     # R3's WebContentsResolver forward-declared interface + the
     # CbInputDispatchMouse pointer for held-modifier read access.
     ":input_dispatch_mouse",
-    # RenderWidgetHostImpl::DragTarget* (cast from public
-    # RenderWidgetHost, same pattern as M4 R3 mouse + R6 touch),
-    # content::DropData, blink::WebDragOperation* via the
-    # content-public re-export path.
+    # RenderWidgetHost::DragTarget{DragEnter,DragOver,DragLeave,Drop} +
+    # FilterDropData. Unlike the M4 R3 mouse / R6 touch paths, these are
+    # PUBLIC virtuals on content::RenderWidgetHost at 7727
+    # (render_widget_host.h:306-344), so no content/browser include and no
+    # cb_friends visibility entry are needed here. Also content::DropData
+    # and blink::DragOperationsMask via the content-public re-export.
     "//content/public/browser",
     # blink::mojom::DragOperation enum for kDragOperationCopyV1.
     "//third_party/blink/public/mojom:mojom_platform",
+    # ui::FileInfo — the element type of content::DropData::filenames
+    # (drop_data.h:106). BuildDropData constructs one per "file" item, so
+    # the definition (not just the forward decl content-public gives us) is
+    # required: ui/base/clipboard/file_info.h.
+    "//ui/base",
     "//url",
   ]
 
@@ -1135,6 +1232,12 @@ source_set("embedder") {
     # the bare ScreenBase that PreEarlyInitialization was constructing.
     "cb_headless_screen.cc",
     "cb_headless_screen.h",
+    # Viewport / resize. Lives in :embedder rather than its own
+    # source_set because it coordinates CbAuraPlatformData and
+    # CbHeadlessScreen, both of which are in here — a separate set
+    # would have to depend on :embedder, which depends on it.
+    "cb_viewport_controller.cc",
+    "cb_viewport_controller.h",
     "cb_window_parenting_client.cc",
     "cb_window_parenting_client.h",
     "cloud_browser_browser_context.cc",
@@ -1190,6 +1293,19 @@ source_set("embedder") {
     ":clipboard_relay",
     ":file_upload_relay",
     ":input_dispatch",
+    # Browser-fidelity wave 1 — the guest's ask-a-human path. main_parts
+    # owns the CbControlChannel unique_ptr and binds it to the kControl DC
+    # alongside the other consumers; the dialog manager hangs off the
+    # WebContentsDelegate and is handed the channel per session.
+    #
+    # Wired into :embedder in the SAME change that adds the source_sets,
+    # deliberately: this target is where these files first get compiled,
+    # and landing them as unreferenced deadweight would defer every
+    # signature error to whichever later change happened to add the dep
+    # (the 9d33276 lesson — see the :cb_audio_* comment block above).
+    ":control_channel",
+    ":javascript_dialog_manager",
+    ":web_contents_delegate",
     # CV2-81 — M4 typed-dispatcher composite delegate. Transitively
     # pulls all 6 typed dispatchers (R3 mouse / R4 keyboard / R5 IME /
     # R6 touch / R7 drag / R8 clipboard) + the M4 R2 active-WebContents
