@@ -84,12 +84,28 @@ def scan(path: str) -> list[tuple[int, str, str]]:
         if _is_comment(line):
             continue
 
-        # FORM 1: `$?` read inside an `if ! ...; then` branch, before the
-        # branch closes. Look ahead a few lines only — the idiom is compact.
+        # FORM 1: `$?` read anywhere inside an `if ! ...; then` branch.
+        #
+        # Scan to the branch's own `fi`/`else`, NOT a fixed lookahead. A
+        # 6-line window was the first version and it MISSED the real case:
+        # in a workflow `run: |` block the dump loop between `then` and
+        # `exit` is ten lines long, so the bug sat outside the window and the
+        # lint reported clean. Bound by structure, not by a guessed distance
+        # — the same mistake this lint's second form exists to catch.
         if NEGATED_IF.match(line):
-            for j in range(i + 1, min(i + 6, len(lines))):
+            base_indent = len(line) - len(line.lstrip())
+            for j in range(i + 1, len(lines)):
                 nxt = lines[j]
-                if re.match(r"^\s*(fi|else|elif)\b", nxt):
+                stripped = nxt.strip()
+                if not stripped:
+                    continue
+                indent = len(nxt) - len(nxt.lstrip())
+                # Branch ends at fi/else/elif at or left of the `if` column.
+                if indent <= base_indent and re.match(
+                        r"^(fi|else|elif)\b", stripped):
+                    break
+                # Or when we dedent out of the block entirely (YAML `run: |`).
+                if indent < base_indent and stripped:
                     break
                 if not _is_comment(nxt) and CAPTURES_RC.search(nxt):
                     out.append(

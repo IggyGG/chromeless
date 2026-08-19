@@ -63,12 +63,53 @@ rc=0
 cmd || rc=$?
 """
 
+# The case the FIRST version of this lint MISSED. In a workflow `run: |`
+# block the branch body is long — the dump loop between `then` and `exit`
+# runs ten lines — so a 6-line lookahead reported clean on a real false
+# green. Bounding by the branch's own structure instead is what fixed it.
+# Keep this case: it is the regression that proves the bound is structural.
+YAML_LONG_BRANCH = """      - name: docker compose up
+        run: |
+          if ! docker compose -f infra/compose.yaml up -d --wait; then
+            echo "::error::compose up failed"
+            echo "::group::compose ps"
+            docker compose -f infra/compose.yaml ps -a || true
+            echo "::endgroup::"
+            for svc in $(docker compose config --services 2>/dev/null); do
+              echo "::group::logs ${svc}"
+              docker compose logs --tail 120 "${svc}" 2>&1 || true
+              echo "::endgroup::"
+            done
+            rc=$?
+            exit "$rc"
+          fi
+"""
+
+# Same shape, correct: a literal exit, never reads $?. This is what actually
+# shipped on main — the lint must NOT fire on it.
+YAML_LONG_BRANCH_OK = """      - name: docker compose up
+        run: |
+          if ! docker compose -f infra/compose.yaml up -d --wait; then
+            echo "::error::compose up failed"
+            for svc in $(docker compose config --services 2>/dev/null); do
+              echo "::group::logs ${svc}"
+              docker compose logs --tail 120 "${svc}" 2>&1 || true
+              echo "::endgroup::"
+            done
+            exit 1
+          fi
+"""
+
 CASES = [
     ("false-green rc idiom", BAD_RC, "negated-if-rc", True),
     ("corrected rc capture", GOOD_RC, "negated-if-rc", False),
     ("line-window guard", BAD_WINDOW, "line-window-guard", True),
     ("structural anchor", GOOD_WINDOW, "line-window-guard", False),
     ("both forms in comments", COMMENTED, None, False),
+    ("yaml run-block, long branch", YAML_LONG_BRANCH,
+     "negated-if-rc", True),
+    ("yaml run-block, literal exit", YAML_LONG_BRANCH_OK,
+     "negated-if-rc", False),
 ]
 
 
