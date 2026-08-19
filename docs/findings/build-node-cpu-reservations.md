@@ -1,4 +1,4 @@
-# The chromeless build lane cannot schedule: t7/t8 CPU reservations
+# The chromeless build lane cannot schedule: t7/t8 CPU and memory reservations
 
 **Status:** investigated, not actioned. Every pod named below belongs to
 another team; the changes are theirs to make. Measured 2026-08-17 against
@@ -92,6 +92,47 @@ was using 4m and looked like an obvious candidate to shrink; its 14-day peak is
 8.11 cores. The snapshot would have led to cutting a pod that needs 4× its
 current request. Prometheus retention here is 15 days, so 14d is the longest
 honest window.
+
+---
+
+## Addendum: memory is the SECOND way this lane fails to schedule (2026-08-19)
+
+The CPU story above is not the whole shape. `OutOfmemory` is a distinct
+rejection with an almost identical presentation, and it caught me today: I
+fired the x264 fix at `build-job-x264.yaml` (the **t8** lane, `requests.memory:
+96Gi`) and got three dead pods and no log — visually the same as the CPU case,
+different reason.
+
+Measured at the moment of the failure, then again 40 minutes later:
+
+| node | allocatable | requested | free | 96Gi lane |
+| --- | --- | --- | --- | --- |
+| triform-2 | 251.4 GiB | 153.7 (61%) | 97.7 | fits, barely |
+| triform-7 | 251.3 GiB | 136.9 (54%) | 114.3 | **fits** |
+| triform-8 | 251.3 GiB | 165.6 (66%) | 85.6 | **CANNOT SCHEDULE** |
+
+t8 is short by ~10 GiB. t2's 1.7 GiB of slack is not a margin — any pod that
+lands there first takes the lane out too.
+
+**So the lane choice is load-bearing, and the default is the right one.**
+`fire-build.sh`'s `DEFAULT_MANIFEST` is the **t7** lane, which is both the node
+with headroom and the manifest that builds 7 of 8 test targets rather than 2.
+Overriding `--manifest` to a t8 lane, as I did, is choosing the node that
+cannot fit it *and* the narrower target list — the exact pairing the "green
+about a target list, not about the tree" trap warns about. A build fired that
+way is worse than the default in both dimensions.
+
+**Check before you fire, not after three OutOfmemory pods:**
+
+```sh
+kubectl describe node triform-8 | awk '/Allocated resources/,/^Events/' | grep -E '^  memory'
+```
+
+Compare that against the manifest's `requests.memory`. This costs one command;
+discovering it from dead pods costs a cycle and produces no log to read.
+
+The CPU findings above still stand — this is an additional constraint on the
+same lane, not a correction to them.
 
 ---
 
