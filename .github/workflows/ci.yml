@@ -172,7 +172,8 @@ jobs:
           curl -fsSLO "${base}/${asset}.sha256"
           sha256sum -c "${asset}.sha256"
           tar -xzf "${asset}"
-          ./lychee-x86_64-unknown-linux-gnu/lychee \
+          test -x ./lychee
+          ./lychee \
             --verbose \
             --no-progress \
             --max-concurrency 4 \
