@@ -248,13 +248,19 @@ void CbControlChannel::OnMessage(const webrtc::DataBuffer& buffer) {
 void CbControlChannel::HandleInboundJson(const std::string& raw) {
   // Parse on the signaling thread so a malformed frame costs no UI-thread
   // time, then hop with the already-validated pieces.
-  std::optional<base::Value> parsed = base::JSONReader::Read(raw);
-  if (!parsed || !parsed->is_dict()) {
+  // ReadDict, not Read + is_dict + GetDict: it parses and extracts the
+  // top-level object in one call, and `options` is REQUIRED at 7727 (no
+  // default) on all three of Read/ReadDict/ReadList. JSON_PARSE_RFC is
+  // strict — no comments, no trailing commas — which is right for a remote
+  // peer's frames: anything lenient here is attack surface, not politeness.
+  std::optional<base::DictValue> parsed =
+      base::JSONReader::ReadDict(raw, base::JSON_PARSE_RFC);
+  if (!parsed) {
     LOG(WARNING) << "CbControlChannel: inbound frame is not a JSON object "
                     "— dropped";
     return;
   }
-  const base::DictValue& envelope = parsed->GetDict();
+  const base::DictValue& envelope = *parsed;
 
   const std::optional<int> v = envelope.FindInt("v");
   if (!v || *v != kProtocolVersion) {

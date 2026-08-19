@@ -219,6 +219,26 @@ not enough.
 
 ---
 
+## base::JSONReader — `options` is REQUIRED, there is no default
+
+`Read`, `ReadDict` and `ReadList` all take `(std::string_view json, int
+options, size_t max_depth = kAbsoluteMaxDepth)`. Only `max_depth` is
+defaulted. A bare `JSONReader::Read(raw)` fails with *"too few arguments to
+function call, expected at least 2, have 1"*.
+
+```cpp
+// Parses AND extracts the top-level object in one call.
+std::optional<base::DictValue> d =
+    base::JSONReader::ReadDict(raw, base::JSON_PARSE_RFC);
+```
+
+Prefer `ReadDict` over `Read` + `is_dict()` + `GetDict()` — shorter, and it
+returns the dict type directly. Use `JSON_PARSE_RFC` (strict: no comments,
+no trailing commas) for anything arriving from a remote peer; leniency there
+is attack surface, not politeness.
+
+---
+
 ## blink::mojom::StreamDevicesSet needs the FULL mojom header
 
 `content/public/browser/media_stream_request.h` includes only
