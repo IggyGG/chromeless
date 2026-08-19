@@ -94,6 +94,7 @@ Common:
 | `CHROMELESS_TLS_CERT` / `_KEY` | — | your own certificate; both or neither |
 | `CHROMELESS_TLS_HOSTS` | — | extra SANs for the generated one |
 | `CHROMELESS_AUTH_PRIVKEY` / `_PUBKEY` | — | from `cmd/keygen`; see below |
+| `SIGNALING_TOKEN` | — | the worker's own credential, also from `cmd/keygen`. Required once the keys are set |
 | `CHROMELESS_TURN_SECRET` | — | required by the `turn` profile |
 | `CHROMIUM_START_URL` | `about:blank` | page to open once the worker is up |
 | `SESSION_ID` | `dev` | must match what the client connects with |
@@ -110,7 +111,7 @@ SANs cover `localhost`, `127.0.0.1`, and `::1`. Reaching the gateway by LAN IP
 or hostname needs `CHROMELESS_TLS_HOSTS=browser.lan,192.168.1.10` — a
 certificate that does not name the host you typed is rejected outright.
 
-### The keypair
+### The keypair, and the worker's token
 
 The gateway mints session tokens; the broker verifies them. Both halves come
 from one place because the broker needs the public key at *its* startup, before
@@ -120,8 +121,27 @@ the gateway exists — neither can hand the other anything at boot:
 eval "$(cd infra/gateway && go run ./cmd/keygen)"
 ```
 
-Omit them and the broker keeps its old anonymous behaviour, warned about at
-startup. The gateway cross-checks the two and refuses to start if they
+That sets **three** variables, not two:
+
+| | |
+| --- | --- |
+| `CHROMELESS_AUTH_PRIVKEY` | the gateway signs with it |
+| `CHROMELESS_AUTH_PUBKEY` | the broker verifies with it |
+| `SIGNALING_TOKEN` | what the *worker* presents to the broker |
+
+The third exists because enabling auth enables it for **both** peers. The page
+asks the gateway for its token after logging in; the browser has no login and
+nothing to ask, so it has to be handed one. `keygen` mints a 30-day
+`browser`-role token for `${SESSION_ID:-dev}` — set `SESSION_ID` before the
+`eval` if you use a different one.
+
+Until 2026-08-19 it minted only the keypair, and this quickstart followed
+exactly armed the broker against a worker carrying nothing. See
+[Troubleshooting](#troubleshooting) for what that looks like, which is nothing
+at all.
+
+Omit all three and the broker keeps its old anonymous behaviour, warned about
+at startup. The gateway cross-checks the two keys and refuses to start if they
 disagree — a mismatched pair is the one misconfiguration with no useful
 symptom: both services behave correctly, disagree, and every connection dies as
 "signature mismatch" with nothing in either log saying the keys differ.
@@ -182,24 +202,40 @@ CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
 CHROMELESS_TURN_SECRET=$(openssl rand -hex 32) \
   docker compose -f infra/compose.host.yaml --profile turn up
 
-# on the machine with the browser
+# still here — mint the far worker's token, because this is where the private
+# key is. `eval`'s own SIGNALING_TOKEN would also work; mint explicitly if the
+# worker uses a different session id.
+SESSION_ID=dev go run ./infra/gateway/cmd/worker-token
+
+# on the machine with the browser, with that token pasted in
 CHROMELESS_IMAGE=… \
 CHROMELESS_SIGNALING_HOST=gateway.example.com:8443 \
-CHROMELESS_SIGNALING_TOKEN=<browser-role token> \
+CHROMELESS_SIGNALING_TOKEN=eyJhbGciOiJFZERTQSI… \
 CHROMELESS_ICE_SERVERS='[…]' \
   docker compose -f infra/compose.worker.yaml up
 ```
+
+The token is minted on the gateway's machine and carried over, not generated
+where the browser runs — `CHROMELESS_AUTH_PRIVKEY` must never leave the host
+that signs with it.
 
 Four differences from the single-host case, all of which only appear once the
 halves are apart:
 
 1. **TURN stops being optional.** Without a relay the session negotiates and
    then produces no video, which reads as a broken build.
-2. **The worker needs a token**, and cannot refresh it. Mint a browser-role one
-   from the gateway's `/issue-token`. They are short-lived by design;
-   `capture/signaling/cb_signaling_reconnect.h` is explicit that token refresh
-   is out of scope, so a worker whose token expires exits and must be
-   restarted.
+2. **The worker needs a token**, and cannot refresh it. Mint one where the
+   private key is, with the session id the worker will use:
+
+   ```bash
+   SESSION_ID=dev go run ./infra/gateway/cmd/worker-token
+   ```
+
+   Not from the gateway's `/issue-token` — that mints 15-minute tokens, which
+   suit a page that rolls them over silently and not a browser process that
+   reads its token once at launch. `capture/signaling/cb_signaling_reconnect.h`
+   is explicit that token refresh is out of scope, so an expired token means
+   the process exits; `cmd/worker-token` mints 30 days to make that rare.
 3. **The worker cannot click through a self-signed certificate.** It is
    Chromium and it validates. Mount a real certificate into the gateway, or add
    the generated one to the worker machine's trust store.
@@ -223,9 +259,36 @@ halves are apart:
 
 ## Troubleshooting
 
-**The page loads but Connect never connects.** Check the broker actually has
-the public key — `docker compose logs signaling | grep auth`. "auth enabled
-(Ed25519)" is what you want; "auth disabled" means the key never arrived.
+**The page loads but Connect never connects.** Two causes, and they look
+identical from the browser.
+
+First check the broker's auth line — `docker compose logs signaling | grep
+auth`. "auth enabled (Ed25519)" means the public key arrived; "auth disabled"
+means it did not, and the login is then protecting only the HTML.
+
+Then check the *worker* was given a credential for that same auth. This is the
+one that reads as a network fault:
+
+```bash
+docker compose -f infra/compose.yaml logs chromium | grep -i "1008\|missing token"
+```
+
+`1008 missing token` means the broker refused the worker. Nothing else in the
+stack shows it — the handshake failure exits the browser process, supervisord
+respawns it every ~30 s, and DevTools answers `/json/version` the whole time.
+The container is healthy, the page is fine, and no offer is ever produced.
+
+The fix is to use the token `keygen` prints:
+
+```bash
+eval "$(cd infra/gateway && go run ./cmd/keygen)"   # exports SIGNALING_TOKEN too
+```
+
+Before 2026-08-19 `keygen` emitted only the keypair, so it armed the broker
+against a worker it had given nothing — the quickstart, followed exactly,
+produced this. If you have an older shell environment still loaded, re-run the
+`eval` and bring the stack back up. Verify with `echo "${SIGNALING_TOKEN:0:12}"`;
+empty means the worker will be refused.
 
 **Video never arrives; the log says "waiting for offer".** The worker is not
 producing an offer. Confirm it reached signaling with the *same session id* the

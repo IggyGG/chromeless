@@ -38,10 +38,12 @@ kubectl create secret generic chromeless-standalone -n chromeless \
   --from-literal=CHROMELESS_AUTH_PUBKEY="$CHROMELESS_AUTH_PUBKEY"
 
 # The worker needs a BROWSER-role token, and cannot refresh one — the gateway's
-# issuer mints 15-minute tokens, which is useless for a worker. Mint a
-# long-lived one with the same key (see the commit that added this directory).
+# issuer mints 15-minute tokens, which is useless for a worker. cmd/worker-token
+# mints 30 days with the same key. (In compose this is keygen's third export;
+# here it is minted separately because it lands in its OWN Secret, which is
+# what stack.yaml wires into WEBRTC_SIGNALING_TOKEN.)
 kubectl create secret generic chromeless-standalone-worker-token -n chromeless \
-  --from-literal=token="<a browser-role token for session id 'dev'>"
+  --from-literal=token="$(cd infra/gateway && SESSION_ID=dev go run ./cmd/worker-token)"
 
 # 3. Network policy, then the stack.
 kubectl apply -f infra/k8s/standalone/networkpolicy.yaml

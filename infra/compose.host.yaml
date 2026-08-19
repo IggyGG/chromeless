@@ -9,6 +9,11 @@
 #   CHROMELESS_CDP_URL=http://127.0.0.1:9222 \
 #     docker compose -f infra/compose.host.yaml up
 #
+# The keygen `eval` also exports SIGNALING_TOKEN. This half does not use it —
+# there is no worker here — but the OTHER half needs one, and the private key
+# lives here. Carry that value over to the worker machine as
+# CHROMELESS_SIGNALING_TOKEN; never copy CHROMELESS_AUTH_PRIVKEY anywhere.
+#
 # Then open https://localhost:8443.
 #
 # Note there is no `chromium` service here and no CHROMELESS_IMAGE: this half

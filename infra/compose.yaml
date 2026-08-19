@@ -132,6 +132,21 @@ services:
       # The /ws path is dropped by launch-chromeless.sh (the native peer builds
       # its own path from the session id) and only the host:port survives.
       SIGNALING_URL: ${SIGNALING_URL:-ws://signaling:8080/ws}
+      # The worker's credential for the broker. `cmd/keygen` exports this
+      # alongside the keypair, so the documented `eval` sets all three at once.
+      #
+      # Empty is CORRECT when the broker has no CHROMELESS_AUTH_PUBKEY: it runs
+      # "auth disabled" and takes any caller. It is FATAL the moment auth is on
+      # — which is precisely what eval'ing keygen does — and the failure has no
+      # visible symptom: the broker closes the worker's socket with `1008
+      # missing token`, the handshake failure EXITS the browser process,
+      # supervisord respawns it every ~30s, and DevTools answers /json/version
+      # throughout. The container reports healthy, the page loads, and Connect
+      # never connects.
+      #
+      # Before 2026-08-19 keygen emitted only the keypair, so following the
+      # README exactly produced that state. cmd/keygen's own tests now assert
+      # all three exports are present.
       SIGNALING_TOKEN: ${SIGNALING_TOKEN:-}
       # ICE. Unset → the peer falls back to public STUN, which is fine for a
       # same-host compose run and will NOT traverse most NATs.

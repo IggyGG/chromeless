@@ -34,6 +34,9 @@ Helm chart and controller, and the glue that runs inside the worker image.
 ## Running it
 
 ```bash
+# Three exports: the gateway's signing key, the broker's verifying key, and
+# SIGNALING_TOKEN — the worker's own credential. All three, or the broker
+# refuses the browser and only a WebSocket close code says so.
 eval "$(cd infra/gateway && go run ./cmd/keygen)"
 
 CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
