@@ -94,7 +94,7 @@ jobs:
           do
             docker pull "$image"
             docker create \
-              --name "__dind_gc_e2e_pin_${index}" \
+              --name "dind-gc-e2e-pin-${index}" \
               --label triform.dev/dind-gc-pin=1 \
               --entrypoint __dind_gc_pin \
               "$image"
@@ -170,5 +170,5 @@ jobs:
           docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans
           docker ps -aq \
             --filter label=triform.dev/dind-gc-pin=1 \
-            --filter name=__dind_gc_e2e_pin_ \
+            --filter name=dind-gc-e2e-pin- \
             | xargs -r docker rm -f
