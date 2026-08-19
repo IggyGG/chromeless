@@ -255,18 +255,34 @@ spec:
                   name: sccache-s3-creds
                   key: AWS_SECRET_ACCESS_KEY
             - name: CHROMELESS_BUILD_TARGETS
-              # Build-czar 2026-05-17 (opt B, post Build #23): drop the
-              # 3 unittest targets — cloud_browser_worker ONLY. Build #23
-              # proved every PRODUCTION cloud-browser TU compiles clean
-              # with iters 1-6 (pcf.o + cb_audio_device_module.o +
-              # worker_main.o all F CXX, cb_dc_host.o no-error). The only
-              # build #23 errors were in cloud_browser_pcf_test.cc
-              # (dynamic_cast/-frtti + TestAudioDeviceModule rename) — a
-              # unittest TU orthogonal to M-stack structural validation.
-              # Operator accepts loss of test-coverage signal (unittests
-              # validate separately later, tracked IMPROVE). Worker-only
-              # = zero error sources + ~20-30% faster build.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings"
+              # Build-czar 2026-05-17 (opt B, post Build #23): dropped the
+              # unittest targets, worker-only, for a faster build. That
+              # traded away the test-coverage signal on the assumption the
+              # unittests would "validate separately later" — which is the
+              # assumption `make lint-build-targets` exists because nobody
+              # ever honoured (three targets went ten weeks compiled by
+              # nothing, and failed on the first build once added).
+              #
+              # 2026-08-19: encoder + framesink capturer tests added back to
+              # THIS lane, deliberately and specifically.
+              #
+              # The encoder tests are not optional coverage here. The fix
+              # they guard is a null-pointer dereference on the mid-session
+              # re-init path (Release() nulls callback_, the self-reinit
+              # never restored it, and Encode() dereferences it ~70 lines
+              # after its only guard). It is reached the moment a frame
+              # changes size, which is exactly what Cb.setViewport now makes
+              # happen. Building cloud_browser_worker alone would compile
+              # the FIX but not the test that proves it, and the lane would
+              # go green having verified nothing about either.
+              #
+              # The framesink capturer test covers SetCaptureResolution, the
+              # other half of the same change.
+              #
+              # If build time becomes the constraint again, drop something
+              # else — a green verdict that excludes the code under test is
+              # not a cheaper verdict, it is a wrong one.
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests"
             - name: NINJA_PARALLELISM
               # Build-czar 2026-05-17 (opt C): 36 -> 56. T7 is 64-core;
               # 36 was conservative. 56 leaves ~8 cores for OS + I/O +
