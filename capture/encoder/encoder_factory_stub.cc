@@ -29,6 +29,7 @@
 #include "capture/encoder/simulcast_factory.h"
 #include "capture/encoder/svtav1_encoder.h"
 #include "capture/encoder/vaapi_encoder.h"
+#include "rtc_base/logging.h"  // RTC_LOG — CV2-ENCODER-BUILD provenance line
 #include "capture/encoder/vp9_encoder.h"
 
 namespace cloud_browser {
@@ -138,7 +139,41 @@ class UnimplementedEncoder : public webrtc::VideoEncoder {
 }  // namespace
 
 CloudBrowserVideoEncoderFactory::CloudBrowserVideoEncoderFactory(Config config)
-    : config_(std::move(config)) {}
+    : config_(std::move(config)) {
+  // Say ONCE, loudly, which codec paths this BINARY can actually produce.
+  //
+  // WHY THIS LINE EXISTS. The factory fails closed: when x264 is not
+  // compiled in, H264Encoder is its #else stub, InitEncode returns
+  // WEBRTC_VIDEO_CODEC_ERROR, and libwebrtc quietly falls back to its own
+  // built-in encoders. Video keeps flowing and the session looks healthy,
+  // so a binary built WITHOUT its intended encoder is indistinguishable
+  // from one built with it.
+  //
+  // That is not hypothetical. Every image built between 2026-05-05 and
+  // 2026-08-19 was gn-gen'd profile=sw because a rename severed
+  // CHROMELESS_BUILD_PROFILE from the reader that consumed it. HAS_X264
+  // was never defined, x264 never ran, and nobody noticed for ~12 weeks —
+  // including every fps/quality measurement taken in that window, all of
+  // which were really measuring libwebrtc's software encoders.
+  //
+  // The fallback itself is deliberate and stays: degrading to a working
+  // codec beats failing a session. What was missing is the ability to SEE
+  // it. `grep CV2-ENCODER-BUILD <serial log>` now answers "what can this
+  // guest actually encode with" in one line.
+#if defined(HAS_X264)
+  const char* x264_state = "COMPILED-IN";
+#else
+  const char* x264_state = "ABSENT (H264Encoder is a stub — libwebrtc's "
+                           "built-in H.264 will be used instead)";
+#endif
+  RTC_LOG(LS_WARNING) << "CV2-ENCODER-BUILD: x264=" << x264_state
+               << " advertised={"
+               << (config_.enable_vp9 ? "VP9 " : "")
+               << (config_.enable_h264 ? "H264 " : "")
+               << (config_.enable_vp8 ? "VP8 " : "")
+               << (config_.enable_svt_av1 ? "AV1 " : "")
+               << "}";
+}
 
 CloudBrowserVideoEncoderFactory::~CloudBrowserVideoEncoderFactory() = default;
 
