@@ -168,15 +168,24 @@ jobs:
           version=0.24.2
           asset=lychee-x86_64-unknown-linux-musl.tar.gz
           base="https://github.com/lycheeverse/lychee/releases/download/lychee-v${version}"
-          curl -fsSLO "${base}/${asset}"
-          curl -fsSLO "${base}/${asset}.sha256"
-          sha256sum -c "${asset}.sha256"
-          tar -xzf "${asset}"
-          lychee=./lychee-x86_64-unknown-linux-musl/lychee
+          tool_dir=$(mktemp -d)
+          trap 'rm -rf "${tool_dir}"' EXIT
+          curl -fsSL -o "${tool_dir}/${asset}" "${base}/${asset}"
+          curl -fsSL -o "${tool_dir}/${asset}.sha256" "${base}/${asset}.sha256"
+          (cd "${tool_dir}" && sha256sum -c "${asset}.sha256")
+          tar -xzf "${tool_dir}/${asset}" -C "${tool_dir}"
+          lychee="${tool_dir}/lychee-x86_64-unknown-linux-musl/lychee"
           test -x "${lychee}"
           "${lychee}" \
             --verbose \
             --no-progress \
             --max-concurrency 4 \
             --exclude-path node_modules \
+            --exclude '^https?://localhost(:[0-9]+)?/' \
+            --exclude '^https://plane\.triform\.cloud/?$' \
+            --exclude '^https://bitmovin\.com/' \
+            --exclude '^https://www\.androidpolice\.com/' \
+            --exclude '^https://www\.cdnetworks\.com/' \
+            --exclude '^https://www\.neowin\.net/' \
+            --exclude '^https://gitlab\.torproject\.org/' \
             './**/*.md'

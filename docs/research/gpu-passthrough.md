@@ -220,7 +220,7 @@ upstream-published figures and T43's cloud-GPU footnote:
 |---------------------------------------|-----------------------------------|------------------------|----------------------------------------|
 | nvidia-container-runtime + runc       | ~5 ms                             | ~100% (baseline)       | NVIDIA dev blog, T43 §2.               |
 | MIG slice (1g.10gb on H100)           | ~5 ms within slice                | full slice fraction    | NVIDIA MIG docs.                       |
-| gVisor + nvproxy                      | ~5-7 ms (slight syscall overhead) | ~85-95%                | gVisor blog, [perf benchmarks](https://gvisor.dev/blog/2024/06/26/cuda-performance/). |
+| gVisor + nvproxy                      | ~5-7 ms (slight syscall overhead) | ~85-95%                | gVisor [GPU support guide](https://gvisor.dev/docs/user_guide/gpu/). |
 | Kata + VFIO passthrough               | ~5 ms                             | ~95-99%                | Kata + KubeVirt benches.               |
 | SwiftShader (Phase 1)                 | n/a (CPU encode)                  | n/a                    | T91 — degraded but functional.         |
 

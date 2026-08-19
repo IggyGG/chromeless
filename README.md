@@ -1,10 +1,10 @@
 # chromeless
 
-[![CI](https://github.com/iggy/chromeless/actions/workflows/ci.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/ci.yml)
-[![E2E](https://github.com/iggy/chromeless/actions/workflows/e2e.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/e2e.yml)
-[![Harness](https://github.com/iggy/chromeless/actions/workflows/harness-loopback.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/harness-loopback.yml)
-[![CodeQL](https://github.com/iggy/chromeless/actions/workflows/codeql.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/codeql.yml)
-[![Release](https://github.com/iggy/chromeless/actions/workflows/release.yml/badge.svg)](https://github.com/iggy/chromeless/actions/workflows/release.yml)
+[![CI](https://forgejo.triform.dev/triform/chromeless/actions/workflows/ci.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![E2E](https://forgejo.triform.dev/triform/chromeless/actions/workflows/e2e.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![Harness](https://forgejo.triform.dev/triform/chromeless/actions/workflows/harness-loopback.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![CodeQL](https://forgejo.triform.dev/triform/chromeless/actions/workflows/codeql.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
+[![Release](https://forgejo.triform.dev/triform/chromeless/actions/workflows/release.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
 
 **Open-source cloud browser with low-latency WebRTC streaming.**
 
@@ -202,8 +202,7 @@ so users hit them with eyes open. Each has a planned-fix milestone.
   real screen capture. Real `getDisplayMedia` fails on Chromium 147
   + Xvfb regardless of launch-flag tuning (see
   [`docs/capture/path-of-least-resistance.md`](./docs/capture/path-of-least-resistance.md)
-  §3a and [`capture/streamer-page/launch.md`](./capture/streamer-page/launch.md)
-  §"T86: the X11+SwiftShader pin alone wasn't enough"). Phase 2's
+  §3a). Phase 2's
   `FrameSinkVideoCapturer` (T47, T55) replaces the
   `getDisplayMedia` path entirely and is the durable fix.
 - **Single tab per session, single session per container.** v1

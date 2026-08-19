@@ -61,7 +61,7 @@ Source-of-truth files in their tree:
   gamepad sockets.
   ([file](https://github.com/selkies-project/selkies/blob/main/src/selkies/input_handler.py))
 - `addons/gst-web/` — browser client (HTML5 + JS).
-  ([dir](https://github.com/selkies-project/selkies/tree/main/addons/gst-web))
+  ([historical dir](https://github.com/selkies-project/selkies/tree/382a462ca5b89983b84ad0e0947393efdc4fc774/addons/gst-web))
 
 ## 2. Strengths
 
@@ -143,7 +143,7 @@ Source-of-truth files in their tree:
 - **Browser client outline.** `addons/gst-web` gives us a working reference
   for keymap, cursor, and clipboard wire formats even if our client is
   rewritten in TypeScript.
-  ([gst-web](https://github.com/selkies-project/selkies/tree/main/addons/gst-web))
+  ([historical gst-web](https://github.com/selkies-project/selkies/tree/382a462ca5b89983b84ad0e0947393efdc4fc774/addons/gst-web))
 - **Audio configuration defaults.** Opus 48 kHz, 10 ms latency, 20 ms frame
   size is a safe default for our Phase 1 PulseAudio loopback.
   ([media_pipeline.py](https://github.com/selkies-project/selkies/blob/main/src/selkies/media_pipeline.py))

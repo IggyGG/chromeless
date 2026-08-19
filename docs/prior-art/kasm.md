@@ -4,7 +4,7 @@
 **Repos:** https://github.com/kasmtech/workspaces-core-images,
 https://github.com/kasmtech/workspaces-images,
 https://github.com/kasmtech/KasmVNC
-**Site / docs:** https://www.kasmweb.com/, https://kasm.com/docs/latest/
+**Site / docs:** https://www.kasmweb.com/, https://www.kasmweb.com/docs/latest/index.html
 **License:** KasmVNC server is GPL-3.0; the Workspaces orchestration platform
 is a commercial product with a free Community Edition.
 
