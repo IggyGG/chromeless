@@ -77,6 +77,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The runner's Docker sidecar garbage-collects unreferenced images while
+      # jobs are active. Pull and reference every registry-backed compose image
+      # before starting the stack so a concurrent collection cannot remove it
+      # between Compose's resolution and container creation.
+      - name: Pin compose images against runner garbage collection
+        run: |
+          set -eu
+          index=0
+          for image in \
+            node:20-alpine \
+            nginx:alpine \
+            prom/prometheus:v2.55.1 \
+            grafana/grafana:11.3.0 \
+            jaegertracing/all-in-one:1.62.0
+          do
+            docker pull "$image"
+            docker create \
+              --name "__dind_gc_e2e_pin_${index}" \
+              --label triform.dev/dind-gc-pin=1 \
+              --entrypoint __dind_gc_pin \
+              "$image"
+            index=$((index + 1))
+          done
+
       - name: docker compose up
         run: |
           docker compose -f infra/compose.yaml --profile observability up -d --wait
@@ -144,3 +168,7 @@ jobs:
         if: always()
         run: |
           docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans
+          docker ps -aq \
+            --filter label=triform.dev/dind-gc-pin=1 \
+            --filter name=__dind_gc_e2e_pin_ \
+            | xargs -r docker rm -f
