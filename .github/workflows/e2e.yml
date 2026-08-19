@@ -1,9 +1,15 @@
 # .github/workflows/e2e.yml — T84 Playwright end-to-end tests.
 #
-# Brings up the full compose stack on a Linux runner, then runs the
+# Brings up the default application stack on a Linux runner, then runs the
 # Playwright specs in tests/e2e/. Spec failures + Playwright's HTML
 # report + the container logs land as artifacts so the failing run is
 # debuggable without re-running locally.
+#
+# The compose file's optional `observability` profile is intentionally not
+# enabled here: the browser journeys exercise Chromium, signaling, and the
+# client, while Prometheus, Grafana, and Jaeger are a separate local-dashboard
+# surface. Pulling that unrelated profile also exceeds the shared runner's
+# bounded Docker volume when concurrent jobs hold their live image layers.
 #
 # Skip-gating: if T78's getDisplayMedia fix isn't in the image, the
 # audio/video specs degrade — we mark them `test.skip` in the spec
@@ -87,10 +93,7 @@ jobs:
           index=0
           for image in \
             node:20-alpine \
-            nginx:alpine \
-            prom/prometheus:v2.55.1 \
-            grafana/grafana:11.3.0 \
-            jaegertracing/all-in-one:1.62.0
+            nginx:alpine
           do
             docker pull "$image"
             docker create \
@@ -103,7 +106,7 @@ jobs:
 
       - name: docker compose up
         run: |
-          docker compose -f infra/compose.yaml --profile observability up -d --wait
+          docker compose -f infra/compose.yaml up -d --wait
 
       - name: Show service status
         if: always()
@@ -167,7 +170,7 @@ jobs:
       - name: docker compose down
         if: always()
         run: |
-          docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans
+          docker compose -f infra/compose.yaml down -v --remove-orphans
           docker ps -aq \
             --filter label=triform.dev/dind-gc-pin=1 \
             --filter name=dind-gc-e2e-pin- \
