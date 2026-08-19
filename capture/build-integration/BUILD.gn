@@ -1137,11 +1137,6 @@ source_set("embedder") {
     "cb_headless_screen.h",
     "cb_window_parenting_client.cc",
     "cb_window_parenting_client.h",
-    # x264 huge-page alignment vs PartitionAlloc's kMaxSupportedAlignment.
-    # Installed from PreEarlyInitialization; see the header for the
-    # disassembly and the measurements.
-    "cb_x264_alignment_shim.cc",
-    "cb_x264_alignment_shim.h",
     "cloud_browser_browser_context.cc",
     "cloud_browser_browser_context.h",
     "cloud_browser_browser_main_parts.cc",

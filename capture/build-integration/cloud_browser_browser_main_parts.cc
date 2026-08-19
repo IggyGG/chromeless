@@ -42,7 +42,6 @@
 #include "capture/build-integration/cb_begin_frame_driver.h"  // CV2-ICE
 #include "capture/build-integration/cb_cursor_xy_join.h"
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
-#include "capture/build-integration/cb_x264_alignment_shim.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
 #include "capture/build-integration/cloud_browser_pcf.h"
 #include "capture/cursor/cb_cursor_dc_emitter.h"
@@ -356,15 +355,6 @@ constexpr int kDefaultDisplayHeight = 720;
 }  // namespace
 
 int CloudBrowserBrowserMainParts::PreEarlyInitialization() {
-  // Clamp oversized aligned allocations before anything can make one.
-  // libx264 asks memalign() for 2 MiB alignment on its larger buffers
-  // (transparent huge pages); PartitionAlloc caps alignment at 1 MiB and
-  // CHECK-fails, aborting the browser process. This must be installed before
-  // the first x264 encoder opens — PreEarlyInitialization is the embedder's
-  // first hook and runs long before any peer connection exists. See
-  // cb_x264_alignment_shim.h.
-  InstallX264AlignmentShim();
-
   // Global display::Screen — done at the EARLIEST available embedder
   // hook. chromium subsystems register DisplayObservers during the
   // PreCreateThreads phase (well before PreMainMessageLoopRun), and
