@@ -171,12 +171,6 @@ source_set("encoder_factory") {
     "../encoder/vaapi_encoder.h",
     "../encoder/vp9_encoder.cc",
     "../encoder/vp9_encoder.h",
-    # Interposes memalign so libx264's huge-page path cannot FATAL
-    # PartitionAlloc and take the browser process with it. Must be in the
-    # same target as h264_encoder.cc so it links into every binary that
-    # can open an x264 encoder — including the unit tests, which is where
-    # the crash was finally caught. See the file header.
-    "../encoder/x264_memalign_shim.cc",
   ]
   deps = [
     "//third_party/abseil-cpp:absl",
