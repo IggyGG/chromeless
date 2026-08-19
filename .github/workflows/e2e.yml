@@ -1,15 +1,9 @@
 # .github/workflows/e2e.yml — T84 Playwright end-to-end tests.
 #
-# Brings up the default application stack on a Linux runner, then runs the
+# Brings up the full compose stack on a Linux runner, then runs the
 # Playwright specs in tests/e2e/. Spec failures + Playwright's HTML
 # report + the container logs land as artifacts so the failing run is
 # debuggable without re-running locally.
-#
-# The compose file's optional `observability` profile is intentionally not
-# enabled here: the browser journeys exercise Chromium, signaling, and the
-# client, while Prometheus, Grafana, and Jaeger are a separate local-dashboard
-# surface. Pulling that unrelated profile also exceeds the shared runner's
-# bounded Docker volume when concurrent jobs hold their live image layers.
 #
 # Skip-gating: if T78's getDisplayMedia fix isn't in the image, the
 # audio/video specs degrade — we mark them `test.skip` in the spec
@@ -38,83 +32,256 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Job-level gate, not just the step-level probe below. On Forgejo a
+    # step-level `if:` prevents only the step's EXECUTION — the job still
+    # clones every action and runs the pre-probe setup steps (checkout,
+    # buildx, setup-node). Observed 2026-07-29: the probe correctly said
+    # "e2e skipped" and the job STILL failed, because setup-node's tool
+    # cache was broken on that runner and its post-steps exited 255. A
+    # job-level `if:` is evaluated before any of that (codeql.yml proves
+    # the pattern on this host), so an unset var now skips the whole job
+    # green instead of gambling on runner state it doesn't need.
+    #
+    # The step-level probe is kept: it still guards the var-set-but-empty
+    # edge and keeps every compose step independently gated (see the
+    # teardown comment at the bottom).
+    if: vars.CHROMELESS_IMAGE != ''
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Node is preinstalled in ci-tools. Keep npm job-local instead of using
-      # setup-node's shared host toolcache, which races across Forgejo jobs.
-      - name: Install npm
-        run: apk add --no-cache npm
-
-      # Build cached via gha so re-runs are fast.
-      - name: Build images
-        id: build_images
-        continue-on-error: true
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: infra/Dockerfile
-          tags: chromeless:dev
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # A Forgejo runner occasionally loses its job-local BuildKit gRPC
-      # frontend while the shared builders are busy. Recreate the builder and
-      # retry once; an actual Dockerfile failure still leaves this job red.
-      - name: Recreate Buildx after transient frontend loss
-        if: steps.build_images.outcome == 'failure'
-        uses: docker/setup-buildx-action@v3
-        with:
-          name: e2e-retry-builder
-          driver: docker-container
-
-      - name: Retry image build once
-        if: steps.build_images.outcome == 'failure'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: infra/Dockerfile
-          tags: chromeless:dev
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # The runner's Docker sidecar garbage-collects unreferenced images while
-      # jobs are active. Pull and reference every registry-backed compose image
-      # before starting the stack so a concurrent collection cannot remove it
-      # between Compose's resolution and container creation.
-      - name: Pin compose images against runner garbage collection
+      # OSS-W2: no `actions/setup-node@v4` — it installs a glibc node into
+      # this host's musl (Alpine) job container, which then cannot exec. The
+      # poisoned PATH fails every later JS action's post-step with exit 255,
+      # so the job dies regardless of its own result. Full write-up in
+      # ci.yml's "Node version (image-provided)" step.
+      # Playwright needs npm/npx, which ci-tools does not ship — install it
+      # from the distro so it matches the image's own node ABI (see ci.yml).
+      - name: Node + npm (image-provided)
         run: |
-          set -eu
-          index=0
-          for image in \
-            node:20-alpine \
-            nginx:alpine
-          do
-            docker pull "$image"
-            docker create \
-              --name "dind-gc-e2e-pin-${index}" \
-              --label triform.dev/dind-gc-pin=1 \
-              --entrypoint __dind_gc_pin \
-              "$image"
-            index=$((index + 1))
-          done
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::no node in the job image; Playwright needs one"
+            exit 1
+          }
+          if ! command -v npm >/dev/null 2>&1; then
+            if command -v apk >/dev/null 2>&1; then
+              apk add --no-cache npm >/dev/null
+            elif command -v apt-get >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq npm >/dev/null
+            fi
+          fi
+          echo "node: $(node --version)  npm: $(npm --version 2>/dev/null || echo MISSING)"
+
+      # OSS-W1: the e2e stack needs a real cloud_browser_worker image. The
+      # browser is a from-source Chromium build (4-8h cold — see
+      # build/chromeless-build.sh) that cannot be produced on a GHA runner,
+      # and this project does not publish images, so the image must be
+      # supplied. Set the CHROMELESS_IMAGE repository variable to enable
+      # this workflow; unset, it reports a notice and passes.
+      #
+      # This replaces a build of infra/Dockerfile — the legacy
+      # stock-Chromium + getDisplayMedia image, unbuildable since the M7
+      # native-peer migration deleted capture/streamer-page/.
+      - name: Check for a supplied worker image
+        id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — e2e skipped. Set it to a cloud_browser_worker image to enable."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # C2: private-registry login — see ci.yml's identical step for the
+      # conditional-secrets rationale. Compose pulls the worker image
+      # itself, so the daemon needs the auth before `up`.
+      - name: Registry login (if credentials provided)
+        if: steps.probe.outputs.present == 'true' && env.REGISTRY_PASSWORD != ''
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          registry="${CHROMELESS_IMAGE%%/*}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
+            --username "${REGISTRY_USERNAME}" --password-stdin
+
+      # C2: does the docker daemon share this job's filesystem?
+      #
+      # infra/compose.yaml bind-mounts repo paths (../client, ../client/dist,
+      # ./observability/prometheus/prometheus.yml). Those are resolved by the
+      # DAEMON, not by compose — so they only work when the daemon can see the
+      # checkout. On this CI host it cannot: jobs run in a container talking to
+      # a sibling dind daemon over tcp://127.0.0.1:2375, with separate
+      # filesystems. Docker then auto-creates each missing source path as an
+      # empty DIRECTORY, which produces two distinct failures:
+      #
+      #   - a file mount becomes dir-onto-file:
+      #       error mounting ".../prometheus.yml" to rootfs at
+      #       "/etc/prometheus/prometheus.yml": not a directory
+      #   - a dir mount silently yields an EMPTY tree, so client-build npm's
+      #     into nothing and nginx serves a blank root — specs would fail
+      #     against a stack that never had the app in it.
+      #
+      # Observed 2026-07-30 on the first real-image e2e run. So probe for it
+      # rather than assuming: write a sentinel into the workspace and ask the
+      # daemon to read it back. Shared filesystem (GitHub-hosted runners,
+      # local dev, DinD with the workspace bind-mounted through) → the value
+      # round-trips and e2e runs for real. Not shared → skip with a notice
+      # instead of reporting a red that says nothing about the product.
+      - name: Probe daemon filesystem sharing
+        id: fsprobe
+        if: steps.probe.outputs.present == 'true'
+        run: |
+          sentinel=".e2e-fsprobe-${GITHUB_RUN_ID:-local}"
+          printf 'shared-ok' > "${sentinel}"
+          got=$(docker run --rm -v "${PWD}/${sentinel}:/probe:ro" \
+                  alpine:3.20 cat /probe 2>/dev/null || true)
+          rm -f "${sentinel}"
+          if [ "${got}" = "shared-ok" ]; then
+            echo "shared=true" >> "$GITHUB_OUTPUT"
+            echo "daemon sees the workspace — running the compose stack"
+          else
+            echo "shared=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::docker daemon does not share this job's filesystem (got '${got}'); compose bind-mounts cannot resolve, so e2e is skipped. Run it where the daemon sees the checkout."
+          fi
+
+      # Go, for cmd/keygen below. `actions/setup-go` is safe on this host in a
+      # way `actions/setup-node` is not: Go ships static binaries, so it cannot
+      # poison the PATH of an Alpine job container the way a glibc node does
+      # (full write-up in ci.yml's "Node version (image-provided)" step).
+      # ci.yml and codeql.yml already resolve it from the mirror.
+      - name: Set up Go
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: infra/gateway/go.sum
+
+      # Turn ON broker auth, because that is the configuration the README
+      # documents — and until 2026-08-19 nothing had ever run it.
+      #
+      # Before this step the job set neither key, so signaling booted "auth
+      # disabled: any caller can connect" and took every peer unconditionally.
+      # That is not what any user is told to run, and it silently masked a real
+      # defect: `keygen` emitted only the keypair, so following the quickstart
+      # exactly armed the broker against a worker that had been given no
+      # credential. The broker closed it with `1008 missing token`, the
+      # handshake failure exited the browser process, supervisord respawned it
+      # every ~30 s, and DevTools answered /json/version throughout — a healthy
+      # container, a working page, and no offer, ever. CI passed the whole time
+      # because CI was running a configuration nobody uses.
+      #
+      # `go run ./cmd/keygen` is deliberately the literal command from the
+      # README rather than a CI-only equivalent: a hand-rolled Ed25519 JWT here
+      # would drift from signaling/token/ and test itself instead of the
+      # product.
+      #
+      # The values go to $GITHUB_ENV so every later compose subcommand
+      # interpolates the same pair — `ps`, the log capture and `down` each
+      # re-read the whole file. They are not masked and do not need to be: the
+      # keypair is minted fresh per run, authenticates only against a broker
+      # that dies with the job, and never leaves the runner.
+      - name: Mint the auth keypair and the worker token
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        working-directory: infra/gateway
+        run: |
+          set -euo pipefail
+          go run ./cmd/keygen > /tmp/chromeless-auth.env
+          # Three exports, not two. The third is the worker's own credential —
+          # the page can ask the gateway for a token after logging in, the
+          # browser process has no login and must be handed one at launch.
+          got=$(grep -c '^export ' /tmp/chromeless-auth.env || true)
+          if [ "${got}" != "3" ]; then
+            echo "::error::keygen emitted ${got} exports, expected 3 (privkey, pubkey, worker token)"
+            sed 's/=.*/=<redacted>/' /tmp/chromeless-auth.env
+            exit 1
+          fi
+          sed 's/^export //' /tmp/chromeless-auth.env >> "$GITHUB_ENV"
+          echo "auth enabled for this run: $(sed 's/=.*//' /tmp/chromeless-auth.env | tr '\n' ' ')"
 
       - name: docker compose up
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          # The gateway refuses to start without a credential, on purpose — a
+          # built-in default password looks like protection and is not. These
+          # must match what tests/e2e/playwright.config.ts signs in with.
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
-          docker compose -f infra/compose.yaml up -d --wait
+          docker compose -f infra/compose.yaml --profile observability up -d --wait
 
+      # `up --wait` is NOT evidence the worker connected. The chromium service
+      # passes its healthcheck off DevTools, which keeps answering while the
+      # browser process is exiting and being respawned — so a worker the broker
+      # is refusing looks identical to a working one until a Playwright spec
+      # times out 30 s later with "never decoded a frame", which reads as a
+      # media bug rather than an auth one.
+      #
+      # Ask the broker directly instead. It logs one line per accepted peer.
+      - name: Assert the broker accepted both peers' auth
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
+        run: |
+          set -uo pipefail
+          # The worker retries its dial, so poll rather than reading once.
+          for _ in $(seq 1 30); do
+            logs=$(docker compose -f infra/compose.yaml logs signaling 2>&1 || true)
+            case "${logs}" in
+              *'"role":"browser"'*) break ;;
+            esac
+            sleep 2
+          done
+
+          case "${logs}" in
+            *'auth disabled'*)
+              echo "::error::the broker booted with auth DISABLED — CHROMELESS_AUTH_PUBKEY never reached it, so this run proves nothing about the documented configuration"
+              exit 1 ;;
+          esac
+          case "${logs}" in
+            *'auth rejected'*)
+              echo "::error::the broker REJECTED a peer. If the role is 'browser' the worker has no usable SIGNALING_TOKEN — see infra/gateway/cmd/keygen."
+              echo "${logs}" | grep -i 'auth rejected' | tail -20
+              exit 1 ;;
+          esac
+          case "${logs}" in
+            *'"role":"browser"'*)
+              echo "broker accepted the worker (role=browser) with auth enabled" ;;
+            *)
+              echo "::error::auth is enabled but the broker never accepted a browser-role peer. The worker either never dialled or was closed before its first envelope."
+              echo "--- signaling ---"
+              echo "${logs}" | tail -40
+              echo "--- chromium ---"
+              docker compose -f infra/compose.yaml logs --tail 60 chromium 2>&1 || true
+              exit 1 ;;
+          esac
+
+      # Every compose subcommand interpolates the whole file, so each one
+      # needs CHROMELESS_IMAGE — it is declared `?err` REQUIRED. Three steps
+      # here (status, log capture, teardown) invoked compose without it and
+      # each died with "required variable CHROMELESS_IMAGE is missing a
+      # value"; the `if: always()` teardown then failed the job on its own.
       - name: Show service status
-        if: always()
+        if: always() && steps.fsprobe.outputs.shared == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
           docker compose -f infra/compose.yaml ps
           docker ps -a
 
       - name: Install Playwright + deps
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         working-directory: tests/e2e
         run: |
           npm install --no-audit --no-fund
@@ -122,14 +289,23 @@ jobs:
 
       - name: Run Playwright specs
         id: playwright
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         working-directory: tests/e2e
         env:
-          # The compose stack publishes ports as documented in
-          # infra/compose.yaml. Specs read SIGNALING_URL etc. from
-          # tests/e2e/playwright.config.ts.
-          CHROMELESS_SIGNALING_URL: ws://localhost:8080
-          CHROMELESS_CLIENT_URL: http://localhost:3000
-          CHROMELESS_DEVTOOLS_URL: http://localhost:9222
+          # The stack publishes exactly ONE port now: the gateway on 8443.
+          # 8080 (broker) and 9222 (DevTools) are deliberately internal — 9222
+          # is unauthenticated remote code execution against the browser, and
+          # 8080 with no auth pubkey is a way straight past the login.
+          #
+          # This replaces CHROMELESS_SIGNALING_URL / _CLIENT_URL / _DEVTOOLS_URL,
+          # which named those ports but were read by no spec and no config —
+          # they only ever documented a topology. The page derives its signaling
+          # endpoint from its own origin (client/src/config.ts), so there is
+          # nothing else to point anywhere.
+          CHROMELESS_E2E_BASE_URL: https://localhost:8443
+          # Must match the pair compose booted the gateway with, above.
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
           # `*.live.spec.ts` is the convention for specs that depend on
           # T78's getDisplayMedia fix. Run them but keep the workflow
@@ -138,40 +314,62 @@ jobs:
           set -o pipefail
           npx playwright test --project=chromium 2>&1 | tee playwright.log
 
-      - name: Upload Playwright artefacts
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: playwright-report-${{ github.run_id }}
-          path: |
-            tests/e2e/playwright-report/
-            tests/e2e/test-results/
-            tests/e2e/playwright.log
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Capture container logs on failure
-        if: failure()
+      # OSS-W2: `actions/upload-artifact@v4` fails hard on this host —
+      # "GHESNotSupportedError: @actions/artifact v2.0.0+ … not currently
+      # supported on GHES" — because v4 talks to GitHub's artifact backend
+      # service, which Forgejo does not implement. With `if: always()` it
+      # failed jobs whose own work had passed. Summarise into the log instead;
+      # the failing spec's output is already in playwright.log above.
+      - name: Playwright output summary
+        if: always() && steps.fsprobe.outputs.shared == 'true'
+        working-directory: tests/e2e
         run: |
-          mkdir -p ./compose-logs
+          echo "--- playwright.log tail (artifact upload is unsupported on this host) ---"
+          tail -100 playwright.log 2>/dev/null || echo "(no playwright.log)"
+          echo "--- test-results tree ---"
+          ls -R test-results 2>/dev/null | head -50 || echo "(no test-results)"
+
+      # Same reason as above: no upload-artifact on this host, so the logs go
+      # to the run log where they are actually readable. Tail-bounded per
+      # container so one chatty service can't bury the others — chromium alone
+      # emits a BeginFrame diagnostic line every 5 s.
+      - name: Container logs on failure
+        if: failure() && steps.fsprobe.outputs.shared == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
+        run: |
           for c in $(docker compose -f infra/compose.yaml ps -q); do
             name=$(docker inspect --format '{{.Name}}' "$c" | sed 's|^/||')
-            docker logs "$c" >"./compose-logs/${name}.log" 2>&1 || true
+            echo "::group::${name}"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
           done
 
-      - name: Upload container logs
-        if: failure()
-        uses: actions/upload-artifact@v3
-        with:
-          name: compose-logs-${{ github.run_id }}
-          path: ./compose-logs/
-          retention-days: 14
-
+      # Gated on the probes like every other compose step: infra/compose.yaml
+      # declares CHROMELESS_IMAGE as REQUIRED, so ANY compose subcommand --
+      # including `down` -- fails interpolation when it is unset. An
+      # ungated `if: always()` teardown therefore failed the whole job even
+      # though the probe had correctly reported "e2e skipped". It also needs
+      # the var in its OWN env: the gate stops it running when unset, but
+      # when the var IS set and `up` never ran, `down` still interpolates.
+      #
+      # `down` must survive the fs-probe skip too — a failed `up` can leave
+      # containers behind on a daemon we don't share a filesystem with, and
+      # those would then squat on the runner (a real cbwrtc-chromium was
+      # found still streaming 40 min after its job died, respawning chromium
+      # every 30s via the GPU-death self-terminate loop).
       - name: docker compose down
-        if: always()
+        if: always() && steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
         run: |
-          docker compose -f infra/compose.yaml down -v --remove-orphans
-          docker ps -aq \
-            --filter label=triform.dev/dind-gc-pin=1 \
-            --filter name=dind-gc-e2e-pin- \
-            | xargs -r docker rm -f
+          docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans || true
+          # Belt-and-braces: compose `down` keys off project labels, which a
+          # half-failed `up` may not have applied to every container.
+          docker rm -f cbwrtc-chromium cbwrtc-signaling cbwrtc-client \
+            cbwrtc-client-build cbwrtc-prometheus cbwrtc-grafana cbwrtc-jaeger \
+            >/dev/null 2>&1 || true

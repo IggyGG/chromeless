@@ -52,10 +52,14 @@
 #include "ui/base/page_transition_types.h"
 #include "url/gurl.h"
 
+#include "base/functional/bind.h"     // OSS-W0 — BindOnce for the shutdown post
 #include "base/functional/callback.h"
 #include "base/json/json_reader.h"   // CV2-WARM — Cb.startNativeSession params
 #include "ui/gfx/geometry/size.h"  // Cb.setViewport response geometry
+#include "base/json/json_writer.h"   // OSS-W0 — re-serialise array-form iceServers
+#include "base/location.h"           // OSS-W0 — FROM_HERE
 #include "base/logging.h"
+#include "base/task/sequenced_task_runner.h"  // OSS-W0 — PostTask
 #include "base/values.h"             // CV2-WARM — base::Value::Dict params
 #include "capture/build-integration/cloud_browser_browser_main_parts.h"  // CV2-WARM — NativeSessionConfig
 #include "capture/framesink-capturer/cb_framesink_video_track_source.h"
@@ -63,6 +67,7 @@
 #include "capture/signaling/cb_signaling_ws_client.h"  // CV2-WARM — WsClientConfig
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/surfaces/video_capture_target.h"
+#include "content/public/browser/browser_thread.h"  // OSS-W0 — GetUIThreadTaskRunner
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_agent_host_client_channel.h"
 #include "content/public/browser/render_widget_host.h"
@@ -115,6 +120,11 @@ constexpr char kGetCaptureStatsMethod[] = "Cb.getCaptureStats";
 // also gives a structured ack, which is what lets physics SEE that its
 // request was clamped instead of guessing.
 constexpr char kSetViewportMethod[] = "Cb.setViewport";
+// OSS-W0 — graceful process exit. Quits the main message loop, which unwinds
+// into PostMainMessageLoopRun's LIFO teardown so the peer gets a `bye` and the
+// WS closes with code 1000. SIGTERM skips all of that, leaving the broker and
+// the remote peer to infer the disconnect from a socket error.
+constexpr char kShutdownMethod[] = "Cb.shutdown";
 
 // Encodes {"started": true, "frameSinkId": "<n:m>"} as a CBOR map
 // inside a length-prefixed envelope. Matches the shape every
@@ -249,6 +259,22 @@ std::vector<uint8_t> EncodeSetViewportResponse(const gfx::Size& size_dip,
   return out;
 }
 
+// OSS-W0 — encodes {"shuttingDown": true} as a CBOR map inside a
+// length-prefixed envelope (same shape as EncodeStartResponse).
+std::vector<uint8_t> EncodeShutdownResponse() {
+  std::vector<uint8_t> out;
+  crdtp::cbor::EnvelopeEncoder envelope;
+  envelope.EncodeStart(&out);
+  out.push_back(crdtp::cbor::EncodeIndefiniteLengthMapStart());
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("shuttingDown"), &out);
+  out.push_back(crdtp::cbor::EncodeTrue());
+
+  out.push_back(crdtp::cbor::EncodeStop());
+  envelope.EncodeStop(&out);
+  return out;
+}
+
 // NOTE (ChromelessV2 M2 R4 — CV2-39): the LogReceivedFrame
 // trampoline that previously lived here was the drop-and-log shape
 // used to prove the capturer was reachable from a CDP-driven trigger
@@ -274,12 +300,14 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
         set_viewport_callback,
     base::RepeatingCallback<CbSessionHealth()>
-        session_health_getter)
+        session_health_getter,
+    base::RepeatingCallback<bool()> shutdown_callback)
     : track_source_getter_(std::move(track_source_getter)),
       active_capture_callback_(std::move(active_capture_callback)),
       start_native_session_callback_(std::move(start_native_session_callback)),
       set_viewport_callback_(std::move(set_viewport_callback)),
       session_health_getter_(std::move(session_health_getter)),
+      shutdown_callback_(std::move(shutdown_callback)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
   // NOTE: we deliberately do NOT Run() the getter here. CV2-69
@@ -302,6 +330,13 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
                     "ServerError. Check CloudBrowserContentBrowserClient::"
                     "CreateDevToolsManagerDelegate wiring against "
                     "CloudBrowserBrowserMainParts::cb_track_source().";
+  }
+  if (!shutdown_callback_) {
+    LOG(WARNING) << "CbDevToolsManagerDelegate: no shutdown callback supplied "
+                    "— Cb.shutdown will fail with a ServerError. Check "
+                    "CloudBrowserContentBrowserClient::"
+                    "CreateDevToolsManagerDelegate wiring against "
+                    "CloudBrowserBrowserMainParts::Shutdown().";
   }
   if (default_browser_context_) {
     LOG(INFO) << "CbDevToolsManagerDelegate: constructed with default "
@@ -352,8 +387,10 @@ void CbDevToolsManagerDelegate::HandleCommand(
       dispatchable.Method(), crdtp::SpanFrom(kGetCaptureStatsMethod));
   const bool is_set_viewport = crdtp::SpanEquals(
       dispatchable.Method(), crdtp::SpanFrom(kSetViewportMethod));
+  const bool is_shutdown = crdtp::SpanEquals(dispatchable.Method(),
+                                             crdtp::SpanFrom(kShutdownMethod));
   if (!is_frame_sink_capture && !is_native_session && !is_get_capture_stats &&
-      !is_set_viewport) {
+      !is_set_viewport && !is_shutdown) {
     // Not ours — fall through to chromium's dispatcher.
     std::move(callback).Run(message);
     return;
@@ -370,8 +407,10 @@ void CbDevToolsManagerDelegate::HandleCommand(
     ok_payload = HandleStartNativeSession(dispatchable, &error);
   } else if (is_set_viewport) {
     ok_payload = HandleSetViewport(dispatchable, &error);
-  } else {  // is_get_capture_stats
+  } else if (is_get_capture_stats) {
     ok_payload = HandleGetCaptureStats(channel, &error);
+  } else {  // is_shutdown
+    ok_payload = HandleShutdown(&error);
   }
 
   std::unique_ptr<crdtp::Serializable> response;
@@ -382,6 +421,9 @@ void CbDevToolsManagerDelegate::HandleCommand(
     response = crdtp::CreateErrorResponse(
         call_id, crdtp::DispatchResponse::ServerError(std::move(error)));
   }
+  // For Cb.shutdown this response is dispatched BEFORE the quit closure runs
+  // (HandleShutdown only posts the quit), so the caller reliably receives
+  // {"shuttingDown":true} rather than racing the socket close.
   channel->DispatchProtocolMessageToClient(response->Serialize());
 }
 
@@ -713,6 +755,57 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
     return {};
   }
 
+  // 1.5 UNKNOWN-KEY REJECTION.
+  //
+  // This is the structural fix for the BUG-1 / BUG-2 class documented below.
+  // Both bugs have the SAME root cause, and it is not the individual
+  // spellings: params are read with bare Find*() calls, so a key nobody
+  // reads is silently ignored. The caller gets a success response, the
+  // feature quietly does not happen, and the symptom surfaces minutes later
+  // somewhere else:
+  //
+  //   BUG-1: `signalingUseTls` unread → use_tls defaulted true → the guest
+  //          dialled wss:// at a plaintext broker → opaque TLS error.
+  //   BUG-2: array-form `iceServers` unread → fell back to public STUN →
+  //          a deployment with provisioned TURN silently ran without it.
+  //
+  // Neither appeared in any response or log. Aliases (added below) fix the
+  // two spellings we know about; rejecting unknown keys fixes the NEXT one
+  // too, at the point of the mistake, with the misspelling in the message.
+  //
+  // `Cb.*` is hand-dispatched — no PDL, no /json/protocol entry — so there
+  // is no schema doing this for us. This list IS the schema; keep it in sync
+  // when adding a param (the DCHECK-free cost is one line).
+  static constexpr const char* kKnownParams[] = {
+      "signalingHost",      "signalingSessionId", "signalingToken",
+      "signalingUseTls",    "useTls",             "iceServers",
+      "iceTransportPolicy",
+  };
+  for (const auto& kv : *dict) {
+    const std::string& key = kv.first;
+    bool known = false;
+    for (const char* k : kKnownParams) {
+      if (key == k) {
+        known = true;
+        break;
+      }
+    }
+    if (!known) {
+      // Name the offending key AND the accepted set: a caller who typo'd
+      // `signalingTls` should not have to diff their JSON against a header.
+      std::string accepted;
+      for (const char* k : kKnownParams) {
+        if (!accepted.empty()) accepted += ", ";
+        accepted += k;
+      }
+      *out_error = "Cb.startNativeSession: unknown param '" + key +
+                   "' (accepted: " + accepted +
+                   "). Rejected rather than ignored — a silently dropped "
+                   "param surfaces later as an unrelated failure.";
+      return {};
+    }
+  }
+
   // 2. Required signaling identity.
   const std::string* signaling_host = dict->FindString("signalingHost");
   const std::string* signaling_session_id =
@@ -734,27 +827,91 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
   if (const std::string* token = dict->FindString("signalingToken")) {
     ws.token = *token;
   }
-  // useTls defaults true (matches WsClientConfig::use_tls default), only the
-  // explicit false from the isolator forces plain ws://.
-  ws.use_tls = dict->FindBool("useTls").value_or(true);
+  // useTls defaults true (matches WsClientConfig::use_tls default), only an
+  // explicit false forces plain ws://.
+  //
+  // OSS-W0 BUG-1: `signalingUseTls` is accepted as an alias for `useTls`.
+  // Every other signaling param in this method carries the `signaling`
+  // prefix (signalingHost / signalingSessionId / signalingToken), so callers
+  // reasonably write `signalingUseTls` — tests/webrtc/cv2-fcdirect.mjs:113
+  // does exactly that, and its own comment documents the param under that
+  // name. The unknown key was silently dropped, use_tls defaulted to true,
+  // and the guest dialled wss:// at a plaintext broker — surfacing minutes
+  // later as an opaque TLS handshake error, far from the cause. Accept both
+  // spellings; the `signaling`-prefixed one wins when both are present.
+  ws.use_tls = dict->FindBool("signalingUseTls")
+                   .value_or(dict->FindBool("useTls").value_or(true));
 
-  // 4. Build the IceConfig from the iceServers JSON + transport policy,
+  // 4. Build the IceConfig from the iceServers param + transport policy,
   //    reusing the SAME parsers the env path uses so the two paths are
-  //    semantically identical. iceServers arrives as the streamer.js JSON
-  //    string (the isolator already stores ice_servers_json as a string and
-  //    passes it through verbatim); absent/unparsable → default single-STUN.
+  //    semantically identical.
+  //
+  //    OSS-W0 BUG-2: `iceServers` is accepted in BOTH shapes.
+  //      * list  — a real JSON array, the shape any ordinary CDP client
+  //                writes and the shape cv2-fcdirect.mjs:114 sends;
+  //      * string — a JSON-encoded string, the legacy isolator shape (it
+  //                stores ice_servers_json as a string and forwards it
+  //                verbatim).
+  //    Previously only the string form was read, via FindString(). That
+  //    returns nullptr on a list, so an array-form caller fell through to
+  //    BuildDefaultIceServers() — i.e. a deployment that had provisioned
+  //    TURN silently ran on stun:stun.l.google.com:19302 instead, with a
+  //    relay-only policy that could never be satisfied. Nothing in the
+  //    response or logs said so.
   signaling::IceConfig ice;
   std::optional<std::vector<webrtc::PeerConnectionInterface::IceServer>>
       servers;
-  if (const std::string* ice_servers_json = dict->FindString("iceServers")) {
-    servers = signaling::ParseIceServersJson(*ice_servers_json);
+  bool ice_servers_param_present = false;
+  if (const base::Value* ice_servers = dict->Find("iceServers")) {
+    ice_servers_param_present = true;
+    if (const std::string* as_string = ice_servers->GetIfString()) {
+      // Legacy isolator shape — JSON inside a JSON string.
+      servers = signaling::ParseIceServersJson(*as_string);
+    } else if (ice_servers->GetIfList() || ice_servers->GetIfDict()) {
+      // Structured shape — re-serialise so the one canonical parser (which
+      // also accepts the `{iceServers:[...]}` wrapper form) stays the single
+      // source of truth for normalisation.
+      std::string reserialised;
+      if (base::JSONWriter::Write(*ice_servers, &reserialised)) {
+        servers = signaling::ParseIceServersJson(reserialised);
+      }
+    }
   }
+
+  // A param that was SUPPLIED but did not yield usable servers is an operator
+  // error, not a reason to quietly substitute public STUN. Fail loudly — the
+  // caller asked for specific ICE servers and would otherwise believe it got
+  // them. Absence still falls back to the documented default.
+  if (ice_servers_param_present && !servers.has_value()) {
+    *out_error =
+        "Cb.startNativeSession: iceServers was supplied but yielded no usable "
+        "servers (expected a JSON array of {urls,username,credential}, an "
+        "object with an `iceServers` array, or a JSON-encoded string of "
+        "either). Refusing to silently fall back to public STUN.";
+    return {};
+  }
+
   ice.servers =
       servers.has_value() ? std::move(*servers) : signaling::BuildDefaultIceServers();
   if (const std::string* policy = dict->FindString("iceTransportPolicy")) {
     ice.transport_policy = signaling::ParseIceTransportPolicy(*policy);
   }  // else leaves the IceConfig default (kAll).
   ice.summary = signaling::SummariseIceServers(ice.servers);
+
+  // Make the default-STUN path visible. A relay-only session on default STUN
+  // can never connect, and that combination was previously silent.
+  if (!ice_servers_param_present) {
+    LOG(WARNING) << "Cb.startNativeSession: no iceServers param — falling back "
+                    "to default public STUN ("
+                 << ice.summary.stun << " stun / " << ice.summary.turn
+                 << " turn). This will not traverse most NATs.";
+  }
+  if (ice.transport_policy ==
+          webrtc::PeerConnectionInterface::IceTransportsType::kRelay &&
+      ice.summary.turn == 0) {
+    LOG(ERROR) << "Cb.startNativeSession: iceTransportPolicy=relay but ZERO "
+                  "TURN servers are configured — ICE cannot succeed.";
+  }
 
   // 5. Bring up the session on the UI thread (we are already on it — this is a
   //    posted HandleCommand task). StartNativeSession wraps its blocking hops
@@ -772,6 +929,42 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(
   LOG(INFO) << "Cb.startNativeSession: native session brought up for session="
             << *signaling_session_id << " host=" << *signaling_host;
   return EncodeStartNativeSessionResponse(*signaling_session_id);
+}
+
+std::vector<uint8_t> CbDevToolsManagerDelegate::HandleShutdown(
+    std::string* out_error) {
+  DCHECK(out_error);
+
+  if (!shutdown_callback_) {
+    *out_error =
+        "Cb.shutdown: no shutdown callback wired (check "
+        "CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate "
+        "against CloudBrowserBrowserMainParts::Shutdown)";
+    return {};
+  }
+
+  // Post rather than run inline. HandleCommand dispatches our response to the
+  // client immediately after this returns, so quitting the message loop here
+  // would race that write against teardown and the caller could see a socket
+  // close instead of {"shuttingDown":true}. Posting lets the current task —
+  // response write included — finish first.
+  //
+  // The callback is Unretained(main_parts_), the same lifetime contract the
+  // other three callbacks use: main_parts outlives the delegate's useful
+  // window. Here that is trivially true, since the posted task is precisely
+  // what begins main_parts' teardown.
+  content::GetUIThreadTaskRunner({})->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](base::RepeatingCallback<bool()> cb) {
+                       if (!cb.Run()) {
+                         LOG(WARNING) << "Cb.shutdown: quit closure was "
+                                         "unavailable at task time";
+                       }
+                     },
+                     shutdown_callback_));
+
+  LOG(INFO) << "Cb.shutdown: graceful exit requested";
+  return EncodeShutdownResponse();
 }
 
 

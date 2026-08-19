@@ -84,14 +84,19 @@ Targets re-exported:
     rtc_base:threading                             (rtc::Thread, ThreadManager)
   webrtc_test_passthrough (testonly):
     test:test_support                              (gtest fixtures, helpers)
+    webrtc_overrides:metrics        (LINK-only: chromium replaces
+                                      webrtc::metrics::HistogramAdd /
+                                      HistogramFactoryGetEnumeration)
+    webrtc_overrides:system_time    (LINK-only: chromium replaces
+                                      webrtc::SystemTimeNanos)
 
 Touched file:
 - third_party/webrtc_overrides/cloud_browser/BUILD.gn  (new file)
 
 Resolved against branch-heads/7727 (Chromium 147 stable).
 ---
- .../webrtc_overrides/cloud_browser/BUILD.gn   | 74 +++++++++++++++++++++++
- 1 file changed, 74 insertions(+)
+ .../webrtc_overrides/cloud_browser/BUILD.gn   | 117 ++++++++++++++++++++++
+ 1 file changed, 117 insertions(+)
  create mode 100644 third_party/webrtc_overrides/cloud_browser/BUILD.gn
 
 diff --git a/third_party/webrtc_overrides/cloud_browser/BUILD.gn b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
@@ -99,7 +104,7 @@ new file mode 100644
 index 0000000000..f4503f144e
 --- /dev/null
 +++ b/third_party/webrtc_overrides/cloud_browser/BUILD.gn
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,117 @@
 +# Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
 +#
 +# Use of this source code is governed by a BSD-style license that can be
@@ -180,6 +185,41 @@ index 0000000000..f4503f144e
 +  testonly = true
 +  public_deps = [
 +    "//third_party/webrtc/test:test_support",
++  ]
++
++  # LINK-time implementations, not headers — and that distinction is the
++  # whole reason these are here.
++  #
++  # Chromium does not build libwebrtc's own versions of these three
++  # functions; it REPLACES them with implementations that live in
++  # webrtc_overrides and forward to //base:
++  #
++  #   webrtc::metrics::HistogramAdd / HistogramFactoryGetEnumeration
++  #                                            -> :metrics (metrics.cc)
++  #   webrtc::SystemTimeNanos       -> :system_time (rtc_base/system_time.cc)
++  #
++  # Everything above is `public_deps` for HEADER visibility. These two are
++  # `deps` because nothing includes them — they only have to be on the link
++  # line.
++  #
++  # cloud_browser_worker never needed this: it links the whole
++  # content/browser stack, which already drags both in. A unit test does
++  # not, so the first time anything dep-narrow linked against
++  # libaudio_device_buffer.a the symbols were simply absent:
++  #
++  #   ld.lld: error: undefined symbol: webrtc::metrics::HistogramAdd(...)
++  #   >>> referenced by audio_device_buffer.cc:199
++  #   ld.lld: error: undefined symbol: webrtc::SystemTimeNanos()
++  #   >>> referenced by time_utils.cc:161
++  #
++  # Found 2026-07-30 by cloud_browser_adm_unittests, a target that had been
++  # declared but built by no lane for ~10 weeks. Exactly the same shape as
++  # the //base-in-private-deps defect found the same day: production links
++  # it transitively, only a dep-narrow target can see the gap, and the only
++  # dep-narrow targets in this tree are the unit tests nothing was building.
++  deps = [
++    "//third_party/webrtc_overrides:metrics",
++    "//third_party/webrtc_overrides:system_time",
 +  ]
 +}
 --

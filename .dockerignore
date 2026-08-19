@@ -1,0 +1,42 @@
+# Root .dockerignore.
+#
+# infra/gateway builds with the REPO ROOT as its context (it shares the token
+# package with signaling/ via a `replace` directive, and copies client/dist).
+# Without this file that context is the entire tree — including capture/, which
+# is a Chromium embedder, and .claude/worktrees/, which holds full checkouts of
+# this repo. Sending those to the daemon turns a two-second build into a very
+# long one and can exhaust disk.
+#
+# Deny-list rather than allow-list: a new top-level directory should build, not
+# silently vanish from the context.
+
+# Full checkouts of this repo. See CLAUDE.md — anything walking the tree has to
+# exclude these or it sees every file N+1 times.
+.claude/
+
+.git/
+.github/
+
+# The Chromium embedder. Large, and built by a separate out-of-tree lane.
+capture/
+patches/
+build/
+
+# Per-arch native binaries and build output; the image builds its own.
+**/node_modules/
+**/__pycache__/
+**/*.log
+
+# Docs, tests, and measurement artefacts: none are inputs to a service image.
+docs/
+harness/
+tests/
+verification/
+conformance/
+newtab-probe-out/
+
+# Other services' build contexts.
+infra/controllers/
+infra/turn-issuer/
+infra/observability/
+infra/snapshots/

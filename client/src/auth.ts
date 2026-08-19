@@ -45,7 +45,15 @@ export async function fetchSessionToken(
   const url = resolveURL(base, path, { role, session_id: sessionId, tenant });
   const f = opts.fetchImpl ?? fetch;
   try {
-    const res = await f(url, { credentials: "omit", cache: "no-store" });
+    // "same-origin", not "omit": the standalone gateway authenticates this
+    // request with the session cookie set at login. With "omit" the cookie is
+    // withheld, the gateway answers 401, and this function returns null — at
+    // which point session.ts logs "connecting unauthenticated" and dials
+    // anyway, so the visible symptom is an unexplained WebSocket close from
+    // the broker rather than an auth error. Same-origin still sends nothing
+    // cross-origin, so a hosted page pointed at someone else's broker is
+    // unaffected.
+    const res = await f(url, { credentials: "same-origin", cache: "no-store" });
     if (!res.ok) {
       console.warn(`session-token: HTTP ${res.status}`);
       return null;

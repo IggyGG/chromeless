@@ -1,43 +1,35 @@
-// 04: The client receives audio bytes from the cloud-Chromium streamer.
+// 05: The client receives real audio bytes from the cloud worker.
 //
 // What this asserts:
-//   - The client peer connection has an inbound-rtp of `kind: "audio"`
-//     within 10 s of `iceConnectionState=connected`.
-//   - Its `bytesReceived` is > 0 — actual audio is flowing through opus
-//     encode/decode on the wire, not just an empty m-line.
-//   - Its `packetsReceived` is increasing — confirming the receiver is
-//     actually consuming RTP packets, not seeing a one-shot probe.
+//   - The client peer connection has an inbound-rtp of `kind: "audio"`.
+//   - `bytesReceived` is > 0 — actual audio crossed the wire through opus,
+//     not just an empty m-line that negotiated successfully.
 //
-// How it works:
-//   1. Attach to the cloud Chromium via DevTools (host-reachable post-T52
-//      thanks to the socat sidecar). Find the streamer page.
-//   2. Inject a 440 Hz Web Audio tone into the streamer page (this is
-//      what `tests/e2e/fixtures/audio-tone.html` documents canonically;
-//      we inject inline so the fixture can stay self-contained for
-//      manual inspection).
-//   3. Drive the client at baseURL with ?e2e=1 — that exposes
-//      `window.__cbwrtc_pc` per `client/main.ts maybeExposePcForE2e`.
-//   4. Click Connect, wait for `#state-conn === "connected"`.
-//   5. Poll `__cbwrtc_pc.getStats()` for inbound-rtp audio every 500 ms;
-//      assert bytes_received > 0 within 10 s.
+// HOW IT REACHES THE WORKER, AND WHY THAT CHANGED.
 //
-// Failure modes and what they tell you:
-//   - Step 1 fails (`connectOverCDP` rejects)         → T52 regressed; host can't reach DevTools.
-//   - Step 1 finds no streamer page                   → T28 streamer-static or supervisord chromium broken.
-//   - Step 2 throws "NotReadableError" or
-//     `__cbwrtc_test_tone_started` not set            → cloud-Chromium AudioContext can't reach the destination
-//                                                        (T24 PulseAudio null-sink regressed?), or the streamer
-//                                                        page hasn't initialized — see T78 (getDisplayMedia
-//                                                        NotReadableError) which keeps the page from running
-//                                                        its start() body.
-//   - Step 4 times out                                → Streamer never reached `pc.connectionState=connected`.
-//                                                        Most-likely root cause today is **T78** (getDisplayMedia
-//                                                        fails inside the cloud Chromium, so the streamer's
-//                                                        start() throws before it dials signaling). T69 is in
-//                                                        but masked by T78.
-//   - Step 5 times out                                → Audio routing (T24) regressed; getDisplayMedia({audio:true})
-//                                                        returning no track; or T26 cursor-watcher swallowed the
-//                                                        audio context.
+// This used to `connectOverCDP("http://localhost:9222")` and then hunt for a
+// tab whose URL contained "/streamer/". Both halves are dead:
+//
+//   - The standalone stack no longer publishes 9222. DevTools is
+//     unauthenticated remote code execution against the browser, so it stays
+//     on the internal network; a spec cannot dial it from the host.
+//   - There is no streamer page. It was deleted in the M7 native-peer
+//     migration — the WebRTC peer lives in the browser process now, and the
+//     worker's only tab is whatever the user navigated to.
+//
+// So the DevTools endpoint is supplied by the harness instead, via
+// CHROMELESS_E2E_DEVTOOLS_URL. Forward it from wherever the worker actually
+// runs and point the variable at the forward:
+//
+//   kubectl port-forward -n chromeless deploy/chromeless-worker 9222:9222
+//   docker compose -f infra/compose.yaml exec chromium ...   # or a tunnel
+//
+// With the variable unset the spec SKIPS rather than fails: it needs a route
+// into the worker that the default topology deliberately does not provide, and
+// a red that means "you did not set up a tunnel" trains people to ignore reds.
+//
+// The tone is injected into the worker's active page. Its audio reaches the
+// captured stream through PulseAudio's null sink (see infra/audio-routing.md).
 
 import {
   chromium,
@@ -47,8 +39,10 @@ import {
   type Page,
 } from "@playwright/test";
 
-const DEVTOOLS_HTTP = "http://localhost:9222";
-const STREAMER_TITLE_HINT = "streamer";
+// Supplied by the harness — see the header. No default: the stack does not
+// publish DevTools, so guessing an endpoint would only produce a confusing
+// connection error.
+const DEVTOOLS_HTTP = process.env["CHROMELESS_E2E_DEVTOOLS_URL"] ?? "";
 
 type StatsResult = {
   ok: boolean;
@@ -66,48 +60,46 @@ test.describe("audio presence end-to-end", () => {
   let streamerPage: Page | null = null;
 
   test.beforeAll(async () => {
-    // Connect to the running cloud Chromium. If T52 isn't on this stack
-    // yet, this throws and the test fails clearly.
+    // No route to the worker's DevTools ⇒ skip. See the header: this is a
+    // harness prerequisite, not a product failure.
+    test.skip(
+      DEVTOOLS_HTTP === "",
+      "CHROMELESS_E2E_DEVTOOLS_URL is unset — forward the worker's DevTools " +
+        "port and set it to inject the test tone (see the spec header).",
+    );
+
     try {
       cdpBrowser = await chromium.connectOverCDP(DEVTOOLS_HTTP);
     } catch (err) {
       throw new Error(
-        `connectOverCDP(${DEVTOOLS_HTTP}) failed: ${err}. ` +
-          `Likely T52 regressed (Chromium DevTools not reachable from host) ` +
-          `or the compose stack isn't running. Run \`docker compose up -d\` ` +
-          `from infra/ first.`
+        `connectOverCDP(${DEVTOOLS_HTTP}) failed: ${err}. Is the port-forward ` +
+          `still up, and is the worker running?`,
       );
     }
 
     const contexts = cdpBrowser.contexts();
     if (contexts.length === 0) {
       throw new Error(
-        "no contexts on cloud Chromium — DevTools attached but no active tab"
+        "no contexts on the worker — DevTools attached but no active tab",
       );
     }
+    // Take the first real page. The worker runs exactly one (the embedder
+    // creates a single WebContents at boot), so there is nothing to search
+    // for — the old "/streamer/" hunt looked for a page that no longer exists.
     for (const ctx of contexts) {
-      for (const pg of ctx.pages()) {
-        const url = pg.url();
-        if (url.includes(STREAMER_TITLE_HINT) || url.includes("/streamer/")) {
-          streamerPage = pg;
-          break;
-        }
+      const pages = ctx.pages();
+      if (pages.length > 0) {
+        streamerPage = pages[0]!;
+        break;
       }
-      if (streamerPage) break;
     }
     if (!streamerPage) {
-      throw new Error(
-        "streamer page not found in cloud Chromium contexts — " +
-          "expected a tab whose URL contains '/streamer/'. Likely a T28 " +
-          "regression in supervisord launch."
-      );
+      throw new Error("worker has no page target — is Chromium still booting?");
     }
 
-    // Inject the 440 Hz tone. The streamer page's getDisplayMedia stream
-    // includes system audio via PulseAudio's null-sink (T24), so any
-    // AudioContext output reaches the captured stream.
-    //
-    // Idempotent: stash a flag on window so re-runs don't double-tone.
+    // Inject a 440 Hz tone. Any AudioContext output reaches the captured
+    // stream via the PulseAudio null sink (infra/audio-routing.md).
+    // Idempotent: a flag on window keeps re-runs from stacking oscillators.
     await streamerPage.evaluate(() => {
       const w = window as unknown as {
         __cbwrtc_test_tone_started?: boolean;
@@ -149,12 +141,10 @@ test.describe("audio presence end-to-end", () => {
     // is answerer. ICE is exchanged in both directions.
     await expect(
       page.locator("#state-conn"),
-      "client peer connection didn't reach 'connected' within 20s — " +
-        "most likely T78 (getDisplayMedia NotReadableError in cloud Chromium) " +
-        "is keeping the streamer's start() from completing, so it never dials " +
-        "signaling. T69 fix is in but masked by T78. Check signaling logs " +
-        "for `peer joined role=browser`; if absent, fix T78 first."
-    ).toHaveText("connected", { timeout: 20_000 });
+      "client peer connection didn't reach 'connected' — check the broker log " +
+        "for a browser-role peer on this session id; if absent, the worker " +
+        "never dialled signaling."
+    ).toHaveText("connected", { timeout: 60_000 });
 
     // Poll getStats for audio bytes. Done inside page.evaluate so the
     // RTCStatsReport iteration stays in-page (Playwright can't

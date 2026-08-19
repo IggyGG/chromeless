@@ -1,6 +1,20 @@
 # .github/workflows/codeql.yml — T84 CodeQL static analysis for Go +
 # JS/TS. Runs on PR + a weekly cron so we catch newly-disclosed CVEs
 # in vendored deps and slow-burn code-quality drift.
+#
+# OSS-W2 — THIS WORKFLOW ONLY RUNS ON GITHUB.
+#
+# `github/codeql-action` does not exist on Forgejo's action mirror
+# (data.forgejo.org/github/codeql-action -> 404), and CodeQL itself is a
+# GitHub-hosted analysis service — there is nothing to port it to. On this
+# repo's actual remote (forgejo.triform.dev) the job failed at action
+# resolution, before any step ran: 38 failures, every one identical.
+#
+# Rather than leave it permanently red, the job is gated on running under
+# github.com. On Forgejo it is skipped with a notice. If you want static
+# analysis that works on both hosts, add a separate workflow using a tool
+# that ships as a container (semgrep, golangci-lint, trivy) — do NOT
+# re-enable this one here.
 
 name: CodeQL
 
@@ -25,11 +39,12 @@ concurrency:
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
-    # github/codeql-action uploads its database and SARIF through GitHub-only
-    # API endpoints. Forgejo correctly returns 404 for those endpoints, so the
-    # GitHub workflow remains available without creating a permanently red,
-    # impossible gate on Forgejo.
-    if: ${{ github.server_url == 'https://github.com' }}
+    # OSS-W2: skip entirely off github.com — see the header. A job whose
+    # `if:` is false is never dispatched, so its `uses:` are never resolved;
+    # that is what keeps the unresolvable github/codeql-action from failing
+    # the run on Forgejo. (Verified against this Forgejo instance, where
+    # conditional jobs record status=skipped rather than failure.)
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -52,9 +67,7 @@ jobs:
           cache: false
 
       - name: Initialize CodeQL
-        # The bare github/codeql-action reference is resolved against
-        # data.forgejo.org, where that repository does not exist.
-        uses: https://github.com/github/codeql-action/init@v3
+        uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -71,6 +84,6 @@ jobs:
       # autobuild covers our Go modules well enough; no custom build
       # step required for the JS/TS path (build-mode: none).
       - name: Perform CodeQL analysis
-        uses: https://github.com/github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"

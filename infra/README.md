@@ -1,64 +1,79 @@
 # infra/
 
-Container image and (Phase 3) orchestration for the chromeless
-runtime.
+Everything around the browser: the standalone gateway, the compose stacks, the
+Helm chart and controller, and the glue that runs inside the worker image.
 
-## Files
+> This file previously documented an `infra/Dockerfile` and a
+> `docker build -t chromeless:dev -f infra/Dockerfile .`. **That Dockerfile does
+> not exist.** It was the legacy stock-Chromium + `getDisplayMedia` image, which
+> had not been buildable since the M7 native-peer migration deleted
+> `capture/streamer-page/` while the Dockerfile still `COPY`d it. The worker
+> image is now [`build/Dockerfile.runtime`](../build/Dockerfile.runtime), built
+> by `build/chromeless-build.sh`.
 
-| File | Purpose |
-|------|---------|
-| `Dockerfile` | Base image: Debian bookworm-slim + Chromium + Xvfb + PulseAudio (null sink) + python3 + supervisord. |
-| `supervisord.conf` | Process supervisor; starts Xvfb → PulseAudio → Chromium → devtools-proxy → metrics-sidecar. M7: native peer (M1+M3) replaced the in-container streamer page and idle-watchdog. |
-| `pulse-default.pa` | PulseAudio bootstrap script, copied to `/etc/pulse/default.pa`. Two null sinks (cb_audio playback + cb_capture intermediary) plus a loopback — see `audio-routing.md`. |
-| `launch-chromeless.sh` | Wrapper invoked by supervisord; takes `SESSION_ID` / `SIGNALING_URL` / `CHROMIUM_START_URL` and execs Chromium with the native-peer flag list. |
-| `audio-routing.md` | Topology + manual smoke procedure for the in-container audio path. |
-| `lifecycle/` | Container session lifecycle (T31): `entrypoint.sh`, `cold-start.sh`, `idle-watchdog.sh`, `restart.sh`, `README.md`. |
-| `compose.yaml` | Local dev stack: real signaling (T13) + chromium with lifecycle wiring + nginx-served client. |
+## Layout
 
-## Build
+| Path | Purpose |
+| --- | --- |
+| `gateway/` | **The standalone front door.** TLS, login, session tokens, navigation, and a reverse proxy to the broker. The only host-facing port in a compose deployment — see [its README](./gateway/README.md). |
+| `compose.yaml` | Single-host stack: gateway + broker + worker, plus opt-in `turn` and `observability` profiles. |
+| `compose.host.yaml` / `compose.worker.yaml` | The same stack split across two machines. See [`docs/operations/standalone.md`](../docs/operations/standalone.md). |
+| `helm/chromeless/` | Kubernetes chart: `BrowserSession` / `BrowserSessionPool` CRDs, controller, coturn, turn-issuer. |
+| `controllers/browser-session-controller/` | The Go controller behind those CRDs. |
+| `turn-issuer/` | RFC 7635 TURN-REST credential issuer (HMAC, rotation-aware). What a multi-user deployment should use instead of static credentials. |
+| `k8s/` | Raw manifests: an alternative to the chart, plus the build-lane Job. |
+| `lifecycle/` | Runs **inside the worker image**: `entrypoint.sh` → `cold-start.sh` → supervisord, plus `idle-watchdog.sh`, `restart.sh`, `scrub-pod.sh`. |
+| `launch-chromeless.sh` | Invoked by supervisord. Translates `SESSION_ID` / `SIGNALING_URL` / `CHROMELESS_ICE_SERVERS` into the `WEBRTC_*` vars the browser process reads, then execs Chromium with the native-peer flag list. |
+| `supervisord.phase2.conf` | Process supervisor inside the image: Xvfb → PulseAudio → Chromium → devtools-proxy. |
+| `devtools-proxy.sh` | socat bridge. Chromium 147+ ignores `--remote-debugging-address` and binds DevTools to loopback only, so a container port mapping reaches nothing without this. |
+| `pulse-default.pa`, `audio-routing.md` | The in-container audio path. |
+| `seccomp/`, `security-hardening.md` | Sandbox profiles and hardening notes. |
+| `observability/`, `observability.md` | Prometheus config and Grafana dashboards for the `observability` profile. |
+| `snapshots/` | Firecracker warm-snapshot tooling. |
 
-The build context is the **repo root** (not `infra/`), because the
-Dockerfile COPYs runtime glue from `infra/*` alongside the Chromium
-binary built by `build/chromeless-build.sh`:
+## Running it
 
+```bash
+# Three exports: the gateway's signing key, the broker's verifying key, and
+# SIGNALING_TOKEN — the worker's own credential. All three, or the broker
+# refuses the browser and only a WebSocket close code says so.
+eval "$(cd infra/gateway && go run ./cmd/keygen)"
+
+CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
+  docker compose -f infra/compose.yaml up
 ```
-docker build -t chromeless:dev -f infra/Dockerfile .
+
+Then <https://localhost:8443>. The full guide, including TURN and the
+split-host layout, is
+[`docs/operations/standalone.md`](../docs/operations/standalone.md).
+
+`CHROMELESS_IMAGE` is required: the browser is a from-source Chromium build
+(4–8h cold) and this repo publishes no images.
+
+## One published port
+
+`compose.yaml` publishes the gateway and nothing else. Two things that used to
+be reachable from the host no longer are:
+
+- **9222 (DevTools)** — unauthenticated remote code execution against the
+  browser. The image also passes `--remote-allow-origins=*`, so a web page
+  could reach it.
+- **8080 (signaling)** — with no `CHROMELESS_AUTH_PUBKEY` the broker accepts
+  anyone, so a published port is a way straight past the login.
+
+Reach either through the container when debugging:
+
+```bash
+docker compose -f infra/compose.yaml exec chromium \
+  curl -s http://127.0.0.1:9222/json/version
 ```
 
-## Run
+## Known limitations
 
-```
-docker run --rm \
-    -p 9222:9222 \
-    -p 8080:8080 \
-    --shm-size=1g \
-    chromeless:dev
-```
-
-Confirm Chromium is alive from the host:
-
-```
-curl http://localhost:9222/json/version
-```
-
-## Validation status (2026-04-30, T7)
-
-- `hadolint infra/Dockerfile` — clean (DL3008 suppressed with rationale
-  in the Dockerfile).
-- `supervisord.conf` parsed by Python `configparser` — all sections and
-  keys recognised.
-- **Real boot test deferred to Linux CI**: the dev box is macOS without a
-  running Docker daemon. T9 (container smoke test, owned by qa-tester)
-  will run the actual `docker build` + `docker run` against this image
-  and report.
-
-## Known limitations (v1 expedients)
-
-- `--no-sandbox` is set on Chromium so the image runs on any host kernel
-  without `CAP_SYS_ADMIN`. **Do not ship to multi-tenant infra as-is.** A
-  follow-up will replace this with the real Chromium sandbox or per-
-  session gVisor/Firecracker isolation (see Phase 3 in `PROJECT_BRIEF.md`).
-- `--remote-allow-origins=*` accepts DevTools connections from any
-  origin. Fine for local dev; lock down before any public deployment.
-- `apt` versions are intentionally unpinned so Debian security updates
-  flow through. Phase 3 will introduce a deterministic apt snapshot.
+- **`--no-sandbox`** is set so the image runs on any host kernel without
+  `CAP_SYS_ADMIN`. Do not ship to multi-tenant infrastructure as-is; use
+  per-session gVisor/Firecracker isolation.
+- **`--remote-allow-origins=*`** accepts DevTools connections from any origin.
+  Survivable only because the port is not published — do not republish it.
+- **apt versions are unpinned** so Debian security updates flow through.

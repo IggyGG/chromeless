@@ -71,12 +71,41 @@ CONTEXT_PATH="${CONTEXT_PATH:-/var/lib/longhorn/chromeless-build/chromium-src/ar
 # Step 9 unless the operator passed it explicitly.
 if [[ -z "${CHROMELESS_KANIKO_TAG:-}" ]]; then
   echo "Reading IMAGE_TAG from ${NODE}:${CONTEXT_PATH}/IMAGE_TAG ..."
+
+  # `|| true` is LOAD-BEARING, not defensive noise.
+  #
+  # This was `CHROMELESS_KANIKO_TAG="$(ssh ... )"` with no guard, under
+  # `set -euo pipefail`. When ssh fails — no key, host not in known_hosts, or
+  # simply running from a laptop that cannot reach cluster nodes — the failing
+  # command substitution makes the ASSIGNMENT non-zero, and `set -e` kills the
+  # script right there. So the carefully written error block below could never
+  # execute. The operator saw:
+  #
+  #     Reading IMAGE_TAG from triform-7:/var/.../IMAGE_TAG ...
+  #     $ echo $?
+  #     0
+  #
+  # No error, no tag, exit 0 — a silent no-op that looks like success. Anyone
+  # scripting on top of it (an auto-bump loop, a CI step) would treat that as
+  # "push done" and carry on with no image. Reproduced in isolation: a bare
+  # `X="$(ssh badhost cat /nope)"` under `set -e` exits 255 at that line.
+  #
+  # With `|| true` the assignment always succeeds, the emptiness check runs,
+  # and the operator gets the diagnosis the author intended to give them.
   CHROMELESS_KANIKO_TAG="$(ssh -o BatchMode=yes "${NODE}" \
-    "cat ${CONTEXT_PATH}/IMAGE_TAG" 2>/dev/null | tr -d '[:space:]')"
+    "cat ${CONTEXT_PATH}/IMAGE_TAG" 2>/dev/null | tr -d '[:space:]' || true)"
+
   if [[ -z "${CHROMELESS_KANIKO_TAG}" ]]; then
     echo "ERROR: could not read IMAGE_TAG from ${NODE}:${CONTEXT_PATH}/IMAGE_TAG" >&2
     echo "  Either the build hasn't reached Step 9 yet, the path is wrong," >&2
-    echo "  or ssh ${NODE} is denied. Pass CHROMELESS_KANIKO_TAG=... to override." >&2
+    echo "  or ssh ${NODE} is denied (e.g. you are running this from a host" >&2
+    echo "  with no SSH access to cluster nodes — kubectl alone is not enough)." >&2
+    echo >&2
+    echo "  Read the tag with kubectl instead, then pass it explicitly:" >&2
+    echo "    kubectl run tagread --rm -i --restart=Never --image=busybox \\" >&2
+    echo "      --overrides='{\"spec\":{\"nodeName\":\"${NODE}\"}}' -- \\" >&2
+    echo "      cat ${CONTEXT_PATH}/IMAGE_TAG" >&2
+    echo "    CHROMELESS_KANIKO_TAG=<tag> $0 ${NODE} ${VARIANT_LABEL:-}" >&2
     exit 1
   fi
 fi
@@ -103,6 +132,107 @@ EOF
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 TEMPLATE="${REPO_ROOT}/infra/k8s/chromeless-build/chromeless-kaniko-push.yaml"
+RELEASE_RECORD="${REPO_ROOT}/build/guest-release.json"
+
+# ---------------------------------------------------------------------
+# write_guest_release_record — the producer's provenance statement.
+#
+# Called ONLY on a confirmed-successful push (Job condition Complete=True),
+# so the file can never claim an image that does not exist in the registry.
+#
+# Why this lives here and not in chromeless-build.sh: the build script runs
+# inside the K8s build Job, on a node, as uid 1000, against a bootstrap
+# clone with no push credentials and no working tree to commit into. It
+# genuinely cannot update a git-tracked file. THIS script, by contrast,
+# already runs on the operator's workstation from a real checkout — it
+# computes REPO_ROOT above to find its own template. So the record is
+# written where a human is already sitting in the repo that owns it.
+#
+# Honest limitation, stated so nobody mistakes this for a closed loop:
+# this writes the file, it does NOT commit or push it. The operator must
+# commit the result (the script prints the exact command). A push
+# performed by someone who never commits the diff leaves the record stale
+# — which the consumer-side check will then catch as a disagreement
+# between the monorepo pin and this file. Stale-and-caught is the
+# designed failure mode; silently-wrong is the one we are eliminating.
+#
+# The SHA is read from the BUILD NODE, never from the local checkout.
+# The operator's working tree is routinely on some other branch (that is
+# exactly how the current drift happened), so a local `git rev-parse`
+# would confidently record a commit that had nothing to do with the
+# binary. The tag itself carries the build's short SHA, so we expand that
+# to a full 40-char SHA via the local object database and verify the
+# expansion round-trips back to the tag before trusting it.
+# ---------------------------------------------------------------------
+write_guest_release_record() {
+  local tag="${CHROMELESS_KANIKO_TAG}"
+  local image="registry.triform.cloud/chromeless/chromeless:${tag}"
+  local short_sha full_sha digest built_at
+
+  # cr<branch>-<sha> -> <sha>. Anything else (an operator override like
+  # cr7727-hotfix) is not a commit and must not be recorded as one.
+  short_sha="${tag#cr*-}"
+  if [[ "${short_sha}" == "${tag}" || ! "${short_sha}" =~ ^[0-9a-f]{7,40}$ ]]; then
+    echo "WARN: tag '${tag}' carries no commit-shaped SHA — NOT writing ${RELEASE_RECORD}." >&2
+    echo "      The provenance record is left untouched rather than filled with a guess." >&2
+    return 0
+  fi
+
+  # Expand to the full SHA and verify it round-trips: if the object is
+  # absent (operator's clone never fetched that branch) we must NOT
+  # invent one. Record what we can verify, flag what we cannot.
+  full_sha="$(git -C "${REPO_ROOT}" rev-parse --verify --quiet "${short_sha}^{commit}" 2>/dev/null || true)"
+  if [[ -z "${full_sha}" ]]; then
+    echo "WARN: commit ${short_sha} is not in the local object DB (git fetch --all?)." >&2
+    echo "      Recording the short SHA only — a checker will treat it as unresolvable." >&2
+    full_sha="${short_sha}"
+  fi
+
+  # Manifest digest — the immutable identity. A tag can be re-pushed to
+  # point somewhere else; a digest cannot. Best-effort: crane may not be
+  # installed, and a missing digest must not fail an otherwise-good push.
+  digest=""
+  if command -v crane >/dev/null 2>&1; then
+    digest="$(crane digest "${image}" 2>/dev/null || true)"
+  fi
+  if [[ -z "${digest}" ]]; then
+    echo "WARN: could not resolve manifest digest for ${image} (crane missing or registry auth)." >&2
+    echo "      Writing the record without a digest; re-run with crane available to fill it." >&2
+  fi
+
+  built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  mkdir -p "$(dirname "${RELEASE_RECORD}")"
+  cat > "${RELEASE_RECORD}" <<EOF
+{
+  "schema": "chromeless.guest-release/v1",
+  "commit": "${full_sha}",
+  "image": "${image}",
+  "digest": "${digest}",
+  "dockerfile": "build/Dockerfile.runtime",
+  "built_at": "${built_at}",
+  "recorded_by": "chromeless-kaniko-push.sh"
+}
+EOF
+
+  echo
+  echo "─── provenance record written ───"
+  echo "  ${RELEASE_RECORD}"
+  echo "  commit : ${full_sha}"
+  echo "  image  : ${image}"
+  echo "  digest : ${digest:-<unresolved>}"
+  echo
+  echo "  ACTION REQUIRED — this script does not commit. Run:"
+  echo "    git -C ${REPO_ROOT} add build/guest-release.json && \\"
+  echo "      git -C ${REPO_ROOT} commit -m 'chore(cv2-build): record guest release ${tag}'"
+  echo
+  if ! git -C "${REPO_ROOT}" merge-base --is-ancestor "${full_sha}" origin/main 2>/dev/null; then
+    echo "  ⚠ ${full_sha} is NOT an ancestor of origin/main." >&2
+    echo "    You are about to ship a guest whose source is not on main." >&2
+    echo "    Land it on main before this image reaches production." >&2
+    echo
+  fi
+}
 
 if [[ ! -f "${TEMPLATE}" ]]; then
   echo "ERROR: template not found: ${TEMPLATE}" >&2
@@ -152,6 +282,7 @@ FAILED="$(kubectl -n chromeless-build get job "${JOB_NAME}" \
 if [[ "${STATUS}" == "True" ]]; then
   echo
   echo "✓ kaniko-push SUCCEEDED — pushed registry.triform.cloud/chromeless/chromeless:${CHROMELESS_KANIKO_TAG}"
+  write_guest_release_record
   exit 0
 fi
 if [[ "${FAILED}" == "True" ]]; then

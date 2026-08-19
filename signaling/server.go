@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -143,12 +144,64 @@ const (
 	// candidates. 32 leaves headroom for ICE restarts mid-buffer
 	// without unbounded growth.
 	iceReplayMaxPerSender = 32
-	// iceReplayMaxAge is the age cap on replayed ICE. Much shorter
-	// than typical TURN allocation TTL (~10 min) so we never replay a
-	// candidate whose underlying allocation has lapsed; longer than
-	// any realistic Phase-1 demo session-start latency.
-	iceReplayMaxAge = 60 * time.Second
+	// defaultICEReplayMaxAge is the default age cap on replayed ICE.
+	// Bounded well under typical TURN allocation TTL (~10 min) so we never
+	// replay a candidate whose underlying allocation has lapsed.
+	//
+	// OSS-W0: raised 60s → 300s. The original 60s was justified as "longer
+	// than any realistic Phase-1 demo session-start latency" — an assumption
+	// that microVM/cold-node deployments invalidate. On firecracker, guest
+	// boot + reconnect can push client registration past 60s, at which point
+	// EVERY buffered guest candidate ages out and is dropped. The peer then
+	// sees remoteCandidates=0 and sits in iceConnectionState=checking forever,
+	// surfacing as 0x0 video with nothing in the logs to explain it. Triform's
+	// broker independently converged on 300s for exactly this reason; anyone
+	// on slow-boot infrastructure (firecracker, gVisor, cold k8s nodes pulling
+	// images) hits it identically. 300s remains comfortably under the ~600s
+	// TURN allocation TTL, so the staleness guarantee is preserved.
+	defaultICEReplayMaxAge = 300 * time.Second
+
+	// iceReplayMaxAgeEnv overrides defaultICEReplayMaxAge, in seconds.
+	// Values <= 0, unparsable values, and values above the TURN-allocation
+	// safety ceiling are ignored (the default is kept and a warning logged).
+	iceReplayMaxAgeEnv = "CHROMELESS_ICE_REPLAY_MAX_AGE_S"
+
+	// iceReplayMaxAgeCeiling is the hard upper bound on the configured age.
+	// Past this we would routinely replay candidates whose TURN allocation
+	// has lapsed, which is worse than replaying nothing.
+	iceReplayMaxAgeCeiling = 600 * time.Second
 )
+
+// iceReplayMaxAge is the effective age cap, resolved once at init from
+// iceReplayMaxAgeEnv. A var (not a const) so deployments on slow-boot
+// infrastructure can tune it without a rebuild.
+var iceReplayMaxAge = resolveICEReplayMaxAge(os.Getenv)
+
+// resolveICEReplayMaxAge reads the override and validates it. Takes a getenv
+// func so tests can exercise it without mutating process env.
+func resolveICEReplayMaxAge(getenv func(string) string) time.Duration {
+	raw := strings.TrimSpace(getenv(iceReplayMaxAgeEnv))
+	if raw == "" {
+		return defaultICEReplayMaxAge
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs <= 0 {
+		slog.Warn("ignoring invalid ICE replay max age override",
+			slog.String("env", iceReplayMaxAgeEnv),
+			slog.String("value", raw),
+			slog.Duration("using", defaultICEReplayMaxAge))
+		return defaultICEReplayMaxAge
+	}
+	d := time.Duration(secs) * time.Second
+	if d > iceReplayMaxAgeCeiling {
+		slog.Warn("ICE replay max age override exceeds the TURN-allocation ceiling; clamping",
+			slog.String("env", iceReplayMaxAgeEnv),
+			slog.Duration("requested", d),
+			slog.Duration("ceiling", iceReplayMaxAgeCeiling))
+		return iceReplayMaxAgeCeiling
+	}
+	return d
+}
 
 // replayableTypes lists the envelope types whose most-recent value is
 // buffered for a future-joining peer. The slice doubles as the replay
@@ -358,6 +411,51 @@ func (s *session) unregister(p *peer) {
 	defer s.mu.Unlock()
 	if cur, ok := s.peers[p.role]; ok && cur == p {
 		delete(s.peers, p.role)
+	}
+}
+
+// discardReplay drops the envelopes buffered FROM role, so a later-joining
+// peer is not handed a dead peer connection's SDP.
+//
+// A `bye` means the negotiated peer connection is GONE — its ufrag/pwd, its
+// DTLS fingerprint and every candidate either side ever gathered are void.
+// Replaying them is not merely useless, it is actively misleading: the new peer
+// receives a complete, well-formed offer, answers it, and pairs its own fresh
+// candidates against sockets that no longer exist. Nothing in either log says
+// so, and it presents as `iceConnectionState=checking` forever with a single
+// unresponsive pair (`req=0`) — indistinguishable by inspection from a NAT or
+// TURN failure, which is where an afternoon went.
+//
+// CALLED FROM TWO PLACES, and both are load-bearing:
+//
+//   - When a peer DISCONNECTS, for its own buffer. Its candidates and SDP
+//     describe a peer connection that went away with it. Missing this was
+//     observed live as a fresh worker being replayed the previous viewer's
+//     stale `answer` on join, reaching ICE `connected` seconds after boot with
+//     nobody watching, and burning its one and only session on a dead client.
+//
+//   - On `bye`, for BOTH roles. A bye ends the negotiated session, not just
+//     the sender's half. The observed failure was a CLIENT bye (viewer closes
+//     the tab) invalidating the BROWSER's buffered offer: the worker tears its
+//     peer connection down and — because cb_offerer_driver's kClosed is
+//     terminal and main_parts' native_session_started_ is a one-way latch —
+//     can never offer again for the life of the process. Its socket stays up,
+//     so the session is not reaped, and the next viewer to join is replayed
+//     the dead offer plus nine dead candidates (`replayed: 10`).
+//
+// The buffer exists for the opposite race (an offer arriving BEFORE the
+// counterpart joins, T96/T104) — a live session whose peer has not shown up
+// yet. Once either side says `bye`, that no longer describes anything.
+//
+// Note this cannot rely on hub.dropIfEmpty: that only fires when BOTH peers
+// have disconnected, and in the bye case the browser deliberately stays
+// connected.
+func (s *session) discardReplay(roles ...peerRole) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range roles {
+		delete(s.recent, r)
+		delete(s.recentICE, r)
 	}
 }
 
@@ -584,6 +682,16 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	p.readPump(sess, done)
 
 	sess.unregister(p)
+	// A peer's buffered envelopes describe ITS peer connection, so they die
+	// with its socket — see discardReplay. Doing this only on `bye` was not
+	// enough: a client that goes away without one (tab closed, network drop,
+	// 1006) leaves a live `answer` in the buffer, and the next BROWSER to join
+	// is replayed it. A fresh worker then consumes a dead answer, believes it
+	// has a viewer, and burns its one and only session (see
+	// docs/findings/one-session-per-worker-process.md) on nobody — observed
+	// live as a worker reaching ICE `connected` seconds after boot with no
+	// client present.
+	sess.discardReplay(p.role)
 	recordPeerUnregistered(p.role, tenantID) // T38/T67 metrics; pairs with the Inc above
 	h.dropIfEmpty(tenantID, sessionID)
 	p.log.Info("peer left")
@@ -634,6 +742,10 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			p.log.Debug("no counterpart yet (buffered if replayable)", slog.String("type", env.Type))
 		}
 		if env.Type == "bye" {
+			// The negotiated session is over for BOTH sides, not just the
+			// sender's — so drop both buffers. See discardReplay for what
+			// replaying a dead session's offer costs.
+			sess.discardReplay(roleClient, roleBrowser)
 			return
 		}
 	}

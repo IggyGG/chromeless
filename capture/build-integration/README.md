@@ -34,11 +34,21 @@ the surface tiny:
   other milestone), the roll branch re-applies the series; merge
   conflicts are fixed forward, never skipped.
 
-The live patch inventory is maintained in
-[`patches/README.md`](../../patches/README.md). The historical renderer-side
-encoder-factory patch 0001 has been retired: the native worker now installs
-`CloudBrowserVideoEncoderFactory` directly in the browser-process dependency
-set implemented by [`cloud_browser_pcf.cc`](cloud_browser_pcf.cc).
+Today the series is three patches — see
+[`patches/README.md`](../../patches/README.md) for the index and the
+rebase-on-roll procedure:
+
+- [`0002-add-cloud-browser-to-build-graph.patch`](../../patches/0002-add-cloud-browser-to-build-graph.patch)
+  hooks `//cloud-browser` into Chromium's build graph.
+- [`0003-add-cloud-browser-webrtc-overrides.patch`](../../patches/0003-add-cloud-browser-webrtc-overrides.patch)
+- [`0005-expose-host-frame-sink-manager.patch`](../../patches/0005-expose-host-frame-sink-manager.patch)
+  exports `content::GetEmbedderHostFrameSinkManager()` so the embedder can
+  bind a `FrameSinkVideoCapturer` without depending on `//content/browser`.
+
+Patches 0001 (the renderer-side encoder-factory injection hook) and 0004
+were **retired in M7 R6**: with the `PeerConnectionFactory` now built in the
+browser process, the renderer-side hook is unreachable. Everything else
+lives in our own source tree and links against unmodified upstream APIs.
 
 ## How the encoder factory plugs into libwebrtc
 
@@ -49,25 +59,30 @@ Our `cloud_browser::CloudBrowserVideoEncoderFactory` (T19 — see
 [`capture/encoder/encoder_factory.h`](../encoder/encoder_factory.h))
 goes there.
 
-The native worker owns a browser-process factory seam, so it constructs the
-dependency set itself and assigns `CloudBrowserVideoEncoderFactory` directly
-before calling `CreateModularPeerConnectionFactory()`. This keeps encoder
-selection in repository-owned code and avoids a renderer-side Chromium hook.
+In a from-scratch libwebrtc embedder this is a one-line wire-up. In
+**Chromium**, the same factory is created deep in
+`content::PeerConnectionDependencyFactory` and the slot is assigned
+internally; we do not get a clean callsite. Patch `0001` makes that
+callsite consult `ContentBrowserClient::GetWebRtcVideoEncoderFactory()`
+before falling back to the built-in factory. Our embedder
+(`cloud_browser_worker`) overrides the virtual to hand back a
+`CloudBrowserVideoEncoderFactory` configured from flags.
 
 ```
                               +---------------------------------------+
                               |  cloud_browser_worker (this binary)   |
                               |                                       |
-                              |  cloud_browser_pcf.cc                 |
-                              |     assigns dependencies              |
-                              |       including                       |
+                              |  CloudBrowserContentBrowserClient     |
+                              |     ::GetWebRtcVideoEncoderFactory()  |
+                              |       returns                         |
                               |     CloudBrowserVideoEncoderFactory   |
                               |       (T19 / T35 / T36)               |
                               +-----------------+---------------------+
                                                 |
-                                                |
+            (patch 0001 adds this consultation) |
                                                 v
-   CreateModularPeerConnectionFactory -----------+
+   content::PeerConnectionDependencyFactory ----+
+   (upstream, mostly unchanged)                  \
                                                   +--> libwebrtc PeerConnectionFactory
                                                        (uses our factory for
                                                         every PC's VP9 / H.264

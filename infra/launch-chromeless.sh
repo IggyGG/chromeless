@@ -13,6 +13,14 @@
 #   SESSION_ID            session identifier             (default: dev)
 #   SIGNALING_URL         WS URL the native peer dials   (default: ws://signaling:8080/ws)
 #   SIGNALING_TOKEN       optional browser-side JWT      (default: empty)
+#   CHROMELESS_ICE_SERVERS           ICE server JSON (array, or an object with
+#                         an `iceServers` array). Unset → public STUN only.
+#   CHROMELESS_ICE_TRANSPORT_POLICY  "all" (default) or "relay"
+#
+# OSS-W1: the four friendly vars above are TRANSLATED below into the
+# WEBRTC_SIGNALING_* / WEBRTC_ICE_* vars the browser process actually reads.
+# Setting a WEBRTC_* var directly always wins, so the Kubernetes controller
+# path (which sets them directly) is unchanged.
 #   CHROMIUM_START_URL    URL the first tab opens at     (default: about:blank)
 #   CHROMELESS_BROWSER_BIN browser executable            (default: /usr/local/bin/chromeless when present,
 #                                                          otherwise /usr/bin/chromium)
@@ -55,6 +63,96 @@ fi
 # mount. Generate the y4m via harness/latency/record-y4m.sh — it's
 # NOT checked in (~150 MiB at 720p × 30s would push git-lfs).
 : "${CHROMELESS_USE_FAKE_MEDIA_FILE:=}"
+
+# OSS-W1 — translate SIGNALING_URL into the WEBRTC_SIGNALING_* vars the
+# native peer actually reads.
+#
+# The browser process reads WEBRTC_SIGNALING_HOST / _SESSION_ID / _TLS /
+# _TOKEN (capture/signaling/cb_signaling_ws_client.cc:35-38). This script
+# only ever knew SIGNALING_URL and never translated it, so the ONLY thing
+# in the repo that could start a session was the Kubernetes controller
+# (infra/controllers/.../reconciler/session.go:450). A plain `docker run`
+# or `docker compose up` booted a CDP-only worker with no peer at all —
+# exactly the state cloud_browser_browser_main_parts.cc:665 warns about.
+#
+# Precedence: an explicitly-set WEBRTC_SIGNALING_* always wins. That keeps
+# the controller path byte-identical (it sets those vars directly and never
+# sets SIGNALING_URL), so this is purely additive for Kubernetes while
+# making the compose/docker path work for the first time.
+#
+# The URL is parsed with POSIX parameter expansion rather than sed/awk to
+# keep this dash-compatible and dependency-free.
+if [ -z "${WEBRTC_SIGNALING_HOST:-}" ] && [ -n "${SIGNALING_URL:-}" ]; then
+    # Strip the scheme, remembering whether it was TLS.
+    case "${SIGNALING_URL}" in
+        wss://*|https://*)
+            _cb_tls=1
+            _cb_rest="${SIGNALING_URL#*://}"
+            ;;
+        ws://*|http://*)
+            _cb_tls=0
+            _cb_rest="${SIGNALING_URL#*://}"
+            ;;
+        *)
+            # No scheme — assume host[:port][/path] and default to TLS, which
+            # matches WsClientConfig::use_tls's own default.
+            _cb_tls=1
+            _cb_rest="${SIGNALING_URL}"
+            ;;
+    esac
+
+    # host[:port] is everything before the first '/'. The path is dropped:
+    # the peer builds its own path from the session id, so a path here would
+    # be silently ignored downstream. Warn instead of pretending otherwise.
+    _cb_hostport="${_cb_rest%%/*}"
+    _cb_path="${_cb_rest#"${_cb_hostport}"}"
+
+    if [ -n "${_cb_hostport}" ]; then
+        WEBRTC_SIGNALING_HOST="${_cb_hostport}"
+        WEBRTC_SIGNALING_TLS="${_cb_tls}"
+        export WEBRTC_SIGNALING_HOST WEBRTC_SIGNALING_TLS
+        echo "[launch-chromium] derived WEBRTC_SIGNALING_HOST=${WEBRTC_SIGNALING_HOST}" \
+             "WEBRTC_SIGNALING_TLS=${WEBRTC_SIGNALING_TLS} from SIGNALING_URL" >&2
+        if [ -n "${_cb_path}" ] && [ "${_cb_path}" != "/" ]; then
+            echo "[launch-chromium] NOTE: ignoring path '${_cb_path}' from" \
+                 "SIGNALING_URL — the native peer builds its own signaling" \
+                 "path from the session id." >&2
+        fi
+    else
+        echo "[launch-chromium] WARNING: could not parse a host out of" \
+             "SIGNALING_URL='${SIGNALING_URL}'; the native peer will not start." >&2
+    fi
+    unset _cb_tls _cb_rest _cb_hostport _cb_path
+fi
+
+# Session id and token likewise flow through to the peer. Same precedence
+# rule: an explicit WEBRTC_SIGNALING_* wins.
+if [ -z "${WEBRTC_SIGNALING_SESSION_ID:-}" ] && [ -n "${SESSION_ID:-}" ]; then
+    WEBRTC_SIGNALING_SESSION_ID="${SESSION_ID}"
+    export WEBRTC_SIGNALING_SESSION_ID
+fi
+if [ -z "${WEBRTC_SIGNALING_TOKEN:-}" ] && [ -n "${SIGNALING_TOKEN:-}" ]; then
+    WEBRTC_SIGNALING_TOKEN="${SIGNALING_TOKEN}"
+    export WEBRTC_SIGNALING_TOKEN
+fi
+
+# ICE servers. CHROMELESS_ICE_SERVERS is the friendly name; the peer reads
+# WEBRTC_ICE_SERVERS (capture/signaling/cb_ice_config.cc:30). Without either,
+# the peer falls back to public STUN, which will not traverse most NATs — say
+# so once at boot rather than letting it be discovered as a silent failure.
+if [ -z "${WEBRTC_ICE_SERVERS:-}" ] && [ -n "${CHROMELESS_ICE_SERVERS:-}" ]; then
+    WEBRTC_ICE_SERVERS="${CHROMELESS_ICE_SERVERS}"
+    export WEBRTC_ICE_SERVERS
+fi
+if [ -z "${WEBRTC_ICE_TRANSPORT_POLICY:-}" ] && [ -n "${CHROMELESS_ICE_TRANSPORT_POLICY:-}" ]; then
+    WEBRTC_ICE_TRANSPORT_POLICY="${CHROMELESS_ICE_TRANSPORT_POLICY}"
+    export WEBRTC_ICE_TRANSPORT_POLICY
+fi
+if [ -n "${WEBRTC_SIGNALING_HOST:-}" ] && [ -z "${WEBRTC_ICE_SERVERS:-}" ]; then
+    echo "[launch-chromium] NOTE: no ICE servers configured (set" \
+         "CHROMELESS_ICE_SERVERS) — falling back to public STUN, which will" \
+         "not traverse most NATs." >&2
+fi
 
 if [ -z "${CHROMELESS_BROWSER_BIN:-}" ]; then
     if [ -x /usr/local/bin/chromeless ]; then

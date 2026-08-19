@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chromeless — sign in</title>
+    <!--
+      Served by the gateway from an embedded file, not from client/dist.
+      It has to be reachable before any bundle exists (and when the bundle
+      failed to build), so it deliberately depends on nothing: no JS module,
+      no external CSS, no fonts. Palette matches client/index.html.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0e0f12;
+        --fg: #e6e7ea;
+        --muted: #8a8e99;
+        --accent: #6db3ff;
+        --err: #f87171;
+        --panel: #16181d;
+        --border: #262932;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+          Roboto, sans-serif;
+        font-size: 14px;
+      }
+      main {
+        min-height: 100%;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      form {
+        width: 100%;
+        max-width: 320px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0 0 4px;
+        letter-spacing: 0.02em;
+      }
+      p.sub {
+        margin: 0 0 20px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+      input {
+        width: 100%;
+        padding: 8px 10px;
+        margin-bottom: 14px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--fg);
+        font: inherit;
+      }
+      input:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      button {
+        width: 100%;
+        padding: 9px 12px;
+        background: var(--accent);
+        border: none;
+        border-radius: 6px;
+        color: #0b1220;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { filter: brightness(1.08); }
+      .error {
+        margin: 0 0 14px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border: 1px solid var(--err);
+        color: var(--err);
+        font-size: 12px;
+      }
+      .error:empty { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- Native form POST, so this works with JS disabled and needs no
+           bundle. The server redirects on success. -->
+      <form method="post" action="/login">
+        <h1>chromeless</h1>
+        <p class="sub">Sign in to reach the browser session.</p>
+        <div class="error">__ERROR__</div>
+        <label for="u">Username</label>
+        <input id="u" name="username" autocomplete="username" autofocus required />
+        <label for="p">Password</label>
+        <input id="p" name="password" type="password"
+               autocomplete="current-password" required />
+        <button type="submit">Sign in</button>
+      </form>
+    </main>
+  </body>
+</html>

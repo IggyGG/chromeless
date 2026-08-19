@@ -49,20 +49,50 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/iggy/chromeless/signaling/token"
 )
 
 // Claims is the JWT payload we expect in a session token.
-type Claims struct {
-	Sub  string `json:"sub"`
-	Sid  string `json:"sid"`
-	Role string `json:"role"`
-	Exp  int64  `json:"exp"`
-	Iat  int64  `json:"iat"`
-	Nbf  int64  `json:"nbf,omitempty"`
-	// Jti (T89) — opaque token identifier used by the denylist for
-	// per-token revocation. Optional: pre-T89 tokens omit it; the
-	// denylist still works as tenant-wide.
-	Jti string `json:"jti,omitempty"`
+//
+// An alias, not a copy: the definition moved to signaling/token so that
+// everything minting or verifying one of these builds from a single struct.
+// The gateway (infra/gateway) mints tokens this server verifies, and the
+// claim names plus the exact signing-input bytes have to agree to the letter —
+// a drifted field name yields a token that parses and then fails verification
+// with a generic "signature mismatch", far from the code that got it wrong.
+// turn-issuer still keeps its own copy with a comment telling you to update it
+// by hand; that is what this removes.
+//
+// Aliased rather than re-typed so every existing reference — and the
+// RFC 7519 §4.1.3 bare-string `aud` handling — keeps working untouched.
+type Claims = token.Claims
+
+// regionPermitted reports whether a token bearing `aud` may be used on
+// this server.
+//
+// The rules, in order:
+//   - No `aud` claim  → permitted. Region scoping is opt-in; tokens minted
+//     before it existed, and deployments that do not use it, must keep
+//     working unchanged.
+//   - Server region unspecified (CHROMELESS_REGION unset) → permitted. A
+//     server that does not know its own region cannot meaningfully enforce
+//     the claim, and failing closed here would break every single-region
+//     deployment the moment someone started minting scoped tokens.
+//   - Otherwise → the server's region must appear in `aud`.
+func regionPermitted(aud []string, serverRegion string) bool {
+	if len(aud) == 0 {
+		return true
+	}
+	if serverRegion == "" || serverRegion == regionUnspecified {
+		return true
+	}
+	for _, a := range aud {
+		if strings.TrimSpace(a) == serverRegion {
+			return true
+		}
+	}
+	return false
 }
 
 // authConfig is mutated only by initAuth(); read-only after init.
@@ -197,6 +227,14 @@ func verifyToken(token, expectedSid, expectedRole string) (*Claims, error) {
 		mAuthFailures.WithLabelValues("role_mismatch").Inc()
 		return nil, fmt.Errorf("role mismatch: token=%q caller=%q", c.Role, expectedRole)
 	}
+	// Region scoping. `processRegion` was initialised at startup but never
+	// consulted, so an `aud`-scoped token was accepted by a server in any
+	// region — the claim was inert. See regionPermitted for the opt-in rules.
+	if !regionPermitted(c.Aud, processRegion) {
+		mAuthFailures.WithLabelValues("region_mismatch").Inc()
+		return nil, fmt.Errorf("region mismatch: token aud=%v, server region=%q",
+			c.Aud, processRegion)
+	}
 	return &c, nil
 }
 
@@ -237,12 +275,7 @@ func recordRoleMismatch() {
 }
 
 // base64URLDecode handles both raw and padded forms.
-func base64URLDecode(s string) ([]byte, error) {
-	if rem := len(s) % 4; rem != 0 {
-		s += strings.Repeat("=", 4-rem)
-	}
-	return base64.URLEncoding.DecodeString(s)
-}
+func base64URLDecode(s string) ([]byte, error) { return token.Base64URLDecode(s) }
 
 // signTokenForTesting produces a signed JWT-style token for use from
 // tests and the dev issuer. It deliberately lives in the same package
@@ -250,16 +283,6 @@ func base64URLDecode(s string) ([]byte, error) {
 //
 // Production code MUST NOT call this with a hardcoded key; the dev
 // issuer (signaling/dev-issuer.go) gates it behind an env var.
-func signToken(priv ed25519.PrivateKey, c Claims) string {
-	header := []byte(`{"alg":"EdDSA","typ":"JWT"}`)
-	payload, _ := json.Marshal(c)
-	headerB64 := base64URLEncode(header)
-	payloadB64 := base64URLEncode(payload)
-	signingInput := headerB64 + "." + payloadB64
-	sig := ed25519.Sign(priv, []byte(signingInput))
-	return signingInput + "." + base64URLEncode(sig)
-}
+func signToken(priv ed25519.PrivateKey, c Claims) string { return token.Sign(priv, c) }
 
-func base64URLEncode(b []byte) string {
-	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
-}
+func base64URLEncode(b []byte) string { return token.Base64URLEncode(b) }

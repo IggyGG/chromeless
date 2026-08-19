@@ -1,0 +1,123 @@
+# infra/k8s/standalone/coturn.yaml — a TURN relay for the standalone stack.
+#
+# WHY IT IS NEEDED HERE. The worker sits in a cluster pod behind NAT and the
+# viewer sits on a laptop behind NAT. Both gather host and server-reflexive
+# candidates, neither can reach the other's, and ICE goes
+# `checking -> failed` with zero relay candidates. Everything upstream looks
+# perfect: offer, answer, VP9 negotiated, both tracks received, capture
+# PRODUCING — and no frame ever arrives. That is precisely the case
+# docs/operations/standalone.md flags as "everything connects, no video, no
+# errors → usually ICE".
+#
+# The k8s twin of the `turn` profile in infra/compose.yaml. Same credential
+# mechanism, same reasoning, and the same warnings apply — see the long comment
+# there.
+#
+# CREDENTIALS: lt-cred-mech with a static user, NOT use-auth-secret. The two
+# are not interchangeable: signaling/turn.go only emits static credentials, and
+# a static username cannot authenticate against a use-auth-secret (HMAC-REST)
+# relay. Pairing them produces a relay that refuses every allocation while
+# looking healthy — no error, no video. The Helm chart's coturn is the
+# HMAC-REST half and pairs with infra/turn-issuer/ instead.
+#
+# DELIBERATELY SEPARATE from triform's production coturn (95.217.200.179).
+# This one is namespaced, labelled, and disposable; it does not borrow a
+# production credential or put test traffic through a relay serving real users.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromeless-standalone-coturn
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-coturn
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  selector:
+    app.kubernetes.io/name: chromeless-standalone-coturn
+  ports:
+    - { name: turn-udp, port: 3478, targetPort: 3478, protocol: UDP }
+    - { name: turn-tcp, port: 3478, targetPort: 3478, protocol: TCP }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromeless-standalone-coturn
+  namespace: chromeless
+  labels:
+    app.kubernetes.io/name: chromeless-standalone-coturn
+    app.kubernetes.io/part-of: chromeless-standalone
+spec:
+  replicas: 1
+  # hostNetwork pods cannot be double-booked on a node, so a rolling update
+  # would deadlock on the port. Same reason triform's coturn uses Recreate.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chromeless-standalone-coturn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chromeless-standalone-coturn
+        app.kubernetes.io/part-of: chromeless-standalone
+    spec:
+      # The relay allocates from a wide UDP range and the allocated port has to
+      # be reachable from outside; a ClusterIP cannot express that. The node's
+      # own public IP IS the contract — which is why the pod is pinned below.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # triform-6, whose public IP (65.109.79.94) is what the ICE server URL
+      # names. If this pod floats to another node the advertised address has no
+      # listener, and the symptom is a TURN allocation that times out. The IP is
+      # the contract; pin the pod to the node that owns it.
+      nodeSelector:
+        kubernetes.io/hostname: triform-6
+      containers:
+        - name: coturn
+          image: coturn/coturn:4.6
+          args:
+            - -n                            # no config file; all flags
+            - --listening-port=3478
+            - --listening-ip=65.109.79.94    # the node's public IP
+            - --external-ip=65.109.79.94
+            - --realm=chromeless
+            - --fingerprint
+            - --lt-cred-mech
+            - --user=chromeless:$(TURN_PASSWORD)
+            - --min-port=49160
+            - --max-port=49200              # a small range; one session needs a handful
+            - --no-tlsv1
+            - --no-tlsv1_1
+            - --no-cli
+            - --log-file=stdout
+            - --simple-log
+            # NOT denying RFC1918 here, unlike the compose profile: the peers
+            # are a cluster pod (10.244.x) and a laptop, so denying private
+            # ranges would refuse the very allocation this exists to permit.
+            # Acceptable because the credential is single-use and the relay is
+            # torn down with the rest of the stack; a durable deployment should
+            # keep the denies and place the relay outside the pod network.
+          env:
+            - name: TURN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: chromeless-standalone-turn, key: password }
+          ports:
+            - { name: turn-udp, containerPort: 3478, protocol: UDP, hostPort: 3478 }
+            - { name: turn-tcp, containerPort: 3478, protocol: TCP, hostPort: 3478 }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits:   { cpu: "1", memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # Required despite every port here being >1024: the official
+              # image bakes file capabilities onto the turnserver binary, and
+              # with no_new_privs the kernel refuses to exec a binary whose
+              # file-cap set is not a subset of the container's bounding set.
+              # tf-multiverse hit exactly this in production.
+              add: ["NET_BIND_SERVICE"]
+          livenessProbe:
+            tcpSocket: { port: 3478 }
+            initialDelaySeconds: 10
+            periodSeconds: 30

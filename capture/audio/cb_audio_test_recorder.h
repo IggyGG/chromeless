@@ -111,6 +111,28 @@ class CbAudioTestRecorder : public webrtc::AudioTransport {
                            int64_t* elapsed_time_ms,
                            int64_t* ntp_time_ms) override;
 
+  // PullRenderData is the OTHER pure virtual on AudioTransport, and
+  // forgetting it is why this file did not compile for ~10 weeks: the
+  // three unittest targets that pull it in were never in
+  // CHROMELESS_BUILD_TARGETS, so nothing ever instantiated
+  // CbAudioTestRecorder and nothing ever noticed it was abstract.
+  // Symptom when the target was finally added:
+  //
+  //   cb_audio_device_module_test.cc:244:29: error: variable type
+  //   'test::CbAudioTestRecorder' is an abstract class
+  //   note: unimplemented pure virtual method 'PullRenderData'
+  //
+  // Same rationale as NeedMorePlayData above: the M5.5 contract is
+  // capture-only, so this is a silence-renderer. It exists to satisfy
+  // the interface, not to be measured.
+  void PullRenderData(int bits_per_sample,
+                      int sample_rate,
+                      size_t number_of_channels,
+                      size_t number_of_frames,
+                      void* audio_data,
+                      int64_t* elapsed_time_ms,
+                      int64_t* ntp_time_ms) override;
+
   // --- Observers (test-side) -----------------------------------------
 
   // Total number of Recorded callbacks delivered since construction —

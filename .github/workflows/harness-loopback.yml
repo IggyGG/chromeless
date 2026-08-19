@@ -92,48 +92,48 @@ jobs:
           # creation to run before the workflow exits non-zero.
           exit 0
 
-      - name: Upload baseline outputs
+      # OSS-W2: this was `uses: actions/upload-artifact@v4`. Unlike
+      # github-script below it RESOLVES on the mirror, so it looked fine —
+      # and then failed at runtime:
+      #   GHESNotSupportedError: @actions/artifact v2.0.0+ … are not
+      #   currently supported on GHES
+      # v4 talks to GitHub's artifact backend service, which Forgejo does not
+      # implement. With `if: always()` that failed the job even when the
+      # comparison itself was clean. Same lesson as github-script, one step
+      # later in the pipeline: resolvable is not the same as runnable.
+      # tools/lint/workflow_actions_lint.py now catches this class too.
+      - name: Baseline outputs
         if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: harness-baselines-${{ github.run_id }}
-          path: |
-            .baselines-out/
-            comparison.txt
-          retention-days: 30
+        run: |
+          echo "--- comparison.txt (artifact upload is unsupported on this host) ---"
+          cat comparison.txt 2>/dev/null || echo "(no comparison.txt)"
+          echo "--- .baselines-out/ ---"
+          for f in .baselines-out/*; do
+            [ -f "$f" ] || continue
+            echo "::group::${f}"
+            head -200 "$f"
+            echo "::endgroup::"
+          done
 
+      # OSS-W2: this was `uses: actions/github-script@v7`, which DOES NOT
+      # EXIST on Forgejo's action mirror — `data.forgejo.org/actions/
+      # github-script` 404s. Action resolution happens before the `if:` is
+      # evaluated, so this step failed EVERY run of this workflow, not just
+      # the scheduled regression case. It is the single largest bucket of
+      # CI failures in this repo's history (56 of 171).
+      #
+      # Rewritten as a plain API call so it works on Forgejo and GitHub
+      # alike. Best-effort: a failure to file the issue must not mask the
+      # regression itself, which the next step fails on.
       - name: File regression issue
         if: steps.compare.outputs.regression == 'true' && github.event_name == 'schedule'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const cmp = fs.existsSync('comparison.txt')
-              ? fs.readFileSync('comparison.txt', 'utf8')
-              : '(comparison.txt missing — see workflow logs)';
-            const title = `Harness regression on ${new Date().toISOString().slice(0,10)}`;
-            const body = [
-              '`harness-loopback` workflow detected a regression past the',
-              '5 ms p50 / 10 ms p95 threshold.',
-              '',
-              '## Comparison',
-              '',
-              '```',
-              cmp,
-              '```',
-              '',
-              `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              '',
-              'See [docs/operations/runbook.md#debugging-a-slow-session]',
-              '(../docs/operations/runbook.md#debugging-a-slow-session) for triage steps.',
-            ].join('\n');
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title,
-              body,
-              labels: ['regression', 'harness'],
-            });
+        continue-on-error: true
+        env:
+          API_TOKEN: ${{ secrets.ISSUE_API_TOKEN || github.token }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: python3 tools/ci/file_regression_issue.py
 
       - name: Fail on regression
         if: steps.compare.outputs.regression == 'true'

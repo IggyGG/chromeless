@@ -41,6 +41,11 @@
 #                            resource packs the runtime image loads.
 #   CHROMELESS_GIT_SHA              short git sha; default derived from
 #                            ${CHROMELESS_REPO}/.git or the env.
+#   CHROMELESS_TESTS_NONFATAL       "1" to ship the artifact even when the
+#                            Step 7 unit tests fail. Off by default —
+#                            failing tests fail the build. Only set this
+#                            on a lane whose build profile genuinely lacks
+#                            the codepaths some tests need, and record why.
 #   SKIP_FETCH              "1" to skip Step 1 entirely (assumes
 #                            /work/src/chromium is already populated).
 #                            Used by Job retries.
@@ -331,20 +336,14 @@ verify_libs() {
     log "profile '${profile}' libs verified at ${prefix}"
 }
 
-# Where the bootstrap initContainer stages profile libs (headers + .so).
-# Named once so the STEP 7 test runner can put ${SYSTEM_LIBS_DIR}/lib on
-# LD_LIBRARY_PATH — gn learns this prefix at BUILD time via *_libdir, but
-# the dynamic loader does not know it at RUN time.
-SYSTEM_LIBS_DIR="${SYSTEM_LIBS_DIR:-/work/system-libs}"
-
 case "${profile}" in
     sw)
         log "no profile-specific system deps (sw build)"
         ;;
     x264|all)
-        # Track F1 (T36). libx264 expected at ${SYSTEM_LIBS_DIR}.
+        # Track F1 (T36). libx264 expected at /work/system-libs.
         if [[ -z "${STUB_MODE}" ]]; then
-            verify_libs "${SYSTEM_LIBS_DIR}" include/x264.h lib/libx264.so
+            verify_libs /work/system-libs include/x264.h lib/libx264.so
         else
             log "[stub] would verify /work/system-libs for libx264"
         fi
@@ -352,7 +351,7 @@ case "${profile}" in
     vaapi)
         # Track F2 (T70). libva expected at /work/system-libs.
         if [[ -z "${STUB_MODE}" ]]; then
-            verify_libs "${SYSTEM_LIBS_DIR}" include/va/va.h lib/libva.so
+            verify_libs /work/system-libs include/va/va.h lib/libva.so
         else
             log "[stub] would verify /work/system-libs for libva"
         fi
@@ -447,69 +446,160 @@ step_done
 # Step 7 — unit tests.
 #
 # Don't run them under STUB_MODE, but in real builds run them before
-# packaging. NON-FATAL during first-light bringup (Wall #38): test
-# failures are logged but don't block STEP 8/9 because some encoder
-# tests require HAS_X264 / HAS_NVENC / HAS_VAAPI codepaths that aren't
-# enabled in this build profile, plus there are known DanglingPtr
-# warnings from raw_ptr cleanup paths in test fixtures we'll fix
-# alongside the runtime wiring. The worker binary itself builds and
-# links cleanly; we want the artifact even if tests are imperfect.
+# packaging.
 #
-# Set CHROMELESS_TESTS_FATAL=1 to restore strict mode once tests pass cleanly.
+# OSS-W2: these are now FATAL BY DEFAULT. They were non-fatal during
+# first-light bringup (Wall #38) for a real reason — some encoder tests
+# require HAS_X264 / HAS_NVENC / HAS_VAAPI codepaths not enabled in every
+# build profile, and there were known DanglingPtr warnings from raw_ptr
+# cleanup in test fixtures. But "temporarily non-blocking" became
+# permanent, and the effect is that the ONLY place C++ tests run at all
+# (they need a Chromium tree, so `make verify` cannot touch them) reported
+# failures as `WARN:` and shipped the artifact anyway. A test suite whose
+# failures never block is not a test suite.
+#
+# The escape hatch is now explicit and named after its actual reason:
+#   CHROMELESS_TESTS_NONFATAL=1   log failures, continue, ship anyway.
+# Use it for a bringup lane on a profile with known-unsupported codepaths,
+# and say so in the job that sets it. Everything else should fail loudly.
+#
+# The old CHROMELESS_TESTS_FATAL=1 opt-IN is gone: strict is the default
+# now, so it had no meaning. Nothing in the repo set it (grep is clean),
+# which is precisely why the tests never blocked anything.
 # ---------------------------------------------------------------------
 
 step "7/10 unit tests"
 
 if [[ -n "${STUB_MODE}" ]]; then
-    log "[stub] would run cloud_browser_encoder_unittests + cloud_browser_framesink_capturer_unittests"
+    log "[stub] would run every *_unittests target in CHROMELESS_BUILD_TARGETS"
 else
-    encoder_rc=0
-    framesink_rc=0
+    # Profile builds dynamic-link system libs staged at /work/system-libs
+    # (BUILD.gn:x264 with -Wl,--allow-shlib-undefined and NO rpath — the
+    # runtime image provides the libs on its default path). The build
+    # host's loader knows nothing about that directory, so the encoder
+    # test binary dies at exec with "error while loading shared
+    # libraries: libx264.so.164" before gtest even starts (exit 127) —
+    # first hit 2026-07-30, the first profile=x264 build to reach STEP 7
+    # after the profile-pipe fix. Export rather than per-command prefix
+    # so both binaries and any future test target get it; harmless for
+    # sw-profile builds (the dir just isn't consulted).
+    export LD_LIBRARY_PATH="/work/system-libs/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-    # The encoder tests link against the profile libs staged at
-    # /work/system-libs (libx264 for the x264 profile, libva for vaapi).
-    # gn gets those via x264_libdir at BUILD time, but the dynamic loader
-    # knows nothing about that prefix at RUN time — so the test binary dies
-    # before main() with
+    # Run every *_unittests target that was BUILT, derived from
+    # CHROMELESS_BUILD_TARGETS rather than hardcoded.
     #
-    #   error while loading shared libraries: libx264.so.164:
-    #   cannot open shared object file
+    # This used to name two binaries literally. That is how
+    # cb_wire_envelope_unittests came to be built-but-never-run: adding a
+    # target to the lane's target list did nothing here, and the mismatch is
+    # invisible — the build goes green either way. Same failure SHAPE as the
+    # silent-skip this step's fatal-on-missing check was added to close, one
+    # level up: there the binary was missing, here it exists and nobody
+    # invokes it.
     #
-    # and exits 127. That is "command not found", NOT a test failure, and it
-    # is worth telling apart: with CHROMELESS_TESTS_FATAL=1 both fail the
-    # build identically, and reading `encoder=127` as "the encoder tests
-    # failed" sends you hunting a code defect that does not exist.
+    # Deriving the list means a target added to CHROMELESS_BUILD_TARGETS is
+    # automatically executed, and STEP 7's existing fatal-on-missing check
+    # still fires if it failed to link.
+    # NOTE: no `local` here. This block runs at SCRIPT TOP LEVEL, not inside a
+    # function, and bash makes `local` a fatal error there — under `set -e`
+    # that aborts the step instantly with no output, which is exactly how the
+    # first run of this rewrite died (STEP 7 START, then nothing). Caught
+    # 2026-07-30 by the build itself; the shellcheck-style lint added
+    # alongside this now catches it before a 12-minute compile does.
+    test_binaries=()
+    for _t in ${CHROMELESS_BUILD_TARGETS}; do
+        # gn labels look like path/to:target_name — take the target name.
+        _name="${_t##*:}"
+        case "${_name}" in
+            *_unittests) test_binaries+=("${_name}") ;;
+        esac
+    done
+
+    # CHROMELESS_TESTS_SKIP_RUN — space-separated binary names that this lane
+    # BUILDS but does not EXECUTE.
     #
-    # cloud_browser_worker itself is unaffected — the runtime image installs
-    # the real libx264 package.
-    test_ld_path="${SYSTEM_LIBS_DIR}/lib"
-    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-        test_ld_path="${test_ld_path}:${LD_LIBRARY_PATH}"
+    # This exists for tests that need a runtime the compile lane is not, and
+    # only those. Today that is cloud_browser_adm_unittests, which drives the
+    # real libwebrtc Pulse backend and therefore needs a live audio server
+    # with a capture source; the compile pod has neither. It is an integration
+    # test wearing a unit test's clothes, and the runtime image
+    # (build/Dockerfile.runtime) already runs PulseAudio under supervisord —
+    # that is where it belongs.
+    #
+    # Compiling it here is still valuable and still happens: the ~10-week gap
+    # this whole mechanism came out of was "declared but never COMPILED", and
+    # compiling it is what found two real defects (an abstract
+    # CbAudioTestRecorder, and missing link-time webrtc_overrides deps).
+    # Skipping the RUN gives that up for nothing, so we don't.
+    #
+    # Three guards keep this from becoming the silent-skip class that STEP 7
+    # was rewritten to close in the first place:
+    #   1. it is opt-IN per lane, never a default;
+    #   2. every skip is logged by name WITH its reason, at the same volume as
+    #      a failure — a skip you cannot see is a lie;
+    #   3. a skipped binary must still have been BUILT. A name in this list
+    #      that ninja did not produce, or that is not in this lane's target
+    #      list at all, is a hard error — that is how a stale entry survives a
+    #      target rename and quietly stops running something.
+    tests_rc=0
+    skipped_run=()
+    for _s in ${CHROMELESS_TESTS_SKIP_RUN:-}; do
+        _found=0
+        for _b in "${test_binaries[@]}"; do
+            [[ "${_b}" == "${_s}" ]] && _found=1 && break
+        done
+        if [[ "${_found}" -eq 0 ]]; then
+            log "ERROR: CHROMELESS_TESTS_SKIP_RUN names '${_s}', which is not in"
+            log "ERROR: this lane's CHROMELESS_BUILD_TARGETS. Stale entry after a"
+            log "ERROR: rename or removal — fix the list rather than leaving a"
+            log "ERROR: skip that silently matches nothing."
+            tests_rc=1
+        fi
+    done
+
+    if [[ "${#test_binaries[@]}" -eq 0 ]]; then
+        log "WARN: no *_unittests targets in CHROMELESS_BUILD_TARGETS — nothing to run."
+        log "WARN: this lane is shipping an artifact no test has exercised."
+    fi
+    for _bin in "${test_binaries[@]}"; do
+        _path="${CHROMIUM_SRC}/${OUT_DIR}/${_bin}"
+        if [[ ! -x "${_path}" ]]; then
+            log "ERROR: ${_bin} was requested but is missing or not executable."
+            log "ERROR: it is in CHROMELESS_BUILD_TARGETS, so ninja should have"
+            log "ERROR: produced it — treat this as a build failure, not a skip."
+            tests_rc=1
+            continue
+        fi
+        # Note the ordering: the executable check above runs FIRST, so a
+        # skipped binary that failed to link is still a build failure. Skipping
+        # the run must never soften "it did not build".
+        _skip=0
+        for _s in ${CHROMELESS_TESTS_SKIP_RUN:-}; do
+            [[ "${_bin}" == "${_s}" ]] && _skip=1 && break
+        done
+        if [[ "${_skip}" -eq 1 ]]; then
+            log "SKIP-RUN: ${_bin} built OK but NOT executed in this lane."
+            log "SKIP-RUN: reason: ${CHROMELESS_TESTS_SKIP_RUN_REASON:-<none given — set CHROMELESS_TESTS_SKIP_RUN_REASON>}"
+            skipped_run+=("${_bin}")
+            continue
+        fi
+        run "${_path}" || tests_rc=$?
+    done
+
+    if [[ "${#skipped_run[@]}" -gt 0 ]]; then
+        log "STEP 7 summary: ran ${#test_binaries[@]} target(s) minus ${#skipped_run[@]} skipped: ${skipped_run[*]}"
+        log "STEP 7 summary: those were COMPILED and LINKED here, just not run."
     fi
 
-    # `env VAR=... cmd` rather than a `VAR=... run ...` prefix: run() is a
-    # shell FUNCTION, and a var prefix on a function call leaks into the
-    # caller's environment in some shells instead of scoping to the call.
-    # env is unambiguous and self-documenting in the `+ ...` echo.
-    run env "LD_LIBRARY_PATH=${test_ld_path}" \
-        "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_encoder_unittests" \
-        || encoder_rc=$?
-    run env "LD_LIBRARY_PATH=${test_ld_path}" \
-        "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_framesink_capturer_unittests" \
-        || framesink_rc=$?
-
-    if [[ "${encoder_rc}" -eq 127 || "${framesink_rc}" -eq 127 ]]; then
-        log "ERROR: a unit-test binary could not START (exit 127) — almost"
-        log "       certainly a missing shared library, not a failing test."
-        log "       Staged libs: ${SYSTEM_LIBS_DIR}/lib"
-    fi
-    if [[ "${encoder_rc}" -ne 0 || "${framesink_rc}" -ne 0 ]]; then
-        log "WARN: unit tests reported failures (encoder=${encoder_rc} framesink=${framesink_rc})"
-        if [[ -n "${CHROMELESS_TESTS_FATAL:-}" ]]; then
-            log "ERROR: CHROMELESS_TESTS_FATAL=1 set; failing build."
+    if [[ "${tests_rc}" -ne 0 ]]; then
+        log "unit tests reported failures (rc=${tests_rc}); ran: ${test_binaries[*]}"
+        if [[ -n "${CHROMELESS_TESTS_NONFATAL:-}" ]]; then
+            log "WARN: CHROMELESS_TESTS_NONFATAL=1 — continuing to STEP 8 and"
+            log "WARN: shipping this artifact with failing unit tests."
+        else
+            log "ERROR: unit tests failed. Set CHROMELESS_TESTS_NONFATAL=1 to ship"
+            log "ERROR: anyway (and record why in the job that sets it)."
             exit 1
         fi
-        log "WARN: continuing to STEP 8 (CHROMELESS_TESTS_FATAL unset; first-light non-blocking)."
     fi
 fi
 

@@ -1,10 +1,14 @@
 # `capture/framesink-capturer/`
 
 `capturer.{h,cc}` is the **consumer end** of Viz's video-capture
-Mojo. Pair it with the browser-process `PeerConnectionFactory` seam in
-[`cloud_browser_pcf.cc`](../build-integration/cloud_browser_pcf.cc) to feed our
-encoder factory. The former renderer-side patch 0001 was retired; the current
-patch-series status is recorded in [`patches/README.md`](../../patches/README.md).
+Mojo. Frames flow into `cb_framesink_video_track_source.{h,cc}`, which
+feeds the browser-process `PeerConnectionFactory` built in
+`cloud_browser_pcf.cc` — that is where our encoder factory is installed.
+
+(Historical note: this used to pair with renderer-side `media_factory`
+injection via `patches/0001-expose-encoder-factory-injection.patch`. That
+patch was retired in M7 R6 when the PeerConnectionFactory moved into the
+browser process — see [`patches/README.md`](../../patches/README.md).)
 
 ```
 [Viz process]                        [our cloud-browser worker]
@@ -21,7 +25,7 @@ FrameSinkVideoCapturerImpl  --Mojo->  CloudBrowserFrameSinkCapturer
                                       libwebrtc PeerConnection
                                           |
                                           | VideoEncoderFactory injected
-                                          | via browser-process PCF seam
+                                          | via patch 0001
                                           v
                                       CloudBrowserVideoEncoderFactory
                                       (T19 / T35 / T36)

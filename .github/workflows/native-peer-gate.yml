@@ -13,10 +13,14 @@
 #     targeting `main` (so the M7 squash-merge MUST come in green-strict).
 #     Every assertion must PASS; NYI is a FAIL.
 #
-# Both jobs depend on `build-image` (chromeless:ci) — they reuse the gha
-# Docker layer cache populated by ci.yml's build-image job. When run in a
-# Forgejo workflow that doesn't share that cache, they build chromeless:ci
-# from infra/Dockerfile in the same job.
+# OSS-W1: both jobs need a real cloud_browser_worker image, supplied via the
+# CHROMELESS_IMAGE repository variable. They previously depended on a
+# `build-image` job that built infra/Dockerfile — the legacy stock-Chromium +
+# getDisplayMedia image, which had been unbuildable since the M7 native-peer
+# migration deleted capture/streamer-page/ while the Dockerfile still COPYd
+# it, and which in any case contained none of the native-peer surface these
+# gates assert on. With CHROMELESS_IMAGE unset both jobs report a notice and
+# pass, so the gate is opt-in rather than permanently red.
 #
 # Branch-protection (required-check): Forgejo's "required status checks"
 # rule lives outside the repo. Operators set
@@ -42,95 +46,89 @@ permissions:
   contents: read
 
 jobs:
-  build-image:
-    name: Build chromeless:ci for gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build chromeless:ci (gha layer cache)
-        id: build_image
-        continue-on-error: true
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: infra/Dockerfile
-          load: true
-          tags: chromeless:ci
-          cache-from: type=gha,scope=chromeless-ci
-          cache-to: type=gha,scope=chromeless-ci,mode=max
-
-      # Forgejo's GHA cache endpoint can return a transient 404 while BuildKit
-      # exports a fully-built image. Retry with a fresh builder and consume the
-      # existing cache, but do not make the retry depend on exporting it again.
-      - name: Recreate Buildx after cache service failure
-        if: steps.build_image.outcome == 'failure'
-        uses: docker/setup-buildx-action@v3
-        with:
-          name: native-gate-retry-builder
-          driver: docker-container
-
-      - name: Retry chromeless:ci build without cache export
-        if: steps.build_image.outcome == 'failure'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: infra/Dockerfile
-          load: true
-          tags: chromeless:ci
-          cache-from: type=gha,scope=chromeless-ci
-
-      - name: Save chromeless:ci as artifact (shared with gate jobs)
-        run: |
-          docker save chromeless:ci -o /tmp/chromeless-ci.tar
-          ls -lh /tmp/chromeless-ci.tar
-
-      # Forgejo does not implement GitHub's v4 artifact service yet. Its
-      # runner exposes the v3 artifact protocol used by our other live
-      # workflows, so keep producer and consumers on that protocol.
-      - uses: actions/upload-artifact@v3
-        with:
-          name: chromeless-ci-image
-          path: /tmp/chromeless-ci.tar
-          retention-days: 1
-
   native-peer-gate-scaffold:
     name: native-peer-gate-scaffold (permissive)
-    needs: [build-image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v3
-        with:
-          name: chromeless-ci-image
-          path: /tmp/
+      # OSS-W2: no `actions/setup-node@v4` — it installs a glibc node onto
+      # this host's musl (Alpine) job container, poisoning PATH so every
+      # later JS action's post-step exits 255 and the job fails with none of
+      # its own work having run. Full write-up in ci.yml's "Node version
+      # (image-provided)" step. The gate only needs `node` + `docker`, both
+      # of which ci-tools ships.
+      - name: Node version (image-provided)
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::no node in the job image; the gate is a node script"
+            exit 1
+          }
+          echo "node: $(node --version)"
 
-      - name: Load chromeless:ci into local daemon
-        run: docker load -i /tmp/chromeless-ci.tar
+      - name: Check for a supplied worker image
+        id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — gate skipped. Set it to a cloud_browser_worker image to enable."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # C2: private-registry login — see ci.yml's identical step for the
+      # conditional-secrets rationale (forks / GitHub keep working with a
+      # public image and no secrets).
+      - name: Registry login (if credentials provided)
+        if: steps.probe.outputs.present == 'true' && env.REGISTRY_PASSWORD != ''
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          registry="${CHROMELESS_IMAGE%%/*}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
+            --username "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Pull the worker image
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: docker pull "${CHROMELESS_IMAGE}"
 
       - name: Run gate (scaffold)
-        run: node verification/native-peer-gate.mjs --scaffold --image=chromeless:ci > gate-output.json
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: node verification/native-peer-gate.mjs --scaffold --image="${CHROMELESS_IMAGE}" > gate-output.json
         # Scaffold permits NYI per the gate-blocking schedule; expected to be
         # green for the whole M0..M6 window (and after M7 if implementation
         # holds).
 
+      # OSS-W2: `actions/upload-artifact@v4` cannot work on this CI host. It
+      # resolves and runs, then fails the step outright:
+      #   GHESNotSupportedError: @actions/artifact v2.0.0+, upload-artifact@v4+
+      #   and download-artifact@v4+ are not currently supported on GHES.
+      # v4 talks to GitHub's artifact backend service, which Forgejo does not
+      # implement (v3 used the older API and is deprecated upstream). Because
+      # the step ran with `if: always()`, it failed the job AFTER the gate had
+      # already printed `verdict=PASS exitCode=0` — a green gate reported red
+      # by its own artifact upload (observed 2026-07-30, run 208899).
+      #
+      # The JSON is small and its only consumer is a human reading the run, so
+      # print it into the log instead. `Print gate JSON` above already does
+      # exactly that; this makes the log the artifact rather than pretending
+      # an upload happened.
       - name: Print gate JSON
-        if: always()
-        run: cat gate-output.json || true
-
-      - uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: native-peer-gate-scaffold-output
-          path: gate-output.json
-          retention-days: 14
+        if: always() && steps.probe.outputs.present == 'true'
+        run: |
+          echo "--- gate-output.json (artifact upload is unsupported on this host) ---"
+          cat gate-output.json || true
 
   native-peer-gate-strict:
     name: native-peer-gate-strict (M7 gate)
-    needs: [build-image]
     runs-on: ubuntu-latest
     # Strict runs on PRs targeting main (so the M7 squash-merge MUST be
     # green-strict) AND on pushes to integration/native-peer (operator
@@ -141,24 +139,80 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v3
-        with:
-          name: chromeless-ci-image
-          path: /tmp/
+      # OSS-W2: see the scaffold job's identical step — setup-node ships a
+      # glibc node this musl job container cannot exec.
+      - name: Node version (image-provided)
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::no node in the job image; the gate is a node script"
+            exit 1
+          }
+          echo "node: $(node --version)"
 
-      - name: Load chromeless:ci into local daemon
-        run: docker load -i /tmp/chromeless-ci.tar
+      - name: Check for a supplied worker image
+        id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — strict gate skipped. Set it to a cloud_browser_worker image to enable."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
 
+      # C2: private-registry login — see ci.yml's identical step for the
+      # conditional-secrets rationale (forks / GitHub keep working with a
+      # public image and no secrets).
+      - name: Registry login (if credentials provided)
+        if: steps.probe.outputs.present == 'true' && env.REGISTRY_PASSWORD != ''
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          registry="${CHROMELESS_IMAGE%%/*}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
+            --username "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Pull the worker image
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: docker pull "${CHROMELESS_IMAGE}"
+
+      # OSS-W2: strict cannot pass today, and that is a property of the gate,
+      # not of the image. Strict requires every assertion to be PASS —
+      # NOT_YET_IMPLEMENTED counts as FAIL (verdict.mjs computeVerdict). But
+      # #3 codec-cap and #4 native-peer are still M0 shims that return NYI
+      # unconditionally, and #3's real probe needs `ctx.client` from the R7
+      # boot harness — which `runGate` never constructs. So there is no
+      # --position value, and no image, that makes strict green: it is
+      # unsatisfiable by construction until M1/M3 wire those two probes.
+      #
+      # Before CHROMELESS_IMAGE was set, this job "passed" only by skipping
+      # (probe present=false → no gate run at all). Setting the var in C2 made
+      # it run for the first time — and it failed, correctly, reporting
+      # exactly the two NYIs. #1 and #2 now PASS against the real image with
+      # `mode: docker` evidence, which is new and is the part that was worth
+      # having.
+      #
+      # Keep running it (the JSON is the honest status of the M7 surface), but
+      # don't fail the PR on a gate whose own probes are unimplemented. The
+      # scaffold job is the required check per verification/README.md; strict
+      # becomes required when M1+M3 land and this continue-on-error comes off.
       - name: Run gate (strict)
-        run: node verification/native-peer-gate.mjs --strict --image=chromeless:ci > gate-strict-output.json
+        if: steps.probe.outputs.present == 'true'
+        continue-on-error: true
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: node verification/native-peer-gate.mjs --strict --image="${CHROMELESS_IMAGE}" > gate-strict-output.json
 
+      # OSS-W2: no upload-artifact — see the scaffold job's note (v4 is
+      # GHES-unsupported on this host and fails the job even when the gate
+      # itself passed).
       - name: Print gate JSON
-        if: always()
-        run: cat gate-strict-output.json || true
-
-      - uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: native-peer-gate-strict-output
-          path: gate-strict-output.json
-          retention-days: 14
+        if: always() && steps.probe.outputs.present == 'true'
+        run: |
+          echo "--- gate-strict-output.json (artifact upload is unsupported on this host) ---"
+          cat gate-strict-output.json || true

@@ -6,186 +6,95 @@
 [![CodeQL](https://forgejo.triform.dev/triform/chromeless/actions/workflows/codeql.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
 [![Release](https://forgejo.triform.dev/triform/chromeless/actions/workflows/release.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
 
-**Open-source cloud browser with low-latency WebRTC streaming.**
+**A Chromium embedder that streams a real browser over WebRTC, with a native
+libwebrtc peer running inside the browser process.**
 
-> **Status:** Phase 0 — foundations. Container, signaling, and harness are
-> still being bootstrapped. See [PROJECT_BRIEF.md](./PROJECT_BRIEF.md) for the
-> full roadmap and exit criteria for each phase.
+A real Chromium runs on a Linux server, its tab is captured straight out of the
+Viz compositor via `FrameSinkVideoCapturer`, encoded (x264 / VP9 / NVENC /
+VAAPI / SVT-AV1), and streamed to a client. Mouse, keyboard, clipboard, file
+uploads, cursor updates, and audio round-trip through the same peer connection.
+Useful for browser isolation, agent tooling, embedded co-browsing, and anywhere
+you need a real Chromium you don't want to run locally.
 
----
-
-## What is this?
-
-`chromeless` is a remote-browser platform: a real Chromium runs on a
-Linux server, its tab is streamed to your local browser over WebRTC, and your
-mouse / keyboard / clipboard / audio round-trip back through the same peer
-connection. The user-facing experience is "I open a webpage and use a browser
-inside it" — useful for browser isolation, scraping, agent tooling, embedded
-co-browsing, and anywhere you need a real Chromium that you don't want to (or
-can't) run locally.
-
-It is built around three opinions:
-
-1. **Latency is the product.** Everything from capture to encoder tuning to
-   input dispatch is evaluated against glass-to-glass latency. The targets are
-   **<100 ms on LAN** and **<200 ms regional**, measured by a flashing-color
-   harness from week one.
-2. **Don't fork Chromium until you have to.** The shortest path to a working
-   demo is stock Chromium + DevTools Protocol + `getDisplayMedia` piped into
-   `RTCPeerConnection`. Custom `FrameSinkVideoCapturer` capture, encoder
-   factory injection, and HW encode are scheduled improvements, not v1
-   prerequisites.
-3. **Ship the boring path first.** Software encode (libvpx VP9, x264 zero-
-   latency), a Go WebSocket signaler, and a single-tenant Docker container is
-   enough to demo. Multi-tenancy, NVENC/VAAPI, and AV1 come later.
-
-### Why not Selkies, Neko, or Kasm?
-
-Each of those projects solves a slightly different problem and we owe them
-significant prior art (see [`docs/prior-art/`](./docs/prior-art/) for our
-surveys):
-
-- **Selkies-GStreamer** focuses on GStreamer-based desktop streaming with
-  hardware encode; it's not browser-native and not WebRTC-first by default.
-- **Neko** is a multi-user "watch together" room around a shared browser; it
-  is excellent for that shape and not optimized for one-user-per-Chromium
-  isolation or programmatic access.
-- **Kasm Workspaces** is a polished commercial product with VNC/KasmVNC at
-  its core; it is not OSS-first and not WebRTC-first.
-
-We are aiming for: **WebRTC-first, one-Chromium-per-user, latency-obsessed,
-Apache-2.0, with a clear extension path for hardware encoders and custom
-capture.** If that overlaps with what you need, contributions welcome.
+**Status: source-available, in production.** This is not a packaged product.
+There are no published container images, no npm package, and no release tags —
+you build it yourself. See [Building](#building) for what that costs.
 
 ---
 
-## Architecture sketch
+## What you actually get
 
-```
-              ┌────────────────────── User's machine ──────────────────────┐
-              │                                                            │
-              │   ┌────────────────┐                                       │
-              │   │ Browser client │   client/index.html + main.ts         │
-              │   │  (Chrome/FF)   │   - RTCPeerConnection (recv video/    │
-              │   └───────┬────────┘     audio; send input via DataChannel)│
-              │           │                                                │
-              └───────────┼────────────────────────────────────────────────┘
-                          │ WebSocket (SDP / ICE)        WebRTC media + DC
-                          │                              (UDP, SRTP, DTLS)
-                          ▼                                       ▲
-              ┌──────────────────────┐                            │
-              │   signaling/  (Go)   │                            │
-              │   ws://…/session/:id │                            │
-              └──────────┬───────────┘                            │
-                         │ session bootstrap                      │
-                         ▼                                        │
-┌──────────────────── Headless Chromium container ─────────────── │ ────────┐
-│                                                                 │         │
-│   ┌───────────────────────────┐    ┌──────────────────────────┐ │         │
-│   │   Chromium (headless)     │    │   capture/ (sidecar)     │ │         │
-│   │   - Xvfb / headless+gpu   │◄──►│   - getDisplayMedia path │ │         │
-│   │   - DevTools Input.*      │    │   - (later) FrameSink    │ │         │
-│   │   - PulseAudio sink       │    │     VideoCapturer        │ │         │
-│   └────────────┬──────────────┘    └────────────┬─────────────┘ │         │
-│                │ frames + audio + cursor meta   │               │         │
-│                ▼                                ▼               │         │
-│   ┌────────────────────────────────────────────────────────┐    │         │
-│   │   Encoder + libwebrtc                                  │────┼─────────┘
-│   │   - SW VP9 / x264, zero-latency tuning (v1)            │
-│   │   - HW NVENC/VAAPI behind webrtc::VideoEncoderFactory  │
-│   │   - Adaptive bitrate via libwebrtc BWE (Phase 2)       │
-│   └────────────────────────────────────────────────────────┘
-│
-│   infra/  Dockerfile + compose.yaml + (later) K8s manifests
-│
-└─────────────────────────────────────────────────────────────────────────┘
+| Component | Language | What it is |
+| --- | --- | --- |
+| `capture/` | C++ | The product. A Chromium content-embedder (`cloud_browser_worker`) built out-of-tree against a pinned Chromium release branch. Native browser-process libwebrtc peer, FrameSink capture, encoder factory, input dispatch, five data channels, a custom `Cb.*` CDP domain. |
+| `signaling/` | Go | WebSocket signaling broker. One session = one `client` + one `browser`. JWT auth, TURN credential minting, offer/ICE replay buffers. |
+| `client/` | TypeScript | Browser-side client: answerer state machine, input encoder, cursor/clipboard/file-upload/stats channels, codec negotiation, reconnect. Tested with vitest. |
+| `infra/` | Go/YAML | The standalone gateway (TLS, login, session tokens, navigation), compose stack, Helm chart, `BrowserSession` CRDs + controller, TURN issuer. |
+| `harness/` | mixed | Glass-to-glass latency measurement (flashing block + webcam reconciliation). |
 
-         harness/  flashing color block + webcam reconciliation
-                   → measures glass-to-glass latency end-to-end
-```
-
-A more detailed phase-by-phase architecture lives in
-[PROJECT_BRIEF.md](./PROJECT_BRIEF.md); design docs and ADRs land in
-[`docs/`](./docs/).
-
----
-
-## Latency budget
-
-Latency is the product. The v1 contract is:
-
-| Path                        | Target            |
-| --------------------------- | ----------------- |
-| Glass-to-glass, LAN         | **< 100 ms**      |
-| Glass-to-glass, regional    | **< 200 ms**      |
-| Input round-trip (separate) | budgeted in v1 doc|
-
-The full, measurable acceptance criteria — resolution, framerate, concurrent
-sessions per host, supported input types — live in
-[`docs/v1-success-criteria.md`](./docs/v1-success-criteria.md). Every
-architectural decision is evaluated against that document.
-
-Latency is measured, not asserted. The
-[`harness/`](./harness/) directory contains a flashing-color-block page and
-reconciliation script: a webcam points at the client screen, the page emits
-timestamped color transitions, and we recover glass-to-glass latency from the
-captured video. See [`harness/latency/README.md`](./harness/latency/README.md)
-for the methodology.
+The browser is **always the offerer**; the client is the answerer.
 
 ---
 
 ## Quickstart
 
-> ⚠️ **Coming Phase 0 exit.** The container, signaling server, and client
-> stub all land before `docker compose up` works end-to-end. Track progress
-> via the task list in this repo.
-
-### Local dev (docker compose)
+You need a `cloud_browser_worker` image. Nothing here publishes one, so either
+build it (below) or use one your organization already built.
 
 ```bash
-git clone https://github.com/<org>/chromeless.git
-cd chromeless
-docker compose -f infra/compose.yaml up
+git clone <this-repo> && cd chromeless
 
-# Then open http://localhost:3000
+# Three exports: the keypair the gateway signs with and the broker verifies
+# against, plus the token the browser itself presents to the broker. All three
+# are needed — with the broker's key set and the worker's token missing, the
+# broker refuses the browser and nothing but a WebSocket close code says so.
+eval "$(cd infra/gateway && go run ./cmd/keygen)"
+
+CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
+  docker compose -f infra/compose.yaml up
 ```
 
-Add `--profile observability` to also bring up Prometheus + Grafana
-with the cb dashboards (T66) auto-loaded; see
-[`infra/observability/dashboards/README.md`](./infra/observability/dashboards/README.md).
+Then open <https://localhost:8443>, accept the certificate once, and sign in.
+Type a URL in the address bar and you are driving a real Chromium.
 
-### Kubernetes (Helm)
+Three variables are required and none has a default. `CHROMELESS_IMAGE`
+because this repo publishes no images and there is nothing honest to point at;
+`CHROMELESS_USER` / `CHROMELESS_PASS` because a built-in default password is
+worse than no login at all — it looks like protection. Compose fails fast on
+each with a message.
 
-The supported install path for clusters is the chart at
-[`infra/helm/chromeless/`](./infra/helm/chromeless):
+**About that certificate warning.** The gateway generates a self-signed
+certificate on first boot and reuses it afterwards. Accepting it once also
+covers the `wss://` signaling connection, because the page and the WebSocket
+share one origin — which is the reason everything runs on a single port. Bring
+your own with `CHROMELESS_TLS_CERT` / `CHROMELESS_TLS_KEY`, and add
+`CHROMELESS_TLS_HOSTS=hostname,192.168.1.10` if you reach it by anything other
+than `localhost`.
+
+Exactly one port is published: the gateway. The signaling broker and Chromium's
+DevTools stay on the internal network — DevTools in particular is
+unauthenticated remote code execution against the browser, and it used to be
+published by default.
+
+Without `CHROMELESS_ICE_SERVERS` the peer falls back to public STUN. Fine for a
+same-host run and **will not traverse most NATs**; for anything else bring up
+the bundled relay:
 
 ```bash
-helm install chromeless \
-    oci://ghcr.io/<org>/chromeless/helm/chromeless \
-    --version 0.1.0 \
-    --namespace chromeless \
-    --create-namespace \
-    -f my-values.yaml
+CHROMELESS_TURN_SECRET=$(openssl rand -hex 32) \
+  docker compose -f infra/compose.yaml --profile turn up
 ```
 
-Required `my-values.yaml` knobs are documented inline in
-[`values.yaml`](./infra/helm/chromeless/values.yaml); the
-short list is the Ed25519 auth pubkey, the TURN shared secret, and
-the TURN URLs. See
-[`docs/operations/phase1-deployment-checklist.md`](./docs/operations/phase1-deployment-checklist.md)
-before going to production, and
-[`docs/operations/runbook.md`](./docs/operations/runbook.md) for
-day-2 operations.
-
-For development against individual components before the full stack lands,
-see each subdirectory's README.
+**Running the browser on another machine** — a box with more cores, or a server
+you already have — is `infra/compose.host.yaml` plus `infra/compose.worker.yaml`.
+See [`docs/operations/standalone.md`](./docs/operations/standalone.md).
 
 ---
 
-## Known limitations (v1)
+## Building
 
-A handful of things don't fully work in v1 by design — captured here
-so users hit them with eyes open. Each has a planned-fix milestone.
+The browser is a from-source Chromium build. There is no smaller path:
 
 - **WebGL is software-rendered.** v1's launch flag set pins Chromium
   to ANGLE + SwiftShader (T78 / T91 — Vulkan is disabled because
@@ -209,42 +118,224 @@ so users hit them with eyes open. Each has a planned-fix milestone.
   intentionally ships one Chromium per user; multi-tenant
   orchestration is Phase 3.
 
+- **4–8 hours cold**, ~1 hour warm with a populated sccache.
+- Needs a full `gclient sync` of the Chromium tree plus a many-core builder.
+- Produces `cloud_browser_worker` + a runtime image via
+  [`build/Dockerfile.runtime`](./build/Dockerfile.runtime).
+
+```bash
+build/chromeless-build.sh          # see build/README.md for the 10 steps and knobs
+```
+
+Chromium is pinned to a release branch (currently `refs/branch-heads/7727`,
+≈M147) and rolled roughly every four weeks. Images are tagged
+`cr<chromium-branch>-<repo-sha>`, so the tag answers "which Chromium is in
+here". Pinning policy and the roll procedure:
+[`docs/build/chromium-from-source.md`](./docs/build/chromium-from-source.md) §6.
+
+The Go services and the TypeScript client build normally and need none of the
+above:
+
+```bash
+( cd signaling && go build ./... && go test ./... )
+( cd client && npm ci && npm test )
+```
+
+---
+
+## Architecture
+
+```
+        ┌──────────── User's machine ────────────┐
+        │  Browser client — client/              │
+        │  RTCPeerConnection (answerer)          │
+        │  recv video+audio · send input over DC │
+        │  address bar ─── POST /api/navigate ─┐ │
+        └───────┬───────────────────────▲──────┼─┘
+                │ WebSocket (SDP/ICE)   │ SRTP/DTLS media + DataChannels
+                ▼                       │      │
+   ╔════════════════════════════════════╪══════╪═══╗
+   ║  infra/gateway/  (Go)   TLS ends here      │  ║  ← the only published
+   ║  login · session tokens · static · proxy   │  ║     port, standalone
+   ╚════════┬═══════════════════════════╪══════╪═══╝
+        ┌───▼──────────────────┐        │      │ CDP Page.navigate
+        │  signaling/  (Go)    │        │      │
+        │  offer + ICE replay  │        │      │
+        └───────┬──────────────┘        │      │
+                │                       │      │
+┌───────────────▼───────────────────────┼──────────────────────────────┐
+│  cloud_browser_worker  (capture/)     │                              │
+│                                       │                              │
+│   Chromium browser process            │                              │
+│     ├─ Viz compositor                 │                              │
+│     │    └─ FrameSinkVideoCapturer ──▶ video track source ──┐        │
+│     ├─ native libwebrtc PeerConnection ◀────────────────────┘        │
+│     │    └─ encoder factory: x264 / VP9 / NVENC / VAAPI / SVT-AV1 ───┤
+│     ├─ DataChannels: input · stats · cursor · clipboard · files      │
+│     └─ CDP: Page.navigate ◀──────────────────────────────────────────┘
+│            Cb.startNativeSession · Cb.startFrameSinkCapture · …      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+The gateway is the standalone deployment's single front door; Kubernetes
+deployments terminate TLS at an Ingress and mint sessions in the controller
+instead, and skip it. **Navigation does not ride the peer connection**: the
+connection carries pixels and input, and the URL goes over HTTP to a control
+plane that drives CDP. The triform portal works the same way, with physics in
+the gateway's place.
+
+The peer lives in the **browser process**, not in a page. There is no streamer
+web page and no `getDisplayMedia` — both were removed in the M7 native-peer
+migration.
+
+**Wire protocol.** `{type, from, data}` with six tags: `offer`, `answer`,
+`ice`, `bye`, `request_renegotiate`, `probe_result`. `ice` data is an
+`RTCIceCandidateInit` or `null` (end-of-candidates); `bye` omits `data`
+entirely. The authoritative statement is
+[`capture/signaling/cb_wire_envelope.h`](./capture/signaling/cb_wire_envelope.h).
+
+**Channel protocols** — one spec per channel, each independently versioned —
+live in [`docs/protocols/`](./docs/protocols/).
+
+---
+
+## Configuration
+
+The worker is configured by environment. `infra/launch-chromeless.sh`
+translates the friendly names into what the browser process reads:
+
+| Set this | Becomes | Meaning |
+| --- | --- | --- |
+| `SIGNALING_URL` | `WEBRTC_SIGNALING_HOST` + `_TLS` | `ws[s]://host[:port]`. Path is ignored — the peer builds its own from the session id. |
+| `SESSION_ID` | `WEBRTC_SIGNALING_SESSION_ID` | Opaque string. Must survive percent-encoding as one path segment. |
+| `SIGNALING_TOKEN` | `WEBRTC_SIGNALING_TOKEN` | The browser's own session token, forwarded verbatim as a query param. Optional **only** while the broker has no `CHROMELESS_AUTH_PUBKEY`; the moment it has one this is required, and omitting it gets the worker closed with `1008 missing token`. `cmd/keygen` prints one. |
+| `CHROMELESS_ICE_SERVERS` | `WEBRTC_ICE_SERVERS` | JSON array of `{urls, username, credential}`, or an object with an `iceServers` array. |
+| `CHROMELESS_ICE_TRANSPORT_POLICY` | `WEBRTC_ICE_TRANSPORT_POLICY` | `all` (default) or `relay`. |
+
+Setting a `WEBRTC_*` variable directly always wins, which is how the Kubernetes
+controller drives it.
+
+Sessions can also be started at runtime over CDP — `Cb.startNativeSession`
+takes the same settings as parameters, which is what a warm-pool orchestrator
+uses after restoring a snapshot. (This previously documented a
+`Cb.startSession` with `Cb.startNativeSession` as its "deprecated alias". It
+is the other way round: `startNativeSession` is the only spelling the embedder
+implements — see `kStartNativeSessionMethod` in
+`capture/build-integration/cb_devtools_agent.cc`. Since `Cb.*` is
+hand-dispatched and absent from `/json/protocol`, nothing would have caught
+the wrong name but a failing call.)
+
+---
+
+## Deploying
+
+- **Kubernetes** — the chart at [`infra/helm/chromeless/`](./infra/helm/chromeless)
+  ships `BrowserSession` / `BrowserSessionPool` CRDs and a controller that
+  translates annotations into pod env. Point `images.*` at your own registry;
+  nothing is published to a public one. Required values: the Ed25519 auth
+  pubkey, the TURN shared secret, and TURN URLs.
+- **Firecracker / warm snapshots** — boot the worker as a CDP-only target and
+  drive `Cb.startNativeSession` over CDP once the microVM is restored. Note
+  that "no signaling env" is **not** how you get there: `cold-start.sh`
+  defaults `SIGNALING_URL` to `ws://signaling:8080/ws`, so an unconfigured
+  worker dials a host that usually does not resolve, fails the handshake, and
+  the process exits — supervisord then restart-loops it every ~30 s while
+  DevTools still answers, which looks like a healthy browser. Set
+  `SIGNALING_URL=""` explicitly.
+- **Standalone / bare docker** — `infra/compose.yaml` plus
+  [`infra/gateway/`](./infra/gateway/): one TLS port, a login, and everything
+  else on an internal network. Split across two machines with
+  `infra/compose.host.yaml` + `infra/compose.worker.yaml`. Full guide:
+  [`docs/operations/standalone.md`](./docs/operations/standalone.md).
+
+Day-2 material is in [`docs/operations/`](./docs/operations/);
+`triform-deploy.md` there documents one real production cluster and is useful
+as a worked example, not as a generic guide.
+
+---
+
+## Known limitations
+
+- **WebGL is software-rendered** (ANGLE + SwiftShader; Vulkan is off because
+  Xvfb has no Vulkan driver). Simple scenes are fine; heavy WebGL drops below
+  ~5 fps. See [`docs/research/rendering-matrix.md`](./docs/research/rendering-matrix.md).
+- **WebGPU is unsupported.** `navigator.gpu` exists but `requestAdapter()`
+  returns null — Dawn needs Vulkan.
+- **One tab per session, one session per worker process.** Starting a second
+  session in a live process is not yet supported; the process is single-use.
+- **`Cb.*` is not in `/json/protocol`.** The domain is hand-dispatched, so
+  protocol-introspecting CDP clients won't discover it.
+- **Hardware encoders are compile-time.** NVENC/VAAPI/SVT-AV1 availability is
+  fixed by the build variant; runtime config selects among what was compiled in.
+
+---
+
+## Latency
+
+Latency is the design constraint: **<100 ms glass-to-glass on LAN, <200 ms
+regional**. It is measured, not asserted — [`harness/`](./harness/) points a
+webcam at the client screen, emits timestamped color transitions, and recovers
+end-to-end latency from the captured video. Method:
+[`harness/latency/README.md`](./harness/latency/README.md). Full acceptance
+criteria: [`docs/v1-success-criteria.md`](./docs/v1-success-criteria.md).
+
+---
+
+## Prior art
+
+We owe [Selkies](./docs/prior-art/selkies.md),
+[Neko](./docs/prior-art/neko.md), and [Kasm](./docs/prior-art/kasm.md)
+significant prior art; each solves an adjacent problem. Selkies is
+GStreamer-based desktop streaming, not browser-native. Neko is a multi-user
+"watch together" room around a shared browser. Kasm is a polished commercial
+product built on VNC/KasmVNC.
+
+chromeless is WebRTC-first, one-Chromium-per-user, capture-from-compositor, and
+latency-obsessed. If that overlaps with what you need, it may be useful to you.
+
 ---
 
 ## Repo layout
 
-| Path           | Contents                                                       |
-| -------------- | -------------------------------------------------------------- |
-| [`signaling/`](./signaling/) | WebSocket signaling server (Go). One session per browser for v1. |
-| [`capture/`](./capture/)     | Headless Chromium capture sidecar + spike branches for `FrameSinkVideoCapturer`. |
-| [`client/`](./client/)       | Browser-side client (`index.html`, `main.ts`) — RTCPeerConnection + input DataChannel. |
-| [`infra/`](./infra/)         | Dockerfile, `compose.yaml`, K8s manifests, TURN/STUN config.   |
-| [`harness/`](./harness/)     | Glass-to-glass latency harness (flashing color block + webcam reconciliation). |
-| [`docs/`](./docs/)           | v1 success criteria, prior-art surveys, ADRs, internal notes.  |
-| [`tests/`](./tests/)         | Container smoke tests, harness validation, E2E regression.     |
-| [`PROJECT_BRIEF.md`](./PROJECT_BRIEF.md) | Phased roadmap, team shape, risks, definition of v1 done. |
+| Path | Contents |
+| --- | --- |
+| [`capture/`](./capture/) | The Chromium embedder: browser-process WebRTC peer, FrameSink capture, encoders, input dispatch, `Cb.*` CDP domain. |
+| [`signaling/`](./signaling/) | Go WebSocket signaling broker. |
+| [`client/`](./client/) | TypeScript browser client + demo page. |
+| [`infra/`](./infra/) | [gateway](./infra/gateway/), compose stack, Helm chart, CRDs + controller, TURN issuer, lifecycle scripts. |
+| [`build/`](./build/) | Chromium build orchestration and the runtime image. |
+| [`patches/`](./patches/) | The (small) Chromium patch series. |
+| [`docs/protocols/`](./docs/protocols/) | Per-channel wire specs — the most useful docs here. |
+| [`harness/`](./harness/) | Glass-to-glass latency measurement. |
+| [`tests/`](./tests/) | Smoke, integration, e2e, and WebRTC drivers. |
+| [`verification/`](./verification/) | Assertion-gate tooling. |
+
+[`docs/README.md`](./docs/README.md) is the map: it groups the documentation by
+what you're trying to do (integrate / operate / change the browser) and lists,
+explicitly, which documents are historical.
+
+Historical planning documents (`PROJECT_BRIEF.md`, the phase-exit reports, the
+Phase 1 stack audit) describe an earlier architecture — stock Chromium plus
+`getDisplayMedia` — that no longer exists. They each carry a status banner
+saying so. Read them as history.
 
 ---
 
 ## Contributing
 
-This project is in **Phase 0**; the public contribution flow will solidify
-once the Phase 0 exit gate (container + harness + signaling stub) is green.
-In the meantime:
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Two things worth knowing up front:
 
-- **Issues** describing latency regressions, broken inputs, or container
-  build problems are welcome.
-- **PRs** are easiest to land if they (a) come with a measurement from the
-  harness for anything in the hot path, and (b) reference a section of
-  `PROJECT_BRIEF.md` or `docs/v1-success-criteria.md`.
-- **Design discussions** that would change architecture should land as an
-  ADR under [`docs/`](./docs/) before code.
-
-A formal `CONTRIBUTING.md` and code-of-conduct will be added before the
-project is announced publicly.
+- Anything in the hot path wants a harness measurement attached.
+- A change to a documented protocol needs the spec in `docs/protocols/` updated
+  in the same change.
 
 ---
 
 ## License
 
 Apache-2.0 — see [`LICENSE`](./LICENSE).
+
+This project builds and distributes a derivative of Chromium, which carries its
+own licenses (BSD-3-Clause plus the terms of its many third-party
+dependencies). If you ship binaries produced by `build/chromeless-build.sh`,
+those obligations are yours to meet.

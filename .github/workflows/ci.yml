@@ -5,14 +5,20 @@
 # work doesn't pin runners.
 #
 # Job map:
-#   lint        hadolint Dockerfile, gofmt+vet signaling, tsc client
-#   build-image docker build infra/Dockerfile, push layer cache to gha
-#   smoke       runs tests/smoke/container-boot.sh if present (T9 gates)
+#   lint        hadolint runtime Dockerfile, gofmt+vet signaling,
+#               tsc + vitest client
+#   smoke       runs tests/smoke/container-boot.sh against a supplied
+#               worker image (opt-in via the CHROMELESS_IMAGE repo var)
 #   docs        lychee link check across markdown
 #
-# Wall-time target: <10 min total. We split lint and build-image so a
-# typo in a Go file doesn't block image builds and vice versa, and the
-# Docker layer cache is shared between build-image and smoke via gha.
+# Wall-time target: <10 min total.
+#
+# OSS-W1 note: there is no image-build job. The browser is a from-source
+# Chromium build (4-8h cold — see build/chromeless-build.sh) that cannot be
+# produced on a GHA runner. The previous `build-image` job built
+# infra/Dockerfile, the legacy stock-Chromium + getDisplayMedia image, which
+# had been unbuildable since the M7 native-peer migration deleted
+# capture/streamer-page/ while the Dockerfile still COPYd it.
 
 name: CI
 
@@ -35,14 +41,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Dockerfile lint
+      # Dockerfile lint.
+      #
+      # OSS-W1: retargeted from the deleted infra/Dockerfile (legacy
+      # stock-Chromium image) to the real runtime image definition.
+      #
+      # OSS-W2: run via the container image rather than
+      # `uses: hadolint/hadolint-action`, which 404s on Forgejo's action
+      # mirror. Forgejo resolves every `uses:` before running ANY step, so
+      # that one unresolvable action killed the whole Lint job — the log
+      # shows "skipping post step for 'hadolint'; step was not executed"
+      # followed immediately by "Job failed". Nothing in Lint ever ran.
+      #
+      # Two details that cost a red run on 2026-07-30 (Lint passed at 09:10Z
+      # and failed at 13:06Z with an unchanged Dockerfile):
+      #
+      #   * the image tag was `:latest`, unpinned. hadolint rolled between the
+      #     two runs and the new version reports two more findings. Pin it, so
+      #     a lint result is a property of this repo, not of what upstream
+      #     published this morning.
+      #   * no --failure-threshold was set, so hadolint's default (`info`)
+      #     applies and ANY info-level finding fails the job. The two it now
+      #     reports are both deliberate:
+      #       DL3025 (line 239) — HEALTHCHECK must be shell form; the check is
+      #         `curl … || exit 1`, and JSON/exec form cannot express `||`.
+      #       DL3066 (line 242) — `USER cbuser` is a named user on purpose
+      #         (the image creates it); a bare uid would lose that intent.
+      #     Threshold `warning` keeps error-class findings fatal (which is
+      #     what a Dockerfile lint is for) without gating on style advice we
+      #     have already considered and rejected.
       - name: hadolint
-        # Forgejo resolves bare third-party actions against data.forgejo.org,
-        # which does not mirror this repository. Pin the upstream host so the
-        # lint gate can actually start.
-        uses: https://github.com/hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: infra/Dockerfile
+        run: |
+          docker run --rm -i hadolint/hadolint:v2.12.0 \
+            hadolint --failure-threshold warning - < build/Dockerfile.runtime
+
+      # OSS-W2: static include check for the Chromium embedder. capture/
+      # only compiles inside a full Chromium checkout (4-8 h), so a missing
+      # #include otherwise surfaces hours later in the build lane — or not
+      # at all, if the lane isn't watched. Runs in ~1 s with no Chromium.
+      # Also runs the linter's own self-tests, so a broken linter fails
+      # loudly rather than silently passing everything.
+      - name: C++ include lint
+        run: |
+          python3 tools/lint/test_cxx_include_lint.py
+          python3 tools/lint/cxx_include_lint.py capture
+
+      # OSS-W2: every `uses:` must resolve on the CI host's action mirror.
+      # Forgejo git-clones them all BEFORE running any step, so one missing
+      # action fails the whole job regardless of its `if:`. This caused the
+      # majority of this repo's historical CI failures.
+      - name: Workflow actions lint
+        run: python3 tools/lint/workflow_actions_lint.py
+
+      # OSS-W2: `local` outside a function is a RUNTIME error in bash, and
+      # `bash -n` does not catch it — it is not a syntax error. The build
+      # orchestrator is ~700 lines of top-level shell where one such slip
+      # aborts a step silently: STEP 7 logged its START banner and stopped,
+      # 27 minutes into a t7 build, after a clean 745-second compile
+      # (2026-07-30). This runs in milliseconds and fails on the same
+      # condition.
+      - name: Shell top-level `local` lint
+        run: python3 tools/lint/shell_toplevel_local_lint.py
 
       # Go signaling server: gofmt + vet
       - name: Set up Go
@@ -65,22 +124,126 @@ jobs:
         working-directory: signaling
         run: go vet ./...
 
-      # Client: TypeScript typecheck. ESLint is run only when the project
-      # actually has a config file — webrtc-dev hasn't added one yet, so
-      # we skip cleanly with a notice instead of failing.
-      # The runner image already carries Node. setup-node writes to a shared
-      # host toolcache, and concurrent jobs can delete that runtime underneath
-      # one another. Install only npm inside this isolated job container.
-      - name: Install npm
-        run: apk add --no-cache npm
+      # Every Go module, not just signaling/. `make test-unit-go-modules`
+      # already discovers them with `find -name go.mod`; this mirrors that
+      # inline, because the CI host runs no make target.
+      #
+      # Nothing here ran ANY Go test until 2026-08-19. infra/gateway/ landed
+      # with 31 of them and CI was green about none — which matters because the
+      # only automated proof that `cmd/keygen` emits the worker's token is a
+      # test in that module. A test no lane runs is not a check, it is a
+      # comment; this repo has a lint for exactly that shape
+      # (tools/lint/tests_wired_lint.py) and CI had the same hole.
+      #
+      # `find` rather than a hand-kept list, for the same reason the make
+      # target uses one: a new module joins the gate automatically instead of
+      # silently joining the ungated pile. tests/integration/ is excluded — it
+      # builds a binary and boots it, which is `make test-integration`, not a
+      # unit test.
+      #
+      # No -mod=mod: readonly is Go's default and the right one here. The
+      # `replace` directives point at sibling directories, which readonly
+      # resolves fine — what it refuses is silently rewriting a go.mod to
+      # paper over a missing go.sum entry, and that refusal is the check.
+      #
+      # The loop does not stop at the first failure, for the same reason the
+      # build lane has --keep-going: one pass should collect every broken
+      # module rather than costing a full CI cycle per finding.
+      #
+      # NOTE: this widens the gate to modules never tested by any lane, and
+      # infra/controllers/browser-session-controller pulls ~227 dependencies.
+      # If it goes red on a resolution failure rather than a test failure,
+      # that is a genuine finding — a module CI cannot even build — not a
+      # reason to narrow the list back.
+      - name: go test (every module)
+        run: |
+          set -uo pipefail
+          fail=0
+          for gomod in $(find . -name go.mod \
+                           -not -path "./.claude/*" \
+                           -not -path "./tests/integration/*" | sort); do
+            d=$(dirname "$gomod")
+            echo "::group::go test $d"
+            if ( cd "$d" && go test -timeout 300s ./... ); then
+              echo "ok"
+            else
+              echo "::error::go test failed in $d"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          [ "$fail" -eq 0 ]
+
+      # Client: TypeScript typecheck + unit tests. ESLint is run only when
+      # the project actually has a config file, so we skip cleanly with a
+      # notice instead of failing.
+      #
+      # OSS-W2: `actions/setup-node@v4` is deliberately NOT used. The CI host
+      # maps `ubuntu-latest` to an ALPINE job container (ci-tools, musl libc),
+      # and setup-node downloads the official node tarball — which is
+      # dynamically linked against glibc. It extracts fine, so setup-node
+      # reports success ("Adding to the cache…", "npm: 10.8.2"), then every
+      # later step that resolves `node` from PATH dies:
+      #
+      #   /opt/hostedtoolcache/node/20.20.2/x64/bin/node: cannot execute:
+      #     required file not found            <- /lib64/ld-linux-x86-64.so.2
+      #   exec .../bin/node: no such file or directory   <- post-steps, 255
+      #
+      # Because the poisoned PATH persists, EVERY `post` step of EVERY
+      # JS action in the job then fails with exit 255 and the job fails even
+      # when its real work passed. Observed 2026-07-30: Lint's tsc + all 217
+      # vitest tests PASSED, then "Post Set up Node"/"Post Set up Go"/"Post
+      # checkout" each 255'd and the job reported failure. Both native-peer
+      # gates and e2e died the same way with nothing of theirs having run.
+      # `setup-go` is unaffected only because Go ships static binaries.
+      #
+      # ci-tools ships node v22 built against musl, which runs the whole
+      # client suite (verified in-container: npm ci + tsc + 15 files / 217
+      # tests green). Use what the image provides rather than installing an
+      # ABI-incompatible one. If you re-add setup-node, pin a glibc job
+      # container too, or this comes back.
+      #
+      # It does NOT ship npm (`npm: not found`, no npx) — node alone is
+      # enough for the gate workflows but not for `npm ci`. Install npm from
+      # the distro so it matches the image's own node ABI, which is the whole
+      # point of not using setup-node. Guarded on apk/apt so this stays
+      # portable to a GitHub-hosted runner, where npm is already present and
+      # neither branch runs.
+      - name: Node + npm (image-provided)
+        run: |
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::no node in the job image; add one or pin a container with node"
+            exit 1
+          fi
+          if ! command -v npm >/dev/null 2>&1; then
+            echo "npm absent; installing from the distro to match node's ABI"
+            if command -v apk >/dev/null 2>&1; then
+              apk add --no-cache npm >/dev/null
+            elif command -v apt-get >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq npm >/dev/null
+            fi
+          fi
+          if ! command -v npm >/dev/null 2>&1; then
+            echo "::error::node present but npm could not be installed in this image"
+            exit 1
+          fi
+          echo "node: $(node --version)  npm: $(npm --version)"
 
       - name: Install client deps
         working-directory: client
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: TypeScript check
         working-directory: client
         run: npm run typecheck
+
+      # OSS-W1: the client carries 14 vitest suites (~200 assertions over
+      # the input/cursor/clipboard/file-upload/stats/sdp/reconnect/auth/
+      # turn/probe/simulcast/codec modules) that CI never ran — only
+      # `typecheck` was wired, so every one of those tests was ungated.
+      - name: Client unit tests
+        working-directory: client
+        run: npm test
 
       - name: ESLint (if configured)
         working-directory: client
@@ -91,69 +254,134 @@ jobs:
             echo "::notice::No ESLint config in client/ — skipping. Add eslint.config.js to enable."
           fi
 
-  build-image:
-    name: Build container image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build chromeless:ci
-        uses: docker/build-push-action@v5
-        with:
-          # Context is repo root: the Dockerfile COPYs both
-          # capture/streamer-page/ (T28) and infra/*, so it needs the
-          # whole tree in build context.
-          context: .
-          file: infra/Dockerfile
-          tags: chromeless:ci
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Track 7: the conformance kit's OWN tests. These are pure node:test
+      # with no network and no image — they lock the kit's IO contract
+      # (stdout/stderr separation, exit codes, evidence shape) and its
+      # verdict algebra. Running the kit AGAINST a deployment is a separate
+      # thing and lives in the smoke job, where an image actually exists.
+      #
+      # `node --test <dir>` stopped accepting a bare directory in newer
+      # Node (26 errors with MODULE_NOT_FOUND), so glob explicitly rather
+      # than depending on the runner's Node minor.
+      - name: Conformance kit self-tests
+        run: node --test 'conformance/__tests__/*.test.mjs'
 
   smoke:
     name: Container smoke test
     runs-on: ubuntu-latest
-    needs: build-image
     steps:
       - uses: actions/checkout@v4
 
-      # T9 owns tests/smoke/container-boot.sh. Until that lands, skip the
-      # whole job with a clear notice rather than fail. Once T9 ships,
-      # this branch is taken automatically — no workflow edit required.
-      - name: Probe for smoke script
+      # OSS-W1: the smoke needs a real cloud_browser_worker image, and there
+      # is no way to produce one here — the browser is a from-source Chromium
+      # build (4-8h cold; see build/chromeless-build.sh) that cannot run on a
+      # 4-vCPU GHA runner, and this project does not publish images.
+      #
+      # So the job is opt-in: set the CHROMELESS_IMAGE repository variable to
+      # an image your own build produced and the smoke runs against it.
+      # Unset, the job reports a notice and passes.
+      #
+      # This replaces a `build-image` job that built infra/Dockerfile — the
+      # legacy stock-Chromium + getDisplayMedia image, which had been
+      # unbuildable since the M7 native-peer migration deleted
+      # capture/streamer-page/ (the Dockerfile still COPYd it). That job had
+      # been failing on every run; it is deleted rather than repaired
+      # because the image contained none of the product.
+      - name: Check for a supplied worker image
         id: probe
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
-          if [ -f tests/smoke/container-boot.sh ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
+          if [ -z "${CHROMELESS_IMAGE}" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::tests/smoke/container-boot.sh not present (T9 pending) — smoke test skipped."
+            echo "::notice::CHROMELESS_IMAGE repo variable not set — container smoke skipped. Set it to a cloud_browser_worker image to enable."
+          elif [ ! -f tests/smoke/container-boot.sh ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::tests/smoke/container-boot.sh missing — container smoke skipped."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Buildx
-        if: steps.probe.outputs.present == 'true'
-        uses: docker/setup-buildx-action@v3
+      # C2: CHROMELESS_IMAGE points at a private registry
+      # (registry.triform.cloud). Login is conditional on the secrets
+      # existing so a fork (or GitHub, where these secrets are absent)
+      # that sets a PUBLIC image still works without them. `docker login`
+      # via stdin keeps the password out of argv/process listings.
+      - name: Registry login (if credentials provided)
+        if: steps.probe.outputs.present == 'true' && env.REGISTRY_PASSWORD != ''
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          registry="${CHROMELESS_IMAGE%%/*}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
+            --username "${REGISTRY_USERNAME}" --password-stdin
 
-      - name: Restore image (uses build-image's cache)
+      - name: Pull the worker image
         if: steps.probe.outputs.present == 'true'
-        uses: docker/build-push-action@v5
-        with:
-          # Context is repo root: the Dockerfile COPYs both
-          # capture/streamer-page/ (T28) and infra/*, so it needs the
-          # whole tree in build context.
-          context: .
-          file: infra/Dockerfile
-          tags: chromeless:ci
-          load: true
-          cache-from: type=gha
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: docker pull "${CHROMELESS_IMAGE}"
 
       - name: Run smoke
         if: steps.probe.outputs.present == 'true'
+        env:
+          SMOKE_IMAGE_TAG: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           chmod +x tests/smoke/container-boot.sh
           ./tests/smoke/container-boot.sh
+
+      # Track 7: run the conformance kit against the SAME image the smoke
+      # just proved boots. This is the kit's own dogfood — if the reference
+      # implementation cannot pass its own conformance suite, the suite is
+      # wrong and we want to know from CI rather than from a third party.
+      #
+      # Three mechanics, all learned the hard way:
+      #
+      #   * DevTools binds 127.0.0.1 only (Chromium 147 ignores
+      #     --remote-debugging-address), so `-p 9222` cannot reach it. We
+      #     join the worker's network namespace with
+      #     `--network container:<id>` instead — the same reason
+      #     tests/smoke/container-boot.sh drives CDP via `docker exec`.
+      #
+      #   * the runtime image ships no node (correct — it is a browser, not
+      #     a toolchain), so the kit runs from node:22-alpine.
+      #
+      #   * DO NOT bind-mount the kit with `-v "${PWD}/conformance:/conf"`.
+      #     Bind sources are resolved by the DAEMON, which on this host is a
+      #     sibling dind with its own filesystem — it cannot see the job's
+      #     checkout, silently creates an empty directory at that path, and
+      #     the run dies with `Cannot find module '/conf/run.mjs'`. That is
+      #     the identical trap e2e.yml's "Probe daemon filesystem sharing"
+      #     step exists for, and this step walked into it on its first run
+      #     (2026-07-30). `docker cp` moves the files through the daemon's
+      #     own API, so it works whether or not the filesystem is shared.
+      - name: Conformance kit vs the worker image
+        if: steps.probe.outputs.present == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          set -euo pipefail
+          cid=$(docker run -d --rm --shm-size=1g "${CHROMELESS_IMAGE}")
+          runner=""
+          cleanup() {
+            [ -n "${runner}" ] && docker rm -f "${runner}" >/dev/null 2>&1 || true
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for i in $(seq 1 60); do
+            if docker exec "$cid" curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
+              echo "devtools up after ${i}s"; break
+            fi
+            sleep 1
+          done
+          # Create → copy → start, so the kit is inside the container's own
+          # filesystem before node looks for it.
+          runner=$(docker create --network "container:${cid}" node:22-alpine \
+            node /conf/run.mjs --target=http://127.0.0.1:9222 --role=cdp)
+          docker cp conformance/. "${runner}:/conf"
+          docker start -a "${runner}"
 
   docs:
     name: Docs link check
@@ -161,31 +389,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # OSS-W2: run lychee from its container rather than
+      # `uses: lycheeverse/lychee-action`, which 404s on Forgejo's action
+      # mirror and therefore failed this job before any step executed.
+      #
+      # --no-progress keeps logs short. --max-concurrency caps load on
+      # third-party hosts. Glob limited to repo markdown.
       - name: lychee link check
-        shell: sh
         run: |
-          set -eu
-          version=0.24.2
-          asset=lychee-x86_64-unknown-linux-musl.tar.gz
-          base="https://github.com/lycheeverse/lychee/releases/download/lychee-v${version}"
-          tool_dir=$(mktemp -d)
-          trap 'rm -rf "${tool_dir}"' EXIT
-          curl -fsSL -o "${tool_dir}/${asset}" "${base}/${asset}"
-          curl -fsSL -o "${tool_dir}/${asset}.sha256" "${base}/${asset}.sha256"
-          (cd "${tool_dir}" && sha256sum -c "${asset}.sha256")
-          tar -xzf "${tool_dir}/${asset}" -C "${tool_dir}"
-          lychee="${tool_dir}/lychee-x86_64-unknown-linux-musl/lychee"
-          test -x "${lychee}"
-          "${lychee}" \
+          docker run --rm -v "$PWD:/w" -w /w lycheeverse/lychee:latest \
             --verbose \
             --no-progress \
             --max-concurrency 4 \
             --exclude-path node_modules \
-            --exclude '^https?://localhost(:[0-9]+)?/' \
-            --exclude '^https://plane\.triform\.cloud/?$' \
-            --exclude '^https://bitmovin\.com/' \
-            --exclude '^https://www\.androidpolice\.com/' \
-            --exclude '^https://www\.cdnetworks\.com/' \
-            --exclude '^https://www\.neowin\.net/' \
-            --exclude '^https://gitlab\.torproject\.org/' \
+            --exclude-path .claude \
             './**/*.md'

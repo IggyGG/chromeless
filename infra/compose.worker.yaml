@@ -1,0 +1,99 @@
+# infra/compose.worker.yaml — the browser, on its own machine.
+#
+# Pair with infra/compose.host.yaml, which runs the gateway and the broker
+# somewhere else. Use this when the machine with the browser is not the machine
+# you sit at: a Linux box with more cores, a server in a rack, a cloud VM.
+#
+#   CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+#   CHROMELESS_SIGNALING_HOST=gateway.example.com:8443 \
+#   CHROMELESS_SIGNALING_TOKEN=<a browser-role token> \
+#     docker compose -f infra/compose.worker.yaml up
+#
+# This needs no new mechanism. The worker already learns everything from the
+# environment and dials OUT — it never listens for the browser — so pointing it
+# at a remote broker is a matter of naming one (capture/signaling/
+# cb_signaling_ws_client.cc builds ws[s]://<host>/api/webrtc/signaling/<id>).
+#
+# THREE THINGS THAT BITE HERE, none of which apply to the single-host case:
+#
+#   1. TURN stops being optional. On one machine the peers find each other with
+#      host candidates. Across networks they will not, unless both sit on a
+#      permissive LAN — so bring up the `turn` profile in compose.host.yaml and
+#      set CHROMELESS_ICE_SERVERS below to point at it. Without a relay the
+#      session negotiates and then produces no video, which reads as a broken
+#      build rather than a missing relay.
+#
+#   2. The token is not optional either. With the broker verifying (which is
+#      the point of the gateway), the worker needs a browser-role token in
+#      CHROMELESS_SIGNALING_TOKEN. Mint one on the machine holding the private
+#      key, with the same SESSION_ID this worker will use:
+#
+#        SESSION_ID=dev go run ./infra/gateway/cmd/worker-token
+#
+#      Do NOT use the gateway's /issue-token for this. That path mints
+#      15-MINUTE tokens — right for a page that can silently roll them over
+#      (client/src/auth.ts does), wrong for a browser process that cannot:
+#      capture/signaling/cb_signaling_reconnect.h is explicit that token refresh
+#      is out of scope, so the worker reads the token once at launch and exits
+#      when it expires. cmd/worker-token mints 30 days for exactly that reason.
+#      Re-mint and restart the container before it lapses.
+#
+#      On the single-host stack you never do this by hand: `cmd/keygen` exports
+#      SIGNALING_TOKEN with the keypair.
+#
+#   3. Navigation needs a route to THIS machine's DevTools. The gateway drives
+#      CDP, so CHROMELESS_CDP_URL over there must reach port 9222 here. Do that
+#      over a private network or an SSH tunnel — never by publishing 9222 to
+#      the internet, which is unauthenticated remote code execution.
+
+name: chromeless-worker
+
+services:
+  chromium:
+    image: ${CHROMELESS_IMAGE:?set CHROMELESS_IMAGE to a cloud_browser_worker image (see build/chromeless-build.sh)}
+    container_name: chromeless-worker
+    environment:
+      # Must match the session id the viewer's client connects with. The broker
+      # pairs exactly one `client` and one `browser` per session id.
+      SESSION_ID: ${SESSION_ID:-dev}
+
+      # The gateway's TLS port, which proxies /api/webrtc/signaling/ through to
+      # the broker. wss:// because the gateway is HTTPS-only.
+      #
+      # SELF-SIGNED CERTIFICATE WARNING: the worker is Chromium and validates
+      # the certificate. A browser can click through the warning; the worker
+      # cannot. For a split-host deployment either mount a real certificate
+      # into the gateway (CHROMELESS_TLS_CERT/_KEY) or add its self-signed one
+      # to this machine's trust store. Otherwise the peer never connects and
+      # the log shows a TLS handshake error.
+      SIGNALING_URL: wss://${CHROMELESS_SIGNALING_HOST:?set CHROMELESS_SIGNALING_HOST to the gateway, e.g. gateway.example.com:8443}
+
+      # A browser-role token from the gateway's /issue-token. Required whenever
+      # the broker runs with CHROMELESS_AUTH_PUBKEY set.
+      SIGNALING_TOKEN: ${CHROMELESS_SIGNALING_TOKEN:-}
+
+      # Point at the relay from compose.host.yaml's `turn` profile. Effectively
+      # mandatory here — see note 1 above.
+      CHROMELESS_ICE_SERVERS: ${CHROMELESS_ICE_SERVERS:-}
+      CHROMELESS_ICE_TRANSPORT_POLICY: ${CHROMELESS_ICE_TRANSPORT_POLICY:-}
+
+    # DevTools, for the gateway's navigation endpoints. Bound to loopback so it
+    # is reachable through a tunnel but not from the network:
+    #
+    #   ssh -N -L 9222:127.0.0.1:9222 worker-host
+    #
+    # and then CHROMELESS_CDP_URL=http://127.0.0.1:9222 on the gateway side.
+    # Change the bind address only if you fully control the network in front of
+    # it — anything that reaches this port can drive the browser and read every
+    # page in it.
+    ports:
+      - "127.0.0.1:9222:9222"
+
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9222/json/version"]
+      interval: 10s
+      timeout: 3s
+      start_period: 45s
+      retries: 3
+    restart: unless-stopped

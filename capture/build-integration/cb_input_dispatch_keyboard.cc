@@ -27,6 +27,16 @@
 #include "content/public/browser/web_contents.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
 #include "third_party/blink/public/common/input/web_keyboard_event.h"
+// ui::DomCode / ui::DomKey and the string→enum converters. Blink's focus and
+// default-action handling reads NativeWebKeyboardEvent's dom_code/dom_key, so
+// these are load-bearing for every non-printing key — see the long comment at
+// the conversion site. Included explicitly rather than relied on transitively:
+// `ui::ScrollGranularity` in cb_input_dispatch_mouse.cc arrives with no
+// ui/events include at all, which is exactly the shape make lint-cxx exists
+// to catch.
+#include "ui/events/keycodes/dom/dom_code.h"
+#include "ui/events/keycodes/dom/dom_key.h"
+#include "ui/events/keycodes/dom/keycode_converter.h"
 
 namespace cloud_browser {
 
@@ -141,6 +151,33 @@ void CbInputDispatchKeyboard::DispatchKey(const base::DictValue& data,
             << "\" key=\"" << key << "\"; falling through to text-synthesis";
   }
 
+  // dom_code / dom_key, from the protocol's own `code` and `key` strings.
+  //
+  // MapCodeToScancode leaves both at 0 — two of its branches even say
+  // "populated by chromium when needed", which is not true and was the whole
+  // defect. Blink's focus traversal and default-action handling key off
+  // dom_code/dom_key, NOT windows_key_code, so with them zero no non-printing
+  // key could do anything: Tab did not move focus, Space did not activate a
+  // focused control, and by inspection the same held for the arrows, Home/End,
+  // PageUp/PageDown and Escape. Typing kept working because characters are
+  // inserted by the separate kChar text-synthesis path below, which is why
+  // this survived — the keyboard looks fine until someone tabs between fields.
+  //
+  // Isolated by controlled experiment against a live worker: dispatching the
+  // same windowsVirtualKeyCode over CDP with and without the code/key params
+  // (which populate exactly these two fields) is the entire difference between
+  // Tab moving focus and Tab doing nothing. See
+  // docs/findings/keyboard-dom-code-never-set.md.
+  //
+  // Converted here rather than in MapCodeToScancode's table because the
+  // protocol already carries both strings verbatim as DOM
+  // KeyboardEvent.code / .key — which is precisely what these two converters
+  // take — so the table has nothing to add. This also does the right thing for
+  // codes the table does not know: the DomCode is still correct even when
+  // there is no VKEY mapping.
+  const ui::DomCode dom_code = ui::KeycodeConverter::CodeStringToDomCode(code);
+  const ui::DomKey dom_key = ui::KeycodeConverter::KeyStringToDomKey(key);
+
   // kRawKeyDown / kKeyUp event for the scancode side. Skipped when
   // there is no scancode (pure text-synthesis path).
   if (have_scancode) {
@@ -151,8 +188,14 @@ void CbInputDispatchKeyboard::DispatchKey(const base::DictValue& data,
         event_time);
     native.windows_key_code = scancode.windows_key_code;
     native.native_key_code = scancode.windows_key_code;
-    native.dom_code = scancode.dom_code;
-    native.dom_key = scancode.dom_key;
+    // Both fields are plain integers on WebKeyboardEvent, while the
+    // converters return the ui:: enum/class types — hence the explicit
+    // conversions. DomKey's ToUint32ForTesting-free public accessor is
+    // operator int() via its underlying value; if this does not compile at
+    // the current pin, the fix is the same shape either way: hand the field
+    // the integer the enum wraps.
+    native.dom_code = static_cast<int>(dom_code);
+    native.dom_key = static_cast<int>(dom_key);
     // text + unmodified_text are populated on the kChar follow-on
     // event below; the kRawKeyDown carries the scancode only,
     // matching how chromium's OS input pipeline shapes the pair.
@@ -180,8 +223,8 @@ void CbInputDispatchKeyboard::DispatchKey(const base::DictValue& data,
           have_scancode ? scancode.windows_key_code : 0;
       char_event.native_key_code =
           have_scancode ? scancode.windows_key_code : 0;
-      char_event.dom_code = have_scancode ? scancode.dom_code : 0;
-      char_event.dom_key = have_scancode ? scancode.dom_key : 0;
+      char_event.dom_code = static_cast<int>(dom_code);
+      char_event.dom_key = static_cast<int>(dom_key);
 
       // NativeWebKeyboardEvent's text + unmodified_text are
       // fixed-size UTF-16 arrays (blink::WebKeyboardEvent::kTextLengthCap).

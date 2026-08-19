@@ -21,6 +21,10 @@ venv/
 *.out
 bin/
 vendor/
+# `go build` with no -o drops a binary named after the module directory next to
+# the sources. These are the ones that exist today.
+/infra/gateway/gateway
+/infra/k8s/chromeless-build/tools/snap-cleaner/snap-cleaner
 
 # C++ / build
 *.o
@@ -50,4 +54,33 @@ Thumbs.db
 # Project-specific
 harness/captures/
 tests/artifacts/
+# Playwright: report/trace output, and the saved gateway session cookie that
+# auth.setup.ts writes. The cookie is a live credential — never commit it.
+tests/e2e/playwright/
+tests/e2e/playwright-report/
+tests/e2e/test-results/
+# Retired in the M7 R4 native-peer migration (input now rides the `input`
+# DataChannel into cb_input_dispatch*.cc). A stale 13 MiB local build of
+# the old sidecar still sits in some working trees.
 capture/input-bridge/input-bridge
+
+# Agent worktrees / scratch. .claude/worktrees/ holds full checkouts of
+# this repo; without this every repo-wide grep returns each hit N+1 times.
+.claude/
+
+# Ad-hoc cluster drivers and one-shot incident forensics. These are
+# genuinely useful while chasing a live bug and genuinely noise in the
+# tree afterwards — write them here so they never land in a commit.
+tests/scratch/
+
+# Probe output directories
+newtab-probe-out/
+
+# `go build ./...` in signaling/ drops the binary next to the source.
+/signaling/signaling
+
+# Python bytecode from tools/
+tools/**/__pycache__/
+
+# Deploy-time credentials written by infra/k8s/standalone/deploy.sh.
+infra/k8s/standalone/.standalone-creds

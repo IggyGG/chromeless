@@ -152,6 +152,11 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // null/empty callback yields a ServerError on the wire rather than a UAF.
   // |set_viewport_callback| applies a live resize at Cb.setViewport dispatch
   // time. Same Unretained(main_parts_) contract; null/empty → ServerError.
+  // |shutdown_callback| (OSS-W0) requests a graceful process exit at
+  // Cb.shutdown DISPATCH time. It is
+  // base::BindRepeating(&CloudBrowserBrowserMainParts::Shutdown,
+  // base::Unretained(main_parts_)) — same Unretained(main_parts_) contract as
+  // the callbacks above. A null/empty callback yields a ServerError.
   explicit CbDevToolsManagerDelegate(
       content::BrowserContext* default_browser_context = nullptr,
       aura::Window* aura_context_window = nullptr,
@@ -164,7 +169,8 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
           set_viewport_callback = {},
       base::RepeatingCallback<CbSessionHealth()>
-          session_health_getter = {});
+          session_health_getter = {},
+      base::RepeatingCallback<bool()> shutdown_callback = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -294,6 +300,14 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       const crdtp::Dispatchable& dispatchable,
       std::string* out_error);
 
+  // OSS-W0 — implementation of Cb.shutdown. Takes no params. POSTS the
+  // shutdown callback to the UI thread rather than running it inline, so
+  // HandleCommand's response write ({"shuttingDown":true}) lands before the
+  // message loop quits and teardown closes the socket. On an unwired callback,
+  // populates |out_error| and returns an empty vector (caller emits
+  // CreateErrorResponse).
+  std::vector<uint8_t> HandleShutdown(std::string* out_error);
+
   // Lazy resolver for the browser-process video track source
   // (ChromelessV2 M2 R3/R4). Run() at Cb.startFrameSinkCapture dispatch
   // time — NOT snapshotted at construction (see the ctor doc for the
@@ -337,6 +351,12 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // zeros, which would read as "no crashes, video fine".
   base::RepeatingCallback<CbSessionHealth()>
       session_health_getter_;
+  // OSS-W0 — requests a graceful process exit at Cb.shutdown dispatch time.
+  // base::BindRepeating(&CloudBrowserBrowserMainParts::Shutdown,
+  // base::Unretained(main_parts_)). Returns false when the quit closure is
+  // unavailable (loop not running, or shutdown already requested). Same
+  // lifetime contract as track_source_getter_; null/empty → ServerError.
+  base::RepeatingCallback<bool()> shutdown_callback_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser

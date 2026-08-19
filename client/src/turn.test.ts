@@ -52,4 +52,18 @@ describe("fetchTurnConfig", () => {
     );
     expect(cfg).toEqual(payload);
   });
+
+  // The standalone gateway gates /turn-credentials on the session cookie.
+  // Withholding it yields a 401, which falls through to the STUN-only
+  // FALLBACK — that "works" on a LAN and then fails to traverse any real NAT,
+  // so the failure is a silent downgrade rather than an error.
+  it("sends same-origin credentials so the gateway's session cookie is attached", async () => {
+    let init: RequestInit | undefined;
+    const fetchImpl: typeof fetch = (_url, i) => {
+      init = i;
+      return Promise.resolve(new Response(JSON.stringify({ iceServers: [] }), { status: 200, headers: { "Content-Type": "application/json" } })) as Promise<Response>;
+    };
+    await fetchTurnConfig("ws://localhost:8080", fetchImpl);
+    expect(init?.credentials).toBe("same-origin");
+  });
 });

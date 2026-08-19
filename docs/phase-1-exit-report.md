@@ -1,5 +1,11 @@
 # Phase 1 exit gate — report
 
+> **Status: HISTORICAL — a point-in-time record, not current guidance.**
+> Run 2026-04-30 against post-`91ec895`, when the capture path was stock
+> Chromium + `getDisplayMedia`. The M7 native-peer migration replaced that
+> wholesale. Kept as the record of what the gate found on the day; do not
+> read its component list as a description of the system.
+
 **Date:** 2026-04-30 · **Author:** `qa-tester` ·
 **Repo HEAD at run:** post-`91ec895` · **Companion documents:**
 [v1 success criteria](v1-success-criteria.md) ·

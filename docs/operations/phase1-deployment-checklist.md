@@ -1,5 +1,14 @@
 # Phase 1 deployment-readiness checklist
 
+> **Status: still current**, unlike the Phase-1 *exit reports* and *stack
+> audit*, which are point-in-time records of an architecture M7 replaced.
+> This file is a checklist, not a description of the code, so almost all of
+> it survived the native-peer migration untouched — auth, TURN,
+> observability, sandboxing, networking and capacity sizing are unaffected
+> by where the WebRTC peer lives. Reviewed 2026-07-30; one item (§1, the
+> "stock `infra/Dockerfile`" fallback) was corrected because that image no
+> longer exists.
+
 A pre-flight checklist for taking chromeless from "the
 team's dev cluster" to "a real Phase 1 deployment that real users
 hit." Everything below should be ✓ before you let traffic in.
@@ -34,10 +43,14 @@ relevant phase — Phase 1 won't carry you.
       ```
       git grep -nE 'TODO\(T[0-9]+'
       ```
-- [ ] T17 chromium-from-source build environment markers cleared if
-      the deploy uses a custom Chromium image. Otherwise stock
-      `infra/Dockerfile` is fine; document that you're on the stock
-      Debian Chromium package.
+- [ ] T17 chromium-from-source build environment markers cleared.
+      There is no longer a "stock Chromium" option to fall back to: the
+      product IS the from-source embedder, and `infra/Dockerfile` (the old
+      stock-Debian-package image this line used to point at) was deleted
+      with the M7 native-peer migration. The image you deploy comes from
+      `build/chromeless-build.sh` + `build/Dockerfile.runtime`, so record
+      the exact tag and the commit it was built from — `build/
+      guest-release.json` is where this repo writes that down.
 - [ ] T63/T69 NVENC/VAAPI HW encoder TODOs cleared **only if** the
       deploy enables HW encode. Phase 1 should default to software;
       flip later.

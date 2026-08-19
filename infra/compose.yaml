@@ -1,36 +1,42 @@
-# infra/compose.yaml — local dev stack for chromeless
+# infra/compose.yaml — the standalone chromeless stack
 #
-# Default stack: four services on a shared bridge network. The
-# `observability` profile (T66) layers on Prometheus + Grafana for
-# people who want dashboards locally.
+# Four services on a shared bridge network, of which exactly ONE is reachable
+# from the host. The `observability` profile (T66) adds Prometheus + Grafana.
 #
-# Brings up four services on a shared bridge network so the browser
-# client can reach signaling and signaling can reach Chromium DevTools:
-#
-#   client-build — one-shot node:20-alpine that runs `npm install && npm
-#                  run build` against ../client. Populates ../client/dist
-#                  with bundled main.js + a copy of index.html. Exits 0
-#                  before the client service starts (T40).
-#   chromium   — the T7 + T28 + T31 image. Boots Chromium under Xvfb
-#                with the streamer page (T23) opened as --app; runs
-#                cold-start.sh + idle-watchdog.sh per T31. DevTools
-#                on :9222.
-#   signaling  — Go WebSocket signaling server (T13). Distroless image,
-#                so no in-container healthcheck (see service block
-#                comment); depending services use service_started.
-#   client     — nginx:alpine serving ../client/dist on :3000 with a
-#                runtime-generated config.js carrying SIGNALING_URL.
+#   gateway      the only published port. Terminates TLS, holds the login,
+#                serves the client bundle, proxies signaling, and mints the
+#                session tokens the broker verifies. See infra/gateway/README.md.
+#   chromium     the cloud_browser_worker runtime image. Boots Chromium under
+#                Xvfb; the native peer builds the PeerConnection in the browser
+#                process and dials signaling. YOU SUPPLY THIS IMAGE.
+#   signaling    Go WebSocket broker (T13). Internal only.
+#   client-build one-shot node:20-alpine that builds ../client into
+#                ../client/dist for the gateway's live-reload mount.
 #
 # Usage (from repo root):
-#   docker compose -f infra/compose.yaml up --build
 #
-# Then open http://localhost:3000 in a browser.
+#   eval "$(cd infra/gateway && go run ./cmd/keygen)"
+#   CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+#   CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
+#     docker compose -f infra/compose.yaml up
 #
-# Override the signaling endpoint the client uses (defaults to
-# ws://signaling:8080 per project spec; that DNS name only resolves
-# inside the docker network, so for browser access from the host you'll
-# usually want to override):
-#   SIGNALING_URL=ws://localhost:8080 docker compose -f infra/compose.yaml up
+# Then open https://localhost:8443 and accept the self-signed certificate once.
+# That single click also covers the wss:// signaling dial, because the page and
+# the WebSocket share this origin — which is why everything funnels through one
+# port instead of being split across three.
+#
+# CHROMELESS_IMAGE is REQUIRED and has no default. The browser is a from-source
+# Chromium build (4-8h cold; see build/chromeless-build.sh) and this repo
+# publishes no images, so there is nothing honest to default to — compose fails
+# fast rather than pulling a tag that does not exist. CHROMELESS_USER and
+# CHROMELESS_PASS are required for the same reason: a built-in default password
+# is worse than no gateway at all, because it looks like protection.
+#
+# DELIBERATELY NOT PUBLISHED: Chromium DevTools (9222) and the signaling broker
+# (8080). Both used to be. 9222 is unauthenticated remote code execution
+# against the browser; 8080 with no CHROMELESS_AUTH_PUBKEY accepts anyone and
+# would be a way straight past the login. Reach either through
+# `docker compose exec` rather than republishing it.
 
 name: chromeless
 
@@ -72,55 +78,93 @@ services:
     restart: "no"
 
   chromium:
-    # Build context is the repo root because the Dockerfile copies
-    # capture/streamer-page/ (T28) and infra/* into the image.
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile
-    image: chromeless:dev
+    # OSS-W1 — bring your own image. There is no `build:` stanza because
+    # the browser cannot be built here: it is a from-source Chromium build
+    # (4-8h cold; see build/chromeless-build.sh) producing
+    # cloud_browser_worker, wrapped by build/Dockerfile.runtime. This repo
+    # does not publish images, so point CHROMELESS_IMAGE at one your own
+    # build produced:
+    #
+    #   CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
+    #     docker compose -f infra/compose.yaml up
+    #
+    # The `?err` form fails fast with that message rather than pulling a
+    # nonexistent tag. This replaced a build of infra/Dockerfile — the
+    # legacy stock-Chromium + getDisplayMedia image, which had not been
+    # buildable since the M7 native-peer migration deleted
+    # capture/streamer-page/ while the Dockerfile still COPYd it, and
+    # which contained none of the native peer / FrameSink capture path.
+    image: ${CHROMELESS_IMAGE:?set CHROMELESS_IMAGE to a cloud_browser_worker image (see build/chromeless-build.sh)}
     container_name: cbwrtc-chromium
     networks: [cbnet]
-    ports:
-      - "9222:9222"
+    # NOT published. DevTools on 9222 is unauthenticated remote code execution
+    # against the browser — anything that can reach it can drive the session,
+    # read every page, and run arbitrary JavaScript — and this image starts
+    # Chromium with --remote-allow-origins=*, so a web page could reach it too.
+    # It was published to the host by default until the gateway landed.
+    #
+    # Everything that needs it reaches it over cbnet: the gateway (navigation)
+    # and, under the observability profile, prometheus scraping 9100. To poke
+    # at it by hand, go through the container rather than republishing:
+    #
+    #   docker compose -f infra/compose.yaml exec chromium \
+    #     curl -s http://127.0.0.1:9222/json/version
+    #
+    # `expose` documents the ports without opening them to the host.
+    expose:
+      - "9222"
       # chromeless-metrics-sidecar (T38) — Prometheus scrape target.
-      - "9100:9100"
+      - "9100"
     environment:
-      # Streamer launch (T28). Override per session as the lifecycle
-      # scripts (T31) come online.
-      SESSION_ID: dev
-      SIGNALING_URL: ws://signaling:8080/ws
-      STREAMER_FPS: "30"
-      # T86: route the dev-compose stack through Chromium's synthetic
-      # media source (test pattern + tone) instead of real
-      # getDisplayMedia. Two reasons this is the dev default:
-      #   1. Real getDisplayMedia under Chromium 147 + Xvfb fails with
-      #      `NotReadableError: Could not start video source` even
-      #      after T78's X11+SwiftShader pin (the UA confirms the X11
-      #      ozone backend is in use; the screen capturer's `start`
-      #      step is what's failing). Xvfb itself is fine — see
-      #      supervisord.conf line 42, screen 0 is 1920x1080x24.
-      #   2. Phase 2's FrameSinkVideoCapturer (T47/T55) doesn't go
-      #      through getDisplayMedia at all — it taps Viz directly.
-      #      Spending more cycles fixing the v1 path that Phase 2
-      #      replaces is wrong-shaped work; route around the bug,
-      #      validate the rest of the pipeline, fix it durably in
-      #      Phase 2.
-      # Set to "" (empty) to flip back to real-getDisplayMedia for
-      # diagnostic runs once Phase 2 capture is in place.
-      CHROMELESS_USE_FAKE_MEDIA: "1"
-      # T109: replay a pre-recorded harness y4m through the synthetic
-      # camera so reconcile.py sees real per-frame QR codes (the
-      # default synthetic-media moving-green-square produces zero
-      # decode rate per qa-tester's T65 finding). The fixtures
-      # directory is bind-mounted at /opt/chromeless-fixtures (see
-      # `volumes:` below); generate the y4m via
-      # harness/latency/record-y4m.sh on the dev host first.
+      SESSION_ID: ${SESSION_ID:-dev}
+      # launch-chromeless.sh translates these into the WEBRTC_SIGNALING_*
+      # / WEBRTC_ICE_* vars the native peer reads (OSS-W1).
       #
-      # Empty CHROMELESS_USE_FAKE_MEDIA_FILE → fall back to the
-      # synthetic green square. We default it to the standard 720p30
-      # filename; the launch script gracefully degrades when the
-      # file isn't readable.
-      CHROMELESS_USE_FAKE_MEDIA_FILE: ${CHROMELESS_USE_FAKE_MEDIA_FILE:-/opt/chromeless-fixtures/harness-loop-720p30.y4m}
+      # This is the WORKER's view and must stay cbnet-internal: the worker
+      # dials from inside its own container, where `localhost` is itself.
+      # An earlier comment here suggested `SIGNALING_URL=ws://localhost:8080`
+      # for host-browser access — that is the wrong service to change, and it
+      # points the worker at a port nothing is listening on inside its own
+      # netns. The PAGE reaches signaling through the gateway on the same origin
+      # it was served from; client/src/config.ts derives that, so there is no
+      # page-side URL to configure at all.
+      #
+      # The /ws path is dropped by launch-chromeless.sh (the native peer builds
+      # its own path from the session id) and only the host:port survives.
+      SIGNALING_URL: ${SIGNALING_URL:-ws://signaling:8080/ws}
+      # The worker's credential for the broker. `cmd/keygen` exports this
+      # alongside the keypair, so the documented `eval` sets all three at once.
+      #
+      # Empty is CORRECT when the broker has no CHROMELESS_AUTH_PUBKEY: it runs
+      # "auth disabled" and takes any caller. It is FATAL the moment auth is on
+      # — which is precisely what eval'ing keygen does — and the failure has no
+      # visible symptom: the broker closes the worker's socket with `1008
+      # missing token`, the handshake failure EXITS the browser process,
+      # supervisord respawns it every ~30s, and DevTools answers /json/version
+      # throughout. The container reports healthy, the page loads, and Connect
+      # never connects.
+      #
+      # Before 2026-08-19 keygen emitted only the keypair, so following the
+      # README exactly produced that state. cmd/keygen's own tests now assert
+      # all three exports are present.
+      SIGNALING_TOKEN: ${SIGNALING_TOKEN:-}
+      # ICE. Unset → the peer falls back to public STUN, which is fine for a
+      # same-host compose run and will NOT traverse most NATs.
+      #
+      # With the `turn` profile up, point this at the local relay. One value,
+      # because the worker and the browser must agree on the relay AND the
+      # credential — mismatched halves fail as "no candidate pair", which looks
+      # like a network problem rather than a config one:
+      #
+      #   CHROMELESS_TURN_SECRET=$(openssl rand -hex 32)
+      #   CHROMELESS_ICE_SERVERS='[{"urls":["turn:<host-ip>:3478"],
+      #                             "username":"chromeless",
+      #                             "credential":"'"$CHROMELESS_TURN_SECRET"'"}]'
+      #
+      # <host-ip> is a LAN address, not localhost: the relay's job is to be
+      # reachable from the viewer's machine as well as this container.
+      CHROMELESS_ICE_SERVERS: ${CHROMELESS_ICE_SERVERS:-}
+      CHROMELESS_ICE_TRANSPORT_POLICY: ${CHROMELESS_ICE_TRANSPORT_POLICY:-}
       # T99: OTel for chromeless-metrics-sidecar (which runs inside this container
       # under supervisord). Empty by default → SDK installs a no-op
       # provider, so the service-without-jaeger case stays quiet.
@@ -129,31 +173,24 @@ services:
       #     docker compose -f infra/compose.yaml --profile observability up
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       CHROMELESS_TRACE_SAMPLE_RATIO: ${CHROMELESS_TRACE_SAMPLE_RATIO:-1.0}
-    # T109: bind-mount the harness y4m fixtures dir read-only so
-    # CHROMELESS_USE_FAKE_MEDIA_FILE can point at a y4m generated by
-    # harness/latency/record-y4m.sh. The dir may be empty on a
-    # fresh checkout — Chromium degrades gracefully (warning + the
-    # synthetic green square) per launch-chromeless.sh.
-    volumes:
-      - ../harness/latency/fixtures:/opt/chromeless-fixtures:ro
     # /dev/shm at default 64m is too small for Chromium tabs; either bump
-    # shm_size or rely on the Dockerfile's --disable-dev-shm-usage. Both
+    # shm_size or rely on the image's --disable-dev-shm-usage. Both
     # is belt-and-braces for stability.
     shm_size: "1gb"
-    # The Dockerfile already sets a HEALTHCHECK; we restate it here so
+    # The image already sets a HEALTHCHECK; we restate it here so
     # other services can depend_on: condition: service_healthy without
     # surprises if someone overrides the image tag.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9222/json/version"]
       interval: 10s
       timeout: 3s
-      # Cold-start.sh + Xvfb + Pulse + streamer-static + Chromium need
-      # a generous grace on the first boot.
+      # cold-start.sh + Xvfb + Pulse + Chromium need a generous grace on
+      # the first boot.
       start_period: 45s
       retries: 3
     depends_on:
-      # streamer page tries to dial signaling immediately at --app load,
-      # so we want signaling at least started before chromium boots.
+      # The native peer dials signaling as soon as it starts, so we want
+      # signaling at least started before chromium boots.
       signaling:
         condition: service_started
     restart: unless-stopped
@@ -173,89 +210,233 @@ services:
     image: chromeless-signaling:dev
     container_name: cbwrtc-signaling
     networks: [cbnet]
-    ports:
-      - "8080:8080"
+    # NOT published. The browser reaches signaling through the gateway's TLS
+    # port, which is where the session-cookie check lives. Publishing this
+    # would expose the broker directly — and with CHROMELESS_AUTH_PUBKEY unset
+    # it accepts anyone, making it a way straight past the login.
+    expose:
+      - "8080"
     environment:
       SIGNALING_PORT: "8080"
+      # Verifier for the session tokens the gateway mints. When this is unset
+      # the broker logs "auth disabled: any caller can connect" and means it —
+      # so the login on the gateway would be protecting only the HTML, and
+      # anyone able to reach this port would bypass it entirely.
+      #
+      # It must be the PUBLIC half of CHROMELESS_AUTH_PRIVKEY on the gateway.
+      # Both are generated outside compose, because this service needs the
+      # public key at ITS startup and cannot ask a service that has not booted
+      # yet. Generate a matching pair with (there is no root Go module, so
+      # this must run from the gateway's directory):
+      #
+      #   eval "$(cd infra/gateway && go run ./cmd/keygen)"
+      #
+      # Leave both unset to keep the old anonymous behaviour (useful when
+      # driving the broker directly from a test harness).
+      CHROMELESS_AUTH_PUBKEY: ${CHROMELESS_AUTH_PUBKEY:-}
+      # What /turn-credentials hands the BROWSER. signaling/turn.go has always
+      # read these three and nothing in this repo has ever set them, so the
+      # endpoint returned STUN-only in every deployment.
+      #
+      # They must name the same relay and credential as the worker's
+      # CHROMELESS_ICE_SERVERS above: both peers have to be able to allocate on
+      # it, and a half-configured pair fails as "no candidate pair" — which
+      # reads as a network fault rather than a config one.
+      TURN_URLS: ${CHROMELESS_TURN_URLS:-}
+      TURN_USER: ${CHROMELESS_TURN_USER:-chromeless}
+      TURN_PASS: ${CHROMELESS_TURN_SECRET:-}
+      STUN_URLS: ${CHROMELESS_STUN_URLS:-}
       # T99: same OTel opt-in pattern as chromium. webrtc-dev's
       # signaling/tracing.go reads these.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       CHROMELESS_TRACE_SAMPLE_RATIO: ${CHROMELESS_TRACE_SAMPLE_RATIO:-1.0}
     restart: unless-stopped
 
-  client:
-    image: nginx:alpine
-    container_name: cbwrtc-client
+  # The standalone gateway: one TLS port, a login, and a reverse proxy to the
+  # broker. This is what makes the stack usable outside Kubernetes — before it,
+  # a compose deployment published the broker and Chromium's DevTools straight
+  # onto the host with no TLS and no authentication anywhere.
+  #
+  # Requires CHROMELESS_USER and CHROMELESS_PASS. Both are `?err` REQUIRED
+  # rather than defaulted: a gateway that boots with a built-in password is
+  # worse than one that refuses to boot, because it looks protected.
+  #
+  #   CHROMELESS_IMAGE=… CHROMELESS_USER=me CHROMELESS_PASS=… \
+  #     docker compose -f infra/compose.yaml up
+  #   → https://localhost:8443
+  #
+  # The first visit warns about the self-signed certificate. Accepting it also
+  # covers the wss:// signaling dial, because the page and the WebSocket share
+  # this origin — which is the reason everything funnels through one port.
+  gateway:
+    build:
+      # Repo root, NOT infra/gateway: the image builds the client bundle from
+      # client/ and (from the token step onward) shares a package with
+      # signaling/ via a `replace` that reaches outside the module. See
+      # infra/gateway/Dockerfile. .dockerignore keeps capture/ out of the
+      # context.
+      context: ..
+      dockerfile: infra/gateway/Dockerfile
+    image: chromeless-gateway:dev
+    container_name: cbwrtc-gateway
     networks: [cbnet]
     ports:
-      - "3000:80"
-    # Bind-mount the *built* client/dist for live reload during dev:
-    # esbuild's --watch mode (npm run watch) updates ../client/dist on
-    # disk and nginx serves it directly. Read-only so the container
-    # can't accidentally write into the source tree. The generated
-    # config.js is written to a tmpfs overlay path inside the container
-    # that's served alongside via an alias in the nginx server block.
-    volumes:
-      - ../client/dist:/usr/share/nginx/html:ro
-      - client_runtime:/srv/runtime
+      - "${CHROMELESS_PORT:-8443}:8443"
     environment:
-      # Project spec says ws://signaling:8080. That DNS name resolves
-      # inside cbnet only; from a host browser the page can't reach it.
-      # Override SIGNALING_URL at compose-up time when testing from the
-      # host (e.g. SIGNALING_URL=ws://localhost:8080).
-      SIGNALING_URL: ws://signaling:8080
-    # NOTE: $$ in command/heredoc bodies escapes compose's own variable
-    # interpolation so the literal $ reaches the container shell / nginx.
-    command:
-      - /bin/sh
-      - -c
-      - |
-        cat > /srv/runtime/config.js <<EOF
-        // Generated at container start by infra/compose.yaml.
-        // Override SIGNALING_URL in the environment to change.
-        window.__CBWRTC_CONFIG__ = {
-          signalingUrl: "$${SIGNALING_URL}"
-        };
-        EOF
-        # Serve the generated config.js out of /srv/runtime alongside
-        # the client/ bind mount. We patch nginx with a tiny location
-        # block via a default.conf override.
-        cat > /etc/nginx/conf.d/default.conf <<'NGINX'
-        server {
-          listen 80;
-          server_name _;
-          root /usr/share/nginx/html;
-          index index.html;
-
-          location = /config.js {
-            alias /srv/runtime/config.js;
-            add_header Cache-Control "no-store";
-          }
-
-          location / {
-            try_files $$uri $$uri/ =404;
-          }
-        }
-        NGINX
-        exec nginx -g 'daemon off;'
+      CHROMELESS_USER: ${CHROMELESS_USER:?set CHROMELESS_USER to the login username for https://localhost:8443}
+      CHROMELESS_PASS: ${CHROMELESS_PASS:?set CHROMELESS_PASS to the login password for https://localhost:8443}
+      CHROMELESS_SIGNALING_URL: ws://signaling:8080
+      CHROMELESS_CDP_URL: http://chromium:9222
+      # Signing key for session tokens; its public half goes to signaling as
+      # CHROMELESS_AUTH_PUBKEY. Unset → the gateway generates one per boot,
+      # which is fine on its own but leaves the broker verifying against a key
+      # nobody holds — so set both, or neither. See the signaling block.
+      CHROMELESS_AUTH_PRIVKEY: ${CHROMELESS_AUTH_PRIVKEY:-}
+      # Passed here ONLY so the gateway can cross-check it against its own
+      # signing key and refuse to start on a mismatch. A mismatched pair is
+      # the one misconfiguration with no useful symptom: every token is
+      # rejected as a bad signature and neither log says the keys differ.
+      CHROMELESS_AUTH_PUBKEY: ${CHROMELESS_AUTH_PUBKEY:-}
+      # Extra SANs for the generated certificate. Needed when reaching the
+      # gateway by LAN IP or hostname rather than localhost — a browser will
+      # not accept a cert that does not name the host actually typed.
+      CHROMELESS_TLS_HOSTS: ${CHROMELESS_TLS_HOSTS:-}
+    volumes:
+      # Persist the generated keypair so it survives a restart. Without this
+      # the browser re-warns on every `compose up`, and any cert the operator
+      # added to their trust store is invalidated.
+      - gateway_certs:/data/certs
+      # Live reload: esbuild --watch writes ../client/dist on the host and the
+      # gateway serves it directly, overlaying the copy baked into the image.
+      - ../client/dist:/srv/client:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/config.js >/dev/null || exit 1"]
-      interval: 5s
-      timeout: 2s
+      # distroless has no shell and no curl, so the probe cannot be an ordinary
+      # command line. The binary re-execs itself with -healthcheck and hits its
+      # own /healthz over loopback, which keeps the probe in step with the
+      # server rather than duplicating its notion of "up".
+      test: ["CMD", "/gateway", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
       start_period: 5s
       retries: 3
     depends_on:
-      # See the signaling service block: distroless image can't host an
-      # in-container healthcheck, so we settle for service_started here.
       signaling:
         condition: service_started
-      chromium:
-        condition: service_healthy
-      # T40: ensure the client bundle is built before nginx tries to
-      # serve it. service_completed_successfully waits for client-build
-      # to exit 0.
       client-build:
         condition: service_completed_successfully
+    restart: unless-stopped
+
+  # The nginx `client` service that used to live here is gone. The gateway
+  # serves client/dist itself, on the same origin as the signaling proxy —
+  # which is what lets one certificate click-through cover the wss:// dial,
+  # and lets client/src/config.ts derive its endpoint from the page origin
+  # instead of being told. That also retires the generated config.js, whose
+  # whole job was injecting a signaling URL now correct by construction.
+
+  # ---------------------------------------------------------------------
+  # Optional TURN relay. Bring up with:
+  #
+  #   CHROMELESS_TURN_SECRET=$(openssl rand -hex 32) \
+  #     docker compose -f infra/compose.yaml --profile turn up
+  #
+  # Off by default because a same-host run does not need a relay: the browser
+  # and the worker are both on this machine, and host candidates connect
+  # directly. You need this the moment the two are on different networks —
+  # a worker on a remote host, or a viewer behind a symmetric NAT or a
+  # corporate firewall.
+  #
+  # (The `turn` profile was promised in a comment in this file for a long time
+  # and never actually existed. This is it.)
+  #
+  # CREDENTIAL MECHANISM — the part that is easy to get wrong.
+  #
+  # This uses `lt-cred-mech` with a static `user=`, NOT `use-auth-secret`.
+  # Both coturn configs elsewhere in this repo
+  # (infra/helm/chromeless/templates/coturn.yaml, infra/k8s/turn-deployment.yaml)
+  # set `use-auth-secret`, which is the HMAC-REST scheme: the username is a
+  # timestamp and the password is an HMAC of it. A STATIC username/password
+  # cannot authenticate against that — every Allocate is refused, and the
+  # symptom is silence, not an error.
+  #
+  # signaling/turn.go only knows how to emit static credentials, so pairing it
+  # with a use-auth-secret relay yields a TURN server that rejects everything
+  # while looking healthy. Static credentials are the honest match here.
+  # docs/ice-and-turn.md scopes them as "fine for a single internal
+  # deployment, not safe for shipping browser-side to the world" — which is
+  # exactly this case, and it now sits behind a login.
+  #
+  # Multi-user deployments should run infra/turn-issuer/ (HMAC-REST, with
+  # secret rotation) against a use-auth-secret relay, which is what triform
+  # does.
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: cbwrtc-coturn
+    profiles: [turn]
+    # host networking, not a port map. A relay allocates from a wide UDP range
+    # (49152-65535) and the allocated port has to be reachable from outside;
+    # docker's per-port NAT cannot express that, and mapping 16k ports is not a
+    # workable alternative. This does mean the profile is Linux-only —
+    # network_mode: host is a no-op on Docker Desktop for macOS/Windows.
+    network_mode: host
+    # Refuse the sentinel. Compose cannot make a variable required per-profile
+    # (it interpolates the whole file for every subcommand), so the check lives
+    # here, where it only runs when the profile is actually up. Starting a
+    # relay with a placeholder password would be worse than not starting one.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        case "$$TURN_USER_SPEC" in
+          *UNSET_RUN_openssl_rand_hex_32)
+            echo "coturn: CHROMELESS_TURN_SECRET is not set." >&2
+            echo "  Generate one and re-run:" >&2
+            echo "    CHROMELESS_TURN_SECRET=\$$(openssl rand -hex 32) \\" >&2
+            echo "      docker compose -f infra/compose.yaml --profile turn up" >&2
+            exit 2
+            ;;
+        esac
+        exec turnserver "$$@"
+      - --
+    environment:
+      # Read by the guard above. Same value as the --user flag below; kept as
+      # its own variable so the check does not have to parse argv.
+      TURN_USER_SPEC: ${CHROMELESS_TURN_USER:-chromeless}:${CHROMELESS_TURN_SECRET:-UNSET_RUN_openssl_rand_hex_32}
+    command:
+      - -n                              # no config file; everything is a flag
+      - --listening-port=3478
+      - --fingerprint
+      - --lt-cred-mech
+      - --realm=chromeless
+      # NOT the `?err` required form. Compose interpolates the WHOLE file for
+      # every subcommand, including `config` and `down`, so a required variable
+      # on an inactive profile breaks the default stack for everyone who never
+      # asked for TURN. The sentinel below is refused by the entrypoint check
+      # instead, which only runs when the profile is actually up.
+      - --user=${CHROMELESS_TURN_USER:-chromeless}:${CHROMELESS_TURN_SECRET:-UNSET_RUN_openssl_rand_hex_32}
+      - --min-port=49152
+      - --max-port=65535
+      # Do not let a relay allocation be aimed back into private space. Without
+      # these, anyone who can authenticate can use the relay to reach services
+      # on the host's LAN — an SSRF pivot with a TURN server in front of it.
+      - --no-multicast-peers
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --no-tlsv1
+      - --no-tlsv1_1
+      - --no-cli
+      - --log-file=stdout
+      - --simple-log
+    # The official image bakes file capabilities onto the turnserver binary, so
+    # dropping ALL capabilities makes the kernel refuse to exec it — EPERM at
+    # startup, with `no_new_privs` set. tf-multiverse hit exactly this in
+    # production (see deployment/kubernetes/apps/production-triform/coturn.yaml);
+    # NET_BIND_SERVICE is required despite every port here being >1024.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # ---------------------------------------------------------------------
@@ -341,7 +522,12 @@ services:
     restart: unless-stopped
 
 volumes:
-  client_runtime:
+  # The gateway's self-signed TLS keypair. Persisted so it survives a restart:
+  # regenerating would re-warn the browser on every `compose up` and invalidate
+  # any cert the operator added to their trust store.
+  gateway_certs:
+  # client_runtime is gone with the nginx client service — it existed only to
+  # hold that service's generated config.js.
   # T40: cached node_modules for client-build. Speeds up successive
   # `compose up` runs and avoids the host filesystem inheriting per-
   # arch native binaries from inside the container.
