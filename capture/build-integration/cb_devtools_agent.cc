@@ -171,7 +171,17 @@ std::vector<uint8_t> EncodeStartNativeSessionResponse(
 // spare (INT32_MAX ≈ 2.1e9 frames = ~800 days at 30fps), so we saturate to
 // INT32_MAX before encoding rather than take a lossy wrap. The gate only reads
 // this as "0 vs growing", so saturation is immaterial to the decision.
-std::vector<uint8_t> EncodeCaptureStatsResponse(uint64_t frames_received) {
+//
+// Health fields are ADDITIVE and appear after framesReceived. CBOR maps are
+// order-insensitive and unknown keys are ignored by every reader here, so
+// both skew directions are safe: an old isolator polling a new guest keeps
+// reading framesReceived and ignores the rest; a new poller against an old
+// guest simply finds the health keys absent. framesReceived must stay first
+// and must never be renamed — isolator/src/vmm/pool.rs reads it by pointer
+// path (/result/framesReceived).
+std::vector<uint8_t> EncodeCaptureStatsResponse(
+    uint64_t frames_received,
+    const CbSessionHealth* health) {
   std::vector<uint8_t> out;
   crdtp::cbor::EnvelopeEncoder envelope;
   envelope.EncodeStart(&out);
@@ -184,6 +194,30 @@ std::vector<uint8_t> EncodeCaptureStatsResponse(uint64_t frames_received) {
           ? std::numeric_limits<int32_t>::max()
           : static_cast<int32_t>(frames_received);
   crdtp::cbor::EncodeInt32(frames_i32, &out);
+
+  if (health) {
+    // How many times the captured renderer has died this session. A poller
+    // seeing framesReceived flat AND this climbing knows the guest is
+    // crash-looping, not merely idle — two states that are otherwise
+    // indistinguishable from outside, because a pull-consumer capturer
+    // reports the same zero for both.
+    crdtp::cbor::EncodeString8(crdtp::SpanFrom("rendererCrashes"), &out);
+    crdtp::cbor::EncodeInt32(health->renderer_crashes, &out);
+
+    // The guest has concluded it is permanently dead and is tearing down.
+    // Distinguishes "dying and says so" from "wedged and does not know it".
+    crdtp::cbor::EncodeString8(crdtp::SpanFrom("permanentDeathSignaled"), &out);
+    out.push_back(health->permanent_death_signaled ? crdtp::cbor::EncodeTrue()
+                                                   : crdtp::cbor::EncodeFalse());
+
+    // False means no video track / no transceiver, i.e. this session can
+    // never emit an offer and will never produce a frame no matter how long
+    // it is polled. StartNativeSession now fails outright in that case, so
+    // seeing false here means something tore the track down afterwards.
+    crdtp::cbor::EncodeString8(crdtp::SpanFrom("videoTrackOk"), &out);
+    out.push_back(health->video_track_ok ? crdtp::cbor::EncodeTrue()
+                                         : crdtp::cbor::EncodeFalse());
+  }
 
   out.push_back(crdtp::cbor::EncodeStop());
   envelope.EncodeStop(&out);
@@ -238,11 +272,14 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
         start_native_session_callback,
     base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
-        set_viewport_callback)
+        set_viewport_callback,
+    base::RepeatingCallback<CbSessionHealth()>
+        session_health_getter)
     : track_source_getter_(std::move(track_source_getter)),
       active_capture_callback_(std::move(active_capture_callback)),
       start_native_session_callback_(std::move(start_native_session_callback)),
       set_viewport_callback_(std::move(set_viewport_callback)),
+      session_health_getter_(std::move(session_health_getter)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
   // NOTE: we deliberately do NOT Run() the getter here. CV2-69
@@ -537,9 +574,24 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleGetCaptureStats(
   // Load-bearing marker for the deploy strings-gate: `grep -a CV2-CAPTURE-STATS
   // <binary>` proves the build carries this method. Also a useful liveness
   // breadcrumb in the guest serial log when the isolator polls the gate.
-  LOG(INFO) << "CV2-CAPTURE-STATS: Cb.getCaptureStats framesReceived=" << frames;
+  // Health is optional: if the getter is unwired (tests, or a build with
+  // no main_parts) we emit exactly the old single-field response rather
+  // than inventing zeros, which would read as "no crashes, video fine".
+  std::optional<CbSessionHealth> health;
+  if (session_health_getter_) {
+    health = session_health_getter_.Run();
+  }
 
-  return EncodeCaptureStatsResponse(frames);
+  LOG(INFO) << "CV2-CAPTURE-STATS: Cb.getCaptureStats framesReceived=" << frames
+            << (health ? " rendererCrashes=" +
+                             std::to_string(health->renderer_crashes) +
+                             " permanentDeath=" +
+                             (health->permanent_death_signaled ? "1" : "0") +
+                             " videoTrackOk=" +
+                             (health->video_track_ok ? "1" : "0")
+                       : std::string(" (health unwired)"));
+
+  return EncodeCaptureStatsResponse(frames, health ? &*health : nullptr);
 }
 
 std::vector<uint8_t> CbDevToolsManagerDelegate::HandleSetViewport(

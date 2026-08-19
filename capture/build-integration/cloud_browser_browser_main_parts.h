@@ -59,6 +59,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"           // CV2-WARM — raw_ptr<AudioDeviceModule>
 #include "base/timer/timer.h"
+#include "base/time/time.h"  // base::TimeTicks — renderer-crash window
 #include "base/functional/callback_helpers.h"  // CV2 — base::ScopedClosureRunner (capture_keepalive_handle_); placed after base/timer to avoid an add/add textual collision with the CV2-WARM raw_ptr.h include (functionally order-independent)
 #include "components/viz/common/surfaces/frame_sink_id.h"
 // CV2-75 — M4/M6 consumer headers. main_parts owns the unique_ptrs
@@ -121,6 +122,17 @@ class CloudBrowserFrameSinkVideoTrackSource;
 // path. Constructed either from LoadConfigFromEnv()+LoadIceConfigFromEnv()
 // at boot, or from Cb.startNativeSession CDP params after a warm-snapshot
 // restore (see cv2-warm-snapshot-cold-start design).
+// Health snapshot surfaced through Cb.getCaptureStats.
+//
+// Free struct rather than a nested one so cb_devtools_agent.h can
+// forward-declare it (the same treatment NativeSessionConfig gets) instead
+// of pulling in this whole header.
+struct CbSessionHealth {
+  int renderer_crashes = 0;
+  bool permanent_death_signaled = false;
+  bool video_track_ok = false;
+};
+
 struct NativeSessionConfig {
   signaling::WsClientConfig ws;
   signaling::IceConfig ice;
@@ -192,6 +204,14 @@ class CloudBrowserBrowserMainParts
   // on the next allocate_or_reuse. NOT an observer override — a plain callback
   // target.
   void OnGpuPermanentDeath();
+
+  // Recovery for a dead captured renderer. Posted from the resolver's
+  // PrimaryMainFrameRenderProcessGone. Reloads (bounded per window) to
+  // rebuild the RenderViewHost, which fires RenderViewHostChanged and
+  // re-arms capture through the path that already exists. On budget
+  // exhaustion escalates to OnGpuPermanentDeath so physics recycles the
+  // guest rather than watching it crash-loop.
+  void OnCapturedRendererGone();
 
   // Public read-only accessor for the default BrowserContext. Returns
   // nullptr until PreMainMessageLoopRun has executed (the context is
@@ -368,6 +388,28 @@ class CloudBrowserBrowserMainParts
   // destruction agree with that, so the invariant survives a member
   // reshuffle. Owns nothing itself.
   std::unique_ptr<CbViewportController> viewport_controller_;
+
+  // Renderer-crash recovery budget. Windowed, not lifetime: a crash an
+  // hour into a session is unrelated to one at boot, and a lifetime
+  // counter would refuse to recover from the former because of the
+  // latter. See OnCapturedRendererGone.
+  base::TimeTicks renderer_crash_window_start_;
+  int renderer_crashes_in_window_ = 0;
+  // Monotonic, for Cb.getCaptureStats — never reset by the window.
+  int renderer_crashes_total_ = 0;
+
+  // Set when the guest has decided it is permanently dead (GPU death, or a
+  // renderer crash-loop that exhausted the reload budget). Exposed through
+  // Cb.getCaptureStats so a poller can distinguish "this guest knows it is
+  // dying" from "this guest is wedged and does not know it" — the two need
+  // different responses, and today they look identical from outside.
+  bool permanent_death_signaled_ = false;
+
+ public:
+  // Health snapshot for Cb.getCaptureStats. Read-only; safe at any time.
+  CbSessionHealth GetSessionHealth() const;
+
+ private:
 
   // Drives PollOutboundRtpStats() every 2s once ICE connects. Armed once
   // (guarded by rtp_stats_timer_armed_) on the first kIceConnectionConnected

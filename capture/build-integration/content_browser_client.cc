@@ -101,6 +101,8 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   // Live resize at Cb.setViewport dispatch time. Same contract again.
   base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
       set_viewport_callback;
+  // Health counters for Cb.getCaptureStats. Same contract again.
+  base::RepeatingCallback<CbSessionHealth()> session_health_getter;
   if (main_parts_) {
     track_source_getter = base::BindRepeating(
         &CloudBrowserBrowserMainParts::cb_track_source,
@@ -114,12 +116,15 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
     set_viewport_callback = base::BindRepeating(
         &CloudBrowserBrowserMainParts::SetViewport,
         base::Unretained(main_parts_));
+    session_health_getter = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::GetSessionHealth,
+        base::Unretained(main_parts_));
   }
   return std::make_unique<CbDevToolsManagerDelegate>(
       default_context, aura_context, std::move(track_source_getter),
       std::move(active_capture_callback),
       std::move(start_native_session_callback),
-      std::move(set_viewport_callback));
+      std::move(set_viewport_callback), std::move(session_health_getter));
 }
 
 }  // namespace cloud_browser

@@ -75,6 +75,7 @@ namespace cloud_browser {
 class CloudBrowserBrowserContext;
 class CloudBrowserFrameSinkVideoTrackSource;
 struct NativeSessionConfig;  // CV2-WARM — cloud_browser_browser_main_parts.h
+struct CbSessionHealth;      // cloud_browser_browser_main_parts.h
 
 // Routes the Cb.startFrameSinkCapture CDP method into the
 // browser-process-owned CloudBrowserFrameSinkVideoTrackSource (held by
@@ -161,7 +162,9 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
           start_native_session_callback = {},
       base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
-          set_viewport_callback = {});
+          set_viewport_callback = {},
+      base::RepeatingCallback<CbSessionHealth()>
+          session_health_getter = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -328,6 +331,12 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // ServerError on the wire.
   base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
       set_viewport_callback_;
+
+  // Reads the session-health counters for Cb.getCaptureStats. Unwired
+  // means the response carries framesReceived alone — deliberately NOT
+  // zeros, which would read as "no crashes, video fine".
+  base::RepeatingCallback<CbSessionHealth()>
+      session_health_getter_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser

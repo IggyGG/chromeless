@@ -70,6 +70,7 @@
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_socket_factory.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/reload_type.h"  // content::ReloadType — renderer-crash reload
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
@@ -110,6 +111,14 @@ constexpr int kBackLog = 10;
 // imperceptible, bounded so a genuinely gone target can't spin forever.
 constexpr int kRecaptureRvhSwapAttempts = 5;
 constexpr int kRecaptureRetryDelayMs = 50;
+
+// Renderer-crash reload budget. Two reloads inside five minutes is enough
+// to ride out a one-off renderer OOM or a bad frame; a third inside the
+// same window means the page reliably kills its renderer, and re-navigating
+// into the same crash is not recovery — it is a loop that burns the guest's
+// single vCPU while the user watches a frozen picture.
+constexpr int kMaxRendererReloadsPerWindow = 2;
+constexpr base::TimeDelta kRendererCrashWindow = base::Minutes(5);
 
 // TCP server-socket factory bound to <address>:<port>. The address
 // comes from --remote-debugging-address (default 127.0.0.1).
@@ -829,6 +838,13 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       base::BindRepeating(&CloudBrowserBrowserMainParts::RearmCaptureAfterRvhSwap,
                           base::Unretained(this), kRecaptureRvhSwapAttempts));
 
+  // Renderer-crash recovery. Same Unretained rationale as the re-arm
+  // closure directly above (the resolver is a value member of this
+  // main_parts, so it cannot outlive us).
+  active_webcontents_resolver_.SetRendererGoneCallback(base::BindRepeating(
+      &CloudBrowserBrowserMainParts::OnCapturedRendererGone,
+      base::Unretained(this)));
+
   // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) F5 + F6 ==============
   //
   // Native WebRTC peer wiring — bootstraps the runtime peer that
@@ -1151,21 +1167,45 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
   // alone leaves the PC idle.
   video_track_ = pcf_->CreateVideoTrack(cb_track_source_, "cb-video-0");
   if (!video_track_) {
-    LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — "
-                  "video transceiver will not be added; "
-                  "OnRenegotiationNeeded will not fire; no SDP offer "
-                  "will be emitted. Worker stays alive on CDP path.";
+    // FAIL the session. This used to LOG(ERROR) and return OK, which left
+    // the pod Ready and the isolator believing it had a working browser —
+    // while nothing could ever put a frame on the wire, because without a
+    // video track there is no transceiver, so OnRenegotiationNeeded never
+    // fires and no offer is ever emitted. The session was dead on arrival
+    // and reported healthy; the user saw a black rectangle and a timeout.
+    //
+    // No isolator change is needed to make this useful: inject_native_
+    // session already treats ANY Cb.startNativeSession error as fatal and
+    // releases the VM. Returning non-OK converts a silent permanent
+    // failure into a fast, attributable one that recycles the guest.
+    //
+    // native_session_started_ is deliberately NOT set on this path, so a
+    // retry is allowed rather than being rejected with INVALID_STATE.
+    LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — no video "
+                  "track, so no transceiver, so no offer will EVER be "
+                  "emitted. Failing the session rather than reporting a "
+                  "browser that cannot stream.";
+    return webrtc::RTCError(
+        webrtc::RTCErrorType::INTERNAL_ERROR,
+        "CreateVideoTrack returned null — session cannot produce video");
   } else {
     webrtc::RtpTransceiverInit video_init;
     video_init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
     auto tx_result =
         offerer_driver_->pc()->AddTransceiver(video_track_, video_init);
     if (!tx_result.ok()) {
+      // Same reasoning as the null-track path above: without the video
+      // transceiver there is no offer, so this session can never stream.
+      // Reporting OK here is what let a permanently-broken guest sit in
+      // the pool looking healthy.
       LOG(ERROR) << "CV2-69: AddTransceiver(video, sendonly) failed: "
                  << tx_result.error().message()
-                 << " — proceeding without video; OnRenegotiationNeeded "
-                    "may not fire and no SDP offer will emit. Worker "
-                    "stays alive on CDP path.";
+                 << " — no video transceiver, so no offer will EVER be "
+                    "emitted. Failing the session.";
+      video_track_ = nullptr;  // Undo the CreateVideoTrack above.
+      return webrtc::RTCError(
+          webrtc::RTCErrorType::INTERNAL_ERROR,
+          "AddTransceiver(video) failed — session cannot produce video");
     } else {
       std::vector<webrtc::RtpCodecCapability> video_codec_preferences =
           BuildFirstLightVideoCodecPreferences(
@@ -1601,7 +1641,93 @@ void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {
 // dead microVM's resources are freed promptly rather than lingering as a
 // "connected but producing nothing" peer. Runs on the main sequence (the
 // driver posts it here), so direct offerer_driver_ access is safe.
+void CloudBrowserBrowserMainParts::OnCapturedRendererGone() {
+  // The captured renderer process died. Posted from
+  // CbActiveWebContentsResolver::PrimaryMainFrameRenderProcessGone.
+  //
+  // Why this needs its own recovery rather than riding the existing
+  // capture re-arm: content does NOT create a replacement RenderViewHost
+  // after a crash until something navigates. So RenderViewHostChanged
+  // never fires, RearmCaptureAfterRvhSwap never runs, and the capturer
+  // stays bound to a dead FrameSink forever. The stream freezes on the
+  // last painted frame and the session looks alive from every angle we
+  // measure — the WebContents exists, the PC is connected, DevTools still
+  // answers. Only the pixels are gone.
+  //
+  // Reload is what creates the new RenderViewHost, which in turn fires
+  // RenderViewHostChanged, which re-arms capture through the path that
+  // already exists. So this policy is deliberately small: issue the
+  // navigation and let the shipped machinery do the rest.
+
+  content::WebContents* wc = active_webcontents_resolver_.GetActiveWebContents();
+  if (!wc) {
+    LOG(WARNING) << "CV2-RENDERER-CRASH: renderer gone but no active "
+                    "WebContents — nothing to reload";
+    return;
+  }
+
+  // Bounded, and bounded over a WINDOW rather than for the process
+  // lifetime. A crash an hour into a session is unrelated to one at boot,
+  // and a lifetime counter would refuse to recover from the former just
+  // because the latter happened. A crash LOOP, though — the page reliably
+  // kills its renderer — must not spin forever re-navigating into the same
+  // crash, which is what the window catches.
+  const base::TimeTicks now = base::TimeTicks::Now();
+  if (now - renderer_crash_window_start_ > kRendererCrashWindow) {
+    renderer_crash_window_start_ = now;
+    renderer_crashes_in_window_ = 0;
+  }
+  ++renderer_crashes_in_window_;
+  ++renderer_crashes_total_;
+
+  if (renderer_crashes_in_window_ > kMaxRendererReloadsPerWindow) {
+    LOG(ERROR) << "CV2-RENDERER-CRASH: " << renderer_crashes_in_window_
+               << " renderer crashes within "
+               << kRendererCrashWindow.InSeconds()
+               << "s — exceeds the reload budget of "
+               << kMaxRendererReloadsPerWindow
+               << ". Escalating to permanent-death so physics recycles this "
+                  "guest instead of watching it crash-loop.";
+    // Reuse the GPU-death escalation verbatim: it emits session_unhealthy
+    // (so physics recycles rather than treating this as a clean bye), tears
+    // the PC down in the right order, and quits the loop on a delay so the
+    // envelope flushes. The cause differs; the required response does not.
+    OnGpuPermanentDeath();
+    return;
+  }
+
+  LOG(ERROR) << "CV2-RENDERER-CRASH: captured renderer died (crash "
+             << renderer_crashes_in_window_ << "/"
+             << kMaxRendererReloadsPerWindow << " in the last "
+             << kRendererCrashWindow.InSeconds()
+             << "s, " << renderer_crashes_total_
+             << " total) — reloading to rebuild the RenderViewHost; the "
+                "resulting RenderViewHostChanged re-arms capture";
+
+  // check_for_repost=false: this is our recovery, not a user gesture, and
+  // a repost confirmation would need a JS dialog answered by a human who
+  // is currently looking at a frozen picture.
+  wc->GetController().Reload(content::ReloadType::NORMAL,
+                             /*check_for_repost=*/false);
+}
+
+CbSessionHealth CloudBrowserBrowserMainParts::GetSessionHealth() const {
+  CbSessionHealth h;
+  h.renderer_crashes = renderer_crashes_total_;
+  h.permanent_death_signaled = permanent_death_signaled_;
+  // A non-null video track means CreateVideoTrack succeeded AND
+  // AddTransceiver succeeded — the failure path nulls it back out before
+  // returning an error, precisely so this stays a single honest bit.
+  h.video_track_ok = video_track_ != nullptr;
+  return h;
+}
+
 void CloudBrowserBrowserMainParts::OnGpuPermanentDeath() {
+  // Latch BEFORE the teardown below: the quit is posted on a delay, so a
+  // Cb.getCaptureStats poll can land in that window and should see the
+  // guest already reporting itself as dying.
+  permanent_death_signaled_ = true;
+
   LOG(ERROR) << "CV2-GPU-DEATH: main_parts received permanent-death signal from "
                 "BeginFrame driver — signalling session-unhealthy to physics "
                 "and self-terminating for a fresh-guest re-pin";
