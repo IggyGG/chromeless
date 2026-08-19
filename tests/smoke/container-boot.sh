@@ -68,7 +68,20 @@ SMOKE_READY_TIMEOUT_S="${SMOKE_READY_TIMEOUT_S:-60}"
 SMOKE_LOAD_TIMEOUT_S="${SMOKE_LOAD_TIMEOUT_S:-30}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CONTAINER_NAME="chromeless-smoke-$$"
+# Unique per RUN, not per PID. `$$` alone collides: inside a container the
+# PID space starts small and repeats, so two jobs minutes apart routinely get
+# the same number. That is not theoretical — CI failed with
+#
+#   Conflict. The container name "/chromeless-smoke-228" is already in use
+#
+# against a leftover `chromeless-smoke-228` sitting in state Created on
+# runner-2. Created, never Running: the dind-gc sidecar's escalation branch
+# runs `docker container prune -f --filter "label!=<its own label>"`, which
+# removes containers mid-creation, so `docker run` can lose its container
+# after the NAME is already claimed and before an ID comes back.
+#
+# Adding the epoch makes a repeat require the same PID in the same second.
+CONTAINER_NAME="chromeless-smoke-$$-$(date +%s)"
 CONTAINER_ID=""
 SCREENSHOT_IN_CONTAINER="/tmp/chromeless-smoke.png"
 
@@ -90,6 +103,12 @@ cleanup() {
         # We started with --rm, so stop should remove. Belt-and-braces:
         docker rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
     fi
+    # Also clear by NAME. The name is claimed by `docker run` BEFORE it
+    # returns an id, so a run killed in that window leaves a container this
+    # function would otherwise skip entirely (CONTAINER_ID is still empty) —
+    # and the next job with the same name then fails on Conflict. Removing by
+    # name is a no-op when the id path already handled it.
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
