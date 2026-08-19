@@ -88,6 +88,31 @@
 //   PartitionAlloc can already service is passed through untouched, so the
 //   only behaviour this can change is "abort" -> "slightly-less-aligned
 //   buffer".
+//
+// PINNED-TREE FACTS THIS DEPENDS ON (read off the build node 2026-08-19,
+// triform-7:/var/lib/longhorn/chromeless-build/chromium-src, 147.0.7727.144
+// — NOT from upstream, because upstream and our pin can differ)
+//
+//   * out/cb-release's generated buildflags.h has
+//     PA_BUILDFLAG_INTERNAL_USE_ALLOCATOR_SHIM() = 1, so this compiles in for
+//     real rather than into the no-op branch.
+//   * memalign -> ShimMemalign -> chain_head->alloc_aligned_function
+//     (shim_alloc_functions.h:219-222). The aligned_malloc_* family is a
+//     different, Windows-facing path.
+//   * AllocToken is declared at allocator_dispatch.h:13, ABOVE `namespace
+//     allocator_shim {` on line 22 — it is a GLOBAL name. This bit us: the
+//     first draft wrote allocator_shim::AllocToken, which does not exist.
+//   * kMaxSupportedAlignment is re-exported into namespace partition_alloc at
+//     partition_alloc_constants.h:453 precisely so non-PA code can name it
+//     without reaching into ::internal.
+//   * //base public_deps the allocator_shim target when use_allocator_shim is
+//     on (base/BUILD.gn:1780-1782), and that target carries
+//     public_configs = [":public_includes"], so the partition_alloc/... include
+//     path arrives through the public_deps = [ "//base" ] this directory's
+//     target already has. No new GN dep.
+//   * AllocatorDispatch is an aggregate with no user-provided constructor, so
+//     our static instance is zero-initialised (`next` == nullptr) before any
+//     code runs.
 
 #ifndef CAPTURE_BUILD_INTEGRATION_CB_X264_ALIGNMENT_SHIM_H_
 #define CAPTURE_BUILD_INTEGRATION_CB_X264_ALIGNMENT_SHIM_H_
