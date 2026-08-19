@@ -331,14 +331,20 @@ verify_libs() {
     log "profile '${profile}' libs verified at ${prefix}"
 }
 
+# Where the bootstrap initContainer stages profile libs (headers + .so).
+# Named once so the STEP 7 test runner can put ${SYSTEM_LIBS_DIR}/lib on
+# LD_LIBRARY_PATH — gn learns this prefix at BUILD time via *_libdir, but
+# the dynamic loader does not know it at RUN time.
+SYSTEM_LIBS_DIR="${SYSTEM_LIBS_DIR:-/work/system-libs}"
+
 case "${profile}" in
     sw)
         log "no profile-specific system deps (sw build)"
         ;;
     x264|all)
-        # Track F1 (T36). libx264 expected at /work/system-libs.
+        # Track F1 (T36). libx264 expected at ${SYSTEM_LIBS_DIR}.
         if [[ -z "${STUB_MODE}" ]]; then
-            verify_libs /work/system-libs include/x264.h lib/libx264.so
+            verify_libs "${SYSTEM_LIBS_DIR}" include/x264.h lib/libx264.so
         else
             log "[stub] would verify /work/system-libs for libx264"
         fi
@@ -346,7 +352,7 @@ case "${profile}" in
     vaapi)
         # Track F2 (T70). libva expected at /work/system-libs.
         if [[ -z "${STUB_MODE}" ]]; then
-            verify_libs /work/system-libs include/va/va.h lib/libva.so
+            verify_libs "${SYSTEM_LIBS_DIR}" include/va/va.h lib/libva.so
         else
             log "[stub] would verify /work/system-libs for libva"
         fi
@@ -459,8 +465,44 @@ if [[ -n "${STUB_MODE}" ]]; then
 else
     encoder_rc=0
     framesink_rc=0
-    run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_encoder_unittests" || encoder_rc=$?
-    run "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_framesink_capturer_unittests" || framesink_rc=$?
+
+    # The encoder tests link against the profile libs staged at
+    # /work/system-libs (libx264 for the x264 profile, libva for vaapi).
+    # gn gets those via x264_libdir at BUILD time, but the dynamic loader
+    # knows nothing about that prefix at RUN time — so the test binary dies
+    # before main() with
+    #
+    #   error while loading shared libraries: libx264.so.164:
+    #   cannot open shared object file
+    #
+    # and exits 127. That is "command not found", NOT a test failure, and it
+    # is worth telling apart: with CHROMELESS_TESTS_FATAL=1 both fail the
+    # build identically, and reading `encoder=127` as "the encoder tests
+    # failed" sends you hunting a code defect that does not exist.
+    #
+    # cloud_browser_worker itself is unaffected — the runtime image installs
+    # the real libx264 package.
+    test_ld_path="${SYSTEM_LIBS_DIR}/lib"
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+        test_ld_path="${test_ld_path}:${LD_LIBRARY_PATH}"
+    fi
+
+    # `env VAR=... cmd` rather than a `VAR=... run ...` prefix: run() is a
+    # shell FUNCTION, and a var prefix on a function call leaks into the
+    # caller's environment in some shells instead of scoping to the call.
+    # env is unambiguous and self-documenting in the `+ ...` echo.
+    run env "LD_LIBRARY_PATH=${test_ld_path}" \
+        "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_encoder_unittests" \
+        || encoder_rc=$?
+    run env "LD_LIBRARY_PATH=${test_ld_path}" \
+        "${CHROMIUM_SRC}/${OUT_DIR}/cloud_browser_framesink_capturer_unittests" \
+        || framesink_rc=$?
+
+    if [[ "${encoder_rc}" -eq 127 || "${framesink_rc}" -eq 127 ]]; then
+        log "ERROR: a unit-test binary could not START (exit 127) — almost"
+        log "       certainly a missing shared library, not a failing test."
+        log "       Staged libs: ${SYSTEM_LIBS_DIR}/lib"
+    fi
     if [[ "${encoder_rc}" -ne 0 || "${framesink_rc}" -ne 0 ]]; then
         log "WARN: unit tests reported failures (encoder=${encoder_rc} framesink=${framesink_rc})"
         if [[ -n "${CHROMELESS_TESTS_FATAL:-}" ]]; then
