@@ -38,7 +38,10 @@ build it (below) or use one your organization already built.
 ```bash
 git clone <this-repo> && cd chromeless
 
-# Generate the keypair the gateway signs with and the broker verifies against.
+# Three exports: the keypair the gateway signs with and the broker verifies
+# against, plus the token the browser itself presents to the broker. All three
+# are needed — with the broker's key set and the worker's token missing, the
+# broker refuses the browser and nothing but a WebSocket close code says so.
 eval "$(cd infra/gateway && go run ./cmd/keygen)"
 
 CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
@@ -177,7 +180,7 @@ translates the friendly names into what the browser process reads:
 | --- | --- | --- |
 | `SIGNALING_URL` | `WEBRTC_SIGNALING_HOST` + `_TLS` | `ws[s]://host[:port]`. Path is ignored — the peer builds its own from the session id. |
 | `SESSION_ID` | `WEBRTC_SIGNALING_SESSION_ID` | Opaque string. Must survive percent-encoding as one path segment. |
-| `SIGNALING_TOKEN` | `WEBRTC_SIGNALING_TOKEN` | Optional JWT, forwarded verbatim as a query param. |
+| `SIGNALING_TOKEN` | `WEBRTC_SIGNALING_TOKEN` | The browser's own session token, forwarded verbatim as a query param. Optional **only** while the broker has no `CHROMELESS_AUTH_PUBKEY`; the moment it has one this is required, and omitting it gets the worker closed with `1008 missing token`. `cmd/keygen` prints one. |
 | `CHROMELESS_ICE_SERVERS` | `WEBRTC_ICE_SERVERS` | JSON array of `{urls, username, credential}`, or an object with an `iceServers` array. |
 | `CHROMELESS_ICE_TRANSPORT_POLICY` | `WEBRTC_ICE_TRANSPORT_POLICY` | `all` (default) or `relay`. |
 

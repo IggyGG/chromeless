@@ -124,6 +124,56 @@ jobs:
         working-directory: signaling
         run: go vet ./...
 
+      # Every Go module, not just signaling/. `make test-unit-go-modules`
+      # already discovers them with `find -name go.mod`; this mirrors that
+      # inline, because the CI host runs no make target.
+      #
+      # Nothing here ran ANY Go test until 2026-08-19. infra/gateway/ landed
+      # with 31 of them and CI was green about none — which matters because the
+      # only automated proof that `cmd/keygen` emits the worker's token is a
+      # test in that module. A test no lane runs is not a check, it is a
+      # comment; this repo has a lint for exactly that shape
+      # (tools/lint/tests_wired_lint.py) and CI had the same hole.
+      #
+      # `find` rather than a hand-kept list, for the same reason the make
+      # target uses one: a new module joins the gate automatically instead of
+      # silently joining the ungated pile. tests/integration/ is excluded — it
+      # builds a binary and boots it, which is `make test-integration`, not a
+      # unit test.
+      #
+      # No -mod=mod: readonly is Go's default and the right one here. The
+      # `replace` directives point at sibling directories, which readonly
+      # resolves fine — what it refuses is silently rewriting a go.mod to
+      # paper over a missing go.sum entry, and that refusal is the check.
+      #
+      # The loop does not stop at the first failure, for the same reason the
+      # build lane has --keep-going: one pass should collect every broken
+      # module rather than costing a full CI cycle per finding.
+      #
+      # NOTE: this widens the gate to modules never tested by any lane, and
+      # infra/controllers/browser-session-controller pulls ~227 dependencies.
+      # If it goes red on a resolution failure rather than a test failure,
+      # that is a genuine finding — a module CI cannot even build — not a
+      # reason to narrow the list back.
+      - name: go test (every module)
+        run: |
+          set -uo pipefail
+          fail=0
+          for gomod in $(find . -name go.mod \
+                           -not -path "./.claude/*" \
+                           -not -path "./tests/integration/*" | sort); do
+            d=$(dirname "$gomod")
+            echo "::group::go test $d"
+            if ( cd "$d" && go test -timeout 300s ./... ); then
+              echo "ok"
+            else
+              echo "::error::go test failed in $d"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          [ "$fail" -eq 0 ]
+
       # Client: TypeScript typecheck + unit tests. ESLint is run only when
       # the project actually has a config file, so we skip cleanly with a
       # notice instead of failing.

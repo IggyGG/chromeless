@@ -103,13 +103,25 @@ changes beyond sending its cookie.
 Generate a matching pair and hand each half to the service that needs it:
 
 ```bash
-eval "$(cd infra/gateway && go run ./cmd/keygen)"   # sets both env vars
+eval "$(cd infra/gateway && go run ./cmd/keygen)"   # sets three env vars
 docker compose -f infra/compose.yaml up
 ```
 
 Both halves are generated **outside** compose because the broker needs the
 public key at *its* startup, before the gateway exists — neither service can
 hand the other anything at boot.
+
+The third export is `SIGNALING_TOKEN`, and it is there because turning auth on
+turns it on for **both** peers. The client gets its token from `/issue-token`
+after logging in; the worker has no login and no way to ask, so it must be
+handed one at launch. `keygen` therefore mints a 30-day `browser`-role token
+for `${SESSION_ID:-dev}` alongside the keypair.
+
+Until 2026-08-19 it did not, and the quickstart followed exactly produced a
+broker armed against a worker holding nothing: `1008 missing token`, the
+browser process exits, supervisord respawns it every ~30 s, DevTools answers
+`/json/version` throughout, and the stack looks healthy while no offer is ever
+made. Set `SESSION_ID` before the `eval` if you are not using the default.
 
 The gateway cross-checks `CHROMELESS_AUTH_PUBKEY` against its own signing key
 and refuses to start if they disagree. That mismatch is the one

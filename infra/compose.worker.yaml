@@ -25,16 +25,21 @@
 #
 #   2. The token is not optional either. With the broker verifying (which is
 #      the point of the gateway), the worker needs a browser-role token in
-#      SIGNALING_TOKEN. Mint one through the gateway:
+#      CHROMELESS_SIGNALING_TOKEN. Mint one on the machine holding the private
+#      key, with the same SESSION_ID this worker will use:
 #
-#        curl -sk -b <cookie-jar> \
-#          'https://gateway.example.com:8443/issue-token?role=browser&session_id=dev'
+#        SESSION_ID=dev go run ./infra/gateway/cmd/worker-token
 #
-#      Tokens are short-lived by design (15 min). A worker whose token expires
-#      mid-session cannot refresh it — capture/signaling/cb_signaling_reconnect.h
-#      is explicit that token refresh is out of scope, and the process exits so
-#      an orchestrator can restart it with a fresh one. For a hand-run worker
-#      that means restarting the container.
+#      Do NOT use the gateway's /issue-token for this. That path mints
+#      15-MINUTE tokens — right for a page that can silently roll them over
+#      (client/src/auth.ts does), wrong for a browser process that cannot:
+#      capture/signaling/cb_signaling_reconnect.h is explicit that token refresh
+#      is out of scope, so the worker reads the token once at launch and exits
+#      when it expires. cmd/worker-token mints 30 days for exactly that reason.
+#      Re-mint and restart the container before it lapses.
+#
+#      On the single-host stack you never do this by hand: `cmd/keygen` exports
+#      SIGNALING_TOKEN with the keypair.
 #
 #   3. Navigation needs a route to THIS machine's DevTools. The gateway drives
 #      CDP, so CHROMELESS_CDP_URL over there must reach port 9222 here. Do that

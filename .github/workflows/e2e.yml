@@ -151,6 +151,60 @@ jobs:
             echo "::notice::docker daemon does not share this job's filesystem (got '${got}'); compose bind-mounts cannot resolve, so e2e is skipped. Run it where the daemon sees the checkout."
           fi
 
+      # Go, for cmd/keygen below. `actions/setup-go` is safe on this host in a
+      # way `actions/setup-node` is not: Go ships static binaries, so it cannot
+      # poison the PATH of an Alpine job container the way a glibc node does
+      # (full write-up in ci.yml's "Node version (image-provided)" step).
+      # ci.yml and codeql.yml already resolve it from the mirror.
+      - name: Set up Go
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: infra/gateway/go.sum
+
+      # Turn ON broker auth, because that is the configuration the README
+      # documents — and until 2026-08-19 nothing had ever run it.
+      #
+      # Before this step the job set neither key, so signaling booted "auth
+      # disabled: any caller can connect" and took every peer unconditionally.
+      # That is not what any user is told to run, and it silently masked a real
+      # defect: `keygen` emitted only the keypair, so following the quickstart
+      # exactly armed the broker against a worker that had been given no
+      # credential. The broker closed it with `1008 missing token`, the
+      # handshake failure exited the browser process, supervisord respawned it
+      # every ~30 s, and DevTools answered /json/version throughout — a healthy
+      # container, a working page, and no offer, ever. CI passed the whole time
+      # because CI was running a configuration nobody uses.
+      #
+      # `go run ./cmd/keygen` is deliberately the literal command from the
+      # README rather than a CI-only equivalent: a hand-rolled Ed25519 JWT here
+      # would drift from signaling/token/ and test itself instead of the
+      # product.
+      #
+      # The values go to $GITHUB_ENV so every later compose subcommand
+      # interpolates the same pair — `ps`, the log capture and `down` each
+      # re-read the whole file. They are not masked and do not need to be: the
+      # keypair is minted fresh per run, authenticates only against a broker
+      # that dies with the job, and never leaves the runner.
+      - name: Mint the auth keypair and the worker token
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        working-directory: infra/gateway
+        run: |
+          set -euo pipefail
+          go run ./cmd/keygen > /tmp/chromeless-auth.env
+          # Three exports, not two. The third is the worker's own credential —
+          # the page can ask the gateway for a token after logging in, the
+          # browser process has no login and must be handed one at launch.
+          got=$(grep -c '^export ' /tmp/chromeless-auth.env || true)
+          if [ "${got}" != "3" ]; then
+            echo "::error::keygen emitted ${got} exports, expected 3 (privkey, pubkey, worker token)"
+            sed 's/=.*/=<redacted>/' /tmp/chromeless-auth.env
+            exit 1
+          fi
+          sed 's/^export //' /tmp/chromeless-auth.env >> "$GITHUB_ENV"
+          echo "auth enabled for this run: $(sed 's/=.*//' /tmp/chromeless-auth.env | tr '\n' ' ')"
+
       - name: docker compose up
         if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         env:
@@ -162,6 +216,54 @@ jobs:
           CHROMELESS_PASS: e2e-password
         run: |
           docker compose -f infra/compose.yaml --profile observability up -d --wait
+
+      # `up --wait` is NOT evidence the worker connected. The chromium service
+      # passes its healthcheck off DevTools, which keeps answering while the
+      # browser process is exiting and being respawned — so a worker the broker
+      # is refusing looks identical to a working one until a Playwright spec
+      # times out 30 s later with "never decoded a frame", which reads as a
+      # media bug rather than an auth one.
+      #
+      # Ask the broker directly instead. It logs one line per accepted peer.
+      - name: Assert the broker accepted both peers' auth
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        env:
+          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
+        run: |
+          set -uo pipefail
+          # The worker retries its dial, so poll rather than reading once.
+          for _ in $(seq 1 30); do
+            logs=$(docker compose -f infra/compose.yaml logs signaling 2>&1 || true)
+            case "${logs}" in
+              *'"role":"browser"'*) break ;;
+            esac
+            sleep 2
+          done
+
+          case "${logs}" in
+            *'auth disabled'*)
+              echo "::error::the broker booted with auth DISABLED — CHROMELESS_AUTH_PUBKEY never reached it, so this run proves nothing about the documented configuration"
+              exit 1 ;;
+          esac
+          case "${logs}" in
+            *'auth rejected'*)
+              echo "::error::the broker REJECTED a peer. If the role is 'browser' the worker has no usable SIGNALING_TOKEN — see infra/gateway/cmd/keygen."
+              echo "${logs}" | grep -i 'auth rejected' | tail -20
+              exit 1 ;;
+          esac
+          case "${logs}" in
+            *'"role":"browser"'*)
+              echo "broker accepted the worker (role=browser) with auth enabled" ;;
+            *)
+              echo "::error::auth is enabled but the broker never accepted a browser-role peer. The worker either never dialled or was closed before its first envelope."
+              echo "--- signaling ---"
+              echo "${logs}" | tail -40
+              echo "--- chromium ---"
+              docker compose -f infra/compose.yaml logs --tail 60 chromium 2>&1 || true
+              exit 1 ;;
+          esac
 
       # Every compose subcommand interpolates the whole file, so each one
       # needs CHROMELESS_IMAGE — it is declared `?err` REQUIRED. Three steps
