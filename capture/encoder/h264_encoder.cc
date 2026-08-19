@@ -17,6 +17,7 @@
 #include <limits>
 
 #include "api/video/i420_buffer.h"
+#include "capture/build-integration/cb_x264_alignment_shim.h"
 #include "modules/video_coding/codecs/h264/include/h264_globals.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
@@ -168,6 +169,13 @@ int32_t H264Encoder::InitEncode(
   params.i_threads = std::clamp(n_threads, 1, kMaxEncoderThreads);
   params.i_lookahead_threads = 1;
   params.b_sliced_threads = 1;
+
+  // Debian's libx264 requests 2 MiB alignment for large internal buffers so
+  // they can use transparent huge pages. Chromium's PartitionAlloc rejects
+  // alignments above 1 MiB and aborts the process. Install the process-wide
+  // allocator seam immediately before the first x264 allocation; keeping the
+  // call here also covers the standalone encoder unit-test binary.
+  InstallX264AlignmentShim();
 
   // Profile / level.
   std::string profile;

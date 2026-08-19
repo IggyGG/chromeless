@@ -161,6 +161,8 @@ source_set("encoder_factory") {
     "../encoder/encoder_factory_stub.cc",
     "../encoder/h264_encoder.cc",
     "../encoder/h264_encoder.h",
+    "cb_x264_alignment_shim.cc",
+    "cb_x264_alignment_shim.h",
     "../encoder/nvenc_encoder.cc",
     "../encoder/nvenc_encoder.h",
     "../encoder/simulcast_factory.cc",
@@ -173,6 +175,7 @@ source_set("encoder_factory") {
     "../encoder/vp9_encoder.h",
   ]
   deps = [
+    "//base",
     "//third_party/abseil-cpp:absl",
     "//third_party/libvpx:libvpx",     # VP9 (T35).
     "//third_party/libyuv:libyuv",     # I420Scale (T83).
