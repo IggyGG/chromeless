@@ -314,6 +314,21 @@ spec:
               value: "80G"
             - name: CHROMELESS_BUILD_PROFILE
               value: "x264"
+            - name: CHROMELESS_TESTS_FATAL
+              # Unit-test failures FAIL this lane.
+              #
+              # Without this the build script logs "WARN: unit tests
+              # reported failures", continues, packages the artifact, and
+              # exits 0 — so `kubectl get job` says Complete and the tests
+              # are decorative. That is how H264EncoderTest sat at 9/9
+              # FAILED inside a green build.
+              #
+              # Turning this on is only safe BECAUSE the profile pipe is
+              # repaired in the same change: those 9 failures were
+              # InitEncode == -1 from HAS_X264 being undefined, not real
+              # defects. If a future build fails here, read the test output
+              # before assuming the flag is too strict.
+              value: "1"
           resources:
             requests:
               # Burstable QoS — see build-job.yaml header. 12 → 4

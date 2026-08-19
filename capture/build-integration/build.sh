@@ -209,20 +209,39 @@ cmd_apply_patches() {
 cmd_gen() {
     require_chromium_src
     require_depot_tools
-    # CB_BUILD_PROFILE selects which args.<profile>.gn overlay to import.
-    # Each overlay imports the base args.gn first, then sets its
-    # profile-specific *_libdir / *_sdk_path to flip the matching
-    # encoder gate on. "sw" (default) imports the base args.gn directly
-    # — no HW or x264 path enabled.
+    # Selects which args.<profile>.gn overlay to import. Each overlay
+    # imports the base args.gn first, then sets its profile-specific
+    # *_libdir / *_sdk_path to flip the matching encoder gate on. "sw"
+    # imports the base args.gn directly — no HW or x264 path enabled.
     #
     # Valid values: sw (default), x264, vaapi, nvenc, all.
-    local profile="${CB_BUILD_PROFILE:-sw}"
+    #
+    # ─── READ BOTH NAMES. THIS COST 12 WEEKS OF SILENT WRONG BUILDS. ───
+    #
+    # build/chromeless-build.sh exports CHROMELESS_BUILD_PROFILE. This
+    # function used to read only CB_BUILD_PROFILE — the old name, from
+    # before the cb-*→chromeless rename (c12d40d) changed the writer and
+    # not the reader. The export never arrived, `:-sw` won, and EVERY
+    # image built after that rename was gn-gen'd profile=sw with
+    # x264_libdir empty and HAS_X264 undefined.
+    #
+    # Nothing caught it, because both of its alarms were disabled:
+    #   * the t7 lane had dropped the unit tests, so H264EncoderTest's
+    #     9/9 InitEncode == -1 was never run;
+    #   * at runtime the encoder factory fails CLOSED onto libwebrtc's
+    #     built-in encoders, so video kept flowing and looked fine. Every
+    #     fps/quality measurement taken in that window was therefore made
+    #     against libwebrtc software encoders, not x264.
+    #
+    # CHROMELESS_BUILD_PROFILE is authoritative; CB_BUILD_PROFILE remains
+    # as a fallback so an old caller still works.
+    local profile="${CHROMELESS_BUILD_PROFILE:-${CB_BUILD_PROFILE:-sw}}"
     local overlay
     case "${profile}" in
         sw)             overlay="args.gn";;
         x264|vaapi|nvenc|all)
                         overlay="args.${profile}.gn";;
-        *)              die "unknown CB_BUILD_PROFILE=${profile} (expected sw|x264|vaapi|nvenc|all)";;
+        *)              die "unknown build profile '${profile}' (expected sw|x264|vaapi|nvenc|all) — set CHROMELESS_BUILD_PROFILE";;
     esac
     local args_path="//cloud-browser/capture/build-integration/${overlay}"
     log "gn gen ${OUT_DIR} (profile=${profile}, importing ${args_path})..."
