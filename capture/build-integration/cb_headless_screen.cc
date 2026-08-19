@@ -26,6 +26,32 @@ void CbHeadlessScreen::SetRootWindow(gfx::NativeWindow root_window) {
             << (root_window_ ? "installed" : "cleared");
 }
 
+void CbHeadlessScreen::UpdatePrimaryDisplay(const gfx::Rect& bounds_in_pixel,
+                                            float device_scale_factor) {
+  display::Display updated = GetPrimaryDisplay();
+
+  const gfx::Rect old_bounds = updated.bounds();
+  const float old_dsf = updated.device_scale_factor();
+
+  // SetScaleAndBounds takes PIXEL bounds and derives the DIP bounds by
+  // dividing — passing DIP here silently halves the display at DSF 2.
+  updated.SetScaleAndBounds(device_scale_factor, bounds_in_pixel);
+
+  if (updated.bounds() == old_bounds &&
+      updated.device_scale_factor() == old_dsf) {
+    return;  // Unconditional-resize-handler friendly.
+  }
+
+  // The fan-out. See the header for why display_list() mutation is not
+  // an acceptable substitute.
+  ProcessDisplayChanged(updated, /*is_primary=*/true);
+
+  LOG(INFO) << "CbHeadlessScreen: primary display " << old_bounds.ToString()
+            << " @" << old_dsf << "x -> " << updated.bounds().ToString()
+            << " @" << updated.device_scale_factor() << "x (DIP size "
+            << updated.size().ToString() << ")";
+}
+
 bool CbHeadlessScreen::IsWindowUnderCursor(gfx::NativeWindow window) {
   // Single-root-window embedder: cb_aura_platform_data.cc constructs
   // exactly one WindowTreeHost, and the only consumer that ever asks

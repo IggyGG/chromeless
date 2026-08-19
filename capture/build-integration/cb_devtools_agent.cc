@@ -54,6 +54,7 @@
 
 #include "base/functional/callback.h"
 #include "base/json/json_reader.h"   // CV2-WARM — Cb.startNativeSession params
+#include "ui/gfx/geometry/size.h"  // Cb.setViewport response geometry
 #include "base/logging.h"
 #include "base/values.h"             // CV2-WARM — base::Value::Dict params
 #include "capture/build-integration/cloud_browser_browser_main_parts.h"  // CV2-WARM — NativeSessionConfig
@@ -99,6 +100,21 @@ constexpr char kStartNativeSessionMethod[] = "Cb.startNativeSession";
 // two apart BEFORE the snapshot is taken. This method exposes exactly that
 // counter and nothing else — no side effects, no capture start.
 constexpr char kGetCaptureStatsMethod[] = "Cb.getCaptureStats";
+
+// Live viewport resize. Browser-scope on purpose (it acts on process-global
+// state — the display, the aura root — and reaches the page through
+// main_parts' active-WebContents resolver, not through channel->
+// GetAgentHost()), so it works over the isolator's browser-scope session
+// without a per-page attach.
+//
+// WHY CDP AND NOT THE INPUT DATACHANNEL. The input channel is an UNTRUSTED
+// client->guest path. A guest that resized itself straight off it would let
+// a hostile client ask for 8192x8192 and OOM a 2048 MB microVM. Physics
+// already receives the resize (screencast_ws.rs) and holds the per-tier cap,
+// so routing through it puts the arbiter in the path by construction. CDP
+// also gives a structured ack, which is what lets physics SEE that its
+// request was clamped instead of guessing.
+constexpr char kSetViewportMethod[] = "Cb.setViewport";
 
 // Encodes {"started": true, "frameSinkId": "<n:m>"} as a CBOR map
 // inside a length-prefixed envelope. Matches the shape every
@@ -174,6 +190,31 @@ std::vector<uint8_t> EncodeCaptureStatsResponse(uint64_t frames_received) {
   return out;
 }
 
+// Encodes the viewport ACTUALLY applied, which may differ from what was
+// asked for — the caller is expected to read these back rather than assume
+// its request was honoured verbatim. A silently-clamped resize that the
+// caller believes succeeded is how geometry disagreements start.
+std::vector<uint8_t> EncodeSetViewportResponse(const gfx::Size& size_dip,
+                                               float device_scale_factor) {
+  std::vector<uint8_t> out;
+  crdtp::cbor::EnvelopeEncoder envelope;
+  envelope.EncodeStart(&out);
+  out.push_back(crdtp::cbor::EncodeIndefiniteLengthMapStart());
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("width"), &out);
+  crdtp::cbor::EncodeInt32(size_dip.width(), &out);
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("height"), &out);
+  crdtp::cbor::EncodeInt32(size_dip.height(), &out);
+
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("deviceScaleFactor"), &out);
+  crdtp::cbor::EncodeDouble(device_scale_factor, &out);
+
+  out.push_back(crdtp::cbor::EncodeStop());
+  envelope.EncodeStop(&out);
+  return out;
+}
+
 // NOTE (ChromelessV2 M2 R4 — CV2-39): the LogReceivedFrame
 // trampoline that previously lived here was the drop-and-log shape
 // used to prove the capturer was reachable from a CDP-driven trigger
@@ -195,10 +236,13 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
     base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
         active_capture_callback,
     base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
-        start_native_session_callback)
+        start_native_session_callback,
+    base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
+        set_viewport_callback)
     : track_source_getter_(std::move(track_source_getter)),
       active_capture_callback_(std::move(active_capture_callback)),
       start_native_session_callback_(std::move(start_native_session_callback)),
+      set_viewport_callback_(std::move(set_viewport_callback)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
   // NOTE: we deliberately do NOT Run() the getter here. CV2-69
@@ -269,7 +313,10 @@ void CbDevToolsManagerDelegate::HandleCommand(
       dispatchable.Method(), crdtp::SpanFrom(kStartNativeSessionMethod));
   const bool is_get_capture_stats = crdtp::SpanEquals(
       dispatchable.Method(), crdtp::SpanFrom(kGetCaptureStatsMethod));
-  if (!is_frame_sink_capture && !is_native_session && !is_get_capture_stats) {
+  const bool is_set_viewport = crdtp::SpanEquals(
+      dispatchable.Method(), crdtp::SpanFrom(kSetViewportMethod));
+  if (!is_frame_sink_capture && !is_native_session && !is_get_capture_stats &&
+      !is_set_viewport) {
     // Not ours — fall through to chromium's dispatcher.
     std::move(callback).Run(message);
     return;
@@ -284,6 +331,8 @@ void CbDevToolsManagerDelegate::HandleCommand(
     ok_payload = HandleStartFrameSinkCapture(channel, &error);
   } else if (is_native_session) {
     ok_payload = HandleStartNativeSession(dispatchable, &error);
+  } else if (is_set_viewport) {
+    ok_payload = HandleSetViewport(dispatchable, &error);
   } else {  // is_get_capture_stats
     ok_payload = HandleGetCaptureStats(channel, &error);
   }
@@ -491,6 +540,78 @@ std::vector<uint8_t> CbDevToolsManagerDelegate::HandleGetCaptureStats(
   LOG(INFO) << "CV2-CAPTURE-STATS: Cb.getCaptureStats framesReceived=" << frames;
 
   return EncodeCaptureStatsResponse(frames);
+}
+
+std::vector<uint8_t> CbDevToolsManagerDelegate::HandleSetViewport(
+    const crdtp::Dispatchable& dispatchable,
+    std::string* out_error) {
+  DCHECK(out_error);
+
+  if (!set_viewport_callback_) {
+    *out_error =
+        "Cb.setViewport: no set-viewport callback wired (check "
+        "CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate "
+        "against CloudBrowserBrowserMainParts::SetViewport)";
+    return {};
+  }
+
+  // Params decode — same CBOR→JSON→ReadDict path as Cb.startNativeSession;
+  // see the long comment there for why ReadDict rather than a hand-rolled
+  // CBOR walker.
+  crdtp::span<uint8_t> params = dispatchable.Params();
+  std::string params_json;
+  if (params.size() > 0) {
+    crdtp::Status status = crdtp::json::ConvertCBORToJSON(params, &params_json);
+    if (!status.ok()) {
+      *out_error = "Cb.setViewport: params CBOR→JSON conversion failed";
+      return {};
+    }
+  }
+  auto dict = base::JSONReader::ReadDict(params_json, base::JSON_PARSE_RFC);
+  if (!dict) {
+    *out_error =
+        "Cb.setViewport: missing, malformed, or non-object params "
+        "(required: width, height)";
+    return {};
+  }
+
+  // Required. Note these are read with EXPLICIT presence checks rather than
+  // value_or defaults: `Cb.*` is hand-dispatched with bare Find* calls, and
+  // a misspelled key that silently takes a default is exactly how
+  // `signalingUseTls` shipped as a no-op read of `useTls`. A caller who
+  // misspells "width" gets an error, not a silent 1280.
+  const std::optional<int> width = dict->FindInt("width");
+  const std::optional<int> height = dict->FindInt("height");
+  if (!width || !height) {
+    *out_error =
+        "Cb.setViewport: both width and height are required (integers, DIP)";
+    return {};
+  }
+
+  // Optional; absent means "leave the scale alone", not "reset to 1.0".
+  // FindDouble accepts an integer-typed JSON value too, so a caller sending
+  // 2 rather than 2.0 works.
+  const std::optional<double> dsf = dict->FindDouble("deviceScaleFactor");
+
+  CbViewportSpec requested;
+  requested.size_dip = gfx::Size(*width, *height);
+  requested.device_scale_factor =
+      dsf ? static_cast<float>(*dsf) : kViewportKeepCurrentScale;
+
+  const CbViewportSpec applied = set_viewport_callback_.Run(requested);
+
+  // Load-bearing marker for the deploy strings-gate, matching
+  // CV2-CAPTURE-STATS: `grep -a CV2-VIEWPORT <binary>` proves the build
+  // carries this method, which is how we tell a stale guest image from a
+  // physics-side wiring bug when a resize does nothing.
+  LOG(INFO) << "CV2-VIEWPORT: Cb.setViewport requested "
+            << requested.size_dip.ToString() << " @"
+            << requested.device_scale_factor << "x -> applied "
+            << applied.size_dip.ToString() << " @"
+            << applied.device_scale_factor << "x";
+
+  return EncodeSetViewportResponse(applied.size_dip,
+                                   applied.device_scale_factor);
 }
 
 std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartNativeSession(

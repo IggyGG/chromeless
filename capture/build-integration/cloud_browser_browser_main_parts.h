@@ -73,6 +73,7 @@
 #include "capture/build-integration/cb_file_upload_relay.h"
 #include "capture/build-integration/cb_input_dispatch.h"
 #include "capture/build-integration/cb_input_dispatch_composite.h"
+#include "capture/build-integration/cb_viewport_controller.h"  // CbViewportSpec (by value)
 #include "capture/signaling/cb_ice_config.h"        // CV2-WARM — NativeSessionConfig::ice
 #include "capture/signaling/cb_offerer_driver.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
@@ -260,6 +261,12 @@ class CloudBrowserBrowserMainParts
   //       (H1). The env-boot path is unaffected by that scope (no-op there).
   webrtc::RTCError StartNativeSession(const NativeSessionConfig& cfg);
 
+  // Apply a viewport (Cb.setViewport dispatch target). Returns the spec
+  // ACTUALLY applied, which may be clamped — the CDP handler puts that on
+  // the wire so physics can see its request was adjusted instead of
+  // assuming it landed verbatim. Safe before the capture pipeline exists.
+  CbViewportSpec SetViewport(const CbViewportSpec& spec);
+
  private:
   // CV2-CAPTURE-REARM: re-arm the FrameSink capturer after a
   // cross-document navigation swapped the captured WebContents'
@@ -353,6 +360,14 @@ class CloudBrowserBrowserMainParts
   // aura_ — declared AFTER aura_ (reverse-order destruction) AND explicitly
   // reset() in PostMainMessageLoopRun before aura_.release().
   std::unique_ptr<CbBeginFrameDriver> begin_frame_driver_;
+
+  // Viewport / resize. Holds RAW pointers to screen_, aura_ and (once
+  // injected) the capturer inside cb_track_source_, so it must not
+  // outlive any of them. PostMainMessageLoopRun resets it explicitly
+  // before all three; the declaration position here makes reverse-order
+  // destruction agree with that, so the invariant survives a member
+  // reshuffle. Owns nothing itself.
+  std::unique_ptr<CbViewportController> viewport_controller_;
 
   // Drives PollOutboundRtpStats() every 2s once ICE connects. Armed once
   // (guarded by rtp_stats_timer_armed_) on the first kIceConnectionConnected

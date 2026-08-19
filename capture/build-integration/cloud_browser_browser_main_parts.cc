@@ -43,6 +43,7 @@
 #include "capture/build-integration/cb_control_channel.h"
 #include "capture/build-integration/cb_cursor_xy_join.h"
 #include "capture/build-integration/cb_headless_screen.h"  // CV2-78
+#include "capture/build-integration/cb_viewport_controller.h"
 #include "capture/build-integration/cb_javascript_dialog_manager.h"
 #include "capture/build-integration/cb_web_contents_delegate.h"
 #include "capture/build-integration/cloud_browser_browser_context.h"
@@ -240,6 +241,9 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
     viz::FrameSinkId frame_sink_id) {
   if (!web_contents || !frame_sink_id.is_valid()) {
     active_webcontents_resolver_.SetActiveCapture(nullptr, viz::FrameSinkId());
+    if (viewport_controller_) {
+      viewport_controller_->SetTargetWebContents(nullptr);
+    }
     LOG(WARNING) << "CV2-81: active capture cleared by invalid "
                     "SetActiveCapture input";
     return;
@@ -247,6 +251,14 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
 
   web_contents->Focus();
   active_webcontents_resolver_.SetActiveCapture(web_contents, frame_sink_id);
+
+  // The viewport follows the captured tab: a resize must resize whatever
+  // is on screen, and after a tab switch that is a different WebContents.
+  // Without this the controller would keep resizing the tab the user
+  // navigated away from.
+  if (viewport_controller_) {
+    viewport_controller_->SetTargetWebContents(web_contents);
+  }
   if (screen_ && input_delegate_) {
     screen_->SetLastPointerSource(input_delegate_->last_pointer_state());
   }
@@ -424,6 +436,14 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   if (screen_) {
     screen_->SetRootWindow(aura_root_window());
   }
+
+  // Viewport controller — the single owner of "how big is the browser".
+  // Constructed here, right after the display and the aura host exist and
+  // before any WebContents does, so nothing can observe a half-applied
+  // viewport. The track source does not exist yet (the capture pipeline
+  // is built in step 5b); it is injected via SetTrackSource once it does.
+  viewport_controller_ = std::make_unique<CbViewportController>(
+      screen_.get(), aura_.get(), /*track_source=*/nullptr);
 
   // Note for CV2-75 (M5 R1 / CbCursorClient): the cursor-client is
   // ALREADY constructed + registered by CbAuraPlatformData's ctor
@@ -732,6 +752,14 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
 
+  // The capture pipeline now exists, so the viewport controller can reach
+  // it. Until this point Apply() updates the display + aura host and skips
+  // the capturer step; the resolution it stored is picked up by the first
+  // capture start.
+  if (viewport_controller_) {
+    viewport_controller_->SetTrackSource(cb_track_source_.get());
+  }
+
   // CV2 idle-refresh: enable the capturer's constant-frame-rate hold-and-repeat
   // so WebRTC keeps streaming the last painted frame when the captured renderer
   // goes IDLE and stops committing CompositorFrames. THE DEFECT (byte-proven on
@@ -875,6 +903,21 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
 // the synchronous signaling_thread_->BlockingCall (audio transceiver) is legal
 // when this runs from a CDP HandleCommand task (per-task DisallowBaseSync-
 // Primitives is active there). The scope is a no-op on the env-boot path.
+CbViewportSpec CloudBrowserBrowserMainParts::SetViewport(
+    const CbViewportSpec& spec) {
+  if (!viewport_controller_) {
+    // Pre-construction (before PreMainMessageLoopRun step 1) or post-
+    // teardown. Echo the request back rather than inventing a value: the
+    // caller learns nothing was applied by observing that nothing changed,
+    // and we avoid claiming a geometry that no layer actually holds.
+    LOG(WARNING) << "CloudBrowserBrowserMainParts::SetViewport: no viewport "
+                    "controller (pre-init or post-teardown); ignoring request "
+                 << spec.size_dip.ToString();
+    return spec;
+  }
+  return viewport_controller_->Apply(spec, "Cb.setViewport");
+}
+
 webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
     const NativeSessionConfig& cfg) {
   // Idempotency guard — reject a second bring-up without mutating state.
@@ -1297,6 +1340,14 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // leaked at the bottom of this fn, but the driver must still stop ticking the
   // compositor before the WebContents frame-sink hierarchy it drives unwinds.)
   begin_frame_driver_.reset();
+
+  // The viewport controller holds RAW pointers to screen_, aura_ and the
+  // capturer owned by cb_track_source_ — every one of which is torn down
+  // (or, for aura_, deliberately leaked) below. It owns nothing and has no
+  // timers, so dropping it is cheap; doing it HERE rather than relying on
+  // member-declaration order is what keeps that true if someone later
+  // reorders the members. Nothing may call Apply() after this point.
+  viewport_controller_.reset();
 
   // ChromelessV2 M2 R4 (CV2-39): drop the video track source, before pcf_.
   // The track source's broadcaster carries sink registrations the M3 peer

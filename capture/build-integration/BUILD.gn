@@ -1144,6 +1144,12 @@ source_set("embedder") {
     # the bare ScreenBase that PreEarlyInitialization was constructing.
     "cb_headless_screen.cc",
     "cb_headless_screen.h",
+    # Viewport / resize. Lives in :embedder rather than its own
+    # source_set because it coordinates CbAuraPlatformData and
+    # CbHeadlessScreen, both of which are in here — a separate set
+    # would have to depend on :embedder, which depends on it.
+    "cb_viewport_controller.cc",
+    "cb_viewport_controller.h",
     "cb_window_parenting_client.cc",
     "cb_window_parenting_client.h",
     "cloud_browser_browser_context.cc",

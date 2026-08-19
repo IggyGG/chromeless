@@ -49,6 +49,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "capture/build-integration/cb_viewport_controller.h"  // CbViewportSpec
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "content/public/browser/devtools_manager_delegate.h"
 
@@ -148,6 +149,8 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // contract as track_source_getter_ (main_parts out-lives the delegate's
   // useful window; the callback only runs inside an active CDP session). A
   // null/empty callback yields a ServerError on the wire rather than a UAF.
+  // |set_viewport_callback| applies a live resize at Cb.setViewport dispatch
+  // time. Same Unretained(main_parts_) contract; null/empty → ServerError.
   explicit CbDevToolsManagerDelegate(
       content::BrowserContext* default_browser_context = nullptr,
       aura::Window* aura_context_window = nullptr,
@@ -156,7 +159,9 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       base::RepeatingCallback<void(content::WebContents*, viz::FrameSinkId)>
           active_capture_callback = {},
       base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
-          start_native_session_callback = {});
+          start_native_session_callback = {},
+      base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
+          set_viewport_callback = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -275,6 +280,17 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
       const crdtp::Dispatchable& dispatchable,
       std::string* out_error);
 
+  // Implementation of Cb.setViewport — live resize. Parses {width, height,
+  // deviceScaleFactor?} out of |dispatchable|'s CBOR Params() and invokes
+  // set_viewport_callback_. Responds with the viewport ACTUALLY applied,
+  // which may be clamped; callers are expected to read it back rather than
+  // assume their request was honoured. Unwired callback or missing
+  // width/height → |out_error| + empty vector (caller emits
+  // CreateErrorResponse).
+  std::vector<uint8_t> HandleSetViewport(
+      const crdtp::Dispatchable& dispatchable,
+      std::string* out_error);
+
   // Lazy resolver for the browser-process video track source
   // (ChromelessV2 M2 R3/R4). Run() at Cb.startFrameSinkCapture dispatch
   // time — NOT snapshotted at construction (see the ctor doc for the
@@ -304,6 +320,14 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // as track_source_getter_. Null/empty → ServerError on the wire.
   base::RepeatingCallback<webrtc::RTCError(const NativeSessionConfig&)>
       start_native_session_callback_;
+
+  // Applies a viewport at Cb.setViewport dispatch time.
+  // base::BindRepeating(&CloudBrowserBrowserMainParts::SetViewport,
+  // base::Unretained(main_parts_)). Returns the spec actually applied.
+  // Same lifetime contract as track_source_getter_. Null/empty →
+  // ServerError on the wire.
+  base::RepeatingCallback<CbViewportSpec(const CbViewportSpec&)>
+      set_viewport_callback_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser
