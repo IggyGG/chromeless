@@ -65,7 +65,7 @@ bool CbControlChannel::IsChannelOpen() const {
 }
 
 void CbControlChannel::SendRequest(const std::string& kind,
-                                   base::Value::Dict payload,
+                                   base::DictValue payload,
                                    base::TimeDelta deadline,
                                    CbControlResponseCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(ui_sequence_checker_);
@@ -80,18 +80,18 @@ void CbControlChannel::SendRequest(const std::string& kind,
   if (!IsChannelOpen()) {
     VLOG(1) << "CbControlChannel: " << kind
             << " request while channel closed — applying default";
-    std::move(callback).Run(base::Value::Dict());
+    std::move(callback).Run(base::DictValue());
     return;
   }
 
   const std::string id = base::NumberToString(++next_request_id_);
 
-  base::Value::Dict data = std::move(payload);
+  base::DictValue data = std::move(payload);
   data.Set("id", id);
   data.Set("kind", kind);
   data.Set("deadline_ms", static_cast<int>(deadline.InMilliseconds()));
 
-  base::Value::Dict envelope;
+  base::DictValue envelope;
   envelope.Set("v", kProtocolVersion);
   envelope.Set("type", kTypeRequest);
   envelope.Set("t", static_cast<double>(NowMs()));
@@ -102,7 +102,7 @@ void CbControlChannel::SendRequest(const std::string& kind,
   if (!base::JSONWriter::Write(base::Value(std::move(envelope)), &json)) {
     LOG(ERROR) << "CbControlChannel: failed to serialise " << kind
                << " request — applying default";
-    std::move(callback).Run(base::Value::Dict());
+    std::move(callback).Run(base::DictValue());
     return;
   }
 
@@ -125,7 +125,7 @@ void CbControlChannel::SendRequest(const std::string& kind,
                      }
                      LOG(WARNING) << "CbControlChannel: request " << id
                                   << " timed out — applying default";
-                     self->ResolvePending(id, base::Value::Dict());
+                     self->ResolvePending(id, base::DictValue());
                    },
                    weak_factory_.GetWeakPtr(), id));
 
@@ -145,22 +145,22 @@ void CbControlChannel::SendRequest(const std::string& kind,
                          << " (" << message << ") — applying default";
             // Resolve now rather than making the page wait out the full
             // deadline for an answer that provably cannot arrive.
-            self->ResolvePending(id, base::Value::Dict());
+            self->ResolvePending(id, base::DictValue());
           },
           weak_factory_.GetWeakPtr(), id));
 }
 
 void CbControlChannel::SendEvent(const std::string& kind,
-                                 base::Value::Dict payload) {
+                                 base::DictValue payload) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(ui_sequence_checker_);
   if (!IsChannelOpen()) {
     return;  // Nothing depends on a notice arriving.
   }
 
-  base::Value::Dict data = std::move(payload);
+  base::DictValue data = std::move(payload);
   data.Set("kind", kind);
 
-  base::Value::Dict envelope;
+  base::DictValue envelope;
   envelope.Set("v", kProtocolVersion);
   envelope.Set("type", kTypeEvent);
   envelope.Set("t", static_cast<double>(NowMs()));
@@ -199,13 +199,13 @@ void CbControlChannel::CancelAllPending() {
       entry.deadline_timer->Stop();
     }
     if (entry.callback) {
-      std::move(entry.callback).Run(base::Value::Dict());
+      std::move(entry.callback).Run(base::DictValue());
     }
   }
 }
 
 void CbControlChannel::ResolvePending(const std::string& id,
-                                      base::Value::Dict response) {
+                                      base::DictValue response) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(ui_sequence_checker_);
   auto it = pending_.find(id);
   if (it == pending_.end()) {
@@ -254,7 +254,7 @@ void CbControlChannel::HandleInboundJson(const std::string& raw) {
                     "— dropped";
     return;
   }
-  const base::Value::Dict& envelope = parsed->GetDict();
+  const base::DictValue& envelope = parsed->GetDict();
 
   const std::optional<int> v = envelope.FindInt("v");
   if (!v || *v != kProtocolVersion) {
@@ -269,7 +269,7 @@ void CbControlChannel::HandleInboundJson(const std::string& raw) {
             << (type ? *type : "<missing>");
     return;
   }
-  const base::Value::Dict* data = envelope.FindDict("data");
+  const base::DictValue* data = envelope.FindDict("data");
   if (!data) {
     LOG(WARNING) << "CbControlChannel: response missing data — dropped";
     return;

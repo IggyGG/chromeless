@@ -99,7 +99,7 @@ void CbJavaScriptDialogManager::AskOrDefault(
     return;
   }
 
-  base::Value::Dict payload;
+  base::DictValue payload;
   payload.Set("dialog_type", dialog_type_name);
   payload.Set("message", TruncateUtf8(message_text));
   payload.Set("default_prompt", TruncateUtf8(default_prompt_text));
@@ -109,7 +109,7 @@ void CbJavaScriptDialogManager::AskOrDefault(
       "js_dialog", std::move(payload), kDialogDeadline,
       base::BindOnce(
           [](DialogClosedCallback cb, bool default_accept,
-             base::Value::Dict response) {
+             base::DictValue response) {
             // An empty dict is the "no answer" signal — closed channel,
             // timeout, or teardown. Fall back to the type's safe default
             // rather than to a permissive one.
@@ -155,7 +155,7 @@ void CbJavaScriptDialogManager::RunBeforeUnloadDialog(
   // stopped forwarding the page's custom string years ago (it was a
   // phishing vector), so the viewer renders its own copy. We pass the
   // reload bit so the overlay can say "reload" vs "leave".
-  base::Value::Dict payload;
+  base::DictValue payload;
   payload.Set("is_reload", is_reload);
 
   if (!control_channel_) {
@@ -173,7 +173,7 @@ void CbJavaScriptDialogManager::RunBeforeUnloadDialog(
   control_channel_->SendRequest(
       "js_dialog", std::move(payload), kDialogDeadline,
       base::BindOnce(
-          [](DialogClosedCallback cb, base::Value::Dict response) {
+          [](DialogClosedCallback cb, base::DictValue response) {
             const std::optional<bool> accept = response.FindBool("accept");
             // Default true: see the header — refusing the navigation on an
             // unattended session strands the guest on a page it was told

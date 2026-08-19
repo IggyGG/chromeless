@@ -169,16 +169,84 @@ Call `rwh->FilterDropData(&drop_data)` before both `DragTargetDragEnter` and
 ### content::DropData field types
 `content/public/common/drop_data.h`
 ```cpp
-GURL url;                                                    // :42
+std::vector<ui::ClipboardUrlInfo> url_infos;                 // :93
 std::vector<ui::FileInfo> filenames;                         // :106
 std::optional<std::u16string> text;                          // :117
 std::optional<std::u16string> html;                          // :122
 std::unordered_map<std::u16string, std::u16string> custom_data;  // :132
 ```
+
+⚠️ **CORRECTED 2026-08-19 — this file previously listed `GURL url; // :42`
+and that was WRONG.** Line 42 is `FileSystemFileInfo::url`, a field of a
+NESTED struct; `DropData` itself has no top-level `url`. The build failed
+with *"no member named 'url' in 'content::DropData'"*.
+
+At 7727 the single-valued URL is `std::vector<ui::ClipboardUrlInfo>
+url_infos` (`ui/base/clipboard/clipboard_url_info.h`: `{GURL url;
+std::u16string title;}`), so `//ui/base` is needed for that header too.
+The vector is strictly better here — the old single-valued field meant a
+multi-URL drag silently kept only the last item.
+
+**Reading a line number out of a header is not the same as reading the
+struct.** Grep for the field, then check what scope it is actually in.
 ⚠️ The existing `TODO` in `cb_input_dispatch_drag.cc:551` guessing
 `content::DropData::FileInfo` is **stale** — it is `ui::FileInfo`
 (`ui/base/clipboard/file_info.h`), so `//ui/base` must be added to that
 `source_set`'s deps.
+
+---
+
+## base::Value — the dictionary type is `base::DictValue`
+
+⚠️ **`base::Value::Dict` DOES NOT EXIST at 7727.** `DictValue` and
+`ListValue` are namespace-level `base::` classes declared *before* `class
+Value` (`base/values.h:247` and `:48`), not nested types. There is no
+back-compat alias.
+
+```cpp
+base::DictValue d;              // NOT base::Value::Dict
+base::ListValue l;              // NOT base::Value::List
+```
+
+The pinned tree contains **1326** uses of `base::DictValue` and **zero** of
+`base::Value::Dict`. Our own already-compiling code uses the right one, and
+`capture/signaling/cb_wire_envelope.h:171` even documents the rename — the
+Wave 1 files were written against the older spelling anyway and cost a build
+cycle. Cost: ~25 errors across three files, all from this one name.
+
+Constructing one needs the full `base/values.h`; a forward declaration is
+not enough.
+
+---
+
+## blink::mojom::StreamDevicesSet needs the FULL mojom header
+
+`content/public/browser/media_stream_request.h` includes only
+`media_stream.mojom-**shared**.h`, which is enough to NAME the type in a
+callback signature but not to CONSTRUCT one — you get *"invalid use of
+incomplete type"*. Add:
+
+```cpp
+#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
+```
+
+That is what every in-tree caller building a `StreamDevicesSet` does (e.g.
+`content/browser/media/captured_surface_controller.cc:22`).
+
+---
+
+## webrtc: sender() returns a scoped_refptr
+
+`RtpTransceiverInterface::sender()` is
+`virtual scoped_refptr<RtpSenderInterface> sender() const`
+(`third_party/webrtc/api/rtp_transceiver_interface.h:78`) — **not** a raw
+pointer. Assigning it to `RtpSenderInterface*` fails with *"no viable
+conversion"*. Hold the refptr:
+
+```cpp
+webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender =
+    transceiver->sender();
+```
 
 ---
 

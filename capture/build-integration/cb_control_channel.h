@@ -96,7 +96,7 @@ namespace cloud_browser {
 // did not answer" and fall back to their own safe default, not to a
 // permissive one.
 using CbControlResponseCallback =
-    base::OnceCallback<void(base::Value::Dict response)>;
+    base::OnceCallback<void(base::DictValue response)>;
 
 class CbControlChannel : public webrtc::DataChannelObserver {
  public:
@@ -123,14 +123,14 @@ class CbControlChannel : public webrtc::DataChannelObserver {
   //
   // Must be called on the UI sequence.
   void SendRequest(const std::string& kind,
-                   base::Value::Dict payload,
+                   base::DictValue payload,
                    base::TimeDelta deadline,
                    CbControlResponseCallback callback);
 
   // Fire-and-forget notice. No id, no reply, no bookkeeping. Silently
   // dropped when the channel is closed — by definition nothing depends on
   // it arriving.
-  void SendEvent(const std::string& kind, base::Value::Dict payload);
+  void SendEvent(const std::string& kind, base::DictValue payload);
 
   // Resolve every in-flight request with its default (an empty dict).
   // Idempotent. Call on channel close, WebContents destruction, and
@@ -166,7 +166,7 @@ class CbControlChannel : public webrtc::DataChannelObserver {
   // No-op when |id| is unknown, which is what makes the response /
   // timeout / cancel race benign: the first one through wins, the losers
   // find nothing.
-  void ResolvePending(const std::string& id, base::Value::Dict response);
+  void ResolvePending(const std::string& id, base::DictValue response);
 
   // Signaling-thread half of OnMessage: parse, then hop.
   void HandleInboundJson(const std::string& raw);

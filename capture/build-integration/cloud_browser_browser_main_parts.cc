@@ -1256,7 +1256,10 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
       // tank to single-digit fps rather than degrade to a smaller picture.
       // That is the intended trade; the fix for it is vCPUs, not a
       // different preference here.
-      webrtc::RtpSenderInterface* video_sender = tx_result.value()->sender();
+      // sender() returns a scoped_refptr, not a raw pointer — hold the
+      // ref for the duration of the Get/Set pair.
+      webrtc::scoped_refptr<webrtc::RtpSenderInterface> video_sender =
+          tx_result.value()->sender();
       if (video_sender) {
         webrtc::RtpParameters params = video_sender->GetParameters();
         params.degradation_preference =

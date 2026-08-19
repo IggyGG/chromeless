@@ -26,6 +26,7 @@
 #include "third_party/blink/public/common/page/drag_operation.h"
 #include "third_party/blink/public/mojom/drag/drag.mojom-shared.h"
 #include "ui/base/clipboard/file_info.h"  // ui::FileInfo for DropData::filenames
+#include "ui/base/clipboard/clipboard_url_info.h"  // ui::ClipboardUrlInfo for DropData::url_infos
 #include "ui/gfx/geometry/point_f.h"
 #include "url/gurl.h"
 
@@ -588,12 +589,18 @@ void CbInputDispatchDrag::BuildDropData(content::DropData* out) const {
       // and also mirror the raw payload into custom_data so getData() sees
       // the exact bytes the client sent.
       //
-      // PRINCIPAL-RISK (unchanged from the draft): DropData.url is single-
-      // valued, so with multiple uri-list items the LAST one wins on .url.
-      // custom_data has the same collision. A multi-URL drag therefore
-      // degrades to its final URL on the convenience accessor. v2 wants a
-      // proper uri-list channel.
-      out->url = GURL(item.data);
+      // The single-valued DropData::url is GONE at 7727 — it is now
+      // `std::vector<ui::ClipboardUrlInfo> url_infos` (drop_data.h:93,
+      // {GURL url; std::u16string title;}). That retires the PRINCIPAL-RISK
+      // this block used to carry: .url was single-valued, so a multi-URL
+      // drag silently degraded to whichever uri-list item happened to come
+      // last. Appending preserves all of them in order.
+      //
+      // custom_data still collides by MIME type — one text/uri-list entry
+      // holds the raw payload the client sent, which is what getData()
+      // reads. That is unchanged and intentional.
+      out->url_infos.push_back(
+          ui::ClipboardUrlInfo{GURL(item.data), std::u16string()});
       out->custom_data[base::UTF8ToUTF16(item.type)] = data16;
     } else {
       // Application MIME — text/custom or vendor-specific. Lands in

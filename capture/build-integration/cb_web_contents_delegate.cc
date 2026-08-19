@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "base/logging.h"
+#include "base/values.h"
 #include "base/no_destructor.h"
 #include "capture/build-integration/cb_control_channel.h"
 #include "capture/build-integration/cb_javascript_dialog_manager.h"
@@ -17,6 +18,13 @@
 // (StreamDevicesSet, MediaStreamRequestResult) — this header pulls in the
 // mojom for both (media_stream_request.h:14-15).
 #include "content/public/browser/media_stream_request.h"
+// media_stream_request.h pulls only media_stream.mojom-SHARED.h, which
+// forward-declares StreamDevicesSet without defining it — enough to name
+// the type in the callback signature, not enough to CONSTRUCT one. The
+// full mojom header is what every in-tree caller that builds a
+// StreamDevicesSet includes (e.g. content/browser/media/
+// captured_surface_controller.cc:22).
+#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/render_frame_host.h"
@@ -156,7 +164,7 @@ void CbWebContentsDelegate::EnterFullscreenModeForTab(
   // Tell the viewer so it can hide its own browser chrome and give the
   // stream the whole panel.
   if (control_channel_) {
-    base::Value::Dict payload;
+    base::DictValue payload;
     payload.Set("fullscreen", true);
     control_channel_->SendEvent("fullscreen_changed", std::move(payload));
   }
@@ -168,7 +176,7 @@ void CbWebContentsDelegate::ExitFullscreenModeForTab(
     fullscreen_contents_ = nullptr;
   }
   if (control_channel_) {
-    base::Value::Dict payload;
+    base::DictValue payload;
     payload.Set("fullscreen", false);
     control_channel_->SendEvent("fullscreen_changed", std::move(payload));
   }
