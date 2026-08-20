@@ -306,11 +306,23 @@ spec:
               value: "x264"
           resources:
             requests:
-              # cpu 6 (not 12) to fit triform-8's actual headroom
-              # ~6.7 free CPU after triform-tf workspace + isolation
-              # builders + longhorn instance-manager. Limit stays at
-              # 40 so autoninja bursts into idle CPU when peers leave.
-              cpu: "6"
+              # cpu 2, matching the t7 lane. This number has been fitted
+              # to observed headroom twice (12 -> 6 on 2026-06-10 when t8
+              # had ~6.7 free) and gone stale both times, because it was
+              # sized against a snapshot of OTHER teams' pods rather than
+              # against what the build consumes.
+              #
+              # 2 is the MEASURED figure, not another snapshot: the t7 lane
+              # runs the identical 10-target build at cpu 2 and completed a
+              # full green build on 2026-08-19. The request only has to buy
+              # admission; the 40-core limit is what lets autoninja burst
+              # into idle CPU, and that is unchanged.
+              #
+              # Sizing a REQUEST against a neighbour's current usage is the
+              # bug: on 2026-08-20 t8 had 2755m free, so the 6 that fit in
+              # June could not schedule at all, and the chromeless build
+              # had nowhere left to run (t7 was at 465m).
+              cpu: "2"
               # MEASURED, not guessed. A full build of this target list peaks at
               # ~57 GiB (kubectl top, sampled through compile + link on
               # 2026-08-19: steady ~50 GiB, peak 56,963 Mi). The request was
