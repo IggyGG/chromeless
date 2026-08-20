@@ -336,6 +336,33 @@ spec:
               # a third of the node. Same reasoning main applied to CPU in
               # e654ed6 (4 -> 2), where requests ran ~10x actual usage.
               memory: "72Gi"
+              # Explicit ephemeral REQUEST decoupled from the 8Gi limit.
+              # The t7 lane fixed exactly this on 2026-07-02; t8 never got
+              # the same treatment, so the defect stayed live here for
+              # seven weeks and surfaced as a build that could not start.
+              #
+              # A limit with NO request makes K8s mirror an implicit 8Gi
+              # request, and t8 is ~92% ephemeral-RESERVED (83.2Gi of 88Gi
+              # allocatable), so the 8Gi ask fails admission outright:
+              #   "Node didn't have enough resource: ephemeral-storage,
+              #    requested: 8589934592, used: 87258300416"
+              # The pod is rejected instantly and the Job just burns
+              # retries -- there is no log to read, which is why this
+              # reads as a mysteriously dead lane rather than a full disk.
+              #
+              # The reservation is fiction, and that is the point. Measured
+              # on t8 2026-08-20: 81Gi of ephemeral RESERVATIONS across the
+              # node correspond to 2.5Gi of actual use, and this build's own
+              # writable layer is 522Mi -- debian base 82Mi + 440Mi of apt
+              # deps, measured with a probe pod running this lane's exact
+              # apt-get line, not estimated. All heavy I/O (chromium tree,
+              # out/, sccache, artifacts) lives on the /work hostPath and
+              # never touches container ephemeral storage.
+              #
+              # 512Mi is the schedulability floor, matching t7. The 8Gi
+              # LIMIT still governs burst, so this cannot regress into a
+              # pod that fills the node disk.
+              ephemeral-storage: "512Mi"
             limits:
               cpu: "40"
               memory: "192Gi"

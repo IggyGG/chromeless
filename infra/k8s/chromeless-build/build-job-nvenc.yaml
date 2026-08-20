@@ -400,6 +400,17 @@ spec:
             requests:
               cpu: "16"
               memory: "96Gi"
+              # Explicit ephemeral REQUEST decoupled from the 8Gi limit.
+              # A limit with NO request makes K8s mirror an implicit 8Gi
+              # request; on a node that is ~92% ephemeral-RESERVED that
+              # fails admission instantly (OutOfephemeral-storage) and the
+              # Job silently burns retries with no log to read. The t7 lane
+              # hit this 2026-07-02, the t8 lane hit it 2026-08-20; these
+              # three lanes carried the same defect latent. Measured: this
+              # image's writable layer is 522Mi (debian 82Mi + 440Mi apt),
+              # and all heavy I/O is on the /work hostPath. 512Mi is the
+              # schedulability floor; the 8Gi LIMIT still governs burst.
+              ephemeral-storage: "512Mi"
             limits:
               cpu: "16"
               memory: "96Gi"

@@ -4,8 +4,9 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets test-interactive \
-        lint-runtime-contracts lint-tests-wired test test-unit test-integration \
+.PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
+        lint-runtime-contracts lint-tests-wired lint-pod-resources \
+        test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
         test-unit-signaling test-unit-client test-unit-harness \
@@ -21,6 +22,7 @@ help:
 	@echo "                           # that would otherwise fail 4-8 h into a build"
 	@echo "  make lint-workflows      # every 'uses:' must exist on the CI action mirror"
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
+	@echo "  make lint-pod-resources  # ephemeral-storage limit implies a reservation"
 	@echo "  make test-interactive    # real Chrome + real worker (needs a live stack)"
 	@echo "  make lint-runtime-contracts # hermetic launcher/runtime contracts"
 	@echo ""
@@ -59,7 +61,7 @@ verify: lint test-unit test-integration
 # ---- lint ------------------------------------------------------------------
 
 lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts \
-      lint-tests-wired lint-silent-noop
+      lint-tests-wired lint-silent-noop lint-pod-resources
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -126,6 +128,29 @@ lint-silent-noop:
 	@python3 tools/lint/test_silent_noop_lint.py >/dev/null && \
 	  echo "    self-test: both arms pass" || \
 	  { echo "    self-test FAILED — the lint cannot be trusted"; exit 1; }
+
+# An ephemeral-storage LIMIT with no REQUEST is a RESERVATION, because K8s
+# mirrors the omitted request from the limit. On a node that is already
+# heavily ephemeral-reserved the pod is rejected at admission -- which means
+# no container, and therefore NO LOG. The Job retries and every attempt dies
+# identically, so the lane reads as mysteriously dead rather than as a
+# resource problem. That gap between symptom and cause is why this is a lint.
+#
+# Measured on triform-8 2026-08-20: 81Gi of ephemeral RESERVATIONS across the
+# node corresponded to 2.5Gi of ACTUAL use, and the build image's writable
+# layer is 522Mi. The reservations were fiction and the build could not run.
+#
+# Fixed three times as an instance and never as a class: kaniko-push
+# (2026-06-29), build-job-x264-t7 (2026-07-02), build-job-x264/t8
+# (2026-08-20). Three further lanes (nvenc, vaapi, x264-t2) and three
+# validation Jobs were found carrying it latent, never having been fired on
+# a full node. Same defect, six directories over, same fix.
+lint-pod-resources:
+	@echo ">>> pod resource request lint"
+	@python3 tools/lint/pod_resource_request_lint.py infra
+	@python3 tools/lint/test_pod_resource_request_lint.py >/dev/null 2>&1 && \
+	  echo ">>> pod-resource-request-lint self-tests pass" || \
+	  { echo "!!! pod-resource-request-lint SELF-TESTS FAILED — the linter itself is broken"; exit 1; }
 
 lint-runtime-contracts:
 	@echo ">>> runtime contracts"
