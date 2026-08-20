@@ -312,6 +312,44 @@ Two specific forms worth memorising:
   ALARM — which trains everyone to ignore the check that would have caught the
   real thing. Anchor on structure.
 
+### Ask the repo how it lands changes before diagnosing why it didn't
+
+Sibling repos land changes differently, and guessing costs hours. In
+`tf-multiverse` a PR does **not** land by merging it: a merge train does, and
+every commit on `dev` is a `lane candidate: pr-NNNNN`. A PR nobody submitted
+sits open forever with green checks and looks wedged.
+
+The tools say so directly, and each answer is one command:
+
+```sh
+scripts/lane-submit --pr N --status   # NOT_ENROLLED / PENDING_INGEST / QUEUED
+scripts/fj pr status N                # names the gate AND the remedy, authoritative
+```
+
+`scripts/lane-submit` is the landing step (`dev-merge` execs it —
+`tf-multiverse/CLAUDE.md:106`), and `docs/runbooks/landing-routes.md` exists
+precisely for "my PR will not move".
+
+**This was written after spending hours attributing two stuck PRs to a Forgejo
+defect.** They were `NOT_ENROLLED`. The evidence against the theory was already
+in hand — other PRs had landed the same day carrying the same
+`pull_request.status=1` that was supposedly blocking mine — and the correct
+mechanism was documented in the sibling repo's own `CLAUDE.md`, which is the
+first file the instructions say to read.
+
+Two habits that would have caught it:
+
+- **When a contradiction appears in your own data, chase it immediately.** "The
+  thing I claim is blocking has demonstrably not blocked others" is a refutation,
+  not a curiosity.
+- **A per-repo status tool beats a general theory.** Before explaining why
+  something is stuck, run whatever the repo provides for reporting *why* — it
+  encodes the mechanism, so it cannot be wrong about it the way an inference can.
+
+Related failure mode: `lane-submit --status` reported `PENDING_INGEST` for a PR
+the ingester log showed it had already enqueued. The summary view lags; the log
+and lane membership are ground truth.
+
 ### A green PR that will not merge is probably not your PR
 
 `pull_request.status` (0=conflict, 1=checking, 2=mergeable) is separate from
