@@ -223,14 +223,28 @@ jobs:
           #
           # Credit: session unblock-goldens-portal-gates found this while
           # root-causing the same lane (chromeless #72).
-          if ! docker compose -f infra/compose.yaml --profile observability up -d --wait; then
+          # NOT --profile observability. That profile is prometheus +
+          # grafana + jaeger, and no e2e spec reads any of them — nothing
+          # outside tests/e2e/node_modules even names them.
+          #
+          # It was also actively harmful. dind-gc on the CI runners prunes
+          # /var/lib/docker above a high-water mark, and its image age filter
+          # keys on an image's BUILD time, so a stable upstream tag is
+          # evictable the instant it lands. Task 339197 pulled
+          # prom/prometheus:v2.55.1 (built 2024-11-06) at 09:43:13 and died at
+          # 09:45:07 with `No such image: prom/prometheus:v2.55.1` — 114
+          # seconds later, in the same run, over a service no spec uses. Reads
+          # exactly like a bad tag; it is not.
+          #
+          # These were 3 of the 5 at-risk images in this lane.
+          if ! docker compose -f infra/compose.yaml up -d --wait; then
             echo "::error::docker compose up failed — dumping service state and logs"
             echo "::group::compose ps"
-            docker compose -f infra/compose.yaml --profile observability ps -a || true
+            docker compose -f infra/compose.yaml ps -a || true
             echo "::endgroup::"
-            for svc in $(docker compose -f infra/compose.yaml --profile observability config --services 2>/dev/null); do
+            for svc in $(docker compose -f infra/compose.yaml config --services 2>/dev/null); do
               echo "::group::logs ${svc}"
-              docker compose -f infra/compose.yaml --profile observability logs --tail 120 "${svc}" 2>&1 || true
+              docker compose -f infra/compose.yaml logs --tail 120 "${svc}" 2>&1 || true
               echo "::endgroup::"
             done
             exit 1
@@ -386,7 +400,7 @@ jobs:
           CHROMELESS_USER: e2e
           CHROMELESS_PASS: e2e-password
         run: |
-          docker compose -f infra/compose.yaml --profile observability down -v --remove-orphans || true
+          docker compose -f infra/compose.yaml down -v --remove-orphans || true
           # Belt-and-braces: compose `down` keys off project labels, which a
           # half-failed `up` may not have applied to every container.
           docker rm -f cbwrtc-chromium cbwrtc-signaling cbwrtc-client \
