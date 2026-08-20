@@ -339,6 +339,65 @@ this as understood — three separate confident explanations (starved consumer,
 arrival-only checking, a throughput deficit) were each refuted by re-reading
 the same PRs twenty minutes later.
 
+### A PR whose CI runs were pruned can never land
+
+Forgejo prunes `action_run` rows, but the commit **statuses** survive. So the
+API still lists a context as pending while the job that would report it no
+longer exists — and anything gating on that context waits forever.
+
+Measured 2026-08-20, two repos independently:
+
+```
+tf-multiverse #13906 (44aabf6d):  60 commit statuses,  0 jobs
+chromeless overall:              233 of 411 commits with statuses have 0 jobs
+```
+
+Diagnose by comparing the two tables for the same SHA — a context with no
+backing job is the signature:
+
+```sql
+SELECT count(*) FROM commit_status cs JOIN repository p ON p.id=cs.repo_id
+ WHERE p.name='chromeless' AND cs.sha LIKE '<sha>%';
+SELECT count(*) FROM action_run_job j JOIN action_run r ON r.id=j.run_id
+ JOIN repository p ON p.id=r.repo_id WHERE p.name='chromeless'
+   AND r.commit_sha LIKE '<sha>%';
+```
+
+Mostly harmless — old merged commits nobody waits on. It bites only when the
+orphaned commit is the HEAD of an **open** PR. The cure is a new commit, which
+schedules fresh runs.
+
+This is the THIRD distinct Forgejo defect on this instance, alongside the
+`status=1` wedge above and stale merge bases (`forgejo doctor check --run
+recalculate-merge-bases`). They are independent; fixing one does not touch the
+others. Unestablished: whether pruning is age-, count-, or GC-driven.
+
+### Put a known-positive in every probe
+
+An instrument that can only return one answer is not evidence. Before
+believing a measurement of absence, measure something you *know* is present
+with the same command.
+
+Three instances in two days, each nearly producing a false finding:
+
+- `strings <guest-image> | grep control` returned **0** — and would have been
+  reported as "this image has no channels at all". `strings` is not installed
+  in that image. The tell was probing `clipboard`, a channel known to be
+  there, and also getting 0. `grep -ac` then gave real numbers.
+- A `sed` meant to inject a defect into a lint's negative control silently
+  failed to match (12-space indent, not 14), so a clean file was compared
+  against itself and `clean / clean` was read as the two arms agreeing.
+- A repo-wide `grep` for a symbol returned nothing because the search was
+  running from a dead CWD, not because the symbol was absent.
+
+The cost is one extra probe. The saving is the difference between "the feature
+is missing" and "my instrument is missing", which are indistinguishable
+outputs from an unchecked tool.
+
+Same shape as the silent-no-op section above, one level up: there the *action*
+was skipped invisibly, here the *measurement* is. Ask both questions —
+did the thing run, and could my check have detected it if it had?
+
 ### When CI says your code is wrong, check whether it said so before
 
 An error message names a cause; it is not evidence of one. On 2026-08-19 disk
