@@ -61,6 +61,27 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
 
 ## Traps that have cost real time
 
+- **A resource LIMIT with no REQUEST is a RESERVATION, and its failure has
+  no log.** Kubernetes mirrors an omitted request from the limit, so
+  `limits: {ephemeral-storage: 8Gi}` reserves 8Gi at admission. On a node
+  that is already heavily reserved the pod is *rejected before it starts* —
+  no container, therefore no log — and the Job silently burns retries. The
+  lane reads as mysteriously dead rather than as a resource problem.
+
+  Fixed as an instance three times and never as a class (kaniko-push
+  2026-06-29, t7 2026-07-02, t8 2026-08-20) while three further build lanes
+  and three validation Jobs carried it latent. `make lint-pod-resources`
+  now fails on it.
+
+  The wider trap: **reservations here are fiction, so never size a request
+  against them.** Measured on triform-8, 2026-08-20 — 81Gi of ephemeral
+  reservations against 2.5Gi of actual use; the build's own writable layer
+  is 522Mi because all heavy I/O is on the `/work` hostPath. The same
+  mistake had already been made twice with cpu (12→6→2) and once with
+  memory (96Gi request against a measured 57Gi peak). Size a request
+  against **what your workload consumes**, measured; the limit is what
+  governs burst.
+
 - **A green build lane is green about a target list, not about the tree.**
   `capture/**/BUILD.gn` declares seven `test()` targets; for ~10 weeks three
   of them appeared in no build manifest at all. They were declared, reviewed,
