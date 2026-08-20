@@ -18,6 +18,7 @@
 import { InputChannel } from "./src/input.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
+import { attachControlChannel, type ControlChannelHandle } from "./src/control.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { resolveSignalingUrl } from "./src/config.js";
 import {
@@ -127,19 +128,23 @@ interface DemoAttachments {
   detachDrop: (() => void) | null;
   passthrough: CameraPassthrough | null;
   fileUpload: FileUploadChannel | null;
+  control: ControlChannelHandle | null;
 }
 
 let session: ChromelessSession | null = null;
 let attach: DemoAttachments = emptyAttachments();
 
 function emptyAttachments(): DemoAttachments {
-  return { detachInput: null, cursor: null, detachDrop: null, passthrough: null, fileUpload: null };
+  return { detachInput: null, cursor: null, detachDrop: null, passthrough: null, fileUpload: null, control: null };
 }
 
 function dropAttachments(): void {
   try { attach.detachInput?.(); } catch { /* ignore */ }
   try { attach.detachDrop?.(); } catch { /* ignore */ }
   try { attach.cursor?.dispose(); } catch { /* ignore */ }
+  // Drops any open prompt. A dialog left on screen after the peer is gone
+  // is a question nobody is listening to.
+  try { attach.control?.dispose(); } catch { /* ignore */ }
   // T81: stop camera/mic so tracks fire "ended" and the user-agent's
   // recording indicator clears; also the §T10 threat-model rule — no
   // silent re-sharing across a rebuild, a fresh click is required.
@@ -154,6 +159,7 @@ function wireDataChannel(dc: RTCDataChannel): void {
   if (dc.label === "input") return wireInputChannel(dc);
   if (dc.label === "cursor") return wireCursorChannel(dc);
   if (dc.label === "files") return wireFilesChannel(dc);
+  if (dc.label === "control") return wireControlChannel(dc);
   log("warn", `ignoring unknown data channel label: ${dc.label}`);
 }
 
@@ -163,6 +169,24 @@ function wireCursorChannel(dc: RTCDataChannel): void {
   dc.addEventListener("close", () => {
     try { attach.cursor?.dispose(); } catch { /* ignore */ }
     attach.cursor = null;
+  });
+}
+
+/**
+ * Wire the "control" RTCDataChannel — the guest's ask-a-human path.
+ *
+ * Until this existed the label fell through to "ignoring unknown data
+ * channel label", so every confirm() the streamed page raised was answered
+ * by the guest's own safe default and the user never saw it. The channel
+ * opened, a warning went to the console, and nothing distinguished that
+ * from working.
+ */
+function wireControlChannel(dc: RTCDataChannel): void {
+  attach.control?.dispose();
+  attach.control = attachControlChannel(dc, { log });
+  dc.addEventListener("close", () => {
+    try { attach.control?.dispose(); } catch { /* ignore */ }
+    attach.control = null;
   });
 }
 
