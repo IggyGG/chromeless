@@ -58,7 +58,7 @@ verify: lint test-unit test-integration
 # ---- lint ------------------------------------------------------------------
 
 lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts \
-      lint-tests-wired
+      lint-tests-wired lint-silent-noop
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -109,6 +109,22 @@ lint-build-targets:
 lint-tests-wired:
 	@echo ">>> tests-wired lint"
 	@python3 tools/lint/tests_wired_lint.py
+
+# Two idioms whose FAILURE is indistinguishable from success, both of which
+# shipped green while doing nothing:
+#   `if ! cmd; then rc=$$?`  — $$? is the negated pipeline's status, always 0,
+#                              so a failed step exits 0 and reports GREEN.
+#   `sed -n 'N,Mp' other/file | grep` — an assertion keyed to line numbers goes
+#                              stale as the file grows and fails as a FALSE
+#                              ALARM (58 failures / 45 PRs, 2026-08-19).
+# Self-tested against the real historical defects: a lint that has never fired
+# is indistinguishable from one that cannot fire, which is this very bug.
+lint-silent-noop:
+	@echo ">>> silent no-op lint"
+	@python3 tools/lint/silent_noop_lint.py .
+	@python3 tools/lint/test_silent_noop_lint.py >/dev/null && \
+	  echo "    self-test: both arms pass" || \
+	  { echo "    self-test FAILED — the lint cannot be trusted"; exit 1; }
 
 lint-runtime-contracts:
 	@echo ">>> runtime contracts"
