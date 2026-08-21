@@ -247,7 +247,45 @@ function presentInDom(
 
   (input ?? ok).focus();
 
+  // Enter = OK, Escape = Cancel. Every native dialog this replaces has this
+  // behaviour, so a user who types an answer into prompt() and presses Enter
+  // reasonably expects it to submit. Without it the only way to answer is to
+  // find and click the button — and for a prompt the keyboard is already
+  // where their hands are.
+  //
+  // Bound on the OVERLAY, not on window: the overlay holds focus (see the
+  // .focus() above), a keydown inside it bubbles here, and a window-level
+  // listener would also fire for keystrokes the user aims at the remote page
+  // through the input channel.
+  //
+  // Escape is ignored for alert(), which has no cancel branch — mapping it to
+  // finish(false) would send accept:false for a dialog whose only honest
+  // answer is "acknowledged", and the guest's default for alert is true.
+  const onKeyDown = (ev: KeyboardEvent) => {
+    if (ev.key === "Enter") {
+      // Not for a multi-line value; there is no textarea here, but guard the
+      // composition case so an IME's Enter does not submit mid-word.
+      if (ev.isComposing) return;
+      ev.preventDefault();
+      finish(true);
+    } else if (ev.key === "Escape" && prompt.dialogType !== "alert") {
+      ev.preventDefault();
+      finish(false);
+    }
+  };
+  overlay.addEventListener("keydown", onKeyDown);
+
   function teardown(): void {
+    // Remove the listener explicitly rather than relying on the element being
+    // detached. finish() calls teardown() and a stale handler on a detached
+    // node that something still references would keep firing into a closure
+    // whose `done` guard silently swallows it — a bug that looks like a dead
+    // keyboard rather than a leak.
+    try {
+      overlay.removeEventListener("keydown", onKeyDown);
+    } catch {
+      /* never throws in practice; belt and braces on teardown paths */
+    }
     try {
       overlay.remove();
     } catch {
