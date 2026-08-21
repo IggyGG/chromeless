@@ -566,6 +566,66 @@ def suite_dialogs(client, worker):
 
 
 # --------------------------------------------------------------------------
+# Clipboard: a real paste, client -> guest.
+#
+# src/clipboard.ts shipped fully implemented and unit-tested with NO caller
+# for as long as it has existed -- main.ts's demux had no arm for the label,
+# so the guest opened the channel and the client dropped it at the
+# fallthrough. Copy/paste could not work, and no test noticed because the
+# only channel check was a substring grep of the client's log, which matches
+# the "ignoring unknown data channel label: clipboard" line just as happily
+# as a wiring line.
+#
+# This drives the path a user actually takes: focus something on the remote
+# page, fire a real `paste` ClipboardEvent at the client document (which is
+# what Cmd/Ctrl+V produces), and read the remote input's value off the
+# WORKER. Nothing here is mocked.
+# --------------------------------------------------------------------------
+def suite_clipboard(client, worker):
+    print("\n[clipboard]")
+
+    if not _session_alive(client):
+        check("the WebRTC session is still up (clipboard needs a live guest)",
+              False, "session already ended (one session per worker process)")
+        return
+
+    H.navigate(H.fixture_url(FORM_HTML))
+    worker.wait_for("document.getElementById('target') ? 1 : 0", 1, timeout=25)
+    time.sleep(1.0)
+
+    # Focus the remote input by clicking it, exactly as suite_keyboard does --
+    # a paste lands wherever the caret is.
+    pos = json.loads(worker.eval("""(() => { const r =
+        document.getElementById('target').getBoundingClientRect();
+        return JSON.stringify({x:(r.left+r.width/2)/innerWidth,
+                               y:(r.top+r.height/2)/innerHeight}); })()"""))
+    worker.eval("document.getElementById('target').value=''; window.scrollTo(0,0); 1")
+    time.sleep(0.4)
+    client.click(pos["x"], pos["y"])
+    ok, active = worker.wait_for("document.activeElement.id", "target", timeout=15)
+    check("the remote input is focused for the paste", ok,
+          f"activeElement={active!r}")
+
+    # A real ClipboardEvent with real DataTransfer data -- the same shape the
+    # browser delivers on Cmd/Ctrl+V. clipboard.ts binds its listener to the
+    # document, so this is dispatched there.
+    PASTED = "pasted-from-the-client-42"
+    fired = client.cdp.eval("""(() => {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', %r);
+        const ev = new ClipboardEvent('paste', {
+            clipboardData: dt, bubbles: true, cancelable: true});
+        document.dispatchEvent(ev);
+        return true; })()""" % PASTED)
+    check("a paste event is dispatched at the client", fired is True)
+
+    ok2, val = worker.wait_for("document.getElementById('target').value",
+                               lambda v: v and PASTED in v, timeout=25)
+    check("the pasted text reaches the remote page", ok2,
+          f"remote input value={val!r}")
+
+
+# --------------------------------------------------------------------------
 # Camera/mic passthrough: click the REAL button.
 #
 # tests/e2e/06 locates #passthrough-toggle and never clicks it (grep -c
@@ -740,7 +800,7 @@ def suite_channels(client, worker):
     # client's demux has no arm for it -- so `clipboard` reaches the
     # fallthrough. A substring check calls that PASS.
     ignored = [ln for ln in log.splitlines() if "ignoring unknown" in ln]
-    for label in ("input", "cursor", "files", "control"):
+    for label in ("input", "cursor", "files", "control", "clipboard"):
         wired = f'wiring data channel "{label}"' in log
         was_ignored = any(label in ln for ln in ignored)
         check(f"channel wired: {label}", wired and not was_ignored,
@@ -753,16 +813,11 @@ def suite_channels(client, worker):
     check("channel open: stats", '"stats"' in log or "'stats'" in log,
           "" if "stats" in log else "not seen in client log")
 
-    # clipboard: asserted as a KNOWN GAP rather than quietly omitted. The
-    # guest opens the channel and the client drops it on the floor, so
-    # copy/paste cannot work in the standalone client no matter what the
-    # guest does. Written as an explicit expectation so that wiring it up
-    # turns this check RED and whoever does the work is told to flip it.
-    cb_ignored = any("clipboard" in ln for ln in ignored)
-    check("clipboard is UNWIRED in the client (known gap)", cb_ignored,
-          "" if cb_ignored else
-          "clipboard no longer hits the fallthrough -- if you wired it, invert "
-          "this check and add a real copy/paste round trip")
+    # clipboard used to be asserted here as a KNOWN GAP: src/clipboard.ts was
+    # fully implemented and unit-tested with no caller, so the guest opened
+    # the channel and main.ts dropped it at the fallthrough. That is now
+    # wired, so it is checked like every other channel above -- and this
+    # comment stays as the record of why a "wired" assertion is worth having.
 
     # The cursor channel should report `pointer` over a cursor:pointer element.
     #
@@ -845,7 +900,7 @@ def main():
         suites = {"dialogs": suite_dialogs, "channels": suite_channels,
                   "video": suite_video, "navigation": suite_navigation,
                   "mouse": suite_mouse, "scroll": suite_scroll,
-                  "keyboard": suite_keyboard,
+                  "keyboard": suite_keyboard, "clipboard": suite_clipboard,
                   "passthrough": suite_passthrough, "stats": suite_stats}
         want = args.only.split(",") if args.only else list(suites)
         for name in want:
