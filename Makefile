@@ -4,7 +4,7 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
+.PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets test-interactive \
         lint-runtime-contracts lint-tests-wired test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
@@ -21,6 +21,7 @@ help:
 	@echo "                           # that would otherwise fail 4-8 h into a build"
 	@echo "  make lint-workflows      # every 'uses:' must exist on the CI action mirror"
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
+	@echo "  make test-interactive    # real Chrome + real worker (needs a live stack)"
 	@echo "  make lint-runtime-contracts # hermetic launcher/runtime contracts"
 	@echo ""
 	@echo "  make test                # legacy alias for test-all-ci (the PR gate)"
@@ -162,7 +163,7 @@ test-all-ci: test-unit test-integration test-smoke
 # - e2e:          Playwright against full compose stack
 # Note: nightly does NOT include opt-in CHROMELESS_INTEGRATION_LIVE Go tests
 # (audio_loopback) — those run inside e2e via Playwright spec 05 anyway.
-test-all-nightly: test-all-ci test-harness-all test-e2e
+test-all-nightly: test-all-ci test-harness-all test-e2e test-interactive
 
 # ---- unit ------------------------------------------------------------------
 
@@ -344,4 +345,30 @@ test-e2e:
 	  ( cd tests/e2e && npm install --silent --no-audit --no-fund && npm run test:e2e ); \
 	else \
 	  echo "skip: tests/e2e/ not populated yet (Phase 1+)"; \
+	fi
+
+# The two-sided real-user suite: real Google Chrome running the real client
+# bundle against a real deployed worker, with the WORKER'S OWN DevTools as the
+# independent oracle. Input is dispatched as genuine DOM events on the
+# client's <video>, never as synthetic CDP input at the client — that would
+# bypass the very code under test.
+#
+# This target exists because the suite was invoked by NOTHING: no make target,
+# no workflow, zero hits across all six. It escaped tools/lint/tests_wired_lint
+# only because tests/**/README.md counts as an invoker and its README names
+# run.py — true for a human, false for CI. 28 checks that nothing ran.
+#
+# NOT in test-all-ci. It needs a live standalone stack, two port-forwards, and
+# a worker restart per run (one session per worker process — a second run
+# against the same pod gets no video and reports ~20 mysterious failures).
+# Nightly, beside test-e2e.
+#
+# Prerequisites are documented in tests/interactive/README.md. The suite
+# reports what is missing rather than failing obscurely.
+test-interactive:
+	@if [ -f tests/interactive/run.py ]; then \
+	  echo ">>> interactive suite (tests/interactive) — needs a live stack"; \
+	  python3 tests/interactive/run.py $(INTERACTIVE_ARGS); \
+	else \
+	  echo "skip: tests/interactive/ not present"; \
 	fi

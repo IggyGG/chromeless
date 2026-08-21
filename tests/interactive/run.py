@@ -280,12 +280,489 @@ def suite_keyboard(client, worker):
     check("space toggles the focused remote checkbox", ok5b, f"checked={checked}")
 
 
+# --------------------------------------------------------------------------
+# Dialogs: the one path where the browser STOPS and waits for a person.
+#
+# This is the suite that did not exist. Everything else here proves input
+# travels client -> guest. This proves the reverse leg: the GUEST asks a
+# question, a human answers it in the client's own UI, and the answer changes
+# what the remote page does.
+#
+# Until this ran, the entire js_dialog round trip had never been exercised by
+# a browser. The client's 25 unit tests inject a mock presenter and run under
+# vitest's NODE environment, so presentInDom() -- the ~85 lines a real user
+# actually touches -- had zero coverage of any kind. The first run of this
+# suite found the overlay had no CSS at all.
+#
+# The oracle is always the WORKER, never the client. A test that clicks OK and
+# then asks the client whether it clicked OK proves only self-consistency.
+# Here the fixture page stashes the dialog's return value on `window.__r`, and
+# we read that off the worker's own DevTools -- so a pass means the whole
+# chain worked: guest blocks -> ui_request -> control channel -> client DOM ->
+# real click -> ui_response -> guest resumes -> the PAGE observed the value.
+# --------------------------------------------------------------------------
+
+# Each fixture arms the dialog behind a rAF so navigation completes before the
+# guest blocks. A dialog raised during load can beat the capture re-arm and we
+# would be clicking at a frame that no longer exists.
+_DIALOG_FIXTURE = """<!doctype html><meta charset=utf-8>
+<title>dialog fixture</title>
+<body style="font:16px system-ui;padding:40px">
+<h1 id=h>dialog fixture</h1>
+<script>
+  window.__r = "PENDING";
+  window.__done = false;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    try { window.__r = %s; } finally { window.__done = true; }
+  }));
+</script>
+"""
+
+
+_arm_n = [0]
+
+
+def _arm(worker, expr):
+    """Navigate the guest to a page that raises `expr` and blocks on it.
+
+    The `?n=` suffix is load-bearing. The gateway stores ONE fixture document
+    globally and every fixture navigation targets the same URL, so a second
+    Page.navigate to a byte-identical URL is a same-document navigation:
+    Chromium does not re-execute the page, the dialog is never raised, and the
+    client never gets a ui_request.
+
+    That failure is silent and reads as a product bug. Running suite_dialogs
+    alone passed 14/14; running ANY navigating suite before it failed with
+    "no overlay appeared" while the worker still showed the fixture and
+    window.__r held the value from a previous run. The query string makes each
+    arm a distinct URL and forces a real cross-document load.
+    """
+    _arm_n[0] += 1
+    url = H.fixture_url(_DIALOG_FIXTURE % expr) + f"?n={_arm_n[0]}"
+    H.navigate(url)
+    # Do NOT wait for __done here -- the guest is BLOCKED inside the dialog
+    # until someone answers, which is the whole point.
+    return worker
+
+
+def _overlay(client, sel=".cb-control-overlay"):
+    """Geometry of the client's dialog overlay, or None if absent."""
+    return json.loads(client.cdp.eval("""(() => {
+        const el = document.querySelector(%r);
+        if (!el) return "null";
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({w: r.width, h: r.height, top: r.top,
+                               left: r.left, vw: innerWidth, vh: innerHeight,
+                               text: (el.innerText || "").slice(0, 200)});
+    })()""" % sel) or "null")
+
+
+def _await_overlay(client, timeout=20):
+    end = time.time() + timeout
+    while time.time() < end:
+        o = _overlay(client)
+        if o:
+            return o
+        time.sleep(0.3)
+    return None
+
+
+def _click_client(client, sel):
+    """Click an element in the CLIENT's own UI (not the streamed page).
+
+    A real MouseEvent on the real button, for the same reason the rest of this
+    harness refuses synthetic CDP input: control.ts binds a click listener,
+    and dispatching anything else would test the dispatcher, not the product.
+    """
+    return client.cdp.eval("""(() => {
+        const el = document.querySelector(%r);
+        if (!el) return false;
+        el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+        return true; })()""" % sel)
+
+
+def _session_alive(client):
+    """Is the CLIENT still attached to the SAME guest process?
+
+    The worker serves exactly one session per browser process and then exits
+    (`exited: chromium (exit status 0; expected)`, then supervisord respawns
+    it). The respawned process has a brand-new control channel that this
+    client is not connected to, so a dialog raised afterwards reaches nobody
+    and the guest applies its default within milliseconds.
+
+    Diagnosed the expensive way: suite_dialogs passed 14/14 alone and failed
+    with "no overlay appeared" after any other suite. The worker still showed
+    the fixture and window.__r held a value, which reads as "the dialog was
+    answered by someone else" -- a convincing product bug. It was a dead
+    process. Checking the data channel is still open turns four confusing
+    FAILs into one true statement.
+    """
+    return client.cdp.eval("""(() => {
+        const pc = window.__cbwrtc_pc;
+        if (!pc) return false;
+        return pc.connectionState === 'connected'; })()""") is True
+
+
+def _guest_has_control(client):
+    """Did the guest actually OPEN a `control` channel on this session?
+
+    Read from the client's own log, which records every channel the guest
+    offered. An old guest simply never opens it.
+    """
+    log = client.cdp.eval("document.getElementById('log').innerText") or ""
+    return 'wiring data channel "control"' in log
+
+
+def suite_dialogs(client, worker):
+    print("\n[dialogs]")
+
+    # PREFLIGHT: does the GUEST BINARY even have the control channel?
+    #
+    # This is a shared cluster and the worker image gets rolled by other
+    # sessions (a `kubectl apply` of stack.yaml resets it). A guest built
+    # before CbControlChannel existed raises confirm() and resolves it against
+    # its own default INSTANTLY -- window.__r becomes false, the page carries
+    # on, and no ui_request is ever sent. From the client that is
+    # indistinguishable from "the dialog code is broken", and it cost a full
+    # debugging cycle here: the same suite passed 14/14, then failed at check
+    # 1 because the image underneath had changed.
+    #
+    # `clipboard` is the known-positive control. A probe that returns 0 for
+    # everything is broken, not informative.
+    if not _guest_has_control(client):
+        check("the guest binary supports the control channel", False,
+              "no `control` channel was opened by the guest -- the worker is "
+              "running an image that predates CbControlChannel. Check "
+              "`kubectl get deploy chromeless-standalone-worker -o "
+              "jsonpath='{.spec.template.spec.containers[0].image}'`")
+        return
+
+    if not _session_alive(client):
+        check("the WebRTC session is still up (dialogs need a live guest)",
+              False,
+              "the guest process was replaced -- one session per worker "
+              "process; run `--only dialogs` after a rollout restart, or run "
+              "dialogs FIRST")
+        return
+
+    # ---- 1. confirm() -> OK -------------------------------------------
+    _arm(worker, "confirm('proceed?')")
+    o = _await_overlay(client)
+    check("confirm() raises a dialog in the client", o is not None,
+          "no .cb-control-overlay appeared" if o is None else "")
+    if o is None:
+        return                      # nothing below can mean anything
+
+    # ---- 2. it is actually VISIBLE ------------------------------------
+    # The check that catches "clickable but nobody can see it". The overlay
+    # had no CSS at all on first run: it rendered as an unstyled flex child
+    # after <main>, so a person could not find it while automation could.
+    visible = (o["w"] > 100 and o["h"] > 40
+               and o["top"] >= 0 and o["left"] >= 0
+               and o["top"] < o["vh"] and o["left"] < o["vw"])
+    check("the dialog is visible on screen", visible,
+          f"rect={o['w']}x{o['h']} at ({o['left']},{o['top']}) "
+          f"viewport={o['vw']}x{o['vh']}")
+    check("the dialog shows the page's message",
+          "proceed?" in (o["text"] or ""), f"text={o['text']!r}")
+
+    ok = _click_client(client, ".cb-control-ok")
+    check("the OK button exists and is clickable", ok is True)
+    got, val = worker.wait_for("String(window.__r)", "true", timeout=25)
+    check("clicking OK returns TRUE to the remote page", got, f"window.__r={val!r}")
+
+    # ---- 3. confirm() -> Cancel ---------------------------------------
+    _arm(worker, "confirm('cancel me?')")
+    if _await_overlay(client) is None:
+        check("second confirm() raises a dialog", False, "no overlay")
+    else:
+        _click_client(client, ".cb-control-cancel")
+        got, val = worker.wait_for("String(window.__r)", "false", timeout=25)
+        check("clicking Cancel returns FALSE to the remote page", got,
+              f"window.__r={val!r}")
+
+    # ---- 4. prompt() -> typed text ------------------------------------
+    _arm(worker, "prompt('your name?', '')")
+    if _await_overlay(client) is None:
+        check("prompt() raises a dialog", False, "no overlay")
+    else:
+        has_input = client.cdp.eval(
+            "!!document.querySelector('.cb-control-input')")
+        check("prompt() renders a text input", has_input is True)
+        client.cdp.eval("""(() => {
+            const i = document.querySelector('.cb-control-input');
+            if (!i) return false;
+            i.focus(); i.value = 'chromeless';
+            i.dispatchEvent(new Event('input', {bubbles: true}));
+            return true; })()""")
+        _click_client(client, ".cb-control-ok")
+        got, val = worker.wait_for("String(window.__r)", "chromeless", timeout=25)
+        check("prompt() returns the typed text to the remote page", got,
+              f"window.__r={val!r}")
+
+    # ---- 5. alert() has no cancel branch ------------------------------
+    # Dismissing an alert IS acknowledging it; a Cancel that mapped to the
+    # same outcome would be a lie. Asserted because it is easy to "fix" the
+    # missing button and silently change what the page is told.
+    _arm(worker, "(alert('notice'), 'ALERTED')")
+    if _await_overlay(client) is None:
+        check("alert() raises a dialog", False, "no overlay")
+    else:
+        has_cancel = client.cdp.eval(
+            "!!document.querySelector('.cb-control-cancel')")
+        check("alert() offers no Cancel button", has_cancel is False,
+              f"cancel present={has_cancel}")
+        _click_client(client, ".cb-control-ok")
+        got, val = worker.wait_for("String(window.__r)", "ALERTED", timeout=25)
+        check("dismissing alert() lets the page continue", got,
+              f"window.__r={val!r}")
+
+    # ---- 6. keyboard: Enter accepts -----------------------------------
+    # Native dialogs all do this, and for prompt() the user's hands are
+    # already on the keyboard.
+    _arm(worker, "confirm('enter accepts?')")
+    if _await_overlay(client) is None:
+        check("confirm() for the Enter check raises a dialog", False, "no overlay")
+    else:
+        client.cdp.eval("""(() => {
+            const o = document.querySelector('.cb-control-overlay');
+            if (!o) return false;
+            o.dispatchEvent(new KeyboardEvent('keydown',
+                {key: 'Enter', bubbles: true, cancelable: true}));
+            return true; })()""")
+        got, val = worker.wait_for("String(window.__r)", "true", timeout=25)
+        check("Enter accepts the dialog", got, f"window.__r={val!r}")
+
+    # ---- 7. keyboard: Escape cancels ----------------------------------
+    _arm(worker, "confirm('escape cancels?')")
+    if _await_overlay(client) is None:
+        check("confirm() for the Escape check raises a dialog", False, "no overlay")
+    else:
+        client.cdp.eval("""(() => {
+            const o = document.querySelector('.cb-control-overlay');
+            if (!o) return false;
+            o.dispatchEvent(new KeyboardEvent('keydown',
+                {key: 'Escape', bubbles: true, cancelable: true}));
+            return true; })()""")
+        got, val = worker.wait_for("String(window.__r)", "false", timeout=25)
+        check("Escape cancels the dialog", got, f"window.__r={val!r}")
+
+    # ---- 8. the overlay is torn down ----------------------------------
+    # control.ts's teardown removes it. A prompt left mounted after the
+    # channel resolves is a dialog the user can answer into a void.
+    # check() prints its detail unconditionally, so a detail phrased as a
+    # failure ("overlay still in the DOM") gets printed next to PASS and reads
+    # as a contradiction. Only pass a detail when there is one to report.
+    left = _overlay(client)
+    check("the dialog is removed after answering", left is None,
+          "" if left is None else f"overlay still in the DOM: {left}")
+
+    # ---- 9. the page is not wedged ------------------------------------
+    # The guest arms its 60s deadline BEFORE sending and resolves on a closed
+    # channel, so a client that never answers cannot pin a page open. Proven
+    # here cheaply: after all of the above the guest still runs script.
+    alive, v = worker.wait_for("String(1+1)", "2", timeout=15)
+    check("the remote page still executes script afterwards", alive, f"got {v!r}")
+
+
+# --------------------------------------------------------------------------
+# Camera/mic passthrough: click the REAL button.
+#
+# tests/e2e/06 locates #passthrough-toggle and never clicks it (grep -c
+# '.click()' -> 0). Its own comment concedes it does not import the
+# controller: it builds a fresh RTCPeerConnection in-page and asserts
+# senders===2, which tests Chromium's WebRTC API rather than
+# client/src/passthrough.ts. A third case inlines a mapErr stub and asserts
+# the stub returns what the stub was written to return.
+#
+# This clicks the actual button on the actual client, against the actual
+# session, and reads the actual peer connection.
+#
+# Chrome is launched by the harness with --use-fake-device-for-media-stream,
+# so getUserMedia resolves without hardware.
+# --------------------------------------------------------------------------
+def suite_passthrough(client, worker):
+    print("\n[camera/mic passthrough]")
+
+    state0 = client.cdp.eval(
+        "document.getElementById('passthrough-toggle').dataset.state")
+    disabled0 = client.cdp.eval(
+        "document.getElementById('passthrough-toggle').disabled")
+    check("toggle starts off and enabled (a session is up)",
+          state0 == "off" and disabled0 is False,
+          f"state={state0!r} disabled={disabled0}")
+
+    # Count senders that actually CARRY a track, not senders.
+    #
+    # First version of this check asserted getSenders().length grew by 2 and
+    # FAILED at 2 -> 2 while the kinds were already 'audio,video'. The product
+    # was right and the test was wrong: addTrack() reuses the existing
+    # recvonly transceivers created by the guest's offer rather than adding
+    # new ones, so the sender count is constant and only sender.track changes
+    # from null to a live track. Counting senders measures the SDP shape;
+    # counting tracked senders measures what the user shared.
+    def tracked():
+        return client.cdp.eval("""(() => {
+            const pc = window.__cbwrtc_pc; if (!pc) return -1;
+            return pc.getSenders().filter(s => s.track).length; })()""")
+
+    senders_before = tracked()
+
+    # A real click on the real button -- the same event a user's mouse makes.
+    clicked = client.cdp.eval("""(() => {
+        const b = document.getElementById('passthrough-toggle');
+        if (!b || b.disabled) return false;
+        b.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+        return true; })()""")
+    check("the toggle is clickable", clicked is True)
+
+    # enable() is async (getUserMedia + addTrack), so poll rather than sleep.
+    end = time.time() + 25
+    state = None
+    while time.time() < end:
+        state = client.cdp.eval(
+            "document.getElementById('passthrough-toggle').dataset.state")
+        if state == "on":
+            break
+        time.sleep(0.4)
+    check("clicking Share turns passthrough ON", state == "on",
+          f"data-state={state!r}")
+
+    senders_after = tracked()
+    check("two tracks were attached to the real peer connection",
+          senders_after >= senders_before + 2,
+          f"senders carrying a track: {senders_before} -> {senders_after}")
+
+    kinds = client.cdp.eval("""(() => {
+        const pc = window.__cbwrtc_pc; if (!pc) return "";
+        return pc.getSenders().map(s => s.track && s.track.kind)
+                 .filter(Boolean).sort().join(","); })()""")
+    check("an audio and a video track are present",
+          "audio" in (kinds or "") and "video" in (kinds or ""),
+          f"sender kinds={kinds!r}")
+
+    # Stop sharing: the same button, second click. This is the half that
+    # actually hard-stops the hardware, and it has never been exercised.
+    client.cdp.eval("""(() => {
+        const b = document.getElementById('passthrough-toggle');
+        if (b && !b.disabled) b.dispatchEvent(
+            new MouseEvent('click', {bubbles: true, cancelable: true}));
+        return 1; })()""")
+    end = time.time() + 20
+    state2 = None
+    while time.time() < end:
+        state2 = client.cdp.eval(
+            "document.getElementById('passthrough-toggle').dataset.state")
+        if state2 == "off":
+            break
+        time.sleep(0.4)
+    check("clicking again turns passthrough OFF", state2 == "off",
+          f"data-state={state2!r}")
+
+    live = client.cdp.eval("""(() => {
+        const pc = window.__cbwrtc_pc; if (!pc) return -1;
+        return pc.getSenders().filter(
+            s => s.track && s.track.readyState === 'live').length; })()""")
+    check("the local tracks were hard-stopped", live == 0,
+          f"{live} sender track(s) still live")
+
+
+# --------------------------------------------------------------------------
+# Stats: assert a STAT ARRIVED, not that the label exists.
+# --------------------------------------------------------------------------
+def suite_stats(client, worker):
+    print("\n[stats]")
+    # The client renders live connection state from the stats it receives.
+    # Read the same getStats() a user's browser reports, twice, and require
+    # movement -- a frozen counter is what a dead stats path looks like.
+    def decoded():
+        return client.cdp.eval("""(async () => {
+            const pc = window.__cbwrtc_pc; if (!pc) return -1;
+            const s = await pc.getStats(); let f = 0;
+            s.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'video')
+                f = Math.max(f, r.framesDecoded || 0); });
+            return f; })()""")
+
+    a = decoded()
+    time.sleep(3)
+    b = decoded()
+    check("inbound video stats are reported to the client", a is not None and a > 0,
+          f"framesDecoded={a}")
+
+    # "Still moving" is only meaningful while the session is live. The worker
+    # serves ONE session per browser process and then exits, so by the time
+    # this suite runs at the end of a full pass the guest may already be gone
+    # -- and a frozen counter then says "the session ended", not "video is
+    # broken". Asserting movement unconditionally made the last suite in the
+    # run blame the encoder for the harness's own lifecycle.
+    if _session_alive(client):
+        check("the stats counter is still moving", (b or 0) > (a or 0),
+              f"framesDecoded {a} -> {b}")
+    else:
+        print("  SKIP  the stats counter is still moving   "
+              "session already ended (one session per worker process)")
+
+    bytes_recv = client.cdp.eval("""(async () => {
+        const pc = window.__cbwrtc_pc; if (!pc) return -1;
+        const s = await pc.getStats(); let n = 0;
+        s.forEach(r => { if (r.type === 'inbound-rtp') n += (r.bytesReceived || 0); });
+        return n; })()""")
+    check("bytes are actually arriving on the connection",
+          (bytes_recv or 0) > 0, f"bytesReceived={bytes_recv}")
+
+    # The state pills are what a human reads to know the session is healthy.
+    conn = client.cdp.eval(
+        "document.getElementById('state-conn') && "
+        "document.getElementById('state-conn').textContent")
+    check("the client shows a connected state to the user", conn == "connected",
+          f"#state-conn={conn!r}")
+
+
 def suite_channels(client, worker):
     print("\n[data channels]")
-    log = "\n".join(client.client_log(40))
-    for label in ("input", "cursor", "files", "stats"):
-        check(f"channel open: {label}", f'"{label}"' in log or f"'{label}'" in log,
-              "" if label in log else "not seen in client log")
+    # The WHOLE log, not the last 40 lines. The wiring lines are emitted once,
+    # at connect. Run this suite alone and they are recent; run it after five
+    # other suites and they have scrolled out of a 40-line window, so the
+    # check reports "control was never wired" about a channel that was wired
+    # perfectly. Order-dependent tests fail as false alarms, which is the
+    # expensive kind.
+    log = client.cdp.eval("document.getElementById('log').innerText") or ""
+    # "control" and "clipboard" were both missing from this list. The guest
+    # opens six channels; this checked four, so a build that stopped opening
+    # either would have passed here in silence. "control" is the one that
+    # carries js_dialog -- see suite_dialogs, which exercises it end to end.
+    #
+    # The oracle is deliberately NOT "the label appears in the log". main.ts
+    # logs the label on the way IN ('wiring data channel "x"') and again when
+    # it falls through ('ignoring unknown data channel label: x'), so a
+    # substring match cannot tell a wired channel from an ignored one. That
+    # matters: clipboard.ts is fully implemented and unit-tested, and the
+    # client's demux has no arm for it -- so `clipboard` reaches the
+    # fallthrough. A substring check calls that PASS.
+    ignored = [ln for ln in log.splitlines() if "ignoring unknown" in ln]
+    for label in ("input", "cursor", "files", "control"):
+        wired = f'wiring data channel "{label}"' in log
+        was_ignored = any(label in ln for ln in ignored)
+        check(f"channel wired: {label}", wired and not was_ignored,
+              "" if wired and not was_ignored
+              else ("dropped at the fallthrough" if was_ignored
+                    else "never seen in the client log"))
+
+    # stats is consumed by session.ts (the pc/stats lifecycle), not by main's
+    # demux, so it legitimately never appears as a "wiring" line.
+    check("channel open: stats", '"stats"' in log or "'stats'" in log,
+          "" if "stats" in log else "not seen in client log")
+
+    # clipboard: asserted as a KNOWN GAP rather than quietly omitted. The
+    # guest opens the channel and the client drops it on the floor, so
+    # copy/paste cannot work in the standalone client no matter what the
+    # guest does. Written as an explicit expectation so that wiring it up
+    # turns this check RED and whoever does the work is told to flip it.
+    cb_ignored = any("clipboard" in ln for ln in ignored)
+    check("clipboard is UNWIRED in the client (known gap)", cb_ignored,
+          "" if cb_ignored else
+          "clipboard no longer hits the fallthrough -- if you wired it, invert "
+          "this check and add a real copy/paste round trip")
 
     # The cursor channel should report `pointer` over a cursor:pointer element.
     #
@@ -353,9 +830,23 @@ def main():
     try:
         frames = client.login_and_connect()
         print(f"[setup] connected; {frames} frames decoded")
-        suites = {"video": suite_video, "navigation": suite_navigation,
+        # ORDER MATTERS, and it is not alphabetical or historical.
+        #
+        # `dialogs` runs FIRST. The worker serves one session per browser
+        # process and then exits (supervisord respawns it), so any suite that
+        # outlives the session leaves the client attached to a process that is
+        # gone. Dialogs is the only suite that needs the guest to send TO the
+        # client, so it is the only one that notices -- and it noticed as
+        # "no overlay appeared", which reads as a broken dialog rather than a
+        # dead session. Running it first means it always gets the live one.
+        #
+        # `channels` runs early for a related reason: it reads the client's
+        # log for the one-time wiring lines emitted at connect.
+        suites = {"dialogs": suite_dialogs, "channels": suite_channels,
+                  "video": suite_video, "navigation": suite_navigation,
                   "mouse": suite_mouse, "scroll": suite_scroll,
-                  "keyboard": suite_keyboard, "channels": suite_channels}
+                  "keyboard": suite_keyboard,
+                  "passthrough": suite_passthrough, "stats": suite_stats}
         want = args.only.split(",") if args.only else list(suites)
         for name in want:
             suites[name.strip()](client, worker.o)

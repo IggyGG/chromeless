@@ -245,6 +245,15 @@ class ClientDriver:
              "--no-first-run", "--no-default-browser-check",
              "--ignore-certificate-errors",     # the gateway's cert is self-signed
              "--autoplay-policy=no-user-gesture-required",
+             # Camera/mic passthrough (suite_passthrough) clicks the real
+             # Share button, which calls getUserMedia. Headless Chrome has no
+             # hardware and no one to grant permission, so without these the
+             # click fails with NotFoundError/NotAllowedError and the suite
+             # would report a product bug that is really a missing flag.
+             # --use-fake-device supplies a synthetic 640x480 pattern +
+             # tone; --use-fake-ui auto-grants the permission prompt.
+             "--use-fake-device-for-media-stream",
+             "--use-fake-ui-for-media-stream",
              "--window-size=1400,900", "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.time() + 30
