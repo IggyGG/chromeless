@@ -41,6 +41,8 @@
 #include "base/files/file_path.h"
 #include "content/public/browser/browser_context.h"
 
+#include "cloud-browser/capture/build-integration/cb_download_manager_delegate.h"
+
 class SimpleFactoryKey;
 
 namespace content {
@@ -109,6 +111,11 @@ class CloudBrowserBrowserContext final : public content::BrowserContext {
   // to interlock service shutdown — see ~CloudBrowserBrowserContext for
   // the exact teardown sequence.
   std::unique_ptr<SimpleFactoryKey> simple_factory_key_;
+
+  // Lazily created by GetDownloadManagerDelegate. Owned here so it
+  // outlives every DownloadManager query and is destroyed with the
+  // context — //content holds the returned pointer raw.
+  std::unique_ptr<CbDownloadManagerDelegate> download_manager_delegate_;
 };
 
 }  // namespace cloud_browser

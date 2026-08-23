@@ -677,6 +677,36 @@ source_set("javascript_dialog_manager") {
 }
 
 # ---------------------------------------------------------------------
+# DownloadManagerDelegate — give a download somewhere to go.
+#
+# Without this, GetDownloadManagerDelegate returns nullptr and
+# DownloadManagerImpl cannot determine a target, so the bytes go nowhere.
+# Paired with CbWebContentsDelegate::CanDownload returning true, that
+# produced the worst shape available: the click is accepted, the page's
+# handler runs, and then nothing happens — no error, no file.
+#
+# Lands the file inside the guest container (useful on its own: any page
+# that downloads and then re-reads a file now works). Relaying the bytes
+# to the viewer over kFiles is a separate change and needs the
+# GetBufferedAmount backpressure gate — see cb_dc_host.h:378.
+# ---------------------------------------------------------------------
+source_set("download_manager_delegate") {
+  sources = [
+    "cb_download_manager_delegate.cc",
+    "cb_download_manager_delegate.h",
+  ]
+  deps = [
+    "//base",
+    "//components/download/public/common:public",
+    "//content/public/browser",
+    "//net",
+    "//url",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
 # WebContentsDelegate — the parts of a browser that aren't pixels.
 #
 # Until this target, capture/ had NO WebContentsDelegate at all, and a
@@ -1306,6 +1336,11 @@ source_set("embedder") {
     ":control_channel",
     ":javascript_dialog_manager",
     ":web_contents_delegate",
+    # Wired here in the SAME change that adds the source_set, per the
+    # comment above: cloud_browser_browser_context.cc now holds a
+    # unique_ptr<CbDownloadManagerDelegate>, so this is where it first
+    # gets compiled.
+    ":download_manager_delegate",
     # CV2-81 — M4 typed-dispatcher composite delegate. Transitively
     # pulls all 6 typed dispatchers (R3 mouse / R4 keyboard / R5 IME /
     # R6 touch / R7 drag / R8 clipboard) + the M4 R2 active-WebContents
