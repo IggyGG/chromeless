@@ -165,7 +165,15 @@ spec:
         - name: chromium
           # The pin from build/guest-release.json, verified to boot and paint
           # by infra/k8s/standalone/smoke-job.yaml.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-224c19413e24
+          # cr7727-29467fecda3a (2026-08-21) is the first worker image that
+          # contains CbControlChannel and Cb.setViewport. The previous pin
+          # predates both, so a `deploy.sh` run would silently roll the guest
+          # BACK to a build where every confirm() takes the default and no
+          # `control` channel is ever opened -- which is exactly what happened
+          # here: the live worker was found on an older tag mid-session,
+          # verified by grepping the deployed binary (CbControlChannel=0 with
+          # clipboard=42 as the known-positive control).
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-29467fecda3a
           env:
             - name: SESSION_ID
               value: dev
@@ -283,7 +291,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: gateway
-          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v6
+          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
           env:
             - name: CHROMELESS_USER
               valueFrom:

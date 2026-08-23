@@ -19,6 +19,7 @@ import { InputChannel } from "./src/input.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
 import { attachControlChannel, type ControlChannelHandle } from "./src/control.js";
+import { ClipboardChannel } from "./src/clipboard.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { resolveSignalingUrl } from "./src/config.js";
 import {
@@ -129,13 +130,14 @@ interface DemoAttachments {
   passthrough: CameraPassthrough | null;
   fileUpload: FileUploadChannel | null;
   control: ControlChannelHandle | null;
+  detachClipboard: (() => void) | null;
 }
 
 let session: ChromelessSession | null = null;
 let attach: DemoAttachments = emptyAttachments();
 
 function emptyAttachments(): DemoAttachments {
-  return { detachInput: null, cursor: null, detachDrop: null, passthrough: null, fileUpload: null, control: null };
+  return { detachInput: null, cursor: null, detachDrop: null, passthrough: null, fileUpload: null, control: null, detachClipboard: null };
 }
 
 function dropAttachments(): void {
@@ -145,6 +147,10 @@ function dropAttachments(): void {
   // Drops any open prompt. A dialog left on screen after the peer is gone
   // is a question nobody is listening to.
   try { attach.control?.dispose(); } catch { /* ignore */ }
+  // Remove the document-level paste listener. Left attached across a peer
+  // rebuild it would keep firing into a closed channel — sendPaste() returns
+  // false on a non-open channel, so it would fail silently rather than loudly.
+  try { attach.detachClipboard?.(); } catch { /* ignore */ }
   // T81: stop camera/mic so tracks fire "ended" and the user-agent's
   // recording indicator clears; also the §T10 threat-model rule — no
   // silent re-sharing across a rebuild, a fresh click is required.
@@ -160,7 +166,35 @@ function wireDataChannel(dc: RTCDataChannel): void {
   if (dc.label === "cursor") return wireCursorChannel(dc);
   if (dc.label === "files") return wireFilesChannel(dc);
   if (dc.label === "control") return wireControlChannel(dc);
+  if (dc.label === "clipboard") return wireClipboardChannel(dc);
   log("warn", `ignoring unknown data channel label: ${dc.label}`);
+}
+
+function wireClipboardChannel(dc: RTCDataChannel): void {
+  // src/clipboard.ts has existed, fully implemented and unit-tested, with NO
+  // caller: the demux had arms for input/cursor/files/control and none for
+  // clipboard, so the guest opened the channel and this function's absence
+  // sent it straight to "ignoring unknown data channel label". Copy and paste
+  // could not work in this client no matter what the guest did.
+  //
+  // Found by tests/interactive/suite_channels once its oracle was tightened
+  // to distinguish "wired" from "appeared in the log" — the previous
+  // substring check passed happily on the ignore line. Same defect class as
+  // the control channel, one file over.
+  attach.detachClipboard?.();
+  const clip = new ClipboardChannel(dc, {
+    onOversize: (bytes) =>
+      log("warn", `clipboard: paste too large (${bytes} bytes), dropped`),
+    onDropped: (why) => log("warn", `clipboard: dropped (${why})`),
+  });
+  // document, not els.video: a paste is delivered to whatever has focus and
+  // the <video> is not focusable. Listening on the document is what makes
+  // Cmd/Ctrl+V work wherever the user's caret happens to be.
+  attach.detachClipboard = clip.attach(document);
+  dc.addEventListener("close", () => {
+    try { attach.detachClipboard?.(); } catch { /* ignore */ }
+    attach.detachClipboard = null;
+  });
 }
 
 function wireCursorChannel(dc: RTCDataChannel): void {

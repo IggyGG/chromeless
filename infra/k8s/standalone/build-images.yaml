@@ -63,7 +63,10 @@ spec:
             - name: REPO
               value: https://forgejo.triform.dev/triform/chromeless.git
             - name: BRANCH
-              value: feat/standalone-mode
+              # main, not feat/standalone-mode. That branch is behind main and
+              # does not contain client/src/control.ts, so a rebuild from it
+              # would faithfully reproduce the bug it was meant to fix.
+              value: main
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
           securityContext:
@@ -75,7 +78,15 @@ spec:
           args:
             - --dockerfile=/workspace/infra/gateway/Dockerfile
             - --context=/workspace
-            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v6
+            # v7 (2026-08-21): v6 predated client/src/control.ts, so the
+            # gateway was serving a bundle with NO control-channel consumer —
+            # verified by fetching /main.js through the live gateway:
+            # wireControlChannel=0 while clipboard=3 (the known-positive that
+            # proves the probe worked). A guest raising confirm() had nobody
+            # listening. Bump this tag whenever client/ changes: the bundle is
+            # baked in at image build time, so a client fix does not reach a
+            # browser until the gateway image is rebuilt AND rolled.
+            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
             - --single-snapshot          # one layer; these images are small
             - --push-retry=3             # the registry 500s intermittently (BUGS-511/513)
           env:
@@ -132,7 +143,10 @@ spec:
             - name: REPO
               value: https://forgejo.triform.dev/triform/chromeless.git
             - name: BRANCH
-              value: feat/standalone-mode
+              # main, not feat/standalone-mode. That branch is behind main and
+              # does not contain client/src/control.ts, so a rebuild from it
+              # would faithfully reproduce the bug it was meant to fix.
+              value: main
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
           securityContext:
