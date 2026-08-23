@@ -291,6 +291,14 @@ spec:
             requests:
               cpu: "100m"
               memory: "256Mi"
+              # Explicit request, decoupled from the limit below. Omitting it
+              # makes K8s mirror the 2Gi LIMIT into the request, which on a
+              # heavily-reserved node fails admission with no container and
+              # therefore no log -- the Job just retries invisibly. Same defect
+              # the build lanes hit (2026-06-29 kaniko, 2026-07-02 t7,
+              # 2026-08-20 t8). The 2Gi LIMIT still governs burst for the
+              # driver's captured media artifacts.
+              ephemeral-storage: "512Mi"
             limits:
               cpu: "1"
               memory: "1Gi"
