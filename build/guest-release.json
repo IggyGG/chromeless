@@ -1,6 +1,6 @@
 {
   "schema": "chromeless.guest-release/v1",
-  "commit": "6feef4fc0713",
+  "commit": "6feef4fc0713c3c6f92fba177097aff4880f10ce",
   "image": "registry.triform.cloud/chromeless/chromeless:cr7727-6feef4fc0713",
   "digest": "sha256:330be9ec415100d2655a047a8f096d496f660cc522d0690ff9d5656bd5cc96ae",
   "dockerfile": "build/Dockerfile.runtime",
