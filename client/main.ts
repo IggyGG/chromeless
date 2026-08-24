@@ -310,6 +310,23 @@ function maybeExposePcForE2e(pc: RTCPeerConnection): void {
   }
 }
 
+// Which optional consumers this BUNDLE contains. Not which channels the
+// guest opened — that is the guest's half and is already visible in the log.
+//
+// The gateway image bakes the client bundle in at build time, so a client
+// fix does not reach a browser until the gateway image is rebuilt AND
+// rolled. When those drift, the failure is indistinguishable from a guest
+// defect: the `control` channel opens, nothing consumes it, and no dialog
+// ever appears. That happened on 2026-08-24 — gateway standalone-v9 was
+// published from a branch predating src/control.ts, and the served main.js
+// had wireControlChannel=0 while the guest was entirely correct.
+//
+// A literal list rather than a computed one: it must be wrong at COMPILE
+// time if a consumer is removed, not silently true because some symbol
+// still happens to exist.
+(window as unknown as { __cb_client_consumers?: readonly string[] })
+  .__cb_client_consumers = ["input", "cursor", "files", "control", "clipboard"];
+
 // ---------- connect ----------
 
 function connect(sessionId: string): void {

@@ -173,7 +173,21 @@ spec:
           # here: the live worker was found on an older tag mid-session,
           # verified by grepping the deployed binary (CbControlChannel=0 with
           # clipboard=42 as the known-positive control).
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-29467fecda3a
+          # cr7727-6047599546e3 (2026-08-24) — first image with BOTH the
+          # control channel and CbDownloadManagerDelegate. Built from
+          # feat/downloads, verified in the binary
+          # (CbDownloadManagerDelegate=2, DetermineDownloadTarget=1,
+          # crdownload=1, CbControlChannel=15) and end to end by
+          # tests/interactive suite_downloads.
+          #
+          # Keep this pin CURRENT. The live deployment was rolled back to an
+          # older tag three times on 2026-08-24 by concurrent sessions, and
+          # each time the symptom was a test failing for a reason that looks
+          # like a code defect: `CbControlChannel=0` in the deployed binary
+          # means every confirm() silently takes the guest default and no
+          # `control` channel is ever opened. tests/interactive's dialogs
+          # preflight now names the image when this happens.
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-6047599546e3
           env:
             - name: SESSION_ID
               value: dev
