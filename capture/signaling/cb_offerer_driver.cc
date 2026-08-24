@@ -973,8 +973,30 @@ void CbOffererDriver::AddRemoteIcePayload(
                                  payload.sdp_m_line_index.value_or(0),
                                  payload.candidate, &err));
   if (!cand) {
-    FailWithReason(std::string("CreateIceCandidate failed: ") +
-                   err.description);
+    // DROP the candidate; do NOT fail the session.
+    //
+    // This used to call FailWithReason, which is terminal — the driver
+    // moves to kFailed, main_parts logs "unrecoverable failure", and the
+    // peer connection is gone for the life of the process. One unparseable
+    // candidate from a remote peer took down a working session.
+    //
+    // That is the wrong severity by a wide margin. ICE is designed around
+    // candidates being lossy: they arrive out of order, some are
+    // unresolvable (an mDNS .local candidate whose resolution fails is
+    // normal and was logged immediately before this on 2026-08-24), and
+    // connectivity is established from whichever ones DO work. A candidate
+    // we cannot parse is one fewer path, not a dead session — the remaining
+    // host/srflx/relay candidates can still pair.
+    //
+    // The empty-string case that actually triggered this is now caught
+    // upstream in cb_wire_envelope.cc, where it is correctly read as
+    // end-of-candidates. This stays as defence in depth: whatever else a
+    // peer sends that we cannot parse, the answer is to skip it loudly, not
+    // to take the browser down with it.
+    LOG(WARNING) << kLogPrefix << "dropping unparseable remote ICE candidate: "
+                 << err.description << " — candidate=[" << payload.candidate
+                 << "] mid=" << payload.sdp_mid.value_or("")
+                 << "; session continues on the remaining candidates";
     return;
   }
   // TODO(M3-R4-add-ice-async): libwebrtc has both a synchronous

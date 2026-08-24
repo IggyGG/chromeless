@@ -256,6 +256,66 @@ TEST(CbWireEnvelopeDecodeTest, RealIceEndOfCandidatesDecodes) {
   EXPECT_EQ(ice->candidate, "");
 }
 
+// An EMPTY candidate string is end-of-candidates, in BOTH dialects.
+//
+// This is the encoding browsers actually send. Chrome ends a gathering
+// cycle by emitting RTCIceCandidate.toJSON() with candidate:"" — a
+// well-formed object, not `data: null`. The parser recognised only the
+// null form, so the empty string took the normal-candidate path,
+// CreateIceCandidate("") failed to parse, and the driver treated a parse
+// failure as UNRECOVERABLE.
+//
+// Live consequence, standalone stack 2026-08-24 18:15:10:
+//   FAIL state=IceInFlight reason=CreateIceCandidate failed: Expected
+//   candidate got
+//   CV2-69 offerer_driver: unrecoverable failure
+// The browser kept capturing (VERDICT=PRODUCING, 50k frames) with a dead
+// peer connection for an hour, so it looked healthy while every viewer sat
+// at "no offer from browser". The END of a SUCCESSFUL gather killed it.
+TEST(CbWireEnvelopeDecodeTest, EmptyCandidateStringIsEndOfCandidates) {
+  // Shape copied from kRealIceEnvelope above, not invented: the canonical
+  // dialect requires `from` (cb_wire_envelope.cc:366 returns nullopt without
+  // it) and has no v/t/seq. My first version of this test hand-wrote a
+  // {v,type,t,seq,data} frame, which failed to decode at all — so it
+  // asserted nothing about end-of-candidates and merely proved the envelope
+  // was malformed.
+  std::optional<Envelope> env = Decode(
+      R"({"type":"ice","from":"client",)"
+      R"("data":{"candidate":"","sdpMid":"0","sdpMLineIndex":0}})");
+  ASSERT_TRUE(env.has_value());
+  EXPECT_EQ(env->type, EnvelopeType::kIce);
+  const auto* ice = std::get_if<IceCandidatePayload>(&env->data);
+  ASSERT_TRUE(ice);
+  EXPECT_TRUE(ice->is_end_of_candidates)
+      << "an empty candidate string must not take the normal-candidate path";
+  EXPECT_EQ(ice->candidate, "");
+}
+
+TEST(CbWireEnvelopeDecodeTest, PortalFlatEmptyCandidateIsEndOfCandidates) {
+  // Same rule in the flat dialect, where the payload IS the frame.
+  std::optional<Envelope> env =
+      Decode(R"({"type":"ice_candidate","candidate":""})");
+  ASSERT_TRUE(env.has_value());
+  ASSERT_TRUE(std::holds_alternative<IceCandidatePayload>(env->data));
+  EXPECT_TRUE(std::get<IceCandidatePayload>(env->data).is_end_of_candidates);
+}
+
+// A NON-empty candidate must still decode as a real candidate. Without
+// this, "treat empty as EOC" could be over-applied and every candidate
+// would silently become end-of-candidates — a fix that breaks ICE while
+// making the failing test pass.
+TEST(CbWireEnvelopeDecodeTest, NonEmptyCandidateIsNotEndOfCandidates) {
+  std::optional<Envelope> env = Decode(
+      R"({"type":"ice","from":"client","data":{)"
+      R"("candidate":"candidate:1 1 udp 2113937151 10.0.0.1 5000 typ host",)"
+      R"("sdpMid":"0","sdpMLineIndex":0}})");
+  ASSERT_TRUE(env.has_value());
+  const auto* ice = std::get_if<IceCandidatePayload>(&env->data);
+  ASSERT_TRUE(ice);
+  EXPECT_FALSE(ice->is_end_of_candidates);
+  EXPECT_NE(ice->candidate.find("typ host"), std::string::npos);
+}
+
 TEST(CbWireEnvelopeDecodeTest, RealByeDecodes) {
   auto env = Decode(kRealByeEnvelope);
   ASSERT_TRUE(env);

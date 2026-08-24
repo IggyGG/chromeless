@@ -283,6 +283,34 @@ std::optional<EnvelopeData> DecodeData(EnvelopeType type,
       const std::string* candidate = d.FindString("candidate");
       if (!candidate) return std::nullopt;
       p.candidate = *candidate;
+      // An EMPTY candidate string is end-of-candidates, not a candidate.
+      //
+      // Two encodings exist for "I have no more candidates", and this
+      // parser only recognised one. `data: null` is handled above; the
+      // OTHER — and the one browsers actually emit — is a well-formed
+      // RTCIceCandidate whose `candidate` field is "". Chrome sends it via
+      // RTCIceCandidate.toJSON() at the end of gathering, and the comment
+      // directly above already says the string is "possibly empty" while
+      // doing nothing about it.
+      //
+      // Taking the non-EOC path with an empty string means
+      // CreateIceCandidate("") fails to parse, and AddRemoteIcePayload
+      // treats a parse failure as UNRECOVERABLE — FailWithReason kills the
+      // whole session:
+      //
+      //   FAIL state=IceInFlight reason=CreateIceCandidate failed:
+      //   Expected candidate got
+      //   CV2-69 offerer_driver: unrecoverable failure
+      //
+      // Observed on the live standalone stack 2026-08-24 18:15:10: the
+      // browser kept capturing (VERDICT=PRODUCING, 50k frames) while the
+      // peer connection had been dead for an hour, so the guest looked
+      // perfectly healthy and every viewer sat at "no offer from browser".
+      // The end of a normal, successful gathering cycle terminated the
+      // session.
+      if (p.candidate.empty()) {
+        p.is_end_of_candidates = true;
+      }
       if (const std::string* sm = d.FindString("sdpMid")) {
         p.sdp_mid = *sm;
       }
@@ -385,7 +413,17 @@ std::optional<Envelope> Decode(std::string_view json) {
         p.is_end_of_candidates = true;
         return Envelope{*portal_type, from, EnvelopeData{std::move(p)}};
       }
-      p.is_end_of_candidates = false;
+      // Empty string is end-of-candidates here too. The branch above
+      // handles a MISSING `candidate`; a present-but-empty one is the same
+      // statement and reaches this line. Chrome sends the empty-string form,
+      // so this is the common case, not the exotic one.
+      //
+      // Caught by a test rather than by reading: I fixed the canonical
+      // dialect first and assumed the flat one was covered. It is separate
+      // code, and PortalFlatEmptyCandidateIsEndOfCandidates failed on the
+      // build lane with is_end_of_candidates=false. Half a fix that looks
+      // whole is exactly what the test is for.
+      p.is_end_of_candidates = candidate->empty();
       p.candidate = *candidate;
       if (const std::string* sm = dict.FindString("sdpMid")) {
         p.sdp_mid = *sm;
