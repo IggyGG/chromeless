@@ -103,6 +103,41 @@ then returns nothing and the ~30 min cycle bought you no information. Watch
   no container, therefore no log — and the Job silently burns retries. The
   lane reads as mysteriously dead rather than as a resource problem.
 
+- **There are FOUR Forgejo tokens and only two can push.** A push failing with
+  a bare `403 Forbidden` is almost never the forge being down — it is a token
+  without user scope. The tell is that repo reads keep working:
+
+  ```sh
+  curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token $T" \
+    https://forgejo.triform.dev/api/v1/user            # 200 = can push
+  curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token $T" \
+    https://forgejo.triform.dev/api/v1/repos/triform/chromeless   # 200 even for a read-only token
+  ```
+
+  | var in `tf-multiverse/.env` | `/user` | pushes as |
+  | --- | --- | --- |
+  | `FORGEJO_REPO_TOKEN` | 200 | `triform-admin` — use this for automation |
+  | `FORGEJO_IGGY_TOKEN` | 200 | `iggy` — a human's own token; don't use it for bot work |
+  | `FORGEJO_API_TOKEN` | 403 | reads only |
+  | `FORGEJO_ISSUES_TOKEN` | 403 | reads only |
+
+  On 2026-08-24 this cost most of a day: `FORGEJO_API_TOKEN` was tried, it read
+  fine, its pushes 403'd, and the conclusion drawn was "my credential expired"
+  — so seven commits sat unpushed and one worktree away from being lost while
+  a *working* token sat two lines above it in the same file.
+
+  A token was also baked into a remote URL (`https://user:tok@…`), so a stale
+  credential kept being used invisibly and survived every attempt to change it.
+  Both are fixed: the working token is in the login keychain under
+  `forgejo-api-token`, `git-credential-forgejo-keychain` serves it to git, and
+  the remote is a plain URL. `git push` now just works. Never bake a token into
+  a remote, and never `source` the `.env` — grep the one variable you need.
+
+- **`kubectl apply` and `kubectl set image` fight each other, silently.** On
+  2026-08-24 a user could not use the standalone stack for a day. The worker
+  Deployment reached **revision 66**; nobody was reverting it by hand. Three
+  mechanisms ran at once:
+
   Fixed as an instance three times and never as a class (kaniko-push
   2026-06-29, t7 2026-07-02, t8 2026-08-20) while three further build lanes
   and three validation Jobs carried it latent. `make lint-pod-resources`
