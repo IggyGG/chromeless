@@ -37,7 +37,31 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    # STOPGAP (2026-08-20): `priority`, not `ubuntu-latest`.
+    #
+    # `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
+    # tf-multiverse saturated them: measured 470 queued `docker` jobs against 19
+    # `ubuntu-latest`, all 18 general slots held by `docker`, and **zero**
+    # `ubuntu-latest` jobs started in 30 minutes. chromeless jobs waited 56-61
+    # min and were not going to get a slot — arrivals were running at 285/30min
+    # against 147 completing, so the backlog was growing, not draining.
+    #
+    # The `priority` pool (6 express replicas x capacity 2 = 12 slots) had 3 in
+    # use. It has the same shape as the general pool — dind + dind-gc + runner,
+    # 16Gi docker storage, capacity 2 — so nothing here depends on a runner
+    # feature the general pool had and this one lacks.
+    #
+    # ⚠ It is NOT free: `priority` exists for tf-multiverse's own fast lane
+    # (portal SSR check, cargoless-serve image builds). This borrows capacity
+    # that belongs to someone else, so it is a stopgap until chromeless has its
+    # own pool — see the split design. If the express pool starts queueing,
+    # this is why.
+    #
+    # ⚠ Express dind has 8Gi memory vs the general pool's 16Gi. The e2e stack
+    # (Chromium + 1GB shm + three small services) is expected to fit, but this
+    # is the one difference between the pools that could bite. An OOM in
+    # `compose up` here is THIS, not a product defect.
+    runs-on: priority
     steps:
       - uses: actions/checkout@v4
 
@@ -268,7 +292,7 @@ jobs:
 
   smoke:
     name: Container smoke test
-    runs-on: ubuntu-latest
+    runs-on: priority
     steps:
       - uses: actions/checkout@v4
 
@@ -287,14 +311,43 @@ jobs:
       # capture/streamer-page/ (the Dockerfile still COPYd it). That job had
       # been failing on every run; it is deleted rather than repaired
       # because the image contained none of the product.
+      # Resolve the worker image from the TREE, not from a forge setting.
+      # See e2e.yml's copy of this step for the full account: the repo variable
+      # is invisible to a checkout, and it went three weeks stale (2026-08-19,
+      # task 340536) with no check able to say so. The file is the reviewable
+      # default; the variable still wins when set, as an explicit override.
+      # tools/lint/guest_release_lint.py fails if this file stops being read.
+      - name: Resolve the worker image
+        id: image
+        env:
+          CHROMELESS_IMAGE_OVERRIDE: ${{ vars.CHROMELESS_IMAGE }}
+        run: |
+          set -eu
+          # Absence is legitimate — a fork with no build of its own has nothing
+          # to pin (guest_release_lint.py makes the same allowance), so this
+          # must not hard-fail. It falls through to the override, and then to
+          # the probe's skip.
+          pinned=""
+          if [ -f build/guest-release.json ]; then
+            pinned=$(python3 -c "import json;print(json.load(open('build/guest-release.json')).get('image',''))")
+          fi
+          if [ -n "${CHROMELESS_IMAGE_OVERRIDE}" ]; then
+            resolved="${CHROMELESS_IMAGE_OVERRIDE}"
+            echo "::notice::worker image from the CHROMELESS_IMAGE repo variable (OVERRIDE): ${resolved}"
+            echo "  tree pin (build/guest-release.json) says: ${pinned}"
+          else
+            resolved="${pinned}"
+            echo "worker image from build/guest-release.json: ${resolved}"
+          fi
+          echo "CHROMELESS_IMAGE=${resolved}" >> "$GITHUB_ENV"
+
       - name: Check for a supplied worker image
         id: probe
-        env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
-          if [ -z "${CHROMELESS_IMAGE}" ]; then
+          # CHROMELESS_IMAGE comes from GITHUB_ENV, set by the resolve step.
+          if [ -z "${CHROMELESS_IMAGE:-}" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::CHROMELESS_IMAGE repo variable not set — container smoke skipped. Set it to a cloud_browser_worker image to enable."
+            echo "::notice::no worker image resolved — build/guest-release.json has no image, or the CHROMELESS_IMAGE override is an empty string."
           elif [ ! -f tests/smoke/container-boot.sh ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/smoke/container-boot.sh missing — container smoke skipped."
@@ -312,7 +365,6 @@ jobs:
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           registry="${CHROMELESS_IMAGE%%/*}"
           echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
@@ -320,14 +372,18 @@ jobs:
 
       - name: Pull the worker image
         if: steps.probe.outputs.present == 'true'
-        env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: docker pull "${CHROMELESS_IMAGE}"
 
+      # SMOKE_IMAGE_TAG must be the RESOLVED image, not the raw repo variable.
+      # Reading `vars.CHROMELESS_IMAGE` here meant the step above pulled one
+      # image and this step booted another — and with the variable unset (the
+      # state this repo was actually in) it booted the empty string, so the
+      # script fell through to its `chromeless:ci` auto-detect default and
+      # smoke-tested an image nobody had asked for.
       - name: Run smoke
         if: steps.probe.outputs.present == 'true'
         env:
-          SMOKE_IMAGE_TAG: ${{ vars.CHROMELESS_IMAGE }}
+          SMOKE_IMAGE_TAG: ${{ env.CHROMELESS_IMAGE }}
         run: |
           chmod +x tests/smoke/container-boot.sh
           ./tests/smoke/container-boot.sh
@@ -359,8 +415,6 @@ jobs:
       #     own API, so it works whether or not the filesystem is shared.
       - name: Conformance kit vs the worker image
         if: steps.probe.outputs.present == 'true'
-        env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           set -euo pipefail
           cid=$(docker run -d --rm --shm-size=1g "${CHROMELESS_IMAGE}")
@@ -385,7 +439,7 @@ jobs:
 
   docs:
     name: Docs link check
-    runs-on: ubuntu-latest
+    runs-on: priority
     steps:
       - uses: actions/checkout@v4
 

@@ -86,7 +86,14 @@ spec:
           # predates signaling/token, so a broker built from it CANNOT verify
           # what the gateway mints — every connection would be rejected as a
           # bad signature, with nothing in either log saying the keys differ.
-          image: registry.triform.cloud/chromeless/signaling:standalone-v3
+          # standalone-v7 (2026-08-21): peer.saidBye — a clean client close no
+          # longer produces a SECOND, synthesised bye. Two byes ~49ms apart
+          # killed the worker's re-arm (the second closed the rebuilt session).
+          #
+          # This pin was also stale: the cluster was running standalone-v6
+          # while this file said v3, so re-applying stack.yaml would have
+          # rolled the broker BACKWARDS.
+          image: registry.triform.cloud/chromeless/signaling:standalone-v7
           env:
             - name: SIGNALING_PORT
               value: "8080"
@@ -165,29 +172,39 @@ spec:
         - name: chromium
           # The pin from build/guest-release.json, verified to boot and paint
           # by infra/k8s/standalone/smoke-job.yaml.
-          # cr7727-29467fecda3a (2026-08-21) is the first worker image that
-          # contains CbControlChannel and Cb.setViewport. The previous pin
-          # predates both, so a `deploy.sh` run would silently roll the guest
-          # BACK to a build where every confirm() takes the default and no
-          # `control` channel is ever opened -- which is exactly what happened
-          # here: the live worker was found on an older tag mid-session,
-          # verified by grepping the deployed binary (CbControlChannel=0 with
-          # clipboard=42 as the known-positive control).
-          # cr7727-6047599546e3 (2026-08-24) — first image with BOTH the
-          # control channel and CbDownloadManagerDelegate. Built from
-          # feat/downloads, verified in the binary
-          # (CbDownloadManagerDelegate=2, DetermineDownloadTarget=1,
-          # crdownload=1, CbControlChannel=15) and end to end by
-          # tests/interactive suite_downloads.
+          # DELIBERATELY STALE UNTIL THE MERGED BUILD LANDS.
           #
-          # Keep this pin CURRENT. The live deployment was rolled back to an
-          # older tag three times on 2026-08-24 by concurrent sessions, and
-          # each time the symptom was a test failing for a reason that looks
-          # like a code defect: `CbControlChannel=0` in the deployed binary
-          # means every confirm() silently takes the guest default and no
-          # `control` channel is ever opened. tests/interactive's dialogs
-          # preflight now names the image when this happens.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-6047599546e3
+          # This merge combines two lineages that each fixed a different half
+          # of the guest, and NEITHER side's pin is right for the result:
+          #
+          #   cr7727-8d2ce2e66288  re-armable offerer driver + the cold-arrival
+          #                        fix (an already-running worker now offers to
+          #                        a newly-arrived viewer instead of staying
+          #                        mute until the previous one leaves; before
+          #                        it, the first viewer on an idle stack sat at
+          #                        "waiting for offer" until they gave up).
+          #                        Has NO control channel and NO downloads.
+          #
+          #   cr7727-6047599546e3  CbControlChannel (js dialogs reach a human)
+          #                        + CbDownloadManagerDelegate (a download
+          #                        click produced no file at all).
+          #                        Has NO cold-arrival fix.
+          #
+          # Pinning either one here rolls somebody's half of the guest
+          # backwards on the next `deploy.sh`, which is precisely the
+          # apply-vs-set-image tug-of-war that cost two sessions a day.
+          #
+          # So this stays on the older tag until a build from THIS merge
+          # exists, and is then replaced by that tag in a follow-up commit.
+          # An honestly stale pin that everyone knows to distrust is safer
+          # than a fresh-looking one that silently loses half the fixes.
+          #
+          # VERIFY BY DIGEST, NOT TAG. These tags are mutable: standalone-v9
+          # was rebuilt over by a different session on 2026-08-24 and the
+          # deployment still read "v9" while serving somebody else's bundle.
+          # `kubectl get deploy ... -o jsonpath='{...image}'` is not evidence
+          # that the right code is running; the image digest is.
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-224c19413e24
           env:
             - name: SESSION_ID
               value: dev
@@ -305,6 +322,16 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: gateway
+          # standalone-v8 is what the cluster ran when this was written. This
+          # pin said v6, so re-applying stack.yaml would have rolled the
+          # gateway BACKWARDS — the same drift the worker and signaling pins
+          # had.
+          #
+          # The gateway BAKES the client bundle in at build time, so a client
+          # fix does not reach a browser until this image is rebuilt AND
+          # rolled. And the tag is mutable: v9 was rebuilt over by another
+          # session, serving a bundle with none of the expected markers while
+          # the deployment still read "v9". Check the digest.
           image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
           env:
             - name: CHROMELESS_USER

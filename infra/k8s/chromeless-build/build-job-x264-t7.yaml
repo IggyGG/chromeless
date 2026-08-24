@@ -74,15 +74,43 @@ spec:
 
               # ---- Phase 2: clone chromeless to /workspace --------
               AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              # `git clone --branch` accepts a BRANCH OR TAG ONLY — never a
+              # commit SHA. fire-build.sh rewrites OUR_REPO_REF to the resolved
+              # SHA (that is the whole point: it pins the build to an exact
+              # commit and reads the live Job back to prove it). So firing at
+              # anything that is not a branch name died here with
+              #
+              #   warning: Could not find remote branch 7bec996 to clone.
+              #   fatal: Remote branch 7bec996 not found in upstream origin
+              #
+              # after ~40 s of apt output, three times, with backoffLimit=2 —
+              # i.e. the lane consumed a full retry budget before ever reaching
+              # the compiler. The bug was latent: every previous fire happened
+              # to name a branch, and the two attempts before this one died on
+              # OutOfcpu/OutOfmemory during scheduling, so init never ran.
+              #
+              # Fix: try the fast shallow path (correct when the ref IS a
+              # branch or tag), and fall back to a full clone + detached
+              # checkout, which works for ANY ref including a bare SHA. The
+              # fallback deliberately does NOT use `fetch --depth 1 <sha>`:
+              # that needs uploadpack.allowAnySHA1InWant on the server, which
+              # is not enabled here. chromeless is a small repo (it is not the
+              # chromium tree), so a full clone costs seconds.
               if [ ! -d /workspace/.git ]; then
-                git clone --depth 1 --branch "${OUR_REPO_REF}" \
-                  "${AUTH_REPO}" /workspace
+                if ! git clone --depth 1 --branch "${OUR_REPO_REF}" \
+                       "${AUTH_REPO}" /workspace 2>/dev/null; then
+                  rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null || true
+                  git clone "${AUTH_REPO}" /workspace
+                  git -C /workspace checkout --detach "${OUR_REPO_REF}"
+                fi
                 git -C /workspace remote set-url origin "${OUR_REPO}"
               else
                 cd /workspace \
-                  && git fetch --depth 1 origin "${OUR_REPO_REF}" \
-                  && git reset --hard FETCH_HEAD
+                  && git fetch origin \
+                  && git checkout --detach "${OUR_REPO_REF}" \
+                  && git reset --hard "${OUR_REPO_REF}"
               fi
+              echo "bootstrap: checked out $(git -C /workspace rev-parse HEAD)"
               [ -x /workspace/build/chromeless-build.sh ] || {
                 echo "ERROR: /workspace/build/chromeless-build.sh missing"; exit 1; }
 
@@ -463,19 +491,46 @@ spec:
               # stop shaving and address the node's reservation hygiene
               # instead — a right-sized builder-fsn-build-v2 alone would
               # return ~10 cores of schedulable headroom.
-              cpu: "2"
-              # MEASURED, not guessed. A full build of this target list peaks at
-              # ~57 GiB (kubectl top, sampled through compile + link on
-              # 2026-08-19: steady ~50 GiB, peak 56,963 Mi). The request was
-              # 96 GiB, which is not conservatism — it is a scheduling lie
-              # that cost two OOM evictions at ADMISSION on 2026-08-19 while
-              # triform-7 had ~29 GiB free and the pod would never have
-              # touched more than 57.
               #
-              # 72Gi = measured peak + ~26% headroom, which covers a colder
-              # cache and a larger target list without pretending to need
-              # a third of the node. Same reasoning main applied to CPU in
-              # e654ed6 (4 -> 2), where requests ran ~10x actual usage.
+              # 2 → 300m (2026-08-21): THIS IS THAT FOURTH TIME, and the
+              # comment above is right — this is now a workaround for a
+              # cluster-wide problem, not a fix. Recorded plainly so the next
+              # reader does not mistake it for tuning.
+              #
+              # The node reached 47535m/48000m requested (465m free), and
+              # every OTHER node was 92%+ as well, so there was no lane with
+              # room anywhere. builder-fsn-build-v2-0 still reserves 10 cores
+              # and has now been resident four days.
+              #
+              # Lowering was chosen deliberately over the alternatives: it
+              # touches nobody else's workload, needs no cluster change, and
+              # the LIMIT is untouched at 40 CPU, so the build's real compute
+              # envelope is unchanged — ninja still spreads over whatever is
+              # genuinely idle. What a 300m request gives up is a GUARANTEE
+              # under contention, which a batch build competing with
+              # latency-sensitive tenants should not hold anyway.
+              #
+              # The honest fix remains reservation hygiene on triform-7.
+              cpu: "300m"
+              # 96Gi → 64Gi (2026-08-21), same reasoning as the CPU request
+              # directly above, and hit in the same session: with CPU fixed the
+              # lane then died on `OutOfmemory` — a DISTINCT rejection with an
+              # almost identical presentation (three dead pods, no log). The
+              # addendum in docs/findings/build-node-cpu-reservations.md was
+              # written about exactly this and says to check headroom BEFORE
+              # firing; measured today:
+              #
+              #   triform-7  allocatable 251.3 GiB  requested 163.9  free 87.4
+              #
+              # A 96Gi request is ~9 GiB short. The node has filled since that
+              # addendum was written (it recorded 114.3 GiB free on 08-19).
+              #
+              # 64Gi keeps a real reservation — a linker OOM costs far more
+              # than slow scheduling, so this is NOT shaved to the bone — while
+              # fitting today's headroom with ~23 GiB to spare. As with CPU,
+              # the LIMIT is untouched at 192Gi, so the build's ceiling is
+              # unchanged; only the guarantee shrinks.
+              memory: "64Gi"
               memory: "72Gi"
               # Explicit ephemeral REQUEST decoupled from the 8Gi limit
               # (2026-07-02, same class as chromeless-kaniko-push.yaml's

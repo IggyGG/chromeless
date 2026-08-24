@@ -64,7 +64,7 @@ func TestSession_ICEReplay_AgeCap(t *testing.T) {
 	s := &session{
 		id:        "age-cap",
 		peers:     make(map[peerRole]*peer, 2),
-		recent:    make(map[peerRole]map[string][]byte, 2),
+		recent:    make(map[peerRole]map[string]bufferedSDP, 2),
 		recentICE: make(map[peerRole][]bufferedICE, 2),
 	}
 
@@ -111,7 +111,7 @@ func TestSession_ICEReplay_QueueCap(t *testing.T) {
 	s := &session{
 		id:        "queue-cap",
 		peers:     make(map[peerRole]*peer, 2),
-		recent:    make(map[peerRole]map[string][]byte, 2),
+		recent:    make(map[peerRole]map[string]bufferedSDP, 2),
 		recentICE: make(map[peerRole][]bufferedICE, 2),
 	}
 	brw := fakePeer(roleBrowser)
@@ -491,7 +491,7 @@ func TestWS_DisconnectDiscardsReplay(t *testing.T) {
 	if len(buffered) != 0 || nICE != 0 {
 		t.Fatalf("departed client left %d envelopes + %d candidates buffered; "+
 			"the next worker to join would be replayed them: %s",
-			len(buffered), nICE, buffered["answer"])
+			len(buffered), nICE, string(buffered["answer"].raw))
 	}
 
 	// And the surviving browser must be unaffected — it is still live, and a
@@ -544,4 +544,633 @@ func waitGoneRole(h *hub, sessionID string, role peerRole, t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("peer %s never left %s", role, sessionID)
+}
+
+// TestWS_ByelessDisconnectDiscardsCounterpartReplay is the case both tests
+// above miss, and it is the one that actually bit.
+//
+// TestWS_ByeDiscardsReplayBuffer covers a viewer that says `bye`.
+// TestWS_DisconnectDiscardsReplay covers a viewer that vanishes, but asserts
+// only that ITS OWN buffer is dropped. Neither covers a viewer that vanishes
+// WITHOUT a bye after negotiating — where the dead offer left behind is the
+// BROWSER's, and the next viewer is the one poisoned.
+//
+// That is not a hypothetical gap. Measured 2026-08-19 (chromeless task 341797,
+// a full Playwright run against a real worker): the broker received ZERO byes
+// for the entire run. `beforeunload` — the only thing client/main.ts hangs
+// disconnect() on — does not fire reliably when a browser context is closed
+// programmatically, and a lid-close, crash or network drop never sends one at
+// all. So:
+//
+//	worker joins, offers, trickles ICE           → buffered
+//	spec 01 joins, replayed:7, connects in 0.42s → PASSES
+//	spec 01's page is closed — no bye            → only the CLIENT's buffer dropped
+//	spec 02 joins                                → replayed the SAME dead 7
+//	spec 03 joins                                → replayed the SAME dead 7
+//
+// Specs 02 and 03 each answered an offer whose peer connection the worker had
+// already torn down (kClosed is terminal), and sat in `connecting` for the full
+// 30s timeout. It reads exactly like a media or NAT failure and is neither —
+// the same disguise documented on discardReplay.
+func TestWS_ByelessDisconnectDiscardsCounterpartReplay(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/byeless-replay"
+
+	type client struct {
+		conn   *websocket.Conn
+		frames chan string
+	}
+	dial := func(name string) *client {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		cl := &client{conn: c, frames: make(chan string, 64)}
+		go func() {
+			defer close(cl.frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				cl.frames <- string(raw)
+			}
+		}()
+		return cl
+	}
+	send := func(c *client, who, msg string) {
+		t.Helper()
+		if err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("%s write: %v", who, err)
+		}
+	}
+	collect := func(c *client) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(750 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+	waitPeer := func(role peerRole, present bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "byeless-replay")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok == present {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s present=%v never happened", role, present)
+	}
+
+	// Worker joins, offers, trickles a candidate. No viewer yet: both buffer.
+	brw := dial("browser")
+	send(brw, "browser", `{"type":"ice","from":"browser"}`)
+	waitPeer(roleBrowser, true)
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 SESSION-ONE"}}`)
+	send(brw, "browser", `{"type":"ice","from":"browser","data":{"candidate":"one"}}`)
+
+	// Viewer 1 joins and IS correctly replayed the live offer.
+	cli1 := dial("client-1")
+	send(cli1, "client-1", `{"type":"ice","from":"client"}`)
+	waitPeer(roleClient, true)
+	if got := collect(cli1); !strings.Contains(got, "SESSION-ONE") {
+		t.Fatalf("precondition: viewer 1 should get the buffered offer, got %q", got)
+	}
+
+	// Viewer 1 ANSWERS. This line is load-bearing: being replayed an offer is
+	// passive and happens to every joiner, so it deliberately does not mark a
+	// peer as negotiated (see TestWS_ByelessDisconnectKeepsUnnegotiatedOffer,
+	// which fails if it does). Sending SDP is what makes this a real session
+	// whose teardown invalidates the worker's offer — and it is what a real
+	// viewer does within milliseconds of receiving one.
+	send(cli1, "client-1", `{"type":"answer","from":"client","data":{"sdp":"v=0 ANSWER-ONE"}}`)
+
+	// Viewer 1 disappears with NO bye — the whole point of this test.
+	_ = cli1.conn.Close()
+	waitPeer(roleClient, false)
+
+	// Viewer 2 joins. The worker's offer describes a peer connection that died
+	// with viewer 1, and kClosed is terminal, so replaying it hands viewer 2 a
+	// connection that can never come up.
+	cli2 := dial("client-2")
+	send(cli2, "client-2", `{"type":"ice","from":"client"}`)
+	waitPeer(roleClient, true)
+	if got := collect(cli2); strings.Contains(got, "SESSION-ONE") ||
+		strings.Contains(got, `"candidate"`) {
+		t.Fatalf("viewer 2 was replayed the dead session after a bye-less exit:\n%s", got)
+	}
+
+	// The broker must still WORK: a worker that can offer again still reaches
+	// viewer 2. Without this, "discard everything always" would pass this test
+	// by breaking the product.
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 SESSION-TWO"}}`)
+	if got := collect(cli2); !strings.Contains(got, "SESSION-TWO") {
+		t.Fatalf("live forwarding broken after a bye-less disconnect: got %q", got)
+	}
+}
+
+// TestWS_ByelessDisconnectKeepsUnnegotiatedOffer is the guard rail on the fix
+// above, and the reason it is gated on `negotiated` rather than unconditional.
+//
+// The replay buffer exists for the OPPOSITE race (T96): the worker offers
+// before any viewer has joined, and that offer must survive until one does. A
+// viewer that connects and drops again WITHOUT exchanging SDP — a refreshed
+// tab, a probe, a health check, a client that fails TLS — has not made the
+// worker's offer stale. Discarding it there would replace an every-viewer-
+// after-the-first bug with an every-viewer bug, and this test is what stops a
+// future simplification to `discardReplay(roleClient, roleBrowser)` from
+// looking correct.
+func TestWS_ByelessDisconnectKeepsUnnegotiatedOffer(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/unnegotiated"
+
+	dialRaw := func(name string) (*websocket.Conn, chan string) {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		frames := make(chan string, 64)
+		go func() {
+			defer close(frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				frames <- string(raw)
+			}
+		}()
+		return c, frames
+	}
+	waitPeer := func(role peerRole, present bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "unnegotiated")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok == present {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s present=%v never happened", role, present)
+	}
+	collect := func(frames chan string) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(750 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+
+	// Worker offers into an empty session — the T96 race this buffer is for.
+	brwConn, _ := dialRaw("browser")
+	if err := brwConn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ice","from":"browser"}`)); err != nil {
+		t.Fatalf("browser hello: %v", err)
+	}
+	waitPeer(roleBrowser, true)
+	if err := brwConn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"offer","from":"browser","data":{"sdp":"v=0 STILL-VALID"}}`)); err != nil {
+		t.Fatalf("browser offer: %v", err)
+	}
+
+	// A viewer connects and leaves again WITHOUT any SDP: it registers (the
+	// hello is an ICE frame, which is not SDP) and then drops. Note it IS
+	// replayed the offer on join — that alone must not count as negotiating,
+	// or this test and the one above cannot both pass.
+	cliConn, cliFrames := dialRaw("client-transient")
+	if err := cliConn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ice","from":"client"}`)); err != nil {
+		t.Fatalf("client hello: %v", err)
+	}
+	waitPeer(roleClient, true)
+	_ = collect(cliFrames) // drain whatever it was replayed
+	_ = cliConn.Close()
+	waitPeer(roleClient, false)
+
+	// The real viewer arrives. The worker's offer was never answered and is
+	// still live, so it MUST still be replayed.
+	realConn, realFrames := dialRaw("client-real")
+	if err := realConn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ice","from":"client"}`)); err != nil {
+		t.Fatalf("real client hello: %v", err)
+	}
+	waitPeer(roleClient, true)
+	if got := collect(realFrames); !strings.Contains(got, "STILL-VALID") {
+		t.Fatalf("a transient viewer destroyed the worker's un-negotiated offer; "+
+			"the T96 race is broken:\n%s", got)
+	}
+}
+
+// TestWS_ByelessDisconnectNotifiesCounterpart is the half that
+// TestWS_ByelessDisconnectDiscardsCounterpartReplay does not cover: dropping
+// the dead SDP protects the NEXT peer, but the peer still connected is never
+// told its partner is gone.
+//
+// For the browser that is fatal. cb_offerer_driver leaves its session only on
+// an explicit close, so a worker whose viewer vanished keeps encoding into a
+// dead transport and never offers again. Measured 2026-08-20 against the live
+// standalone stack: the worker sat at `frames_encoded=3369 fps=10 1280x720`
+// with NO viewer attached, while every newly-joining client got an EMPTY
+// replay buffer and timed out with no `m=` lines in its remote description —
+// no offer had ever reached it. Three specs failed that way and the cause was
+// invisible from the client side, which is what makes this worth a test.
+func TestWS_ByelessDisconnectNotifiesCounterpart(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/byeless-notify"
+
+	type client struct {
+		conn   *websocket.Conn
+		frames chan string
+	}
+	dial := func(name string) *client {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		cl := &client{conn: c, frames: make(chan string, 64)}
+		go func() {
+			defer close(cl.frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				cl.frames <- string(raw)
+			}
+		}()
+		return cl
+	}
+	send := func(c *client, msg string) {
+		t.Helper()
+		if err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	collect := func(c *client) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(1500 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+	waitPeer := func(role peerRole, present bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "byeless-notify")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok == present {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s present=%v never happened", role, present)
+	}
+
+	brw := dial("browser")
+	send(brw, `{"type":"ice","from":"browser"}`)
+	waitPeer(roleBrowser, true)
+	send(brw, `{"type":"offer","from":"browser","data":{"sdp":"v=0 SESSION-ONE"}}`)
+
+	cli := dial("client")
+	send(cli, `{"type":"ice","from":"client"}`)
+	waitPeer(roleClient, true)
+	_ = collect(cli) // drain the replayed offer
+
+	// The viewer ANSWERS (so it counts as negotiated) and then vanishes with
+	// no bye — a closed laptop, a killed tab, a dropped network.
+	send(cli, `{"type":"answer","from":"client","data":{"sdp":"v=0 ANSWER-ONE"}}`)
+	_ = collect(brw) // drain the answer on the browser side
+	_ = cli.conn.Close()
+	waitPeer(roleClient, false)
+
+	// The browser MUST be told. Without this it keeps streaming into a dead
+	// transport forever and never offers to the next viewer.
+	if got := collect(brw); !strings.Contains(got, `"type":"bye"`) {
+		t.Fatalf("browser was never told its viewer left; got %q", got)
+	}
+}
+
+// TestWS_CleanByeIsNotDoubled is the counterpart guard to
+// TestWS_ByelessDisconnectNotifiesCounterpart: a viewer that DOES send its own
+// bye and then closes must produce EXACTLY ONE bye on the wire, not two.
+//
+// This was a real, measured defect. The client sends a bye
+// (client/src/session.ts) and then drops the socket, and unregister
+// synthesised a second one — so the worker received two byes ~49ms apart. That
+// was harmless while a bye meant "exit": the process was already going down.
+// It became fatal once the worker RE-ARMS instead. The first bye tore the
+// session down and RearmSession rebuilt it in ~7ms; the second closed the
+// REBUILD, so the still-pending OnRenegotiationNeeded landed in kClosed, took
+// FailWithReason -> kFailed, and Rearm() then refused — falling back to process
+// exit. The browser died on every viewer change while the logs read "rebuilt".
+func TestWS_CleanByeIsNotDoubled(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/clean-bye-once"
+
+	type client struct {
+		conn   *websocket.Conn
+		frames chan string
+	}
+	dial := func(name string) *client {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		cl := &client{conn: c, frames: make(chan string, 64)}
+		go func() {
+			defer close(cl.frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				cl.frames <- string(raw)
+			}
+		}()
+		return cl
+	}
+	send := func(c *client, msg string) {
+		t.Helper()
+		if err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	collect := func(c *client) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(1500 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+	waitPeer := func(role peerRole, present bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "clean-bye-once")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok == present {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s present=%v never happened", role, present)
+	}
+
+	brw := dial("browser")
+	send(brw, `{"type":"ice","from":"browser"}`)
+	waitPeer(roleBrowser, true)
+	send(brw, `{"type":"offer","from":"browser","data":{"sdp":"v=0 SESSION-ONE"}}`)
+
+	cli := dial("client")
+	send(cli, `{"type":"ice","from":"client"}`)
+	waitPeer(roleClient, true)
+	_ = collect(cli) // drain the replayed offer
+
+	send(cli, `{"type":"answer","from":"client","data":{"sdp":"v=0 ANSWER-ONE"}}`)
+	_ = collect(brw) // drain the answer
+
+	// A CLEAN departure: the viewer announces itself, THEN closes.
+	send(cli, `{"type":"bye","from":"client"}`)
+	_ = cli.conn.Close()
+	waitPeer(roleClient, false)
+
+	got := collect(brw)
+	if n := strings.Count(got, `"type":"bye"`); n != 1 {
+		t.Fatalf("browser must receive EXACTLY ONE bye for a clean close, got %d: %q", n, got)
+	}
+}
+
+// TestWS_UnnegotiatedDisconnectDoesNotNotify is the guard rail: a viewer that
+// connects and drops without exchanging SDP never had a session, so announcing
+// its death would tear down a worker that is legitimately waiting for its
+// FIRST viewer — turning "the second viewer fails" into "every viewer fails".
+func TestWS_UnnegotiatedDisconnectDoesNotNotify(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/unnegotiated-notify"
+
+	dialRaw := func() (*websocket.Conn, chan string) {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		frames := make(chan string, 64)
+		go func() {
+			defer close(frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				frames <- string(raw)
+			}
+		}()
+		return c, frames
+	}
+	waitPeer := func(role peerRole, present bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "unnegotiated-notify")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok == present {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s present=%v never happened", role, present)
+	}
+	drain := func(ch chan string) string {
+		var sb strings.Builder
+		timeout := time.After(1200 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-ch:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+
+	brwConn, brwFrames := dialRaw()
+	_ = brwConn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ice","from":"browser"}`))
+	waitPeer(roleBrowser, true)
+	_ = brwConn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"offer","from":"browser","data":{"sdp":"v=0 STILL-WAITING"}}`))
+
+	cliConn, cliFrames := dialRaw()
+	_ = cliConn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ice","from":"client"}`))
+	waitPeer(roleClient, true)
+	_ = drain(cliFrames) // it IS replayed the offer; that alone is not negotiating
+	_ = cliConn.Close()
+	waitPeer(roleClient, false)
+
+	if got := drain(brwFrames); strings.Contains(got, `"type":"bye"`) {
+		t.Fatalf("a transient viewer tore down a worker that never had a session:\n%s", got)
+	}
+}
+
+// TestWS_StaleSDPIsNotReplayed is the bug a REAL browser found that every
+// in-cluster test missed.
+//
+// `recent` held offer/answer forever while `recentICE` aged out after
+// iceReplayMaxAge. So a viewer joining later was handed a perfectly
+// well-formed offer whose ufrag/pwd named a peer connection that no longer
+// existed — and NO candidates, because those had already been dropped. It
+// answers, gathers its own host/srflx/relay, and goes straight to
+// iceConnectionState=failed.
+//
+// Measured 2026-08-20 from Chrome on a laptop: `replayed:1` of an offer
+// buffered 23 minutes earlier, ICE failed 5s later with relay candidates
+// present on BOTH sides. That reads as a TURN or NAT problem and is neither,
+// which is exactly why it needs a test.
+func TestWS_StaleSDPIsNotReplayed(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sess := h.getOrCreate(anonymousTenant, "stale-sdp")
+
+	// Buffer an offer and backdate it past the cap, the way a worker that has
+	// been waiting for a viewer ends up looking.
+	sess.mu.Lock()
+	sess.recent[roleBrowser] = map[string]bufferedSDP{
+		"offer": {
+			raw: []byte(`{"type":"offer","from":"browser","data":{"sdp":"v=0 ANCIENT"}}`),
+			ts:  time.Now().Add(-2 * iceReplayMaxAge),
+		},
+	}
+	sess.mu.Unlock()
+
+	cli := &peer{role: roleClient, send: make(chan []byte, 8),
+		log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	replayed, err := sess.register(cli)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if replayed != 0 {
+		t.Fatalf("a %v-old offer was replayed (%d envelope(s)); the viewer would "+
+			"answer dead ICE credentials and fail", 2*iceReplayMaxAge, replayed)
+	}
+
+	// And a FRESH one must still be replayed — the buffer exists for the T96
+	// race and this must not turn into "never replay anything".
+	sess.unregister(cli)
+	sess.mu.Lock()
+	sess.recent[roleBrowser] = map[string]bufferedSDP{
+		"offer": {
+			raw: []byte(`{"type":"offer","from":"browser","data":{"sdp":"v=0 FRESH"}}`),
+			ts:  time.Now(),
+		},
+	}
+	sess.mu.Unlock()
+
+	cli2 := &peer{role: roleClient, send: make(chan []byte, 8),
+		log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	replayed2, err := sess.register(cli2)
+	if err != nil {
+		t.Fatalf("register 2: %v", err)
+	}
+	if replayed2 != 1 {
+		t.Fatalf("a fresh offer was NOT replayed (%d); the T96 race is broken", replayed2)
+	}
 }

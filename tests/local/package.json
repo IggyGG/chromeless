@@ -1,0 +1,2 @@
+{ "name": "chromeless-local-validation", "private": true,
+  "devDependencies": { "@playwright/test": "1.58.0" } }

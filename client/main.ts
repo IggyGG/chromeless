@@ -493,7 +493,23 @@ els.passthrough.addEventListener("click", async () => {
   }
 });
 
-window.addEventListener("beforeunload", () => session?.disconnect("page unload"));
+// Teardown on BOTH events, because `beforeunload` is not reliable.
+//
+// It does not fire when a browser context is closed programmatically (which is
+// what Playwright does between specs), and on mobile/bfcache paths it is
+// skipped entirely. Measured 2026-08-20 across a full e2e run: the broker
+// received ZERO `bye` envelopes, so the worker was never told the session had
+// ended — it sat on a peer connection that rotted connected -> disconnected ->
+// failed, and never re-offered for the next viewer.
+//
+// `pagehide` DOES fire on programmatic close and on bfcache eviction, and is
+// the modern recommendation. Both are registered: beforeunload still covers
+// the "user confirms navigation away" case, and disconnect() is idempotent
+// (teardown() early-returns once rws and pc are null), so a double fire is
+// harmless.
+const teardown = (why: string) => session?.disconnect(why);
+window.addEventListener("pagehide", () => teardown("page hidden"));
+window.addEventListener("beforeunload", () => teardown("page unload"));
 
 log("info", "client loaded — click Connect to start");
 

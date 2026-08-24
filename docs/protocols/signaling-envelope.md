@@ -79,6 +79,42 @@ implementation is most likely to get wrong: accepting an unknown tag is
 invisible until it meets a peer that assumes the documented behaviour.
 `conformance/run.mjs --role=signaling` checks it.
 
+## Replay buffer lifetime: a `bye` is not guaranteed
+
+The broker buffers the most recent `offer`/`answer`/`request_renegotiate` per
+role (T96) plus a bounded ICE queue (T104), and replays them when the
+counterpart joins. That fixes the race where the browser peer offers before any
+viewer is connected.
+
+Those buffers are dropped:
+
+- when a peer **disconnects**, for its own buffer — its SDP and candidates
+  describe a peer connection that went away with it;
+- on **`bye`**, for both roles — a bye ends the negotiated session, not just
+  the sender's half;
+- when a peer that had **negotiated** disconnects, for both roles — even with
+  no bye.
+
+That last rule exists because **a `bye` frequently never arrives.** The web
+client sends one from `beforeunload`, which does not fire reliably when a
+browser context is closed programmatically, and a lid-close, process kill or
+network drop never sends one at all. Measured 2026-08-19 across a full
+Playwright run against a real worker: **zero** byes reached the broker. The
+worker's offer therefore survived every viewer disconnect and was replayed to
+the next one, which answered SDP whose peer connection had already been torn
+down — `iceConnectionState` stuck at `checking`/`connecting` forever, with one
+unresponsive candidate pair. It looks exactly like a NAT or TURN failure.
+
+**"Negotiated" is required, and means SDP was exchanged** — this peer was
+replayed the counterpart's SDP on join, or sent an `offer`/`answer` itself. ICE
+alone does not count. A viewer that connects and drops again without exchanging
+SDP (a refresh, a probe, a health check) must NOT invalidate the buffer, or the
+T96 race it exists for is broken and *every* viewer fails instead of every
+viewer after the first.
+
+Implementations that keep their own replay buffer must apply all three rules.
+Dropping only on `bye` is the shape that shipped and was wrong.
+
 ## Known gap: the physics translator is lossy
 
 Today the portal and the browser peer are bridged by

@@ -84,6 +84,31 @@ type peer struct {
 	// claims is non-nil iff auth is enabled. Used to enforce role
 	// consistency on subsequent envelopes (T48).
 	claims *Claims
+	// negotiated records that this peer took part in a real negotiation —
+	// it was replayed the counterpart's buffered SDP on join, or it sent
+	// SDP of its own. Read on disconnect to decide whether the
+	// COUNTERPART's buffer is now void; see unregister's call site.
+	//
+	// Guarded by the session mutex on every access — markNegotiated and
+	// register write it, didNegotiate reads it — so `go test -race` is clean
+	// even though writer and reader are the same goroutine in practice.
+	negotiated bool
+	// saidBye records that this peer sent a `bye` of its own before the
+	// socket dropped. Read on disconnect so unregister does NOT synthesise a
+	// SECOND bye for a peer that already announced itself.
+	//
+	// Without this the worker received TWO byes ~49ms apart on every clean
+	// client close (the client sends one at session.ts:622, then the socket
+	// closes and unregister synthesised another). Harmless while a bye meant
+	// "exit" — the process was already going down. Fatal once the worker
+	// RE-ARMS instead: the first bye tore down and rebuilt the session, and
+	// the second closed the fresh one ~1ms later, so the pending
+	// OnRenegotiationNeeded landed in kClosed -> FailWithReason -> kFailed ->
+	// Rearm() refused -> process exit. Measured 2026-08-21; the browser pid
+	// changed across every viewer change while the logs said "rebuilt".
+	//
+	// Guarded by the session mutex, same as negotiated above.
+	saidBye bool
 }
 
 // anonymousTenant is the tenant id used when auth is disabled. T67 keys
@@ -127,13 +152,28 @@ type session struct {
 	tenant    string
 	mu        sync.Mutex
 	peers     map[peerRole]*peer
-	recent    map[peerRole]map[string][]byte
+	recent    map[peerRole]map[string]bufferedSDP
 	recentICE map[peerRole][]bufferedICE // T104
 }
 
 // bufferedICE is a captured ICE envelope plus the wall-clock time we
 // saw it, so register() can age out stale TURN candidates on replay.
 type bufferedICE struct {
+	raw []byte
+	ts  time.Time
+}
+
+// bufferedSDP is the same idea for offer/answer/renegotiate.
+//
+// It was NOT timestamped originally, and that asymmetry was a live bug: ICE
+// aged out after 5 minutes while the SDP it belonged to lived forever, so a
+// viewer joining later was handed a well-formed offer carrying dead ICE
+// credentials and NO candidates to go with it. Measured 2026-08-20 from a real
+// browser: an offer buffered at 19:21 was replayed at 19:44 (`replayed:1`,
+// 23 minutes old); the client answered it, gathered its own host/srflx/relay
+// candidates, and ICE went straight to `failed` because the peer those
+// credentials named no longer existed. Everything upstream looked perfect.
+type bufferedSDP struct {
 	raw []byte
 	ts  time.Time
 }
@@ -297,8 +337,8 @@ func (h *hub) getOrCreate(tenant, id string) *session {
 			id:        id,
 			tenant:    tenant,
 			peers:     make(map[peerRole]*peer, 2),
-			recent:    make(map[peerRole]map[string][]byte, 2), // T96 replay buffer
-			recentICE: make(map[peerRole][]bufferedICE, 2),     // T104 ICE queue
+			recent:    make(map[peerRole]map[string]bufferedSDP, 2), // T96 replay buffer
+			recentICE: make(map[peerRole][]bufferedICE, 2),          // T104 ICE queue
 		}
 		h.sessions[k] = s
 		recordSessionCreated(tenant) // T38/T67 metrics
@@ -355,12 +395,33 @@ func (s *session) register(p *peer) (replayed int, err error) {
 	other := p.role.other()
 	if buf, ok := s.recent[other]; ok {
 		for _, t := range replayableTypes {
-			raw, has := buf[t]
+			entry, has := buf[t]
 			if !has {
 				continue
 			}
+			// AGE-GATE the SDP, exactly as the ICE queue below is gated.
+			//
+			// Without this, `recent` kept an offer forever while its ICE aged
+			// out after 5 minutes — so a viewer joining later got a perfectly
+			// well-formed offer whose ufrag/pwd named a peer that no longer
+			// existed, plus no candidates at all. It answers, gathers, and goes
+			// straight to iceConnectionState=failed. Measured from a real
+			// browser 2026-08-20: `replayed:1` of an offer buffered 23 minutes
+			// earlier; ICE failed in 5s with host, srflx AND relay candidates
+			// present on both sides, which reads as a TURN problem and is not.
+			//
+			// Same cap as ICE: they describe the same negotiation, so outliving
+			// it is never useful.
+			if age := time.Since(entry.ts); age > iceReplayMaxAge {
+				p.log.Info("dropping stale buffered SDP on replay",
+					slog.String("type", t),
+					slog.Duration("age", age.Round(time.Second)),
+					slog.Duration("max", iceReplayMaxAge))
+				delete(buf, t)
+				continue
+			}
 			select {
-			case p.send <- raw:
+			case p.send <- entry.raw:
 				replayed++
 			default:
 				// New peer's send buffer is somehow already full —
@@ -450,6 +511,40 @@ func (s *session) unregister(p *peer) {
 // Note this cannot rely on hub.dropIfEmpty: that only fires when BOTH peers
 // have disconnected, and in the bye case the browser deliberately stays
 // connected.
+// markNegotiated records that p took part in an offer/answer exchange. Held
+// under the session lock because peers on two goroutines touch the same
+// session; the flag itself is only ever read on p's own goroutine, after its
+// readPump has returned.
+func (s *session) markNegotiated(p *peer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.negotiated = true
+}
+
+// markSaidBye records that p sent a `bye` itself. Same locking discipline as
+// markNegotiated.
+func (s *session) markSaidBye(p *peer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.saidBye = true
+}
+
+// didSayBye reads p.saidBye under the session lock.
+func (s *session) didSayBye(p *peer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return p.saidBye
+}
+
+// didNegotiate reads p.negotiated under the session lock. Both the write
+// (markNegotiated / register) and this read take s.mu, so the flag is
+// race-free even though in practice they run on the same goroutine.
+func (s *session) didNegotiate(p *peer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return p.negotiated
+}
+
 func (s *session) discardReplay(roles ...peerRole) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -476,7 +571,7 @@ func (s *session) forward(role peerRole, envType string, raw []byte) bool {
 		sender := role.other()
 		buf, ok := s.recent[sender]
 		if !ok {
-			buf = make(map[string][]byte, len(replayableTypes))
+			buf = make(map[string]bufferedSDP, len(replayableTypes))
 			s.recent[sender] = buf
 		}
 		// Copy raw because the caller's underlying buffer may be
@@ -484,7 +579,8 @@ func (s *session) forward(role peerRole, envType string, raw []byte) bool {
 		// data race with the read pump's next ReadMessage.
 		dup := make([]byte, len(raw))
 		copy(dup, raw)
-		buf[envType] = dup
+		// Timestamped so register() can age it out — see bufferedSDP.
+		buf[envType] = bufferedSDP{raw: dup, ts: time.Now()}
 	}
 	if envType == "ice" && hasICEData(raw) {
 		// Skip envelopes whose `data` is null or absent: those are
@@ -691,7 +787,68 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	// docs/findings/one-session-per-worker-process.md) on nobody — observed
 	// live as a worker reaching ICE `connected` seconds after boot with no
 	// client present.
-	sess.discardReplay(p.role)
+	//
+	// AND the counterpart's, when this peer had actually negotiated. A `bye`
+	// already does this (readPump below), but a bye is not guaranteed to
+	// arrive: `beforeunload` does not fire reliably when a browser context is
+	// closed programmatically, and a lid-close, crash or network drop never
+	// sends one at all. Measured 2026-08-19 (task 341797): across a whole
+	// Playwright run the broker received ZERO byes, so the worker's offer
+	// survived every disconnect. Spec 01 connected in 0.42s off that buffer
+	// and passed; specs 02 and 03 were each replayed the same 7 now-dead
+	// envelopes, answered an offer whose peer connection the worker had
+	// already torn down, and sat in `connecting` for the full 30s timeout.
+	//
+	// Gated on `negotiated` — NOT unconditional. The buffer exists for the
+	// opposite race (T96: the worker offers before any viewer has joined), and
+	// a client that connects and drops again without exchanging SDP must NOT
+	// destroy that still-valid offer. Only a peer that SENT SDP has made the
+	// counterpart's buffer describe a connection that is now gone — being
+	// replayed the offer is passive and happens to every joiner.
+	roles := []peerRole{p.role}
+	negotiated := sess.didNegotiate(p)
+	if negotiated {
+		roles = append(roles, p.role.other())
+	}
+	sess.discardReplay(roles...)
+
+	// ...and TELL the counterpart, which discarding alone does not do.
+	//
+	// Dropping the buffers stops the NEXT peer being handed dead SDP, but the
+	// peer still connected never learns its partner is gone. For the browser
+	// that is fatal: cb_offerer_driver only leaves its session on an explicit
+	// close, so a worker whose viewer vanished keeps encoding into a dead
+	// transport forever and never offers again. Measured 2026-08-20 against
+	// the live standalone stack: the worker sat at
+	// `frames_encoded=3369 fps=10 1280x720` with NO viewer, while every new
+	// client joined to an empty replay buffer (`peer joined` with no
+	// `replayed`) and waited out its timeout with `m=` lines absent — no offer
+	// had ever been sent to it.
+	//
+	// So synthesise the `bye` the departing peer failed to send. This is the
+	// same envelope a clean teardown produces, so the counterpart takes its
+	// existing, well-tested path: the worker closes its session, exits, and
+	// supervisord respawns it ready to offer to whoever joins next.
+	//
+	// Gated on `negotiated` for the same reason as the discard above: a peer
+	// that connected and dropped without exchanging SDP never had a session,
+	// so announcing its death would tear down a worker that is legitimately
+	// waiting for its first viewer.
+	// ...but ONLY if this peer did not already send one. A clean client close
+	// sends its own bye (client/src/session.ts) and THEN drops the socket;
+	// synthesising a second one delivered two byes ~49ms apart, which a
+	// re-arming worker cannot survive — the first rebuilds the session and the
+	// second closes the rebuild, stranding OnRenegotiationNeeded in kClosed.
+	// See peer.saidBye for the measured trace.
+	if negotiated && !sess.didSayBye(p) {
+		if raw, err := json.Marshal(Envelope{Type: "bye", From: p.role}); err == nil {
+			if sess.forward(p.role.other(), "bye", raw) {
+				p.log.Info("synthesised bye to counterpart (peer left without one)",
+					slog.String("to", string(p.role.other())))
+			}
+		}
+	}
+
 	recordPeerUnregistered(p.role, tenantID) // T38/T67 metrics; pairs with the Inc above
 	h.dropIfEmpty(tenantID, sessionID)
 	p.log.Info("peer left")
@@ -738,6 +895,15 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			}
 		}
 		recordMessageForwarded(env.Type) // T38 metrics
+		// SDP from this peer means a negotiation is under way. Recorded so
+		// that if this peer vanishes WITHOUT a bye, unregister knows the
+		// counterpart's buffered SDP is now void. Not ICE: candidates alone
+		// do not establish that an offer/answer exchange happened, and the
+		// T96 race (SDP buffered before the counterpart joins) must keep
+		// working.
+		if env.Type == "offer" || env.Type == "answer" {
+			sess.markNegotiated(p)
+		}
 		if !sess.forward(p.role.other(), env.Type, raw) {
 			p.log.Debug("no counterpart yet (buffered if replayable)", slog.String("type", env.Type))
 		}
@@ -746,6 +912,9 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			// sender's — so drop both buffers. See discardReplay for what
 			// replaying a dead session's offer costs.
 			sess.discardReplay(roleClient, roleBrowser)
+			// Recorded so the imminent unregister does not synthesise a
+			// SECOND bye on top of this one. See peer.saidBye.
+			sess.markSaidBye(p)
 			return
 		}
 	}

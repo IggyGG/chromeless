@@ -165,6 +165,28 @@ void CbAudioLifecycle::PrepareForTeardown(std::string_view reason) {
   }
 }
 
+// CV2-REARM: see the header for why the object must survive the session.
+bool CbAudioLifecycle::Rearm() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  if (state_ != AudioLifecycleState::kStopped) {
+    LOG(WARNING) << "[m55-r5] Rearm() refused in state="
+                 << static_cast<int>(state_)
+                 << "; only a STOPPED lifecycle may be re-armed (re-arming a "
+                    "live one would abandon a running capture)";
+    return false;
+  }
+
+  // Session-scoped only. The downstream_/observer_/task-runner/ADM handles are
+  // construction-time deps and outlive every session.
+  state_ = AudioLifecycleState::kIdle;
+  audio_activated_emitted_ = false;
+
+  VLOG(1) << "[m55-r5] CV2-REARM: lifecycle back to kIdle; awaiting "
+             "AdoptBindings for the next session";
+  return true;
+}
+
 AudioLifecycleState CbAudioLifecycle::state() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return state_;
@@ -204,6 +226,16 @@ void CbAudioLifecycle::OnRenegotiationStarted(std::string_view trigger) {
   VLOG(2) << "[m55-r5] OnRenegotiationStarted(trigger=" << trigger
           << ") — audio bindings preserved across renegotiation";
   ForwardRenegotiationStarted(trigger);
+}
+
+void CbAudioLifecycle::OnNewViewerNeedsOffer() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // Nothing audio-specific to do — the embedder's re-arm will drive this
+  // lifecycle through PrepareForTeardown + Rearm in the right order. Just
+  // relay, or the embedder never hears it.
+  if (downstream_) {
+    downstream_->OnNewViewerNeedsOffer();
+  }
 }
 
 void CbAudioLifecycle::OnRenegotiationCompleted() {

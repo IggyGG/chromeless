@@ -39,6 +39,13 @@ Consequences:
   `refs/branch-heads/7727` (≈M147); APIs drift across rolls, and several
   commits in the log are pure drift fixes (`JSONReader::ReadDict`,
   `raw_ptr<AudioDeviceModule>`, `RtpTransceiverDirectionToString`).
+
+  **`webrtc::scoped_refptr` has no `reset()`.** It is not `base::scoped_refptr`
+  and not `std::unique_ptr`; release it with `= nullptr`. This cost a ~27-minute
+  build in 2026-08 because the member in question sat in a block of seven
+  `std::unique_ptr`s where `.reset()` was correct — the smart-pointer type, not
+  the name, decides the idiom. When one line in a uniform-looking block has a
+  different type, that is the line to grep for precedent on.
 - `make lint-cxx` catches the recurring subset — symbols used without their
   header. It exists because `Cb.shutdown` shipped using `base::BindOnce` and
   `FROM_HERE` with neither header included. It is a lint, not a compiler:
@@ -58,6 +65,34 @@ reported a verdict about the wrong target list.
 
 `--keep-going` sets `NINJA_KEEP_GOING=0` so one pass collects every failing
 TU. Without it each drift error costs a full ~30 min cycle to discover.
+
+**Three ways the lane fails BEFORE it ever compiles.** All three present as a
+dead Job within seconds-to-a-minute and produce no compiler output, so they are
+easy to misread as a code problem:
+
+1. `OutOfcpu` and `OutOfmemory` — scheduling rejections, not build failures.
+   The Job never got a node. Check headroom *before* firing (see
+   `docs/findings/build-node-cpu-reservations.md`, which prescribes exactly
+   this and which I ignored and then rediscovered from dead pods):
+   ```sh
+   kubectl describe node triform-7 | awk '/Allocated resources/,/^Events/' \
+     | grep -E '^  (cpu|memory)'
+   ```
+   Both requests are guarantees, not ceilings — the `limits` are 40 cores and
+   192Gi regardless — so lowering a *request* to fit does not slow the build.
+   Measured 2026-08-21: the build peaks around **60.5 GiB**, so 64Gi is the
+   floor worth reserving; below that a linker OOM becomes the risk.
+2. The init container's clone. `git clone --depth 1 --branch <ref>` takes a
+   BRANCH OR TAG ONLY, and `fire-build.sh` rewrites the ref to a resolved SHA
+   — so firing at a SHA died after ~40 s of apt noise, three times, exhausting
+   `backoffLimit=2` before reaching the compiler. Fixed 2026-08-21 with a
+   full-clone + detached-checkout fallback.
+
+**Read a failing build's log BEFORE the pod is deleted.** When the build
+container exits non-zero the Job hits `BackoffLimitExceeded` and the pod is
+removed moments later, taking the log with it — `kubectl logs --previous`
+then returns nothing and the ~30 min cycle bought you no information. Watch
+`restartCount` and dump `--previous` the instant it becomes non-zero.
 
 ## Traps that have cost real time
 
@@ -140,6 +175,25 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
   listening locally. Always force 9222 — `infra/gateway/cdp.go` and
   `tests/cdp/conftest.py` both do this, and `infra/k8s/standalone/smoke-probe.py`
   had to learn it the same way.
+- **chromeless CI runs on the `priority` runner label, and that is borrowed.**
+  `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
+  tf-multiverse can saturate them completely: measured 2026-08-20, 470 queued
+  `docker` jobs, all 18 general slots held by `docker`, and **zero**
+  `ubuntu-latest` jobs started in 30 minutes while chromeless jobs waited
+  56-61 min. Arrivals were ~2x completions, so the backlog was growing.
+
+  `priority` (6 express replicas x capacity 2) is the same shape — dind +
+  dind-gc + runner, 16Gi docker storage — with one difference: **8Gi dind
+  memory against the general pool's 16Gi.** An OOM during `compose up` is that,
+  not a product defect.
+
+  This is a STOPGAP. `priority` belongs to tf-multiverse's fast lane (portal
+  SSR check, cargoless-serve builds); chromeless adds ~103 jobs/day against its
+  752, and that pool already averages 130 s queued with a 74-minute worst case,
+  so the borrow is within its normal variance — but it is still someone else's
+  capacity. The real fix is a dedicated `chromeless` pool. `release.yml` stays
+  on `ubuntu-latest` deliberately: it publishes artifacts and blocks nobody.
+
 - **CI runs on Forgejo, and every `uses:` must exist on its action mirror.**
   Forgejo *does* execute `.github/workflows` (no `.forgejo/` needed). But it
   resolves actions from `data.forgejo.org`, and it **git-clones every `uses:`
@@ -155,6 +209,48 @@ TU. Without it each drift error costs a full ~30 min cycle to discover.
   unbuildable `infra/Dockerfile`. Prefer a `run:` step over a third-party
   action; `make lint-workflows` enforces this. A job-level `if:` IS evaluated
   before resolution, so gating a whole job (as `codeql.yml` does) works.
+
+- **`No such image:` / `No such container:` mid-`compose up` is the RUNNER, not
+  this repo.** The Forgejo runners carry a `dind-gc` sidecar that prunes when
+  `/var/lib/docker` passes `GC_HIGH_WATER_PCT=60`; the disks sit at 79-91%, so
+  it is effectively always armed. Two independent arms:
+
+  - `image prune --filter until=` keys on the image's **BUILD** time, so any
+    stable upstream tag is stale the instant it is pulled. Measured 2026-08-20
+    (task 347618): `node:20-alpine` **and** the worker image were both deleted
+    while `compose up` ran, with `__dind_gc_pin` containers created one and two
+    minutes *into* the job. The age filter provably cannot help; only a pin in
+    `GC_PIN_IMAGES_RE` (in tf-multiverse) can.
+  - `container prune` removes **`Created`** containers, not just Exited ones.
+    compose creates its whole graph up front, so any service waiting on a
+    `depends_on` sits in `Created` wide open.
+
+  Both arms can fire on consecutive attempts of one step, so a 2-attempt retry
+  is not sufficient on its own. **Never** label job containers with
+  `GC_PIN_LABEL` to escape it — `refresh_pins` does `docker rm -f` on every
+  container carrying that label before each prune, so labelling guarantees a
+  kill. What does help: run a slow dependency as its own step before `up` (it
+  collapses the create→start window), and dump `compose logs` + `ps -a` BEFORE
+  any retry `down`, or the teardown destroys the only evidence.
+
+- **The worker's own log is NOT in `docker logs`.** `infra/supervisord.phase2.conf`
+  sends chromium's stdout to `/var/log/supervisor/chromium.log` and its stderr
+  to `/dev/console` (so Firecracker's serial capture gets it). The container log
+  carries only supervisord's process transitions. That absence is actively
+  misleading — it was read once as "the exit-on-close path never fires", which
+  was wrong: the log was missing, not the behaviour. Read it with
+  `docker compose exec` / `kubectl exec`.
+
+- **A dead container reports as "unhealthy".** compose has no other word for it,
+  so a process that exits before its first probe looks identical to one failing
+  a healthcheck. Check the ExitCode
+  (`compose ps -a --format 'table {{.Name}}\t{{.State}}\t{{.ExitCode}}'`)
+  before debugging the probe. The gateway once died in **870ms** with
+  `start_period: 5s` — no probe had run at all. Cause: a fresh docker named
+  volume whose path does not exist in the image gets a **root-owned 0755**
+  mountpoint, and the gateway runs as distroless `nonroot` (65532), so writing
+  its TLS key was EACCES. `os.MkdirAll` does not save you — it is a no-op on an
+  existing directory and never fixes ownership.
 
 - **Reading CI logs.** The API gives status but not text. For the actual
   failure:

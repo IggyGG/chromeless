@@ -6,7 +6,7 @@
 
 .PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
         lint-runtime-contracts lint-tests-wired lint-pod-resources \
-        test-interactive test test-unit test-integration \
+        lint-guest-release test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
         test-unit-signaling test-unit-client test-unit-harness \
@@ -23,6 +23,7 @@ help:
 	@echo "  make lint-workflows      # every 'uses:' must exist on the CI action mirror"
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
 	@echo "  make lint-pod-resources  # ephemeral-storage limit implies a reservation"
+	@echo "  make lint-guest-release  # the worker-image pin names real code"
 	@echo "  make test-interactive    # real Chrome + real worker (needs a live stack)"
 	@echo "  make lint-runtime-contracts # hermetic launcher/runtime contracts"
 	@echo ""
@@ -61,7 +62,7 @@ verify: lint test-unit test-integration
 # ---- lint ------------------------------------------------------------------
 
 lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts \
-      lint-tests-wired lint-silent-noop lint-pod-resources
+      lint-tests-wired lint-silent-noop lint-pod-resources lint-guest-release
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -90,6 +91,14 @@ lint-build-targets:
 	@python3 tools/lint/test_build_targets_lint.py >/dev/null && \
 	  echo ">>> build-targets-lint self-tests pass" || \
 	  { echo "!!! build-targets-lint SELF-TESTS FAILED — the linter itself is broken"; exit 1; }
+
+# The worker-image pin must name real code, and every lane that boots a worker
+# must read it rather than the out-of-git CHROMELESS_IMAGE variable. That
+# variable went weeks stale with no check able to say so, and the e2e lane's
+# first real run failed on the PIN rather than on the code.
+lint-guest-release:
+	@echo ">>> guest release pin lint"
+	@python3 tools/lint/guest_release_lint.py
 
 # Hermetic runtime contracts — static greps plus a launcher dry-run with
 # CHROMELESS_BROWSER_BIN=/bin/echo, so nothing executes. No Docker, no Chromium,

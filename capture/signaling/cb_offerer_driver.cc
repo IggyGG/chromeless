@@ -104,6 +104,108 @@ CbOffererDriver::~CbOffererDriver() {
 // Public API
 // ---------------------------------------------------------------------
 
+// CV2-REARM: see the header for why this exists and what it must NOT reset.
+bool CbOffererDriver::Rearm(bool announce_bye) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  if (state_ == OffererState::kIdle) {
+    VLOG(1) << kLogPrefix << "Rearm() ignored: already kIdle";
+    return false;
+  }
+  if (state_ == OffererState::kFailed) {
+    // A failed driver failed for a reason (PC creation refused, SDP
+    // rejected, protocol violation). Re-arming would paper over it and
+    // most likely fail again on the next viewer; a fresh process is the
+    // honest answer, and OnFailed has already told the embedder.
+    LOG(WARNING) << kLogPrefix
+                 << "Rearm() refused from kFailed — a fresh process is needed";
+    return false;
+  }
+
+  // Not yet closed (the viewer vanished without a bye and ICE has not
+  // finished rotting). Close first so the teardown path runs exactly
+  // once, in its documented order, before we drop the PC.
+  if (state_ != OffererState::kClosed) {
+    VLOG(1) << kLogPrefix << "Rearm() from state=" << StateName(state_)
+            << " — closing first";
+    // The close source decides whether a `bye` goes out, and BOTH choices are
+    // load-bearing (CloseInternal skips the bye for source "ws"/"remote"):
+    //
+    //   announce_bye=true  -> source "rearm". The previous viewer is gone, so
+    //     the bye tells the broker to discard both replay buffers and a
+    //     late-joining viewer cannot be handed the dead offer.
+    //     (signaling/server.go, discardReplay on inbound bye.)
+    //
+    //   announce_bye=false -> source "remote", which suppresses the bye. Used
+    //     when re-arming FOR a viewer that is already connected and waiting.
+    //     The broker forwards a bye straight to that viewer, whose client
+    //     calls teardown("peer said bye") — so announcing here kills the very
+    //     peer we are rebuilding for. Measured 2026-08-21: the re-arm
+    //     completed in 9ms and the viewer went `connecting` -> `closed`
+    //     without ever seeing the fresh offer that was built for it.
+    CloseInternal("rearm", announce_bye ? "rearm" : "remote");
+  }
+
+  // Release OUR ref to the old PC — but ON THE SIGNALING THREAD, never here.
+  //
+  // Two hazards, both documented at ClosePcOnSignalingThread:
+  //   1. The proxy DESTRUCTOR blocking-hops to the signaling thread. That is
+  //      the "re-test #4 FATAL site". Rearm() is reachable from posted-task
+  //      contexts (an inbound `bye` arrives that way), where chromium's
+  //      per-task DisallowBaseSyncPrimitives makes a blocking hop fatal. A
+  //      bare `pc_ = nullptr` here can therefore kill the worker outright if
+  //      this happens to hold the last ref.
+  //   2. The PC holds THIS DRIVER as its PeerConnectionObserver by raw
+  //      pointer, so the PC must never outlive the driver. That still holds:
+  //      the driver is unique_ptr-owned by the embedder and is NOT destroyed
+  //      on the re-arm path, so it outlives this posted release by the whole
+  //      remaining life of the process.
+  //
+  // Moving the ref into the task means the final Release() happens on the
+  // signaling thread, where the dtor's hop is a no-op.
+  if (pc_) {
+    signaling_thread_->PostTask([pc = std::move(pc_)]() mutable {
+      pc = nullptr;
+    });
+  }
+  pc_ = nullptr;  // moved-from above; explicit so the state is unambiguous.
+
+  // CUT EVERY IN-FLIGHT CALLBACK FROM THE OLD PEERCONNECTION.
+  //
+  // The SDP observer adapters (CreateOfferObserver / SetLocalDescObserver /
+  // SetRemoteDescObserver) are refcounted by libwebrtc and outlive us; they
+  // hop back through a WeakPtr. A CreateOffer still in flight when the viewer
+  // left would otherwise land DURING the next session and do one of two bad
+  // things: if the new session happens to be in kCreatingOffer it is accepted,
+  // putting the DEAD PC's ufrag/pwd and DTLS fingerprint on the wire for the
+  // new viewer; in any other state it hits "CreateOffer success in unexpected
+  // state" -> FailWithReason -> the worker dies.
+  //
+  // Invalidating here drops all of them at once. Safe because every WeakPtr is
+  // taken fresh at post time (8 call sites, all `weak_factory_.GetWeakPtr()`
+  // inline in a Bind), so the new session's hops get valid pointers — nothing
+  // holds one across the re-arm boundary.
+  weak_factory_.InvalidateWeakPtrs();
+
+  // Session-scoped state only.
+  state_ = OffererState::kIdle;
+  teardown_emitted_ = false;
+  initial_renegotiation_consumed_ = false;
+  pending_renegotiation_ = false;
+  pending_remote_ice_.clear();
+  pending_local_offer_.reset();
+  // An early answer buffered for the OLD offer would otherwise be replayed
+  // against the NEW local SDP by HopHandleSetLocalDescriptionComplete, fail
+  // SetRemoteDescription, and kill the driver via FailWithReason.
+  pending_early_answer_sdp_.reset();
+  current_offer_answered_ = false;
+
+  LOG(INFO) << kLogPrefix
+            << "CV2-REARM: driver returned to kIdle; the embedder must now "
+               "rebuild transceivers + data channels and call Start()";
+  return true;
+}
+
 void CbOffererDriver::Start() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (state_ != OffererState::kIdle) {
@@ -580,6 +682,7 @@ void CbOffererDriver::HopHandleRenegotiationNeeded() {
       return;
     }
     state_ = OffererState::kCreatingOffer;
+    current_offer_answered_ = false;  // a brand-new offer has nobody behind it
     webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
     // CV2-69 #176: transient refcounted CreateOfferObserver adapter
     // (not `this` — see the adapter block above); CreateOffer AddRefs
@@ -752,6 +855,9 @@ void CbOffererDriver::HopHandleSetRemoteDescriptionComplete(
   const bool was_renegotiation = was_in_ice_flight_once_;
   state_ = OffererState::kIceInFlight;
   was_in_ice_flight_once_ = true;
+  // We only reach here by APPLYING a remote answer, so the offer currently on
+  // the wire has a live peer behind it. See current_offer_answered_.
+  current_offer_answered_ = true;
   VLOG(1) << kLogPrefix
           << (was_renegotiation
                   ? "remote SDP set (renegotiated); ICE in flight"
@@ -1025,6 +1131,32 @@ void CbOffererDriver::HandleIceEnvelope(const Envelope& env) {
 }
 
 void CbOffererDriver::HandleByeEnvelope() {
+  // A `bye` that arrives when there is no session to end is stale — it
+  // belongs to the viewer who ALREADY left, not to the one this driver is
+  // now offering to. Dropping it here is defence in depth for the re-arm
+  // path.
+  //
+  // Measured 2026-08-21: a clean client close produced TWO byes ~49ms apart
+  // (the client sends one itself, then the broker synthesised another on
+  // socket drop). The first correctly tore the session down and RearmSession
+  // rebuilt it in ~7ms; the second then closed the FRESH session, so the
+  // still-pending OnRenegotiationNeeded landed in kClosed and took the
+  // FailWithReason path -> kFailed -> Rearm() refuses -> process exit. The
+  // browser died on every viewer change while the log said "rebuilt".
+  //
+  // The broker no longer sends the duplicate (signaling/server.go, peer
+  // .saidBye), but the worker must not depend on that: an older broker, a
+  // retried frame, or a genuinely doubled client are all outside its control,
+  // and the cost of being wrong is the browser process.
+  //
+  // kIdle / kCreatingPc mean "no negotiated session yet" — exactly the window
+  // a re-armed driver sits in until its fresh offer is answered.
+  if (state_ == OffererState::kIdle || state_ == OffererState::kCreatingPc) {
+    LOG(INFO) << kLogPrefix
+              << "dropping stale `bye` in state=" << StateName(state_)
+              << " — no live session to close (re-arm in progress)";
+    return;
+  }
   // R6: route inbound `bye` through the unified teardown path.
   // CloseInternal handles idempotency, observer fan-out, and the
   // teardown_emitted_ guard.
@@ -1040,7 +1172,76 @@ void CbOffererDriver::HandleRequestRenegotiateEnvelope() {
   // sent it during a reconnect race; treat the pre-kIceInFlight case
   // as "coalesce for later" rather than a hard fail, to be robust to
   // R7's reconnect storms.
+  // kAwaitingAnswer is THE cold-arrival state: we have an offer on the wire and
+  // nobody has answered it. A request_renegotiate arriving here is a viewer
+  // saying "I never got an offer" — and it is right, because the offer it is
+  // waiting for was buffered by the broker and then aged out at
+  // iceReplayMaxAge before this viewer ever joined.
+  //
+  // Measured 2026-08-21: after re-arming, the driver sits in kAwaitingAnswer,
+  // NOT kIceInFlight. The first version of this fix guarded kIceInFlight and
+  // therefore never fired — the request fell through to the mid-dance coalesce
+  // below, which sets pending_renegotiation_ and waits for a return to
+  // kIceInFlight that can only happen if someone answers. Nobody ever does,
+  // so the viewer waits out its own watchdog and reports `failed`.
+  //
+  // Re-offering on this PeerConnection would be wrong for the same reason as
+  // below: its ICE ufrag/pwd and DTLS fingerprint were minted for the offer
+  // the new viewer never received. Only a fresh PC is correct, and only the
+  // embedder can build one.
+  if (state_ == OffererState::kAwaitingAnswer) {
+    LOG(INFO) << kLogPrefix
+              << "inbound request_renegotiate while AWAITING AN ANSWER — a new "
+                 "viewer never received our offer; re-arming for it";
+    if (observer_) {
+      observer_->OnNewViewerNeedsOffer();
+    }
+    return;
+  }
   if (state_ == OffererState::kIceInFlight) {
+    // WHO is asking matters more than the state.
+    //
+    // If our current offer was never answered, the peer asking is NOT the peer
+    // we are negotiating with. That is the cold-arrival shape, measured live
+    // 2026-08-21:
+    //
+    //   09:37:58  worker re-arms after the last viewer left; offer buffered
+    //   ...       >5 minutes idle
+    //   09:43:19  a NEW viewer joins. The broker correctly DROPS the buffered
+    //             offer (age 322s > the 300s cap) so nothing is replayed, and
+    //             the page sits at "waiting for offer".
+    //   +45s      the client's offer watchdog sends `request_renegotiate`.
+    //
+    // We were in kIceInFlight the whole time — from the PREVIOUS viewer's
+    // session. Renegotiating on that PeerConnection re-offers with ICE
+    // ufrag/pwd and a DTLS fingerprint belonging to a peer that is gone, which
+    // is exactly the mismatch that shows up as `iceConnectionState=failed`
+    // with relay candidates present on BOTH sides — the failure that started
+    // this whole line of work.
+    //
+    // A fresh PeerConnection is the only correct answer, and only the embedder
+    // can build one (it owns the transceivers and data channels), so hand the
+    // decision up.
+    //
+    // Why this cannot misfire on a HEALTHY viewer: kIceInFlight is assigned at
+    // exactly ONE site (HopHandleSetRemoteDescriptionComplete), and that site
+    // sets current_offer_answered_ = true two lines later. A viewer that is
+    // actually connected therefore always has the flag set, so a live viewer
+    // asking to refresh SDP takes the BeginRenegotiation path below.
+    //
+    // This branch is belt-and-braces: the cold-arrival case is caught earlier,
+    // in kAwaitingAnswer. It remains because kIceInFlight-with-an-unanswered
+    // offer would mean the two flags disagree, and re-offering stale ICE
+    // credentials is the more expensive way to be wrong.
+    if (!current_offer_answered_) {
+      LOG(INFO) << kLogPrefix
+                << "inbound request_renegotiate from an UNANSWERED offer — a "
+                   "new viewer needs a fresh session, not a renegotiation";
+      if (observer_) {
+        observer_->OnNewViewerNeedsOffer();
+      }
+      return;
+    }
     BeginRenegotiation("remote");
     return;
   }
@@ -1102,6 +1303,7 @@ void CbOffererDriver::BeginRenegotiation(std::string_view trigger) {
           << "BeginRenegotiation: dance re-entering kCreatingOffer, "
              "trigger=" << trigger;
   state_ = OffererState::kCreatingOffer;
+  current_offer_answered_ = false;  // a brand-new offer has nobody behind it
   if (observer_) {
     observer_->OnRenegotiationStarted(trigger);
   }

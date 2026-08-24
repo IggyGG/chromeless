@@ -279,6 +279,27 @@ class CbAudioLifecycle : public signaling::OffererDriverObserver {
   // |reason| flows to the observer + log; informational only.
   void PrepareForTeardown(std::string_view reason);
 
+  // CV2-REARM: return a stopped lifecycle to kIdle so the SAME object can
+  // adopt the NEXT session's bindings.
+  //
+  // The header above says "construct a new lifecycle for a new session", and
+  // that was right while a session ended with the process. It is not possible
+  // once the worker re-arms in place: CbOffererDriver holds this object by RAW
+  // POINTER as its observer (see the ctor call in
+  // cloud_browser_browser_main_parts.cc), and there is no way to swap that
+  // pointer — destroying and rebuilding the lifecycle would leave the driver
+  // observing freed memory.
+  //
+  // So the object address stays stable and only the SESSION state resets.
+  // Without this, AdoptBindings on the second session hits the kStopped guard,
+  // logs "construct a new lifecycle" at WARNING, and silently ignores the
+  // bindings — the worker would keep video but lose AUDIO from the second
+  // viewer onward, with nothing failing loudly.
+  //
+  // Safe only from kStopped: re-arming a live lifecycle would abandon a
+  // running capture. Returns false (and logs) otherwise.
+  bool Rearm();
+
   // State accessor for tests + the embedder's diagnostics path.
   AudioLifecycleState state() const;
 
@@ -289,6 +310,11 @@ class CbAudioLifecycle : public signaling::OffererDriverObserver {
       webrtc::PeerConnectionInterface::IceConnectionState state) override;
   void OnRenegotiationStarted(std::string_view trigger) override;
   void OnRenegotiationCompleted() override;
+  // Pure pass-through. This class sits BETWEEN the driver and the embedder, so
+  // an un-overridden observer method is silently swallowed by the base class's
+  // empty default — the embedder would never learn a new viewer needs an
+  // offer, and the cold-arrival fix would do nothing at all.
+  void OnNewViewerNeedsOffer() override;
   void OnClosed(std::string_view reason) override;
   void OnFailed(std::string_view reason) override;
 

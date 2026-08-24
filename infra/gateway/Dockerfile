@@ -41,6 +41,11 @@ WORKDIR /src/infra/gateway
 ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -trimpath -ldflags="-s -w" -o /out/gateway .
 
+# An empty directory to seed /data/certs with. distroless has no shell and no
+# mkdir, so the runtime stage cannot create it — and it MUST exist in the image
+# with the right owner. See the COPY in the runtime stage for why.
+RUN mkdir -p /out/certs && chmod 700 /out/certs
+
 # ---------- runtime ----------
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /
@@ -51,6 +56,29 @@ COPY --from=build /out/gateway /gateway
 # self-contained; compose can still mount client/dist over this path for live
 # reload during development.
 COPY --from=client --chown=nonroot:nonroot /client/dist/ /srv/client/
+
+# /data/certs must exist IN THE IMAGE, owned by nonroot, or the gateway dies
+# ~1s after start with no useful symptom.
+#
+# compose mounts the named volume `gateway_certs` here. Docker seeds a fresh
+# named volume from the image's content at that path — INCLUDING its ownership.
+# When the path does not exist in the image, docker creates the mountpoint
+# itself, root-owned 0755. The gateway runs as nonroot (uid 65532), so:
+#
+#   os.MkdirAll("/data/certs", 0700)   -> succeeds, it already exists (no-op)
+#   os.WriteFile("/data/certs/key.pem") -> EACCES
+#
+# loadOrCreateCert then returns an error and main os.Exit(2)s. Measured on
+# 2026-08-19 (task 340081): `Container cbwrtc-gateway Started` at 11:57:00.703,
+# `container cbwrtc-gateway is unhealthy` at 11:57:01.573 — 870ms, with
+# start_period 5s, so NO healthcheck had run. Compose reports the dead
+# container as "unhealthy", which reads as a failing probe rather than a
+# process that exited before the first one.
+#
+# Reproduced and the fix verified on a real daemon (docker 27.5.1): a fresh
+# named volume over a root-owned mountpoint gives WRITE-DENIED to uid 65532;
+# with this COPY it gives WRITE-OK.
+COPY --from=build --chown=nonroot:nonroot /out/certs /data/certs
 
 # TLS terminates here. This is the only port a standalone deployment
 # publishes: the signaling broker and Chromium's DevTools stay internal.
