@@ -40,7 +40,25 @@ metadata:
     app.kubernetes.io/component: build
     app.kubernetes.io/variant: x264
 spec:
-  backoffLimit: 2
+  # backoffLimit 2 -> 6, and podReplacementPolicy so a REJECTED pod is not
+  # counted as a failed attempt in the first place.
+  #
+  # A pod rejected at admission (OutOfcpu / OutOfephemeral-storage) dies in
+  # about a second, with no container and therefore no log. With
+  # backoffLimit: 2 that is three attempts burned in a few seconds, so on
+  # 2026-08-24 the downloads build reached BackoffLimitExceeded without ever
+  # invoking the compiler — while triform-8 was using 14.7 of its 48 cores.
+  # The build "failed" without building anything.
+  #
+  # Retries are cheap here precisely BECAUSE rejection is instant and the
+  # expensive part (the ~11 min compile) only starts once a pod is admitted.
+  # A higher limit costs nothing on the failure path and buys the job a
+  # chance to land when a neighbour's pod finishes.
+  backoffLimit: 6
+  # Failed: count a pod only once it has actually terminated, rather than as
+  # soon as it is marked for deletion. Keeps an admission rejection from
+  # double-counting against backoffLimit.
+  podReplacementPolicy: Failed
   activeDeadlineSeconds: 28800
   ttlSecondsAfterFinished: 86400
   template:
