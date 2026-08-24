@@ -1784,13 +1784,40 @@ void CloudBrowserBrowserMainParts::OnClosed(std::string_view reason) {
 }
 
 void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {
-  // Unrecoverable failure (e.g. CreateOffer rejected, SDP munging
-  // error, transport teardown not surfaced by ws_client OnError).
-  // R7 reconnect would handle transport-level failures in a follow-
-  // up R#; for CV2-69 we log and leave chromium alive on its CDP
-  // path. A future R# may add a Cb.shutdown CDP method here.
+  // Unrecoverable failure (e.g. CreateOffer rejected, SDP munging error,
+  // transport teardown not surfaced by ws_client OnError).
+  //
+  // THIS USED TO ONLY LOG. The comment said "we log and leave chromium alive
+  // on its CDP path", which sounds conservative and is the worst available
+  // outcome: the driver is in kFailed for the life of the process, so it can
+  // never emit another offer, while EVERY health signal stays green. The
+  // browser keeps capturing (VERDICT=PRODUCING), the WS stays up and keeps
+  // decoding inbound frames, the pod reports Running with no restarts, and
+  // the re-arm path cannot rescue it because a failed driver is terminal.
+  //
+  // Observed on the live standalone stack 2026-08-24: a driver died at
+  // 18:15:10 and the worker sat there for an hour and twenty minutes looking
+  // perfectly healthy. Every viewer that arrived waited 45 s, sent
+  // request_renegotiate, received nothing, and reported "no offer from
+  // browser". The 50,000 frames it had captured in the meantime went nowhere.
+  //
+  // A worker that cannot produce an offer is not usable for streaming, and
+  // nothing outside this process can tell. So take the GPU-death path
+  // verbatim: it emits session_unhealthy so the supervisor/physics RECYCLES
+  // this guest rather than reading a clean bye, tears the PC down in the
+  // right order, and quits the loop on a delay so the envelope flushes.
+  // The cause differs; the required response does not.
   LOG(ERROR) << "CV2-69 offerer_driver: unrecoverable failure, reason="
-             << reason;
+             << reason
+             << " — recycling this guest: a driver in kFailed can never emit "
+                "another offer, and every other health signal stays green.";
+
+  if (tearing_down_) {
+    // Already on a teardown path (our own Close can reach OnFailed). Do not
+    // re-enter; the destination is the same.
+    return;
+  }
+  OnGpuPermanentDeath();
 }
 
 // CV2-GPU-DEATH: the BeginFrame driver reported permanent renderer/GPU death
@@ -1886,6 +1913,19 @@ CbSessionHealth CloudBrowserBrowserMainParts::GetSessionHealth() const {
 }
 
 void CloudBrowserBrowserMainParts::OnGpuPermanentDeath() {
+  // Idempotent on entry. This had ONE caller (the BeginFrame driver, which
+  // carries its own one-way latch), so re-entry was impossible by
+  // construction and the check was unnecessary. OnFailed is now a second
+  // caller, and two independent signals can race — a driver failure and a
+  // GPU death in the same teardown window. Running this twice would post the
+  // quit closure twice and re-enter CloseUnhealthy on an already-torn-down
+  // PC. Guard here rather than relying on every future caller to remember.
+  if (permanent_death_signaled_) {
+    LOG(WARNING) << "CV2-GPU-DEATH: permanent-death signalled twice; ignoring "
+                    "the second (teardown is already in flight)";
+    return;
+  }
+
   // Latch BEFORE the teardown below: the quit is posted on a delay, so a
   // Cb.getCaptureStats poll can land in that window and should see the
   // guest already reporting itself as dying.
