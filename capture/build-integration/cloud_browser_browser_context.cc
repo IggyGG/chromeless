@@ -90,10 +90,21 @@ bool CloudBrowserBrowserContext::IsOffTheRecord() {
 
 content::DownloadManagerDelegate*
 CloudBrowserBrowserContext::GetDownloadManagerDelegate() {
-  // No downloads. If a page tries to trigger one, chromium's default
-  // path will silently drop the request — fine for the worker's
-  // streaming-only use case.
-  return nullptr;
+  // Was nullptr, which produced the worst possible half-state:
+  // CbWebContentsDelegate::CanDownload returns true and LOGS the attempt,
+  // so a download was permitted and observable — and then //content's
+  // DownloadManagerImpl could not determine a target without a delegate,
+  // so the bytes went nowhere. A clickable link, an accepted click, and
+  // nothing happening, with no error anywhere.
+  //
+  // Lazy rather than constructed eagerly: this is called after the context
+  // is fully initialised, which is when the profile path this delegate
+  // needs is actually reliable.
+  if (!download_manager_delegate_) {
+    download_manager_delegate_ = std::make_unique<CbDownloadManagerDelegate>();
+    download_manager_delegate_->SetDownloadManager(GetDownloadManager());
+  }
+  return download_manager_delegate_.get();
 }
 
 content::BrowserPluginGuestManager*
