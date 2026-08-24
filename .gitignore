@@ -56,9 +56,19 @@ harness/captures/
 tests/artifacts/
 # Playwright: report/trace output, and the saved gateway session cookie that
 # auth.setup.ts writes. The cookie is a live credential — never commit it.
-tests/e2e/playwright/
-tests/e2e/playwright-report/
-tests/e2e/test-results/
+# By SHAPE, not by place. These three rules named tests/e2e/ specifically,
+# so when tests/local/ appeared its output matched none of them and
+# `git add -A` staged 122 Playwright artifacts (~23 MB of .webm, .trace and
+# .zip) into a patch. Any suite anywhere produces the same three directories,
+# so match them anywhere.
+#
+# NOTE for whoever adds the next suite: a rule here does NOT untrack a file
+# that is already tracked. If artifacts have been committed, this needs
+# `git rm -r --cached <dir>` as well — otherwise the rule reads as protection
+# and does nothing, which is the failure shape that cost two sessions a day.
+**/playwright/
+**/playwright-report/
+**/test-results/
 # Retired in the M7 R4 native-peer migration (input now rides the `input`
 # DataChannel into cb_input_dispatch*.cc). A stale 13 MiB local build of
 # the old sidecar still sits in some working trees.
