@@ -415,8 +415,48 @@ def _session_alive(client):
         return pc.connectionState === 'connected'; })()""") is True
 
 
+def _client_has_control_consumer(client):
+    """Does the SERVED bundle contain the control-channel consumer?
+
+    Distinct from _guest_has_control, and worth separating because the two
+    faults look identical from the overlay's absence while having opposite
+    fixes:
+
+      * old GUEST image  -> no `control` channel is ever offered
+      * old CLIENT bundle -> the channel opens and nothing consumes it
+
+    The gateway image BAKES the client bundle in at build time, so a client
+    fix does not reach a browser until the gateway image is rebuilt AND
+    rolled. On 2026-08-24 a peer published gateway standalone-v9 from a
+    branch predating client/src/control.ts: the guest was correct, the
+    channel opened, and the served main.js had wireControlChannel=0. The
+    dialogs suite blamed the guest.
+
+    Reads window.__cb_client_consumers, which main.ts sets to a literal list
+    of the consumers the bundle contains. A bundle too old to have the
+    control consumer is also too old to define the marker, so `absent` and
+    `present but missing "control"` both mean the same thing — and both are
+    reported as a stale gateway rather than a guest defect.
+    """
+    got = client.cdp.eval(
+        "JSON.stringify(window.__cb_client_consumers || null)")
+    try:
+        consumers = json.loads(got) if got else None
+    except (TypeError, ValueError):
+        consumers = None
+    if consumers is None:
+        # Marker ABSENT. Either the bundle predates it, or it predates the
+        # control consumer too — indistinguishable from here, and calling it
+        # a stale gateway would be a guess. Return None so the caller can say
+        # "unknown" instead of inventing a verdict; the guest-side check
+        # below still runs, and if the channel opens with nobody consuming it
+        # the dialog checks fail with their own honest message.
+        return None
+    return "control" in consumers
+
+
 def _guest_has_control(client):
-    """Did the guest actually OPEN a `control` channel on this session?
+    """Did the GUEST actually OPEN a `control` channel on this session?
 
     Read from the client's own log, which records every channel the guest
     offered. An old guest simply never opens it.
@@ -441,6 +481,21 @@ def suite_dialogs(client, worker):
     #
     # `clipboard` is the known-positive control. A probe that returns 0 for
     # everything is broken, not informative.
+    consumer = _client_has_control_consumer(client)
+    if consumer is None:
+        print("  NOTE  the served bundle predates "
+              "window.__cb_client_consumers; cannot tell a stale gateway "
+              "from a stale guest here. Probe the bundle directly: "
+              "curl the gateway's /main.js and grep for wireControlChannel.",
+              flush=True)
+    elif not consumer:
+        check("the SERVED CLIENT BUNDLE has the control consumer", False,
+              "window.__cb_client_consumers lacks \"control\" — the gateway "
+              "image bakes the bundle in at build time, so this is a stale "
+              "gateway, NOT a guest defect. Rebuild it from a ref that "
+              "contains client/src/control.ts and roll the deployment.")
+        return
+
     if not _guest_has_control(client):
         check("the guest binary supports the control channel", False,
               "no `control` channel was opened by the guest -- the worker is "
