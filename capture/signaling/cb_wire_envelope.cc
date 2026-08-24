@@ -413,7 +413,17 @@ std::optional<Envelope> Decode(std::string_view json) {
         p.is_end_of_candidates = true;
         return Envelope{*portal_type, from, EnvelopeData{std::move(p)}};
       }
-      p.is_end_of_candidates = false;
+      // Empty string is end-of-candidates here too. The branch above
+      // handles a MISSING `candidate`; a present-but-empty one is the same
+      // statement and reaches this line. Chrome sends the empty-string form,
+      // so this is the common case, not the exotic one.
+      //
+      // Caught by a test rather than by reading: I fixed the canonical
+      // dialect first and assumed the flat one was covered. It is separate
+      // code, and PortalFlatEmptyCandidateIsEndOfCandidates failed on the
+      // build lane with is_end_of_candidates=false. Half a fix that looks
+      // whole is exactly what the test is for.
+      p.is_end_of_candidates = candidate->empty();
       p.candidate = *candidate;
       if (const std::string* sm = dict.FindString("sdpMid")) {
         p.sdp_mid = *sm;

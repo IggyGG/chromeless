@@ -273,8 +273,14 @@ TEST(CbWireEnvelopeDecodeTest, RealIceEndOfCandidatesDecodes) {
 // peer connection for an hour, so it looked healthy while every viewer sat
 // at "no offer from browser". The END of a SUCCESSFUL gather killed it.
 TEST(CbWireEnvelopeDecodeTest, EmptyCandidateStringIsEndOfCandidates) {
+  // Shape copied from kRealIceEnvelope above, not invented: the canonical
+  // dialect requires `from` (cb_wire_envelope.cc:366 returns nullopt without
+  // it) and has no v/t/seq. My first version of this test hand-wrote a
+  // {v,type,t,seq,data} frame, which failed to decode at all — so it
+  // asserted nothing about end-of-candidates and merely proved the envelope
+  // was malformed.
   std::optional<Envelope> env = Decode(
-      R"({"v":1,"type":"ice","t":0,"seq":1,)"
+      R"({"type":"ice","from":"client",)"
       R"("data":{"candidate":"","sdpMid":"0","sdpMLineIndex":0}})");
   ASSERT_TRUE(env.has_value());
   EXPECT_EQ(env->type, EnvelopeType::kIce);
@@ -300,7 +306,7 @@ TEST(CbWireEnvelopeDecodeTest, PortalFlatEmptyCandidateIsEndOfCandidates) {
 // making the failing test pass.
 TEST(CbWireEnvelopeDecodeTest, NonEmptyCandidateIsNotEndOfCandidates) {
   std::optional<Envelope> env = Decode(
-      R"({"v":1,"type":"ice","t":0,"seq":1,"data":{)"
+      R"({"type":"ice","from":"client","data":{)"
       R"("candidate":"candidate:1 1 udp 2113937151 10.0.0.1 5000 typ host",)"
       R"("sdpMid":"0","sdpMLineIndex":0}})");
   ASSERT_TRUE(env.has_value());
