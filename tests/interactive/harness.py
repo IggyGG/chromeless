@@ -38,6 +38,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -488,18 +489,41 @@ def _req(verb, timeout=45):
         return json.loads(r.read())
 
 
-def navigate(url, timeout=45):
-    """Drive the gateway's navigation endpoint, as the address bar does."""
+def navigate(url, timeout=45, retries=3):
+    """Drive the gateway's navigation endpoint, as the address bar does.
+
+    Retries on 502. The gateway holds a long-lived CDP connection to the
+    worker pod, and when that pod is replaced (every `rollout restart`, which
+    this suite requires between runs) the first navigation through the stale
+    connection fails with `cdp read: i/o timeout` surfaced as a 502. The
+    gateway then reconnects, so the immediate retry succeeds.
+
+    Without this, one stale connection raised an unhandled HTTPError out of
+    whichever suite happened to navigate first, and every suite AFTER it never
+    ran — the run reported a traceback instead of results, which reads as a
+    broken test rather than a reconnect.
+    """
     body = json.dumps({"url": url}).encode()
-    req = urllib.request.Request(f"{GATEWAY}/api/navigate", data=body,
-                                 headers={"Content-Type": "application/json",
-                                          "Cookie": _COOKIE})
     import ssl
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-        return json.loads(r.read())
+    last = None
+    for attempt in range(retries):
+        req = urllib.request.Request(f"{GATEWAY}/api/navigate", data=body,
+                                     headers={"Content-Type": "application/json",
+                                              "Cookie": _COOKIE})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code != 502 or attempt == retries - 1:
+                raise
+            print(f"  ..  gateway 502 on navigate (stale CDP connection); "
+                  f"retry {attempt + 1}/{retries - 1}", flush=True)
+            time.sleep(2.0)
+    raise last  # unreachable; kept so the failure mode is explicit
 
 
 _COOKIE = ""

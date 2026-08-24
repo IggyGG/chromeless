@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -67,9 +69,19 @@ SITES = [
 results = []
 
 
-def check(name, ok, detail=""):
+def check(name, ok, detail="", pass_detail=""):
+    """Record and print one check.
+
+    `detail` is printed ONLY on failure. That is a deliberate change: it used
+    to print unconditionally, so a detail phrased as a diagnosis ("the input
+    path missed the target") appeared next to PASS and read as a
+    contradiction — which is exactly the kind of noise that trains people to
+    skim past the output. Pass `pass_detail` for something worth showing on
+    success (a measured value, a count).
+    """
     results.append((name, bool(ok), detail))
-    print(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f"   {detail}" if detail else ""),
+    shown = pass_detail if ok else detail
+    print(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f"   {shown}" if shown else ""),
           flush=True)
     return ok
 
@@ -581,6 +593,161 @@ def suite_dialogs(client, worker):
 # what Cmd/Ctrl+V produces), and read the remote input's value off the
 # WORKER. Nothing here is mocked.
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Downloads: does clicking a download link actually produce a file?
+#
+# Before CbDownloadManagerDelegate this was the worst shape a feature can
+# have: CanDownload returned true and LOGGED the attempt, so the click was
+# accepted and the page's handler ran — and GetDownloadManagerDelegate
+# returned nullptr, so DownloadManagerImpl could not determine a target and
+# the bytes went nowhere. A clickable link that does nothing, with no error.
+#
+# The oracle is the GUEST's own filesystem, read over its DevTools. Asking
+# the page whether it started a download proves only that the page tried.
+# --------------------------------------------------------------------------
+_DOWNLOAD_FIXTURE = """<!doctype html><meta charset=utf-8>
+<title>download fixture</title>
+<body style="font:16px system-ui;padding:40px">
+<h1 id=h>download fixture</h1>
+<!-- Blob, not a data: URL. Chromium blocks top-level data: navigations as a
+     web-platform rule (unrelated to the gateway's own allowlist), so an
+     anchor pointing at data: is dismissed before any download starts and the
+     guest never sees an attempt at all — which reads as "downloads are
+     broken" when nothing was ever requested. A blob: URL is same-origin,
+     produces real bytes, and exercises the identical DownloadManager path. -->
+<!-- display:block with real padding, NOT a bare inline link. The click is
+     dispatched at the element's centre in remote viewport fractions, and a
+     small inline anchor is a small target: the same suite passed by hand
+     against a padded block and failed against this same markup inline. A
+     test that misses its target reports "downloads are broken". -->
+<a id=dl download="chromeless-probe.txt" href="#"
+   style="display:block;padding:30px;background:#eee;text-align:center">
+   DOWNLOAD ME</a>
+<script>
+  const blob = new Blob(["chromeless-download-probe-42"], {type: "text/plain"});
+  const a = document.getElementById("dl");
+  a.href = URL.createObjectURL(blob);
+  // Counted so a failure can say WHICH half broke: no click means the input
+  // path missed, a click with no file means the download path did.
+  window.__clicks = 0;
+  a.addEventListener("click", () => { window.__clicks++; });
+</script>
+"""
+
+
+def suite_downloads(client, worker):
+    print("\n[downloads]")
+
+    if not _session_alive(client):
+        check("the WebRTC session is still up (downloads need a live guest)",
+              False, "session already ended (one session per worker process)")
+        return
+
+    _arm_n[0] += 1
+    try:
+        H.navigate(H.fixture_url(_DOWNLOAD_FIXTURE) + f"?dl={_arm_n[0]}")
+    except Exception as exc:
+        # H.navigate already retries a 502 (stale gateway->worker CDP
+        # connection). Anything that still escapes is a real infrastructure
+        # fault, and reporting it as a failed CHECK keeps the remaining suites
+        # running instead of killing the process with a traceback.
+        check("the gateway could navigate the guest", False,
+              f"{type(exc).__name__}: {exc}")
+        return
+    ok, _ = worker.wait_for("document.getElementById('dl') ? 1 : 0", 1, timeout=25)
+    check("the download fixture loaded", ok)
+    if not ok:
+        return
+
+    # Click the link ON THE REMOTE PAGE, via a real mouse event routed through
+    # the input channel — the same path a user's click takes.
+    box = worker.rect("dl")
+    worker.eval("window.scrollTo(0,0); 1")
+    time.sleep(0.5)
+    client.click(box["x"], box["y"])
+    # The download is asynchronous: DetermineDownloadTarget hops to a
+    # MayBlock() ThreadPool sequence to generate the filename and back to the
+    # UI thread before //content opens the file. Polling immediately finds an
+    # empty directory and reports "the download never happened" — verified by
+    # hand that the file DOES appear about a second later, so this settle
+    # window is the difference between a real check and a false alarm.
+    clicked, n = worker.wait_for("window.__clicks || 0",
+                                 lambda v: (v or 0) >= 1, timeout=15)
+    check("the click reached the download link", clicked,
+          f"anchor saw {n} click(s) — the input path missed the target, "
+          f"so nothing below is about downloads")
+    if not clicked:
+        return
+    time.sleep(2.5)
+
+    # The delegate lands the file under the browser context's own path, in a
+    # "Downloads" directory it creates on demand. There is no JS API for the
+    # guest's filesystem, so the observable signal is chrome://downloads'
+    # state as //content reports it: a download that reached a target has a
+    # non-empty target path. Poll the DownloadManager through the page's own
+    # navigation to the downloads UI would need a tab; instead assert on what
+    # the PAGE can see plus what the delegate LOGS, which is the honest
+    # boundary of a browser-side test.
+    #
+    # Concretely: before the delegate, DownloadManagerImpl cancelled the
+    # download during target determination, so the anchor's click produced no
+    # download at all. After it, the item reaches TARGET_RESOLVED. The
+    # difference is visible in the guest's stderr, which the pod carries.
+    alive = worker.eval("String(1+1)") == "2"
+    check("clicking the download link did not wedge the page", alive,
+          "" if alive else
+          "the remote page stopped executing script after the click")
+
+    # THE REAL ORACLE: the guest's own filesystem.
+    #
+    # Asking the page whether it started a download proves only that the page
+    # tried — which it always did. The bug was that nothing landed. So look
+    # at the guest container: CbDownloadManagerDelegate resolves a target
+    # under the browser context's path in a "Downloads" directory it creates
+    # on demand, and writes through a ".crdownload" intermediate.
+    #
+    # Read over `kubectl exec` rather than CDP: there is no JS API for the
+    # browser's own filesystem, and inventing a check the harness cannot
+    # actually see would be worse than having none.
+    ns = os.environ.get("CHROMELESS_NS", "chromeless")
+    dep = os.environ.get("CHROMELESS_WORKER_DEPLOY",
+                         "deploy/chromeless-standalone-worker")
+    # Look in the profile's Downloads dir directly rather than `find /`.
+    # The delegate resolves the target under the BrowserContext's own path,
+    # which is /tmp/cloud_browser_profile_<n>/Downloads. A whole-filesystem
+    # find takes longer than the poll window in this container and returned
+    # empty every time — a TEST timeout that reads exactly like "the download
+    # never happened". Verified by hand first: the file was always there.
+    found, listing = _poll(
+        lambda: subprocess.run(
+            ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
+             "bash", "-c",
+             "ls -1 /tmp/cloud_browser_profile_*/Downloads/ 2>/dev/null | head -5"],
+            capture_output=True, text=True, timeout=30).stdout.strip(),
+        lambda out: bool(out) and "chromeless-probe" in out,
+        timeout=30)
+    check("the downloaded file exists in the guest", found,
+          f"no chromeless-probe* under any Downloads dir; found={listing!r}")
+
+    if found:
+        body = subprocess.run(
+            ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
+             "bash", "-c",
+             "cat /tmp/cloud_browser_profile_*/Downloads/chromeless-probe.txt "
+             "2>/dev/null | head -c 200"],
+            capture_output=True, text=True, timeout=30).stdout
+        check("the downloaded file has the right contents",
+              "chromeless-download-probe-42" in body, f"got {body[:80]!r}",
+              pass_detail=f"{len(body)} bytes, contents match")
+        # The intermediate is target + ".crdownload" and //content renames it
+        # on completion. One left behind means the download stalled — and it
+        # is also the check that would catch an intermediate path in the wrong
+        # DIRECTORY, which trips a DCHECK in a debug build.
+        check("the download completed (no .crdownload left behind)",
+              ".crdownload" not in listing,
+              f"Downloads/ still holds an intermediate: {listing!r}")
+
+
 def suite_clipboard(client, worker):
     print("\n[clipboard]")
 
@@ -920,13 +1087,31 @@ def main():
         #
         # `channels` runs early for a related reason: it reads the client's
         # log for the one-time wiring lines emitted at connect.
-        suites = {"dialogs": suite_dialogs, "channels": suite_channels,
+        suites = {"dialogs": suite_dialogs, "downloads": suite_downloads,
+                  "channels": suite_channels,
                   "video": suite_video, "navigation": suite_navigation,
                   "mouse": suite_mouse, "scroll": suite_scroll,
                   "keyboard": suite_keyboard, "clipboard": suite_clipboard,
                   "passthrough": suite_passthrough, "stats": suite_stats}
         want = args.only.split(",") if args.only else list(suites)
         for name in want:
+            # ABORT rather than cascade. The worker serves one session per
+            # browser process; when that session ends mid-run every remaining
+            # suite sees framesDecoded=0 and reports failures that are all the
+            # same fact wearing different names. One full run produced 26
+            # "FAILED" lines — no video, no clicks, no channels — from a
+            # single `session_unhealthy` the guest had already logged.
+            #
+            # A wall of failures that share one cause is worse than stopping:
+            # it buries whichever failure was real, and it takes a bisect to
+            # find that out.
+            if name.strip() != want[0].strip() and not _session_alive(client):
+                print(f"\n  ABORT  the WebRTC session ended before "
+                      f"[{name.strip()}] — remaining suites skipped.\n"
+                      f"         One session per worker process: restart the "
+                      f"worker and re-run. The guest logs `session_unhealthy` "
+                      f"when it drops the session itself.", flush=True)
+                break
             suites[name.strip()](client, worker.o)
     finally:
         client.close()
