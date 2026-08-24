@@ -322,7 +322,25 @@ spec:
               # bug: on 2026-08-20 t8 had 2755m free, so the 6 that fit in
               # June could not schedule at all, and the chromeless build
               # had nowhere left to run (t7 was at 465m).
-              cpu: "2"
+              # 1500m, not 2000m. Same principle as every other number in
+              # this block: the request buys ADMISSION, the 40-core limit is
+              # what autoninja actually bursts into.
+              #
+              # Measured on triform-8, 2026-08-23:
+              #   reserved   46310m of 48000m  (96%)
+              #   ACTUAL     14743m            (31%)
+              # so ~32 cores sit idle that the scheduler cannot see, and a
+              # 2000m request failed admission by 310m against a node that
+              # was two-thirds unused. The big reservers are other teams'
+              # pods (forgejo-runner 6500m x2, longhorn 5760m,
+              # triform-builder 3000m) — not ours to resize.
+              #
+              # This is the fourth time a request here has been fitted to a
+              # snapshot of OTHER pods' reservations and gone stale (cpu
+              # 12 -> 6 -> 2 -> 1.5, memory 96Gi -> 72Gi). The durable fix is
+              # not a better number, it is keeping the request at the floor
+              # that buys admission and letting the LIMIT do the work.
+              cpu: "1500m"
               # MEASURED, not guessed. A full build of this target list peaks at
               # ~57 GiB (kubectl top, sampled through compile + link on
               # 2026-08-19: steady ~50 GiB, peak 56,963 Mi). The request was
