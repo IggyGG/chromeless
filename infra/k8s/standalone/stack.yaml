@@ -204,18 +204,22 @@ spec:
           # deployment still read "v9" while serving somebody else's bundle.
           # `kubectl get deploy ... -o jsonpath='{...image}'` is not evidence
           # that the right code is running; the image digest is.
-          # Matches build/guest-release.json, which lint-deploy-pin now
-          # enforces. Both name cr7727-8d2ce2e66288 — the RE-ARM image that
-          # is currently live and serving a user.
+          # THE MERGED IMAGE. Carries both halves, verified in the binary
+          # by LOG STRINGS (the binary is stripped, so identifiers do not
+          # survive — enum names return 0 on every build, fixed or not):
           #
-          # This is deliberately NOT the merged image yet: no build from this
-          # merge exists at commit time, and pinning either parent's tag
-          # would roll back the other parent's half on the next
-          # `deploy.sh`. Pointing at what is genuinely running is the only
-          # honest option until the lane returns a merged tag, at which point
-          # this AND guest-release.json (tag + digest) change together — the
-          # lint fails if they do not.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-8d2ce2e66288
+          #   "while AWAITING AN ANSWER"   1   cold-arrival fix
+          #   CV2-REARM                    8   re-armable driver
+          #   CbControlChannel            15   js dialogs reach a human
+          #   CbDownloadManagerDelegate    2   downloads land a file
+          #   crdownload                   1
+          #   clipboard                   48   known-positive control
+          #
+          # Moves in lockstep with build/guest-release.json (tag AND digest);
+          # lint-deploy-pin fails if they drift. The digest is the part a
+          # rebuilt tag cannot fake — standalone-v9 was rebuilt over by
+          # another session while the Deployment still reported v9.
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-6feef4fc0713
           env:
             - name: SESSION_ID
               value: dev
