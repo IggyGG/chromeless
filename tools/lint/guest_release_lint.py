@@ -20,10 +20,14 @@ binary.
 The root cause was mechanical, not careless. `chromeless-kaniko-push.sh` writes
 the provenance record only after `kubectl logs -f` returns, and that command
 fails outright against a pod still in ContainerCreating. A push that SUCCEEDED
-could therefore leave the pin untouched, silently. Both halves are fixed — the
-script now waits for the pod to be followable and treats the Job condition as
-the authority — and this lint is the backstop for the next mechanism nobody
-predicted.
+could therefore leave the pin untouched, silently. That fix was claimed here on 2026-08-17 but was NOT
+actually in the script: it still ran `kubectl logs -f` the moment the pod
+existed, which fails with BadRequest while the pod is ContainerCreating, and —
+being the head of a pipe — failed invisibly. Two more silent drops happened on
+2026-08-24. Genuinely fixed now (wait for a followable phase, `|| true` on the
+follow, then `kubectl wait --for=condition=complete` before judging), and
+`make lint-deploy-pin` is the backstop that would have caught the drift while
+this docstring was quietly wrong.
 
 WHAT IT CHECKS
 --------------

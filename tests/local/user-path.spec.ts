@@ -87,7 +87,10 @@ test("the user's path: bare URL, log in, connect, browse real sites", async ({ p
     await expect(page).not.toHaveURL(/\/login/, { timeout: 20_000 });
   }
 
-  await page.locator("#connect").click();
+  // DO NOT CLICK CONNECT. A user who has just logged in expects a working
+  // browser, not a button; the page connects itself. Leaving the click out is
+  // the assertion — if auto-connect regresses, this hangs here rather than
+  // quietly papering over it with a click the user would not have made.
   await expect(page.locator("#status"),
     'the status pill never reached "connected" — this is the "waiting for offer" hang')
     .toHaveAttribute("data-state", "connected", { timeout: 150_000 });

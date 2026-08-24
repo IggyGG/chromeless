@@ -124,6 +124,43 @@ print(json.dumps([
    'username':'$TURN_USER','credential':'$TURN_CRED'},
   {'urls':['stun:$TURN_IP:3478']}]))")"
 
+# ---------------------------------------------------------------------------
+# Refuse to roll the cluster BACKWARDS.
+#
+# `kubectl apply -f stack.yaml` below sets the worker image to whatever this
+# file pins. On 2026-08-24 that pin was 64 commits behind the fix under test,
+# so every run of this script silently reverted a running fix — and every
+# `kubectl set image` reverted it back. The worker Deployment reached revision
+# 66 in a day with nobody reverting anything on purpose; kubectl showed two
+# field managers (`kubectl-client-side-apply` and `kubectl-set`) both owning
+# spec.containers[].image, each pulling toward its own answer.
+#
+# The user lost a day to it: tests passed against an image they never saw, and
+# they hit a bug those tests had "proved" fixed.
+#
+# So: if the live worker is running something NEWER than this file pins, stop
+# and say so rather than quietly downgrading it. `make lint-deploy-pin` keeps
+# stack.yaml and build/guest-release.json in agreement; this is the runtime
+# half, for the case where the cluster has moved and the tree has not.
+#
+# CHROMELESS_ALLOW_ROLLBACK=1 proceeds anyway — deliberate downgrades are
+# legitimate, they just should not be silent.
+pinned_worker="$(grep -oE 'chromeless/chromeless:[^ ]+' "$HERE/stack.yaml" | head -1 | sed 's|.*:||')"
+live_worker="$(kubectl get deploy chromeless-standalone-worker -n "$NS" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's|.*:||' || true)"
+if [ -n "$live_worker" ] && [ -n "$pinned_worker" ] && [ "$live_worker" != "$pinned_worker" ]; then
+    echo "ERROR: applying stack.yaml would CHANGE the running worker image." >&2
+    echo "         live:   $live_worker" >&2
+    echo "         pinned: $pinned_worker   (infra/k8s/standalone/stack.yaml)" >&2
+    echo "" >&2
+    echo "  If the live image is the newer one, this apply is a ROLLBACK and is" >&2
+    echo "  almost certainly not what you want. Update the pin in stack.yaml and" >&2
+    echo "  build/guest-release.json together, then re-run." >&2
+    echo "  To proceed anyway: CHROMELESS_ALLOW_ROLLBACK=1 $0 $*" >&2
+    [ "${CHROMELESS_ALLOW_ROLLBACK:-}" = "1" ] || exit 1
+    echo "  CHROMELESS_ALLOW_ROLLBACK=1 set — proceeding." >&2
+fi
+
 echo ">>> network policy + stack"
 # Not optional: the namespace carries chromeless-default-deny with
 # podSelector:{}, so new pods get nothing. The symptom is a TIMEOUT rather than

@@ -204,7 +204,18 @@ spec:
           # deployment still read "v9" while serving somebody else's bundle.
           # `kubectl get deploy ... -o jsonpath='{...image}'` is not evidence
           # that the right code is running; the image digest is.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-224c19413e24
+          # Matches build/guest-release.json, which lint-deploy-pin now
+          # enforces. Both name cr7727-8d2ce2e66288 — the RE-ARM image that
+          # is currently live and serving a user.
+          #
+          # This is deliberately NOT the merged image yet: no build from this
+          # merge exists at commit time, and pinning either parent's tag
+          # would roll back the other parent's half on the next
+          # `deploy.sh`. Pointing at what is genuinely running is the only
+          # honest option until the lane returns a merged tag, at which point
+          # this AND guest-release.json (tag + digest) change together — the
+          # lint fails if they do not.
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-8d2ce2e66288
           env:
             - name: SESSION_ID
               value: dev
@@ -255,6 +266,46 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 12
+          # LIVENESS: is the worker still TALKING TO THE BROKER?
+          #
+          # The readiness probe above only asks whether DevTools answers, and it
+          # answers whether or not signaling is up. That is exactly how a worker
+          # looks perfectly healthy while being useless: on 2026-08-24 a user
+          # sat at "no offer from browser" against a pod that was Running 1/1
+          # and rendering 29 fps the whole time, and had simply never re-dialed
+          # the broker after it was restarted the previous day. The broker log
+          # showed only `role: client` joining — the browser peer was absent
+          # entirely, for 20 hours, with nothing anywhere reporting a problem.
+          #
+          # The worker's WS client has NO reconnect — its own error log says
+          # "a follow-up R# should add R7 reconnect supervision" — so a
+          # code=1006 drop is permanent for the life of the process. Until that
+          # C++ lands, the honest fix is to let Kubernetes notice and restart:
+          # ~15s, and invisible to a viewer.
+          #
+          # Reads /proc/net/tcp directly because the image has neither ss nor
+          # netstat. 0x1F90 is 8080 (the broker port) and state 01 is
+          # ESTABLISHED. Verified live: 1 while signaling is up, 0 once gone.
+          #
+          # 3 x 30s = 90s of confirmed silence before restarting — far longer
+          # than any broker rollout, so redeploying the broker does not put the
+          # worker into a restart loop.
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import sys
+                  n = 0
+                  for line in open('/proc/net/tcp').read().splitlines()[1:]:
+                      f = line.split()
+                      if f[3] == '01' and f[2].upper().endswith(':1F90'):
+                          n += 1
+                  sys.exit(0 if n > 0 else 1)
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
       volumes:
         - name: dshm
           emptyDir: { medium: Memory, sizeLimit: 1Gi }
@@ -376,5 +427,23 @@ spec:
         # emptyDir: the cert is regenerated on restart. Fine here — a
         # port-forward user re-accepts it — but a durable deployment wants a
         # PVC so the browser is not re-warned on every roll.
+        #
+        # 2026-08-24: this bit a real user. The gateway restarted, generated a
+        # FRESH self-signed cert into this emptyDir, and their browser — which
+        # had an exception pinned to the PREVIOUS cert — refused the new one.
+        # The client showed `ws closed {code: 1015}` in a reconnect loop and
+        # the gateway logged `remote error: tls: bad certificate`, neither of
+        # which points at "your cert changed".
+        #
+        # The live deployment now mounts a Secret (chromeless-gateway-tls) and
+        # an initContainer copies it into the writable /tmp the gateway already
+        # has, so the cert survives restarts and the browser is warned ONCE.
+        # The copy is needed because the gateway calls MkdirAll on its TLS dir
+        # before reading, which fails on a read-only Secret mount.
+        #
+        #   kubectl create secret generic chromeless-gateway-tls -n chromeless \
+        #     --from-file=cert.pem=... --from-file=key.pem=...
+        #
+        # Verified: fingerprint identical across a rollout restart.
         - name: certs
           emptyDir: {}

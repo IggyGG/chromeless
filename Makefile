@@ -6,7 +6,7 @@
 
 .PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
         lint-runtime-contracts lint-tests-wired lint-pod-resources \
-        lint-guest-release test-interactive test test-unit test-integration \
+        lint-guest-release lint-deploy-pin test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
         test-unit-signaling test-unit-client test-unit-harness \
@@ -24,6 +24,7 @@ help:
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
 	@echo "  make lint-pod-resources  # ephemeral-storage limit implies a reservation"
 	@echo "  make lint-guest-release  # the worker-image pin names real code"
+	@echo "  make lint-deploy-pin     # manifests agree with the guest-release pin"
 	@echo "  make test-interactive    # real Chrome + real worker (needs a live stack)"
 	@echo "  make lint-runtime-contracts # hermetic launcher/runtime contracts"
 	@echo ""
@@ -62,7 +63,7 @@ verify: lint test-unit test-integration
 # ---- lint ------------------------------------------------------------------
 
 lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts \
-      lint-tests-wired lint-silent-noop lint-pod-resources lint-guest-release
+      lint-tests-wired lint-silent-noop lint-pod-resources lint-guest-release lint-deploy-pin
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -154,6 +155,19 @@ lint-silent-noop:
 # (2026-08-20). Three further lanes (nvenc, vaapi, x264-t2) and three
 # validation Jobs were found carrying it latent, never having been fired on
 # a full node. Same defect, six directories over, same fix.
+# Every manifest that pins a deployable image must agree with
+# build/guest-release.json. Exists because a user lost a day to a stack whose
+# manifest and cluster disagreed: `kubectl apply` silently rolled the worker
+# back to a build predating the fix it was meant to carry.
+#
+# Also requires the pin to carry a sha256 DIGEST, because a tag is not
+# evidence of which artifact runs — the gateway's standalone-v9 tag was
+# rebuilt over by another session while the Deployment still reported v9.
+# Right tag, wrong artifact.
+lint-deploy-pin:
+	@echo ">>> deploy pin lint"
+	@python3 tools/lint/deploy_pin_lint.py
+
 lint-pod-resources:
 	@echo ">>> pod resource request lint"
 	@python3 tools/lint/pod_resource_request_lint.py infra

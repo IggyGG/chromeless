@@ -18,7 +18,18 @@ export default defineConfig({
     // headless only changes whether a window is drawn, not which binary runs
     // or how WebRTC/ICE behaves.
     headless: true,
-    ignoreHTTPSErrors: true,  // the gateway's cert is self-signed
+    // NOT ignoreHTTPSErrors. That flag hid a real, user-facing failure for two
+    // rounds: the gateway served a self-signed cert, the browser accepted the
+    // PAGE via a click-through exception, and then refused the wss:// upgrade —
+    // which surfaces only as `ws closed {code:1015}` and an endless reconnect
+    // loop. Every test passed the whole time, because Playwright was told not
+    // to care about certificates.
+    //
+    // The gateway now serves a cert issued by the machine's mkcert root CA,
+    // which the OS and Chrome genuinely trust, so no leniency is needed here.
+    // Leaving this false is load-bearing: if the cert ever regresses to
+    // self-signed, these tests fail the way the user does.
+    ignoreHTTPSErrors: false,
     trace: "retain-on-failure",
     video: "retain-on-failure",
     launchOptions: {

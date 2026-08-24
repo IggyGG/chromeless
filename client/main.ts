@@ -511,7 +511,29 @@ const teardown = (why: string) => session?.disconnect(why);
 window.addEventListener("pagehide", () => teardown("page hidden"));
 window.addEventListener("beforeunload", () => teardown("page unload"));
 
-log("info", "client loaded — click Connect to start");
+// ---------- start automatically ----------
+//
+// A user who has just logged in expects a working browser, not a button. The
+// Connect button stays (it doubles as Disconnect, and reconnecting by hand is
+// genuinely useful when a session goes wrong), but nobody should have to press
+// it to get the thing they asked for.
+//
+// Deliberately NOT gated on any query flag. `?e2e=1` exists only to expose the
+// PeerConnection to tests, and gating behaviour on it is precisely how the
+// suite ended up green while the page a real user loads was broken.
+//
+// Failures surface exactly as before — connect() reports through the status
+// pill and the log — so an auto-start that cannot reach the worker looks the
+// same as a hand-clicked one that cannot.
+function autoConnect(): void {
+  if (session) return;                    // already up (e.g. hot reload)
+  const sessionId = els.sessionId.value.trim() || "dev";
+  els.connect.textContent = "Disconnect";
+  connect(sessionId);
+}
+
+log("info", "client loaded — connecting…");
+autoConnect();
 
 // Part of the public surface via the session's signaling event.
 export type { ReconnectState };
