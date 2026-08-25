@@ -230,7 +230,11 @@ spec:
           # lint-deploy-pin fails if they drift. The digest is the part a
           # rebuilt tag cannot fake — standalone-v9 was rebuilt over by
           # another session while the Deployment still reported v9.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-7da2b212a8ed
+          # Pinned by DIGEST. cr7727-08f76460a5bc carries every fix in this
+          # branch plus the ICE-send regression fix; verified live on this
+          # digest with 11 "ws Send(ice) failed" events and ZERO driver
+          # failures, where the previous image recycled the guest on three.
+          image: registry.triform.cloud/chromeless/chromeless@sha256:aa1686079e8734aeba5392a3fc7f14be0134ac250d605683092fd0ccc311cf0e
           env:
             - name: SESSION_ID
               value: dev
