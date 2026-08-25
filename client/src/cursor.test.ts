@@ -13,6 +13,7 @@ import {
   isValidEnvelope,
   sourceToViewport,
   renderCursor,
+  cssCursorFor,
 } from "./cursor.js";
 
 // ---------------------------------------------------------------------------
@@ -154,17 +155,56 @@ describe("renderCursor", () => {
     r.dispose();
   });
 
-  it("positions and shows on visible:true", () => {
+  // The renderer no longer positions anything — the OS draws the pointer, so
+  // the only observable effect of a visible envelope is the CSS cursor on the
+  // <video>. This test used to assert `transform: translate3d(...)`; that
+  // assertion is gone WITH the behaviour, not because it became inconvenient.
+  it("sets the CSS cursor on the video and does NOT position anything", () => {
     const v = stubVideo(1920, 1080);
     const r = renderCursor(v);
     r.update({
       v: 1, type: "cursor", t: 1, seq: 0,
       data: { x: 960, y: 540, visible: true, shape: "pointer" },
     });
+    expect(v.style.cursor).toBe("pointer");
+    // The marker still publishes the shape — tests/interactive reads it.
     const overlay = overlayOf();
-    expect(overlay.style.display).toBe("block");
     expect(overlay.dataset.shape).toBe("pointer");
-    expect(overlay.style.transform).toMatch(/translate3d\(\d+px, \d+px, 0\)/);
+    // ...and stays invisible: it is an observability seam, not a renderer.
+    expect(overlay.style.display).toBe("none");
+    expect(overlay.style.transform ?? "").toBe("");
+  });
+
+  // x/y are ignored deliberately. Position from the guest arrives only on
+  // cursor-CHANGE edges (cb_cursor_xy_join.h:53), so it is not a usable
+  // position source; using it is what made the cursor feel frozen.
+  it("ignores x/y entirely — same shape, wildly different coords", () => {
+    const v = stubVideo(1920, 1080);
+    const r = renderCursor(v);
+    r.update({
+      v: 1, type: "cursor", t: 1, seq: 0,
+      data: { x: 0, y: 0, visible: true, shape: "text" },
+    });
+    const first = v.style.cursor;
+    r.update({
+      v: 1, type: "cursor", t: 2, seq: 1,
+      data: { x: 1919, y: 1079, visible: true, shape: "text" },
+    });
+    expect(v.style.cursor).toBe(first);
+    expect(v.style.cursor).toBe("text");
+  });
+
+  it("restores the video cursor on dispose", () => {
+    const v = stubVideo();
+    v.style.cursor = "crosshair";
+    const r = renderCursor(v);
+    r.update({
+      v: 1, type: "cursor", t: 1, seq: 0,
+      data: { x: 0, y: 0, visible: true, shape: "pointer" },
+    });
+    expect(v.style.cursor).toBe("pointer");
+    r.dispose();
+    expect(v.style.cursor).toBe("crosshair");
   });
 
   it("hides on visible:false", () => {
@@ -178,8 +218,8 @@ describe("renderCursor", () => {
       v: 1, type: "cursor", t: 2, seq: 1,
       data: { x: 0, y: 0, visible: false, shape: "none" },
     });
-    const overlay = overlayOf();
-    expect(overlay.style.display).toBe("none");
+    expect(v.style.cursor).toBe("none");
+    expect(overlayOf().dataset.shape).toBe("none");
   });
 
   it("ignores invalid envelopes", () => {
@@ -202,5 +242,72 @@ describe("renderCursor", () => {
     });
     const overlay = overlayOf();
     expect(overlay.dataset.shape).toBe("default");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cssCursorFor — the shape -> CSS translation.
+//
+// Nearly the identity function by design (34 of 36 protocol shapes ARE CSS
+// keywords), so these tests exist for the two that are not, and for the two
+// ways a custom cursor silently fails to apply: a missing fallback keyword,
+// and a hotspot outside the image.
+// ---------------------------------------------------------------------------
+describe("cssCursorFor", () => {
+  const bare = (shape: string) =>
+    ({ x: 0, y: 0, visible: true, shape } as never);
+
+  it("passes standard keywords through untouched", () => {
+    for (const s of ["default", "pointer", "text", "nesw-resize", "zoom-in",
+                     "context-menu", "vertical-text", "all-scroll"]) {
+      expect(cssCursorFor(s, bare(s))).toBe(s);
+    }
+  });
+
+  it("builds a url() with a MANDATORY fallback keyword", () => {
+    // Without the trailing `, default` the whole declaration is invalid and
+    // the cursor silently does not change — the failure mode this guards.
+    const out = cssCursorFor("custom", {
+      x: 0, y: 0, visible: true, shape: "custom",
+      custom_image_b64: "AAAA", image_format: "png",
+      hotspot: { x: 4, y: 6 },
+    } as never);
+    expect(out).toBe('url("data:image/png;base64,AAAA") 4 6, default');
+  });
+
+  it("honours the hotspot the old renderer ignored", () => {
+    const out = cssCursorFor("custom", {
+      x: 0, y: 0, visible: true, shape: "custom",
+      custom_image_b64: "Zm9v", image_format: "png",
+      hotspot: { x: 9, y: 3 },
+    } as never);
+    expect(out).toContain(" 9 3, default");
+  });
+
+  it("defaults the hotspot to 0 0 when absent or nonsense", () => {
+    const mk = (hotspot: unknown) => cssCursorFor("custom", {
+      x: 0, y: 0, visible: true, shape: "custom",
+      custom_image_b64: "Zm9v", image_format: "png", hotspot,
+    } as never);
+    expect(mk(undefined)).toContain(" 0 0, default");
+    expect(mk({ x: -5, y: -5 })).toContain(" 0 0, default");
+    expect(mk({ x: NaN, y: NaN })).toContain(" 0 0, default");
+  });
+
+  it("clamps a hotspot outside the image — CSS drops the whole rule", () => {
+    const out = cssCursorFor("custom", {
+      x: 0, y: 0, visible: true, shape: "custom",
+      custom_image_b64: "Zm9v", image_format: "png",
+      hotspot: { x: 9999, y: 9999 },
+    } as never);
+    expect(out).toContain(" 127 127, default");
+  });
+
+  it("falls back to default when the custom image is missing or not png", () => {
+    expect(cssCursorFor("custom", bare("custom"))).toBe("default");
+    expect(cssCursorFor("custom", {
+      x: 0, y: 0, visible: true, shape: "custom",
+      custom_image_b64: "AAAA", image_format: "gif",
+    } as never)).toBe("default");
   });
 });
