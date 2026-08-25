@@ -1,9 +1,9 @@
 {
   "schema": "chromeless.guest-release/v1",
-  "commit": "3f9e3d00d1f77da6993011e3e02db77bf370d5a5",
-  "image": "registry.triform.cloud/chromeless/chromeless:cr7727-3f9e3d00d1f7",
-  "digest": "sha256:6a12b08c2398e21076aff92f3f23f45d26a59277598730113b0f6c9837e56895",
+  "commit": "7da2b212a8eda9b9a64c4239a7ff895645686425",
+  "image": "registry.triform.cloud/chromeless/chromeless:cr7727-7da2b212a8ed",
+  "digest": "sha256:ae8400a86d5c5d3aa4ee48e889ad1ef914f8c93dea6b96877bffa4c9eb149f01",
   "dockerfile": "build/Dockerfile.runtime",
-  "built_at": "2026-08-25T00:06:34Z",
-  "recorded_by": "chromeless-kaniko-push.sh (digest resolved from the registry: the script's log-follow died on ContainerCreating before it could record one)"
+  "built_at": "2026-08-25T03:45:14Z",
+  "recorded_by": "chromeless-kaniko-push.sh"
 }

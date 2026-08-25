@@ -230,7 +230,7 @@ spec:
           # lint-deploy-pin fails if they drift. The digest is the part a
           # rebuilt tag cannot fake — standalone-v9 was rebuilt over by
           # another session while the Deployment still reported v9.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-3f9e3d00d1f7
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-7da2b212a8ed
           env:
             - name: SESSION_ID
               value: dev
