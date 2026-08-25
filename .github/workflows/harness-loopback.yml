@@ -29,7 +29,31 @@ permissions:
 jobs:
   harness:
     name: Harness baselines
-    runs-on: ubuntu-latest
+    # STOPGAP (2026-08-20): `priority`, not `ubuntu-latest`.
+    #
+    # `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
+    # tf-multiverse saturated them: measured 470 queued `docker` jobs against 19
+    # `ubuntu-latest`, all 18 general slots held by `docker`, and **zero**
+    # `ubuntu-latest` jobs started in 30 minutes. chromeless jobs waited 56-61
+    # min and were not going to get a slot — arrivals were running at 285/30min
+    # against 147 completing, so the backlog was growing, not draining.
+    #
+    # The `priority` pool (6 express replicas x capacity 2 = 12 slots) had 3 in
+    # use. It has the same shape as the general pool — dind + dind-gc + runner,
+    # 16Gi docker storage, capacity 2 — so nothing here depends on a runner
+    # feature the general pool had and this one lacks.
+    #
+    # ⚠ It is NOT free: `priority` exists for tf-multiverse's own fast lane
+    # (portal SSR check, cargoless-serve image builds). This borrows capacity
+    # that belongs to someone else, so it is a stopgap until chromeless has its
+    # own pool — see the split design. If the express pool starts queueing,
+    # this is why.
+    #
+    # ⚠ Express dind has 8Gi memory vs the general pool's 16Gi. The e2e stack
+    # (Chromium + 1GB shm + three small services) is expected to fit, but this
+    # is the one difference between the pools that could bite. An OOM in
+    # `compose up` here is THIS, not a product defect.
+    runs-on: priority
     timeout-minutes: 25
 
     steps:

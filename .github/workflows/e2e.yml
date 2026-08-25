@@ -1,15 +1,32 @@
-# .github/workflows/e2e.yml — T84 Playwright end-to-end tests.
+# .github/workflows/e2e.yml — Playwright end-to-end tests.
 #
-# Brings up the full compose stack on a Linux runner, then runs the
-# Playwright specs in tests/e2e/. Spec failures + Playwright's HTML
-# report + the container logs land as artifacts so the failing run is
-# debuggable without re-running locally.
+# Brings up the full compose stack, then runs the Playwright specs in
+# tests/e2e/ against it. There are no artifacts: `actions/upload-artifact`
+# cannot work on this host (see the summary step), so the failing spec's
+# output goes to the run log instead.
 #
-# Skip-gating: if T78's getDisplayMedia fix isn't in the image, the
-# audio/video specs degrade — we mark them `test.skip` in the spec
-# files, but to keep the workflow green-able even on the day of the
-# revert, we treat any spec ending in `.live.spec.ts` as best-effort:
-# their failure surfaces in the report but doesn't fail the workflow.
+# READ THIS BEFORE TRUSTING A GREEN TICK FROM THIS WORKFLOW.
+#
+# Until 2026-08-19 this lane had NEVER RUN. Not "rarely" — never: every one
+# of 120 e2e jobs in this repo's history that got as far as executing
+# printed "e2e is skipped" and passed. Playwright had not launched a browser
+# here a single time. The cause was a probe that drew the wrong conclusion
+# from a real symptom, described in full at the align step below.
+#
+# Two things follow, and both are load-bearing:
+#
+#   - This job is only a gate when its own steps actually execute. It still
+#     skips green when CHROMELESS_IMAGE is unset (no image, nothing to test)
+#     or when path alignment genuinely fails. If you are asking "did e2e
+#     catch this?", grep the run log for "e2e is skipped" first.
+#   - Two nested container boundaries have to line up: the daemon must
+#     resolve the same paths this job does (the align step), and the
+#     browser must be able to exec on the image running it (the Playwright
+#     step). Each one broke this lane on its own.
+#
+# The `.live.spec.ts` best-effort convention the old header described is
+# gone — no such file exists, and the specs that once carried `test.skip`
+# pending "T34" now run. Every spec here counts.
 
 name: E2E
 
@@ -29,7 +46,31 @@ permissions:
 jobs:
   e2e:
     name: docker-compose + Playwright
-    runs-on: ubuntu-latest
+    # STOPGAP (2026-08-20): `priority`, not `ubuntu-latest`.
+    #
+    # `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
+    # tf-multiverse saturated them: measured 470 queued `docker` jobs against 19
+    # `ubuntu-latest`, all 18 general slots held by `docker`, and **zero**
+    # `ubuntu-latest` jobs started in 30 minutes. chromeless jobs waited 56-61
+    # min and were not going to get a slot — arrivals were running at 285/30min
+    # against 147 completing, so the backlog was growing, not draining.
+    #
+    # The `priority` pool (6 express replicas x capacity 2 = 12 slots) had 3 in
+    # use. It has the same shape as the general pool — dind + dind-gc + runner,
+    # 16Gi docker storage, capacity 2 — so nothing here depends on a runner
+    # feature the general pool had and this one lacks.
+    #
+    # ⚠ It is NOT free: `priority` exists for tf-multiverse's own fast lane
+    # (portal SSR check, cargoless-serve image builds). This borrows capacity
+    # that belongs to someone else, so it is a stopgap until chromeless has its
+    # own pool — see the split design. If the express pool starts queueing,
+    # this is why.
+    #
+    # ⚠ Express dind has 8Gi memory vs the general pool's 16Gi. The e2e stack
+    # (Chromium + 1GB shm + three small services) is expected to fit, but this
+    # is the one difference between the pools that could bite. An OOM in
+    # `compose up` here is THIS, not a product defect.
+    runs-on: priority
     timeout-minutes: 30
 
     # Job-level gate, not just the step-level probe below. On Forgejo a
@@ -45,7 +86,12 @@ jobs:
     # The step-level probe is kept: it still guards the var-set-but-empty
     # edge and keeps every compose step independently gated (see the
     # teardown comment at the bottom).
-    if: vars.CHROMELESS_IMAGE != ''
+    #
+    # The job-level `if:` is GONE, deliberately. It gated on the repo variable
+    # being set, which was the mechanism that let this lane skip 120 times in a
+    # row while reporting success. The image now comes from a file that is
+    # always present, so there is always something to test and the job always
+    # has to justify itself. See "Resolve the worker image" below.
 
     steps:
       - uses: actions/checkout@v4
@@ -53,27 +99,61 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # OSS-W2: no `actions/setup-node@v4` — it installs a glibc node into
-      # this host's musl (Alpine) job container, which then cannot exec. The
-      # poisoned PATH fails every later JS action's post-step with exit 255,
-      # so the job dies regardless of its own result. Full write-up in
-      # ci.yml's "Node version (image-provided)" step.
-      # Playwright needs npm/npx, which ci-tools does not ship — install it
-      # from the distro so it matches the image's own node ABI (see ci.yml).
-      - name: Node + npm (image-provided)
+      # Resolve the worker image from the TREE, not from a forge setting.
+      #
+      # This used to read `vars.CHROMELESS_IMAGE` directly — a Forgejo
+      # repository variable, i.e. a row in the forge's database. Nothing in a
+      # checkout described what CI actually ran, no diff showed it changing,
+      # and `git log` could not explain why a gate started failing. It went
+      # three weeks stale and no check could say so: on 2026-08-19 (task
+      # 340536) the pin was cr7727-f9e46a1434b5, built 2026-07-30, which
+      # predates the worker-restart half of the one-session-per-worker fix.
+      # Chromium spawned once and never restarted, so every spec after the
+      # first was replayed a dead offer and sat in `connecting` forever —
+      # 5 passed, 2 failed, and the failures were the PIN, not the code.
+      #
+      # So: build/guest-release.json is the default and is reviewable in a
+      # diff. It is the record chromeless-kaniko-push.sh already writes after
+      # every build, so it tracks reality without anyone remembering to edit
+      # it — which is the point. The repo variable still WINS when set,
+      # because overriding is how you bisect a bad build or test a candidate
+      # without a commit, but it is now an explicit override of a stated
+      # default rather than the only source of truth. Which one applied is
+      # printed, so a surprising run explains itself from its own log.
+      #
+      # This resolution and tools/lint/guest_release_lint.py come from PR #65,
+      # which diagnosed the same three-way disagreement two days earlier and
+      # additionally fixed the WRITER: the script recorded the pin only after
+      # `kubectl logs -f` returned, and that fails against a pod still in
+      # ContainerCreating — so a push that SUCCEEDED could silently leave the
+      # record untouched. That is why it went stale. This branch adds only the
+      # other two lanes (65 covers ci.yml) and widens the lint to match.
+      #
+      # tools/lint/guest_release_lint.py fails if this file stops being read.
+      - name: Resolve the worker image
+        id: image
+        env:
+          CHROMELESS_IMAGE_OVERRIDE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
-          command -v node >/dev/null 2>&1 || {
-            echo "::error::no node in the job image; Playwright needs one"
-            exit 1
-          }
-          if ! command -v npm >/dev/null 2>&1; then
-            if command -v apk >/dev/null 2>&1; then
-              apk add --no-cache npm >/dev/null
-            elif command -v apt-get >/dev/null 2>&1; then
-              apt-get update -qq && apt-get install -y -qq npm >/dev/null
-            fi
+          set -euo pipefail
+          # Absence is legitimate — a fork with no build of its own has nothing
+          # to pin (guest_release_lint.py makes the same allowance), so this
+          # must not hard-fail. It falls through to the override, and then to
+          # the probe's skip.
+          pinned=""
+          if [ -f build/guest-release.json ]; then
+            pinned=$(python3 -c "import json;print(json.load(open('build/guest-release.json')).get('image',''))")
           fi
-          echo "node: $(node --version)  npm: $(npm --version 2>/dev/null || echo MISSING)"
+          if [ -n "${CHROMELESS_IMAGE_OVERRIDE}" ]; then
+            resolved="${CHROMELESS_IMAGE_OVERRIDE}"
+            echo "::notice::worker image from the CHROMELESS_IMAGE repo variable (OVERRIDE): ${resolved}"
+            echo "  tree pin (build/guest-release.json) says: ${pinned}"
+          else
+            resolved="${pinned}"
+            echo "worker image from build/guest-release.json: ${resolved}"
+          fi
+          echo "CHROMELESS_IMAGE=${resolved}" >> "$GITHUB_ENV"
+          echo "resolved=${resolved}" >> "$GITHUB_OUTPUT"
 
       # OSS-W1: the e2e stack needs a real cloud_browser_worker image. The
       # browser is a from-source Chromium build (4-8h cold — see
@@ -87,12 +167,17 @@ jobs:
       # native-peer migration deleted capture/streamer-page/.
       - name: Check for a supplied worker image
         id: probe
-        env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
-          if [ -z "${CHROMELESS_IMAGE}" ]; then
+          # CHROMELESS_IMAGE comes from GITHUB_ENV, set by the resolve step.
+          # Kept as a real check rather than hardcoded true: the pin file could
+          # carry an empty string, and a job that boots "" is worse than one
+          # that says why it stopped.
+          if [ -z "${CHROMELESS_IMAGE:-}" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::CHROMELESS_IMAGE repo variable not set — e2e skipped. Set it to a cloud_browser_worker image to enable."
+            # ::warning::, same reasoning as the fs-probe below: a skip that
+            # only a notice records is a skip nobody reads, and this job is
+            # then green about nothing.
+            echo "::warning::E2E DID NOT RUN. No worker image resolved — build/guest-release.json has no image, or the CHROMELESS_IMAGE override is set to an empty string."
           else
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
@@ -105,50 +190,138 @@ jobs:
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
         run: |
           registry="${CHROMELESS_IMAGE%%/*}"
           echo "${REGISTRY_PASSWORD}" | docker login "${registry}" \
             --username "${REGISTRY_USERNAME}" --password-stdin
 
-      # C2: does the docker daemon share this job's filesystem?
+      # C2: can the docker daemon resolve this job's bind-mount paths?
       #
       # infra/compose.yaml bind-mounts repo paths (../client, ../client/dist,
       # ./observability/prometheus/prometheus.yml). Those are resolved by the
-      # DAEMON, not by compose — so they only work when the daemon can see the
-      # checkout. On this CI host it cannot: jobs run in a container talking to
-      # a sibling dind daemon over tcp://127.0.0.1:2375, with separate
-      # filesystems. Docker then auto-creates each missing source path as an
-      # empty DIRECTORY, which produces two distinct failures:
+      # DAEMON, not by compose — so a path that means one thing here has to
+      # mean the same thing over there. When it does not, docker auto-creates
+      # each missing source as an empty DIRECTORY, producing two failures:
       #
       #   - a file mount becomes dir-onto-file:
       #       error mounting ".../prometheus.yml" to rootfs at
       #       "/etc/prometheus/prometheus.yml": not a directory
       #   - a dir mount silently yields an EMPTY tree, so client-build npm's
-      #     into nothing and nginx serves a blank root — specs would fail
-      #     against a stack that never had the app in it.
+      #     into nothing and the gateway serves a blank root — specs would
+      #     fail against a stack that never had the app in it.
       #
-      # Observed 2026-07-30 on the first real-image e2e run. So probe for it
-      # rather than assuming: write a sentinel into the workspace and ask the
-      # daemon to read it back. Shared filesystem (GitHub-hosted runners,
-      # local dev, DinD with the workspace bind-mounted through) → the value
-      # round-trips and e2e runs for real. Not shared → skip with a notice
-      # instead of reporting a red that says nothing about the product.
+      # Observed 2026-07-30 on the first real-image e2e run.
+      #
+      # THE ORIGINAL PROBE WAS RIGHT ABOUT THE SYMPTOM AND WRONG ABOUT THE
+      # CAUSE, and that cost this lane its entire existence. It concluded
+      # "separate filesystems" and skipped. Checked 2026-08-19: EVERY e2e job
+      # in this repo's history that got as far as running printed
+      # "e2e is skipped" — 120 jobs, and Playwright had never once executed
+      # here. A lane that has never run is not a gate; it is a green tick.
+      #
+      # The filesystems are in fact SHARED. act_runner puts the checkout in a
+      # docker VOLUME and mounts it into the job container, so the same bytes
+      # are visible to both — at two different PATHS:
+      #
+      #   job container : /workspace/<owner>/<repo>
+      #   daemon        : /var/lib/docker/volumes/<id>/_data
+      #
+      # The sentinel probe passed ${PWD} — a path meaningful only in here —
+      # so the daemon created an empty dir and read nothing back. Measured on
+      # forgejo-runner-0 with a miniature compose fixture: same file, empty
+      # via ${PWD}, "hello-bundle" via the daemon path. Relative build
+      # contexts (`context: ..`) resolve the same way.
+      #
+      # So align the two rather than give up: symlink the daemon's path to
+      # our mount point, and point compose at the aligned path. A symlink,
+      # not a copy — compose passes the path through unresolved and the
+      # daemon resolves it on its own side, so the checkout is never
+      # duplicated and writes land in one place.
+      #
+      # The probe is KEPT and still decides. Alignment runs first and the
+      # sentinel then re-tests reality: if it still fails, the skip is
+      # correct and this host really does have separate filesystems.
+      - name: Align the workspace path with the daemon's
+        id: fsalign
+        if: steps.probe.outputs.present == 'true'
+        run: |
+          set -eu
+          ws="$(pwd)"
+
+          # Longest mountinfo mount point covering $ws. Fields: 4=root within
+          # the source fs, 5=mount point in this container. Longest wins
+          # because /workspace and /workspace/<owner>/<repo> can both match
+          # and only the deeper one names the volume we are in.
+          line=$(awk -v w="$ws" '
+            $5 == w || index(w, $5 "/") == 1 { print $4 "\t" $5 }
+          ' /proc/self/mountinfo | awk '{ print length($2) "\t" $0 }' \
+            | sort -rn | head -1 | cut -f2-)
+          root=$(printf '%s' "$line" | cut -f1)
+          mp=$(printf '%s' "$line" | cut -f2)
+
+          aligned="$ws"
+          case "${root:-}" in
+            /volumes/*/_data)
+              vol=${root#/volumes/}; vol=${vol%/_data}
+              dpath=$(docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null || true)
+              if [ -n "$dpath" ]; then
+                if [ ! -e "$dpath" ]; then
+                  mkdir -p "$(dirname "$dpath")"
+                  ln -s "$mp" "$dpath"
+                fi
+                # $mp quoted inside the expansion: unquoted it is a glob
+                # pattern, so a workspace path containing [ or * would strip
+                # the wrong prefix (SC2295).
+                aligned="$dpath${ws#"$mp"}"
+                echo "aligned: $ws -> $aligned (volume $vol)"
+              else
+                echo "daemon does not know volume $vol; leaving path as-is"
+              fi
+              ;;
+            *)
+              # A bind-mounted or same-filesystem workspace (GitHub-hosted
+              # runners, local dev). Nothing to align.
+              echo "workspace is not a docker volume; leaving path as-is"
+              ;;
+          esac
+          echo "workspace=${aligned}" >> "$GITHUB_OUTPUT"
+
+          # $GITHUB_ENV rather than a per-step `env:` block, because EVERY
+          # compose subcommand needs it — including the `down` teardown, which
+          # runs on `always()` and would otherwise interpolate an empty path
+          # into `-f /infra/compose.yaml` and leave containers squatting on the
+          # runner. One assignment here beats six env blocks that must not
+          # drift.
+          echo "COMPOSE_FILE_PATH=${aligned}/infra/compose.yaml" >> "$GITHUB_ENV"
+
+      # Now ask the daemon, using whatever path alignment settled on. This is
+      # the same sentinel round-trip as before — it is the evidence, and it
+      # still gets to veto.
       - name: Probe daemon filesystem sharing
         id: fsprobe
         if: steps.probe.outputs.present == 'true'
+        env:
+          WS: ${{ steps.fsalign.outputs.workspace }}
         run: |
           sentinel=".e2e-fsprobe-${GITHUB_RUN_ID:-local}"
           printf 'shared-ok' > "${sentinel}"
-          got=$(docker run --rm -v "${PWD}/${sentinel}:/probe:ro" \
+          got=$(docker run --rm -v "${WS}/${sentinel}:/probe:ro" \
                   alpine:3.20 cat /probe 2>/dev/null || true)
           rm -f "${sentinel}"
           if [ "${got}" = "shared-ok" ]; then
             echo "shared=true" >> "$GITHUB_OUTPUT"
-            echo "daemon sees the workspace — running the compose stack"
+            echo "daemon resolves ${WS} — running the compose stack"
           else
             echo "shared=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::docker daemon does not share this job's filesystem (got '${got}'); compose bind-mounts cannot resolve, so e2e is skipped. Run it where the daemon sees the checkout."
+            # ::warning:: not ::notice::, and this is the point of the whole
+            # change. A notice is invisible from the PR page — that is how
+            # 120 consecutive skipped e2e runs read as 120 passes for four
+            # months. $GITHUB_STEP_SUMMARY would be the right surface, but
+            # act_runner v12.10.1 does not set it (checked on the live
+            # runner: the variable is unset, and Forgejo's schema has no
+            # summary table), so a warning annotation is the loudest thing
+            # available that a reader sees without opening the log.
+            echo "::warning::E2E DID NOT RUN. The docker daemon cannot resolve '${WS}' (sentinel returned '${got}'), so compose bind-mounts would silently mount empty directories. This job is green because it declined to test, NOT because the stack works."
           fi
 
       # Go, for cmd/keygen below. `actions/setup-go` is safe on this host in a
@@ -205,10 +378,120 @@ jobs:
           sed 's/^export //' /tmp/chromeless-auth.env >> "$GITHUB_ENV"
           echo "auth enabled for this run: $(sed 's/=.*//' /tmp/chromeless-auth.env | tr '\n' ' ')"
 
+      # Run client-build ON ITS OWN, before `up`. This is not tidiness — it is
+      # what keeps the gateway from being deleted mid-start by the host.
+      #
+      # The gateway declares `depends_on: client-build: service_completed_
+      # successfully`, so `up` CREATES the gateway container and then leaves it
+      # in `Created` state for as long as `npm install && npm run build` takes
+      # (15.5 s on 2026-08-19). The runner's dind-gc, when it cannot get
+      # /var/lib/docker under its high-water mark with an age-filtered image
+      # prune, escalates to:
+      #
+      #     docker container prune -f --filter "label!=triform.dev/dind-gc-pin"
+      #
+      # which removes every stopped AND `Created` container that does not carry
+      # its pin label. Compose containers do not. Measured on this lane's run of
+      # task 339285 (runner-5):
+      #
+      #     12:00:37.30  compose:  Container cbwrtc-gateway  Created
+      #     12:00:39.86  dind-gc:  "still 67% — dropping stopped containers"
+      #     12:00:52.82  compose:  Container cbwrtc-gateway  Starting
+      #                  Error response from daemon: No such container: 78177b7f…
+      #
+      # That escalation fired 423 times across the fleet in the hour I measured
+      # it — the high-water is 60% and the disks sit at 79-91%, so it is
+      # effectively always on. Any container left un-started for a few seconds
+      # is at risk.
+      #
+      # DO NOT "fix" this by putting the pin label on compose's containers:
+      # dind-gc's refresh_pins does `docker rm -f` on every container carrying
+      # that label before each prune, so labelling would guarantee a forced
+      # kill rather than prevent one.
+      #
+      # Building the bundle first collapses the window to the sub-second gap
+      # between create and start.
+      # Hold the pulled images ALIVE for the length of this job.
+      #
+      # The runner's dind-gc prunes images on BUILD time, so a stable upstream
+      # tag is stale the instant it is pulled and gets deleted mid-job. Measured
+      # 2026-08-20 (task 347618): both node:20-alpine and the worker image were
+      # removed while `compose up` was running, with __dind_gc_pin containers
+      # created one and two minutes INTO the job. Two attempts died the same way
+      # and no spec ran.
+      #
+      # Docker will not prune an image that a container references, so a tiny
+      # container per image is a repo-side guard against a host we do not own.
+      # Verified on a real daemon (docker 27.5.1, a runner's dind), all four
+      # combinations:
+      #
+      #   no guard                -> image DELETED by `image prune -af`
+      #   guard, RUNNING          -> image survives, guard survives
+      #   guard, CREATED-only     -> image survives `image prune` ...
+      #   ...but `container prune -f --filter label!=…` REMOVES a Created guard,
+      #      which then leaves the image exposed again.
+      #
+      # So the guard must be RUNNING, not merely created. `tail -f /dev/null`
+      # in the image itself needs no extra pull and exits when killed.
+      #
+      # DO NOT use dind-gc's own pin label to do this: refresh_pins does
+      # `docker rm -f` on every container carrying that label before each prune,
+      # so labelling would guarantee a kill rather than prevent one.
+      - name: Hold pulled images against the runner's image GC
+        id: imageguard
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        run: |
+          set -uo pipefail
+          # Pull first so the guard has something to reference. compose would
+          # pull these anyway; doing it here means the race window is ours.
+          for img in "${CHROMELESS_IMAGE}" node:20-alpine; do
+            docker pull -q "${img}" >/dev/null 2>&1 \
+              || echo "::warning::could not pre-pull ${img}; compose will retry"
+          done
+          # Best-effort by design: a guard that cannot start must NOT fail the
+          # job. `tail` is present in node:20-alpine and in the worker image
+          # (debian-based), but an image without it would otherwise turn a
+          # protective measure into an outage. `sleep infinity` is the fallback
+          # for a busybox-only image where tail exists but the entrypoint
+          # override behaves differently.
+          n=0
+          for img in "${CHROMELESS_IMAGE}" node:20-alpine; do
+            name="cbguard-${n}"
+            docker rm -f "${name}" >/dev/null 2>&1 || true
+            if docker run -d --name "${name}" --entrypoint tail \
+                 "${img}" -f /dev/null >/dev/null 2>&1; then
+              echo "guarding ${img} with ${name} (tail)"
+            elif docker run -d --name "${name}" --entrypoint sleep \
+                 "${img}" infinity >/dev/null 2>&1; then
+              echo "guarding ${img} with ${name} (sleep)"
+            else
+              echo "::warning::no guard for ${img} — it stays exposed to the runner's image GC, so this job may still lose it mid-run"
+            fi
+            n=$((n+1))
+          done
+          docker ps --filter 'name=cbguard-' --format '  {{.Names}} -> {{.Image}}'
+          # Never fail the job here: this step protects against a host defect,
+          # it is not a gate on the product.
+          exit 0
+
+      - name: Build the client bundle (before compose, on purpose)
+        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
+        env:
+          # Needed even though this step starts ONE service that uses none of
+          # them. `docker compose` interpolates the WHOLE file before it looks
+          # at which services were named, so an unset variable behind a `:?`
+          # aborts the command:
+          #   error while interpolating services.chromium.image: required
+          #   variable CHROMELESS_IMAGE is missing a value
+          # (measured: task 339462, this step's first run).
+          CHROMELESS_USER: e2e
+          CHROMELESS_PASS: e2e-password
+        run: |
+          docker compose -f "${COMPOSE_FILE_PATH}" up --exit-code-from client-build client-build
+
       - name: docker compose up
         if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
           # The gateway refuses to start without a credential, on purpose — a
           # built-in default password looks like protection and is not. These
           # must match what tests/e2e/playwright.config.ts signs in with.
@@ -249,6 +532,54 @@ jobs:
             done
             exit 1
           fi
+          # NO --profile observability. It adds prometheus, grafana and jaeger —
+          # three images no spec in tests/e2e references — and on 2026-08-19 it
+          # is what failed this lane's first real run: "No such image:
+          # prom/prometheus:v2.55.1", 114 seconds AFTER compose logged
+          # "prometheus Pulled".
+          #
+          # The runner's dind-gc prunes with `--filter until=30m`, and docker's
+          # `until` compares the image's BUILD time, not when it was pulled.
+          # prom/prometheus:v2.55.1 was built 2024-11-06, so it is ~2 years old
+          # the instant it lands and is deleted out from under a running job.
+          # The age filter exists precisely to spare freshly-pulled images; it
+          # cannot, for any stable upstream tag. Verified on forgejo-runner-0:
+          # every pinned image survived, every unpinned image this job pulled
+          # (prometheus, grafana, jaeger, node:20-alpine) was gone afterwards.
+          #
+          # Fewer unpinned images is the only half of that we control here.
+          #
+          # Retry: the same GC also removes Created containers (see the step
+          # above). Two attempts, because the loser of that race is a HOST
+          # event with no repo-side cure — not a defect in this stack. If both
+          # fail, the warning step below names the GC explicitly so a reader
+          # does not spend an afternoon debugging compose.
+          # DUMP LOGS BEFORE `down`. The teardown below deletes the containers,
+          # and with them the only record of WHY a service failed. On 2026-08-19
+          # (task 340081) attempt 2 got the whole stack up and died on
+          # "container cbwrtc-gateway is unhealthy" — and this loop then wiped
+          # the gateway's stdout, so the "Container logs on failure" step later
+          # found nothing to print. The run cost a full cycle and produced one
+          # line of evidence. compose prefixes each line with its service name by
+          # default, which is what makes a combined dump readable at all.
+          for attempt in 1 2; do
+            if docker compose -f "${COMPOSE_FILE_PATH}" up -d --wait; then
+              exit 0
+            fi
+            echo "::warning::compose up attempt ${attempt} failed. If the error above is \"No such container\" or \"No such image\", the runner's dind-gc removed it mid-start (it prunes Created containers and filters images on BUILD time). Retrying."
+            echo "::group::service logs after failed attempt ${attempt}"
+            docker compose -f "${COMPOSE_FILE_PATH}" logs --tail 100 --no-color 2>&1 || true
+            echo "::endgroup::"
+            echo "::group::container states after failed attempt ${attempt}"
+            # `compose ps` hides containers that already exited; -a shows them,
+            # and ExitCode is what separates "died" from "never passed a probe".
+            docker compose -f "${COMPOSE_FILE_PATH}" ps -a \
+              --format 'table {{.Name}}\t{{.Service}}\t{{.State}}\t{{.ExitCode}}\t{{.Status}}' 2>&1 || true
+            echo "::endgroup::"
+            docker compose -f "${COMPOSE_FILE_PATH}" down --remove-orphans >/dev/null 2>&1 || true
+          done
+          echo "::error::compose up failed twice."
+          exit 1
 
       # `up --wait` is NOT evidence the worker connected. The chromium service
       # passes its healthcheck off DevTools, which keeps answering while the
@@ -261,14 +592,13 @@ jobs:
       - name: Assert the broker accepted both peers' auth
         if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
         env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
           CHROMELESS_USER: e2e
           CHROMELESS_PASS: e2e-password
         run: |
           set -uo pipefail
           # The worker retries its dial, so poll rather than reading once.
           for _ in $(seq 1 30); do
-            logs=$(docker compose -f infra/compose.yaml logs signaling 2>&1 || true)
+            logs=$(docker compose -f "${COMPOSE_FILE_PATH}" logs signaling 2>&1 || true)
             case "${logs}" in
               *'"role":"browser"'*) break ;;
             esac
@@ -294,7 +624,7 @@ jobs:
               echo "--- signaling ---"
               echo "${logs}" | tail -40
               echo "--- chromium ---"
-              docker compose -f infra/compose.yaml logs --tail 60 chromium 2>&1 || true
+              docker compose -f "${COMPOSE_FILE_PATH}" logs --tail 60 chromium 2>&1 || true
               exit 1 ;;
           esac
 
@@ -306,46 +636,95 @@ jobs:
       - name: Show service status
         if: always() && steps.fsprobe.outputs.shared == 'true'
         env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
           CHROMELESS_USER: e2e
           CHROMELESS_PASS: e2e-password
         run: |
-          docker compose -f infra/compose.yaml ps
+          docker compose -f "${COMPOSE_FILE_PATH}" ps
           docker ps -a
+          # A swarm of `__dind_gc_pin` containers in `docker ps -a` above is the
+          # host's image-pin mechanism, and its presence means the GC's
+          # escalation branch has been running. That branch also does
+          # `docker container prune -f --filter label!=<pin>`, which deletes
+          # unstarted compose containers — see the "docker compose up" step.
+          #
+          # If a service is missing its image AFTER compose said "Pulled", the
+          # host GC raced us — not a defect in this repo. Say so in the log,
+          # because "No such image" reads exactly like a bad tag.
+          for svc_img in $(docker compose -f "${COMPOSE_FILE_PATH}" config \
+                            --images 2>/dev/null); do
+            if ! docker image inspect "${svc_img}" >/dev/null 2>&1; then
+              echo "::warning::${svc_img} is NOT present on the daemon. If compose logged it as pulled earlier in this run, the runner's image GC removed it mid-job (it filters on image BUILD time, so any stable upstream tag is instantly 'old'). Re-run; this is a host issue, not a repo one."
+            fi
+          done
 
-      - name: Install Playwright + deps
-        if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
-        working-directory: tests/e2e
-        run: |
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-
+      # Playwright runs inside the OFFICIAL image, not in this job container.
+      #
+      # This job container is Alpine (musl). Playwright's browser download
+      # succeeds there and then cannot exec: measured on forgejo-runner-0,
+      #   spawn .../chromium_headless_shell-1148/chrome-linux/headless_shell ENOENT
+      # — the classic glibc-binary-on-musl ENOENT, where the missing file is
+      # the loader, not the binary. `--with-deps` cannot fix it: it shells out
+      # to apt-get, which Alpine does not have. This is the same wall that
+      # `actions/setup-node` hits on this host (see ci.yml), arriving from the
+      # other direction.
+      #
+      # mcr.microsoft.com/playwright is Ubuntu with the browsers preinstalled
+      # and version-matched to tests/e2e/package.json — 1.48.2. Pinned, not
+      # `:latest`: a browser newer than the client library refuses to start.
+      # Verified reachable and working from this daemon, running a real spec.
+      #
+      # --network host so `https://localhost:8443` reaches the port compose
+      # published (verified: a bridge container's published port is reachable
+      # from a host-network container here). The workspace is mounted at the
+      # ALIGNED path so the container's cwd matches what the daemon knows,
+      # which keeps `test-results/` and `playwright.log` landing in the real
+      # checkout rather than in a copy that vanishes with the container.
+      # The spec count is the evidence this lane ran. A pass with 0 tests
+      # collected is the same non-event as a skip, and after four months of
+      # exactly that failure this job asserts against it rather than
+      # trusting an exit code.
       - name: Run Playwright specs
         id: playwright
         if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
-        working-directory: tests/e2e
         env:
-          # The stack publishes exactly ONE port now: the gateway on 8443.
-          # 8080 (broker) and 9222 (DevTools) are deliberately internal — 9222
-          # is unauthenticated remote code execution against the browser, and
-          # 8080 with no auth pubkey is a way straight past the login.
-          #
-          # This replaces CHROMELESS_SIGNALING_URL / _CLIENT_URL / _DEVTOOLS_URL,
-          # which named those ports but were read by no spec and no config —
-          # they only ever documented a topology. The page derives its signaling
-          # endpoint from its own origin (client/src/config.ts), so there is
-          # nothing else to point anywhere.
-          CHROMELESS_E2E_BASE_URL: https://localhost:8443
-          # Must match the pair compose booted the gateway with, above.
-          CHROMELESS_USER: e2e
-          CHROMELESS_PASS: e2e-password
+          WS: ${{ steps.fsalign.outputs.workspace }}
         run: |
-          # `*.live.spec.ts` is the convention for specs that depend on
-          # T78's getDisplayMedia fix. Run them but keep the workflow
-          # green if they fail, until that fix lands stable in the
-          # image — see the e2e workflow header comment.
           set -o pipefail
-          npx playwright test --project=chromium 2>&1 | tee playwright.log
+          docker run --rm --network host \
+            -v "${WS}:${WS}" -w "${WS}/tests/e2e" \
+            -e CI=1 \
+            -e CHROMELESS_E2E_BASE_URL=https://localhost:8443 \
+            -e CHROMELESS_E2E_USE_RUNNING_STACK=1 \
+            -e CHROMELESS_USER=e2e \
+            -e CHROMELESS_PASS=e2e-password \
+            --entrypoint bash \
+            mcr.microsoft.com/playwright:v1.48.2-noble -c '
+              set -o pipefail
+              npm install --no-audit --no-fund
+              npx playwright test --project=chromium 2>&1 | tee playwright.log
+            '
+          # `N passed` / `N failed` — if neither appears, no spec ran, and the
+          # exit code above said nothing about the product.
+          if ! grep -qE "[0-9]+ (passed|failed|flaky)" tests/e2e/playwright.log; then
+            echo "::error::Playwright exited without running any spec — check the log above. A green tick here would mean nothing."
+            exit 1
+          fi
+          echo "specs ran: $(grep -oE "[0-9]+ (passed|failed|flaky|skipped)" tests/e2e/playwright.log | tr "\n" " ")"
+
+      # CHROMELESS_E2E_USE_RUNNING_STACK=1 above is load-bearing. Without it
+      # playwright.config.ts starts its own `docker compose up --build`
+      # webServer — and it would run INSIDE the playwright container, which
+      # has no docker CLI and no daemon socket, against a stack the previous
+      # steps already brought up. The stack is already running and already
+      # asserted healthy; the config's own escape hatch exists for exactly
+      # this case.
+      #
+      # The stack publishes exactly ONE port: the gateway on 8443. 8080
+      # (broker) and 9222 (DevTools) stay internal — 9222 is unauthenticated
+      # remote code execution against the browser, and 8080 with no auth
+      # pubkey is a way straight past the login. The page derives its
+      # signaling endpoint from its own origin (client/src/config.ts), so
+      # there is nothing else to point anywhere.
 
       # OSS-W2: `actions/upload-artifact@v4` fails hard on this host —
       # "GHESNotSupportedError: @actions/artifact v2.0.0+ … not currently
@@ -353,10 +732,21 @@ jobs:
       # service, which Forgejo does not implement. With `if: always()` it
       # failed jobs whose own work had passed. Summarise into the log instead;
       # the failing spec's output is already in playwright.log above.
+      # Reads the files the container wrote. Both paths — this job's
+      # tests/e2e and the aligned one the container used — are the same
+      # bytes on the same volume, which is the whole point of the alignment
+      # step; the symlink means neither is a copy.
       - name: Playwright output summary
         if: always() && steps.fsprobe.outputs.shared == 'true'
         working-directory: tests/e2e
         run: |
+          # Paths are relative to `working-directory: tests/e2e` above, NOT to
+          # the repo root. The spec container runs with -w ${WS}/tests/e2e and
+          # ${WS} is the aligned path for this same directory, so `tee` put the
+          # log right here. I briefly "fixed" this to tests/e2e/playwright.log,
+          # which resolves to tests/e2e/tests/e2e/ and would have printed
+          # "(no playwright.log)" on precisely the failure this step exists to
+          # explain — the double prefix is the trap, not the missing one.
           echo "--- playwright.log tail (artifact upload is unsupported on this host) ---"
           tail -100 playwright.log 2>/dev/null || echo "(no playwright.log)"
           echo "--- test-results tree ---"
@@ -369,15 +759,50 @@ jobs:
       - name: Container logs on failure
         if: failure() && steps.fsprobe.outputs.shared == 'true'
         env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
           CHROMELESS_USER: e2e
           CHROMELESS_PASS: e2e-password
         run: |
-          for c in $(docker compose -f infra/compose.yaml ps -q); do
+          for c in $(docker compose -f "${COMPOSE_FILE_PATH}" ps -q); do
             name=$(docker inspect --format '{{.Name}}' "$c" | sed 's|^/||')
             echo "::group::${name}"
             docker logs --tail 200 "$c" 2>&1 || true
             echo "::endgroup::"
+
+            # THE WORKER'S OWN LOG IS NOT IN `docker logs`. supervisord.phase2.conf
+            # sends chromium's stdout to /var/log/supervisor/chromium.log and its
+            # stderr to /dev/console (so Firecracker's serial capture gets it), so
+            # the container log carries ONLY supervisord's process transitions.
+            #
+            # That absence is actively misleading: I read "no session-closed line
+            # in docker logs" as "the exit-on-close path never fires" and was
+            # wrong — the LOG was missing, not the behaviour. Everything the
+            # embedder says about offers, ICE, session close and Cb.shutdown lives
+            # in these files and nowhere else.
+            if [ "${name}" = "cbwrtc-chromium" ]; then
+              for f in chromium.log chromium.err.log; do
+                echo "::group::${name}:/var/log/supervisor/${f}"
+                docker exec "$c" sh -c "tail -300 /var/log/supervisor/${f} 2>/dev/null" 2>&1 \
+                  || echo "(no ${f} — container already gone, or the path moved)"
+                echo "::endgroup::"
+              done
+              # Session lifecycle only: the one-session-per-worker limit is
+              # visible as an offer that happens once and a close that is never
+              # followed by another. Grepped separately because the full log is
+              # long and this is the line a reader actually wants.
+              # BOTH files: chromium.log is EMPTY in practice. The embedder's
+              # LOG(INFO) goes to stderr, which supervisord routes to
+              # chromium.err.log (and to /dev/console for Firecracker). Grepping
+              # only chromium.log printed an empty group and looked like "the
+              # worker says nothing", which is exactly the wrong conclusion —
+              # measured 2026-08-20, task 349025.
+              echo "::group::${name}: session lifecycle"
+              docker exec "$c" sh -c \
+                "grep -hnE 'offerer_driver|session closed|Cb.shutdown|native session|startNativeSession|kClosed' \
+                   /var/log/supervisor/chromium.log /var/log/supervisor/chromium.err.log \
+                   2>/dev/null | tail -60" 2>&1 \
+                || echo "(nothing matched, or the container is gone)"
+              echo "::endgroup::"
+            fi
           done
 
       # Gated on the probes like every other compose step: infra/compose.yaml
@@ -396,13 +821,31 @@ jobs:
       - name: docker compose down
         if: always() && steps.probe.outputs.present == 'true'
         env:
-          CHROMELESS_IMAGE: ${{ vars.CHROMELESS_IMAGE }}
           CHROMELESS_USER: e2e
           CHROMELESS_PASS: e2e-password
         run: |
-          docker compose -f infra/compose.yaml down -v --remove-orphans || true
+          # COMPOSE_FILE_PATH is set by the align step. If THAT step failed,
+          # this one still runs (always()) with the variable empty, and
+          # `-f /infra/compose.yaml` would fail before removing anything —
+          # so fall back to the relative path, which is at least right for
+          # `down` (it needs the service list, not the bind-mount sources).
+          # --profile observability still named here: `down` must be able to
+          # remove containers a PREVIOUS run (or a hand-run with the profile)
+          # left behind, and naming a profile that started nothing is a no-op.
+          docker compose -f "${COMPOSE_FILE_PATH:-infra/compose.yaml}" \
+            --profile observability down -v --remove-orphans || true
           # Belt-and-braces: compose `down` keys off project labels, which a
-          # half-failed `up` may not have applied to every container.
-          docker rm -f cbwrtc-chromium cbwrtc-signaling cbwrtc-client \
-            cbwrtc-client-build cbwrtc-prometheus cbwrtc-grafana cbwrtc-jaeger \
+          # half-failed `up` may not have applied to every container. This list
+          # must match `container_name:` in compose.yaml — it named a
+          # `cbwrtc-client` that no longer exists (the nginx client service was
+          # folded into the gateway) while omitting cbwrtc-gateway and
+          # cbwrtc-coturn, so the two services most likely to hold port 8443
+          # were the two this never cleaned up.
+          docker rm -f cbwrtc-chromium cbwrtc-signaling cbwrtc-gateway \
+            cbwrtc-client-build cbwrtc-coturn cbwrtc-prometheus \
+            cbwrtc-grafana cbwrtc-jaeger \
             >/dev/null 2>&1 || true
+          # The image guards from the step above. They hold no state and exit
+          # immediately, but leaving them behind would squat on the runner and
+          # keep images alive for jobs that did not ask for them.
+          docker rm -f cbguard-0 cbguard-1 >/dev/null 2>&1 || true

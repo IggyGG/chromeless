@@ -86,7 +86,14 @@ spec:
           # predates signaling/token, so a broker built from it CANNOT verify
           # what the gateway mints — every connection would be rejected as a
           # bad signature, with nothing in either log saying the keys differ.
-          image: registry.triform.cloud/chromeless/signaling:standalone-v3
+          # standalone-v7 (2026-08-21): peer.saidBye — a clean client close no
+          # longer produces a SECOND, synthesised bye. Two byes ~49ms apart
+          # killed the worker's re-arm (the second closed the rebuilt session).
+          #
+          # This pin was also stale: the cluster was running standalone-v6
+          # while this file said v3, so re-applying stack.yaml would have
+          # rolled the broker BACKWARDS.
+          image: registry.triform.cloud/chromeless/signaling:standalone-v7
           env:
             - name: SIGNALING_PORT
               value: "8080"
@@ -165,29 +172,54 @@ spec:
         - name: chromium
           # The pin from build/guest-release.json, verified to boot and paint
           # by infra/k8s/standalone/smoke-job.yaml.
-          # cr7727-29467fecda3a (2026-08-21) is the first worker image that
-          # contains CbControlChannel and Cb.setViewport. The previous pin
-          # predates both, so a `deploy.sh` run would silently roll the guest
-          # BACK to a build where every confirm() takes the default and no
-          # `control` channel is ever opened -- which is exactly what happened
-          # here: the live worker was found on an older tag mid-session,
-          # verified by grepping the deployed binary (CbControlChannel=0 with
-          # clipboard=42 as the known-positive control).
-          # cr7727-6047599546e3 (2026-08-24) — first image with BOTH the
-          # control channel and CbDownloadManagerDelegate. Built from
-          # feat/downloads, verified in the binary
-          # (CbDownloadManagerDelegate=2, DetermineDownloadTarget=1,
-          # crdownload=1, CbControlChannel=15) and end to end by
-          # tests/interactive suite_downloads.
+          # DELIBERATELY STALE UNTIL THE MERGED BUILD LANDS.
           #
-          # Keep this pin CURRENT. The live deployment was rolled back to an
-          # older tag three times on 2026-08-24 by concurrent sessions, and
-          # each time the symptom was a test failing for a reason that looks
-          # like a code defect: `CbControlChannel=0` in the deployed binary
-          # means every confirm() silently takes the guest default and no
-          # `control` channel is ever opened. tests/interactive's dialogs
-          # preflight now names the image when this happens.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-6047599546e3
+          # This merge combines two lineages that each fixed a different half
+          # of the guest, and NEITHER side's pin is right for the result:
+          #
+          #   cr7727-8d2ce2e66288  re-armable offerer driver + the cold-arrival
+          #                        fix (an already-running worker now offers to
+          #                        a newly-arrived viewer instead of staying
+          #                        mute until the previous one leaves; before
+          #                        it, the first viewer on an idle stack sat at
+          #                        "waiting for offer" until they gave up).
+          #                        Has NO control channel and NO downloads.
+          #
+          #   cr7727-6047599546e3  CbControlChannel (js dialogs reach a human)
+          #                        + CbDownloadManagerDelegate (a download
+          #                        click produced no file at all).
+          #                        Has NO cold-arrival fix.
+          #
+          # Pinning either one here rolls somebody's half of the guest
+          # backwards on the next `deploy.sh`, which is precisely the
+          # apply-vs-set-image tug-of-war that cost two sessions a day.
+          #
+          # So this stays on the older tag until a build from THIS merge
+          # exists, and is then replaced by that tag in a follow-up commit.
+          # An honestly stale pin that everyone knows to distrust is safer
+          # than a fresh-looking one that silently loses half the fixes.
+          #
+          # VERIFY BY DIGEST, NOT TAG. These tags are mutable: standalone-v9
+          # was rebuilt over by a different session on 2026-08-24 and the
+          # deployment still read "v9" while serving somebody else's bundle.
+          # `kubectl get deploy ... -o jsonpath='{...image}'` is not evidence
+          # that the right code is running; the image digest is.
+          # THE MERGED IMAGE. Carries both halves, verified in the binary
+          # by LOG STRINGS (the binary is stripped, so identifiers do not
+          # survive — enum names return 0 on every build, fixed or not):
+          #
+          #   "while AWAITING AN ANSWER"   1   cold-arrival fix
+          #   CV2-REARM                    8   re-armable driver
+          #   CbControlChannel            15   js dialogs reach a human
+          #   CbDownloadManagerDelegate    2   downloads land a file
+          #   crdownload                   1
+          #   clipboard                   48   known-positive control
+          #
+          # Moves in lockstep with build/guest-release.json (tag AND digest);
+          # lint-deploy-pin fails if they drift. The digest is the part a
+          # rebuilt tag cannot fake — standalone-v9 was rebuilt over by
+          # another session while the Deployment still reported v9.
+          image: registry.triform.cloud/chromeless/chromeless:cr7727-3f9e3d00d1f7
           env:
             - name: SESSION_ID
               value: dev
@@ -238,6 +270,46 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 12
+          # LIVENESS: is the worker still TALKING TO THE BROKER?
+          #
+          # The readiness probe above only asks whether DevTools answers, and it
+          # answers whether or not signaling is up. That is exactly how a worker
+          # looks perfectly healthy while being useless: on 2026-08-24 a user
+          # sat at "no offer from browser" against a pod that was Running 1/1
+          # and rendering 29 fps the whole time, and had simply never re-dialed
+          # the broker after it was restarted the previous day. The broker log
+          # showed only `role: client` joining — the browser peer was absent
+          # entirely, for 20 hours, with nothing anywhere reporting a problem.
+          #
+          # The worker's WS client has NO reconnect — its own error log says
+          # "a follow-up R# should add R7 reconnect supervision" — so a
+          # code=1006 drop is permanent for the life of the process. Until that
+          # C++ lands, the honest fix is to let Kubernetes notice and restart:
+          # ~15s, and invisible to a viewer.
+          #
+          # Reads /proc/net/tcp directly because the image has neither ss nor
+          # netstat. 0x1F90 is 8080 (the broker port) and state 01 is
+          # ESTABLISHED. Verified live: 1 while signaling is up, 0 once gone.
+          #
+          # 3 x 30s = 90s of confirmed silence before restarting — far longer
+          # than any broker rollout, so redeploying the broker does not put the
+          # worker into a restart loop.
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import sys
+                  n = 0
+                  for line in open('/proc/net/tcp').read().splitlines()[1:]:
+                      f = line.split()
+                      if f[3] == '01' and f[2].upper().endswith(':1F90'):
+                          n += 1
+                  sys.exit(0 if n > 0 else 1)
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
       volumes:
         - name: dshm
           emptyDir: { medium: Memory, sizeLimit: 1Gi }
@@ -305,6 +377,16 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: gateway
+          # standalone-v8 is what the cluster ran when this was written. This
+          # pin said v6, so re-applying stack.yaml would have rolled the
+          # gateway BACKWARDS — the same drift the worker and signaling pins
+          # had.
+          #
+          # The gateway BAKES the client bundle in at build time, so a client
+          # fix does not reach a browser until this image is rebuilt AND
+          # rolled. And the tag is mutable: v9 was rebuilt over by another
+          # session, serving a bundle with none of the expected markers while
+          # the deployment still read "v9". Check the digest.
           image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
           env:
             - name: CHROMELESS_USER
@@ -349,5 +431,23 @@ spec:
         # emptyDir: the cert is regenerated on restart. Fine here — a
         # port-forward user re-accepts it — but a durable deployment wants a
         # PVC so the browser is not re-warned on every roll.
+        #
+        # 2026-08-24: this bit a real user. The gateway restarted, generated a
+        # FRESH self-signed cert into this emptyDir, and their browser — which
+        # had an exception pinned to the PREVIOUS cert — refused the new one.
+        # The client showed `ws closed {code: 1015}` in a reconnect loop and
+        # the gateway logged `remote error: tls: bad certificate`, neither of
+        # which points at "your cert changed".
+        #
+        # The live deployment now mounts a Secret (chromeless-gateway-tls) and
+        # an initContainer copies it into the writable /tmp the gateway already
+        # has, so the cert survives restarts and the browser is warned ONCE.
+        # The copy is needed because the gateway calls MkdirAll on its TLS dir
+        # before reading, which fails on a read-only Secret mount.
+        #
+        #   kubectl create secret generic chromeless-gateway-tls -n chromeless \
+        #     --from-file=cert.pem=... --from-file=key.pem=...
+        #
+        # Verified: fingerprint identical across a rollout restart.
         - name: certs
           emptyDir: {}

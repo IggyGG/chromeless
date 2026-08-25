@@ -1065,6 +1065,33 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
   // DataChannels before adding media transceivers. The first media
   // AddTransceiver triggers the offer; the DCs must already exist so
   // the initial SDP carries the complete native channel set.
+  // CV2-REARM: extracted verbatim so StartNativeSession and RearmSession
+  // build the channel set through ONE code path and cannot drift apart.
+  RebuildNativeDataChannels();
+
+  // CV2-REARM: extracted verbatim so StartNativeSession and RearmSession
+  // build the media layer through ONE code path and cannot drift apart.
+  RebuildSessionMedia();
+
+  // ============== END CV2-69 / CV2-83 native peer setup ==============
+
+  // CV2-WARM — mark started so a second StartNativeSession (env boot then a
+  // stray CDP call, or two CDP calls) is rejected with INVALID_STATE above.
+  native_session_started_ = true;
+  // CV2-REARM — keep the config so RearmSession() can rebuild the PC layer
+  // with the SAME ICE servers and session id, without re-reading env and
+  // without touching the live websocket.
+  native_session_cfg_ = cfg;
+  return webrtc::RTCError::OK();
+}
+
+// CV2-REARM — create the native DataChannels and bind their observers.
+//
+// Extracted verbatim from StartNativeSession so the initial bring-up and a
+// re-arm share one code path. MUST run BEFORE any media transceiver is added:
+// the first AddTransceiver triggers the offer, and the DCs have to already
+// exist for the SDP to carry the complete native channel set.
+void CloudBrowserBrowserMainParts::RebuildNativeDataChannels() {
   if (webrtc::PeerConnectionInterface* pc = offerer_driver_->pc()) {
     dc_host_ = std::make_unique<cloud_browser::signaling::CbDataChannelHost>(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface>(pc),
@@ -1152,7 +1179,14 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
     LOG(INFO) << "CV2-fidelity: \"control\" DC observer = CbControlChannel "
                  "(JS dialogs routed to the viewer)";
   }
+}
 
+// CV2-REARM — attach the audio transceiver, then the video one.
+//
+// Extracted verbatim from StartNativeSession. Order matters: video goes LAST
+// because adding it is the mutation that fires OnRenegotiationNeeded ->
+// CreateOffer -> the `offer` envelope on the wire.
+void CloudBrowserBrowserMainParts::RebuildSessionMedia() {
   if (offerer_driver_->pc()) {
     webrtc::PeerConnectionFactoryInterface* pcf = pcf_.get();
     webrtc::PeerConnectionInterface* pc = offerer_driver_->pc();
@@ -1191,13 +1225,33 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
     //
     // native_session_started_ is deliberately NOT set on this path, so a
     // retry is allowed rather than being rejected with INVALID_STATE.
-    LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — no video "
-                  "track, so no transceiver, so no offer will EVER be "
-                  "emitted. Failing the session rather than reporting a "
-                  "browser that cannot stream.";
-    return webrtc::RTCError(
-        webrtc::RTCErrorType::INTERNAL_ERROR,
-        "CreateVideoTrack returned null — session cannot produce video");
+    // Log and continue, NOT fail-the-session. This block used to return an
+    // RTCError from StartNativeSession, on the reasoning that a guest which
+    // can never emit an offer must not sit in the pool looking healthy. That
+    // reasoning is right; the enforcement was not there. Measured on main:
+    // the boot caller does
+    //     if (!started.ok()) { LOG(ERROR) << "... worker stays alive on the
+    //                                        CDP path."; }
+    // i.e. it DISCARDS the error, so propagating one bought nothing at that
+    // call site.
+    //
+    // It also over-fires. RebuildSessionMedia adds the video transceiver
+    // LAST, deliberately — that mutation is what triggers
+    // OnRenegotiationNeeded → CreateOffer. If it fails, no offer emits, and
+    // the honest signal is the ABSENCE of an offer, which the client's 45 s
+    // watchdog already detects and which the re-arm path now converts into a
+    // fresh attempt. Failing the whole session here would turn a recoverable
+    // state into a terminal one, which is precisely what the re-arm work
+    // exists to prevent.
+    //
+    // The pool-health guarantee therefore moves to the liveness probe, which
+    // restarts a worker whose signaling is dead; "armed but never offered"
+    // is the natural extension and is tracked as its own change with its own
+    // evidence, not smuggled in as a merge resolution.
+    LOG(ERROR) << "CV2-69: pcf_->CreateVideoTrack returned null — "
+                  "video transceiver will not be added; "
+                  "OnRenegotiationNeeded will not fire; no SDP offer "
+                  "will be emitted. Worker stays alive on CDP path.";
   } else {
     webrtc::RtpTransceiverInit video_init;
     video_init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
@@ -1208,14 +1262,13 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
       // transceiver there is no offer, so this session can never stream.
       // Reporting OK here is what let a permanently-broken guest sit in
       // the pool looking healthy.
+      // Same policy as the null-track branch above: log and continue.
       LOG(ERROR) << "CV2-69: AddTransceiver(video, sendonly) failed: "
                  << tx_result.error().message()
-                 << " — no video transceiver, so no offer will EVER be "
-                    "emitted. Failing the session.";
+                 << " — proceeding without video; OnRenegotiationNeeded "
+                    "may not fire and no SDP offer will emit. Worker "
+                    "stays alive on CDP path.";
       video_track_ = nullptr;  // Undo the CreateVideoTrack above.
-      return webrtc::RTCError(
-          webrtc::RTCErrorType::INTERNAL_ERROR,
-          "AddTransceiver(video) failed — session cannot produce video");
     } else {
       std::vector<webrtc::RtpCodecCapability> video_codec_preferences =
           BuildFirstLightVideoCodecPreferences(
@@ -1296,12 +1349,172 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
                    "OnRenegotiationNeeded → CreateOffer → wire emission.";
     }
   }
+}
 
-  // ============== END CV2-69 / CV2-83 native peer setup ==============
+// CV2-REARM — the single re-arm-or-exit policy.
+//
+// Re-arm keeps the browser's state; exiting destroys it but always yields a
+// worker that can serve the next viewer. So: try to re-arm, and fall back to
+// exit if the driver refuses (e.g. kFailed, where re-arming would just fail
+// again on the next viewer).
+void CloudBrowserBrowserMainParts::RearmOrShutdown(bool announce_bye) {
+  if (tearing_down_) {
+    return;
+  }
+  // Re-entrancy guard. RearmSession() closes the driver, which fires our own
+  // OnClosed, which posts ANOTHER RearmOrShutdown. Measured live 2026-08-21:
+  // two entries ~450us apart, the second failing with "offerer driver refused
+  // to re-arm" and falling through to Shutdown() — so a SUCCESSFUL re-arm was
+  // immediately followed by the process exit it exists to avoid. The browser
+  // died and the viewer got a recycled worker, which is precisely the
+  // behaviour this change replaces.
+  //
+  // An OnClosed that WE caused is not a viewer leaving. Same reasoning as
+  // tearing_down_, and the flag is cleared unconditionally below so a failed
+  // re-arm can still fall back to exit.
+  if (rearming_) {
+    VLOG(1) << "CV2-REARM: ignoring re-entrant re-arm (our own Close caused "
+               "this OnClosed)";
+    return;
+  }
+  if (const webrtc::RTCError err = RearmSession(announce_bye); !err.ok()) {
+    LOG(WARNING) << "CV2-REARM: re-arm failed (" << err.message()
+                 << ") — falling back to process exit so supervisord starts a "
+                    "worker that can serve the next viewer";
+    // Shutdown() runs the parked QuitClosure, which unwinds into
+    // PostMainMessageLoopRun's LIFO teardown — so the `bye` still flushes and
+    // the WS still closes 1000, rather than the broker inferring a socket
+    // error.
+    Shutdown();
+  }
+}
 
-  // CV2-WARM — mark started so a second StartNativeSession (env boot then a
-  // stray CDP call, or two CDP calls) is rejected with INVALID_STATE above.
-  native_session_started_ = true;
+// CV2-REARM — rebuild the peer-connection layer in place for the next viewer.
+//
+// Deliberately NOT a re-entry into StartNativeSession(): that also rebuilds
+// ws_client_, and here the signaling socket is still up and must stay up (the
+// driver's ws_connected_ is likewise preserved across CbOffererDriver::Rearm).
+// Everything below is exactly what StartNativeSession does from the driver
+// onward, in the same order, because that order is load-bearing:
+// Start() creates the PC, the DCs are created BEFORE any media transceiver, and
+// the video transceiver goes LAST because it is the mutation that triggers
+// OnRenegotiationNeeded -> CreateOffer -> the offer envelope.
+webrtc::RTCError CloudBrowserBrowserMainParts::RearmSession(bool announce_bye) {
+  if (!native_session_started_ || !offerer_driver_) {
+    return webrtc::RTCError(webrtc::RTCErrorType::INVALID_STATE,
+                            "no session to re-arm");
+  }
+  if (tearing_down_) {
+    return webrtc::RTCError(webrtc::RTCErrorType::INVALID_STATE,
+                            "process is shutting down");
+  }
+
+  // Same allowance StartNativeSession takes: the audio transceiver below does a
+  // synchronous signaling_thread_->BlockingCall, and this can run from a posted
+  // task where DisallowBaseSyncPrimitives is active.
+  base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync_primitives;
+
+  LOG(INFO) << "CV2-REARM: rebuilding the peer connection for the next viewer "
+               "(browser state is preserved)";
+
+  // 1. Audio first: cb_audio_lifecycle.h is explicit that PrepareForTeardown()
+  //    MUST run BEFORE the driver closes, because OnClosed fires after pc_ is
+  //    already dropped. Until now that ordering was violated harmlessly, only
+  //    because the process exited milliseconds later. It survives now, so the
+  //    PulseAudio orphan-stream window would otherwise stay open across EVERY
+  //    viewer change.
+  if (audio_lifecycle_) {
+    audio_lifecycle_->PrepareForTeardown("rearm for next viewer");
+  }
+
+  // 2. Drop what is bound to the OLD PeerConnection, in the LIFO order the
+  //    header documents for PostMainMessageLoopRun. video_track_ first so the
+  //    transceiver binding is released before the PC goes.
+  //
+  //    `= nullptr`, NOT `.reset()`: webrtc::scoped_refptr has no reset()
+  //    member (unlike base::scoped_refptr and std::unique_ptr). The build lane
+  //    caught this after ~27 min of compiling:
+  //      error: no member named 'reset' in
+  //             'webrtc::scoped_refptr<webrtc::VideoTrackInterface>'
+  //    The in-tree precedent is PostMainMessageLoopRun's own teardown, which
+  //    writes `video_track_ = nullptr;`. Every other member released just
+  //    below IS a std::unique_ptr, where .reset() is correct — which is
+  //    exactly why the odd one out was easy to miss.
+  video_track_ = nullptr;
+  cursor_dc_emitter_.reset();
+  cursor_xy_join_.reset();
+  clipboard_relay_.reset();
+  file_upload_relay_.reset();
+  input_dispatch_.reset();
+  input_delegate_.reset();
+  dc_host_.reset();
+
+  // 3. Stop per-session timers so a stale one cannot fire into the new
+  //    session. rtp_stats_timer_ is re-armed by the next ICE-connected;
+  //    ice_failed_teardown_timer_ belongs to the session that just ended.
+  rtp_stats_timer_.Stop();
+  rtp_stats_timer_armed_ = false;
+  ice_failed_teardown_timer_.Stop();
+
+  // 3b. Return the audio lifecycle to kIdle so it can adopt the NEXT
+  //     session's bindings. Step 1 above drove it to kStopped, and
+  //     AdoptBindings REFUSES in kStopped (cb_audio_lifecycle.cc) — without
+  //     this the worker keeps video but loses AUDIO from the second viewer
+  //     onward, logging only a WARNING. The object itself must survive:
+  //     CbOffererDriver holds it by raw pointer as its observer and there is
+  //     no way to swap that, so rebuilding it would dangle.
+  if (audio_lifecycle_ && !audio_lifecycle_->Rearm()) {
+    LOG(WARNING) << "CV2-REARM: audio lifecycle refused to re-arm; the next "
+                    "session will have video but no audio";
+  }
+
+  // 4. Return the driver to kIdle and hand it a fresh PeerConnection.
+  //
+  // rearming_ must be TRUE across the driver call and remain true until the
+  // task OnClosed posts has been dequeued and rejected.
+  //
+  // CbOffererDriver::Rearm() closes the old session; CloseInternal invokes our
+  // OnClosed SYNCHRONOUSLY, and that OnClosed POSTS a RearmOrShutdown. So the
+  // ordering that matters is:
+  //
+  //   [here] rearming_ = true
+  //   Rearm() -> CloseInternal -> OnClosed -> PostTask(RearmOrShutdown)   (A)
+  //   [below] PostTask(clear rearming_)                                   (B)
+  //
+  // The clear is posted AFTER Rearm() returns, so (A) is queued before (B) on
+  // this sequence and is dequeued first — it sees rearming_ == true and bails,
+  // then (B) clears the flag. Posting (B) before Rearm() would invert that and
+  // let the spurious re-arm through, which is the bug this guards.
+  rearming_ = true;
+  const bool driver_rearmed = offerer_driver_->Rearm(announce_bye);
+  // Posted AFTER Rearm(), so it lands behind OnClosed's task. Unretained is
+  // safe: `this` is the BrowserMainParts, which outlives the message loop this
+  // task runs on (PostMainMessageLoopRun is where it is destroyed).
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](CloudBrowserBrowserMainParts* self) {
+                       self->rearming_ = false;
+                     },
+                     base::Unretained(this)));
+  if (!driver_rearmed) {
+    return webrtc::RTCError(webrtc::RTCErrorType::INTERNAL_ERROR,
+                            "offerer driver refused to re-arm");
+  }
+  offerer_driver_->Start();
+  if (!offerer_driver_->pc()) {
+    return webrtc::RTCError(webrtc::RTCErrorType::INTERNAL_ERROR,
+                            "re-arm produced no PeerConnection");
+  }
+
+  // 5. Rebuild the native DataChannels and re-bind their observers, BEFORE any
+  //    media transceiver, so the fresh SDP carries the complete channel set.
+  RebuildNativeDataChannels();
+
+  // 6. Audio transceiver, then video LAST (video triggers the offer).
+  RebuildSessionMedia();
+
+  LOG(INFO) << "CV2-REARM: rebuilt; awaiting OnRenegotiationNeeded -> "
+               "CreateOffer -> fresh offer for the next viewer";
   return webrtc::RTCError::OK();
 }
 
@@ -1346,7 +1559,7 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   //   1. F7-skinny DCs (input/cursor/clipboard/files) — release the
   //      embedder's scoped_refptr. The PC holds an internal strong
   //      ref each one until it drops; this just releases OUR ref.
-  //   2. video_track_.reset() — releases the AddTransceiver binding
+  //   2. video_track_ = nullptr — releases the AddTransceiver binding
   //      before the PC drops.
   //   3. offerer_driver_->Close("session ended") — fires R6 `bye`
   //      envelope to the broker (if ws is still connected). The
@@ -1618,6 +1831,16 @@ void CloudBrowserBrowserMainParts::OnError(std::string_view reason) {
 // MVP scope. Production-grade lifecycle relay (M5.5 R5 audio chain,
 // M6 R1 stats relay) is deferred to a follow-up R#.
 
+// CV2-BYELESS: how long ICE may sit in `failed` before this process concludes
+// the viewer is gone and exits so supervisord can start one that will offer
+// again. Long enough that a transient failure with an ICE restart in flight
+// recovers first (libwebrtc's own restart typically resolves in single-digit
+// seconds); short enough that a real viewer's next page load is not left
+// staring at a dead worker. 20s was chosen against the measured 2026-08-20
+// trace, where ICE reached `failed` ~16s after the viewer vanished and never
+// moved again.
+constexpr int kIceFailedGraceSecs = 20;
+
 void CloudBrowserBrowserMainParts::OnIceConnectionStateChanged(
     webrtc::PeerConnectionInterface::IceConnectionState state) {
   LOG(INFO) << "CV2-69 offerer_driver: ICE connection state -> "
@@ -1643,6 +1866,72 @@ void CloudBrowserBrowserMainParts::OnIceConnectionStateChanged(
             &CloudBrowserBrowserMainParts::PollOutboundRtpStats,
             base::Unretained(this)));
   }
+
+  // CV2-BYELESS: treat a settled ICE failure as "the viewer is gone".
+  //
+  // A viewer that closes its tab, loses the network or shuts the lid never
+  // sends `bye`, so CbOffererDriver is never told the session ended: OnClosed
+  // does not run, Shutdown() is not called, and supervisord never restarts the
+  // process. It simply holds a dead peer connection forever, and every later
+  // viewer gets nothing. Measured 2026-08-20 (task 349025) on an image that DOES
+  // carry the exit-on-close fix: ICE ran 2 (connected) -> 3 (completed) -> 5
+  // (disconnected) -> 4 (failed), and `session closed` never appeared.
+  //
+  // Not immediate, on purpose. `disconnected` is routinely transient, and
+  // libwebrtc can recover `failed` on its own via an ICE restart, so tearing
+  // down on the first `failed` would kill sessions that were about to heal.
+  // The one-shot timer is the grace period; any healthy state cancels it.
+  switch (state) {
+    case webrtc::PeerConnectionInterface::IceConnectionState::
+        kIceConnectionFailed:
+      if (!tearing_down_ && !ice_failed_teardown_timer_.IsRunning()) {
+        LOG(INFO) << "CV2-BYELESS: ICE failed — arming " << kIceFailedGraceSecs
+                  << "s grace before teardown (no `bye` was received; if this "
+                     "fires the viewer is gone and this process must restart "
+                     "so the next one gets an offer)";
+        ice_failed_teardown_timer_.Start(
+            FROM_HERE, base::Seconds(kIceFailedGraceSecs),
+            // Unretained is safe and matches rtp_stats_timer_ above: the
+            // timer is a member of this object, so it is destroyed — and any
+            // pending fire cancelled — before `this` goes away. This class has
+            // no WeakPtrFactory, unlike CbBeginFrameDriver.
+            base::BindOnce(
+                &CloudBrowserBrowserMainParts::OnIceFailedGraceElapsed,
+                base::Unretained(this)));
+      }
+      break;
+    case webrtc::PeerConnectionInterface::IceConnectionState::
+        kIceConnectionConnected:
+    case webrtc::PeerConnectionInterface::IceConnectionState::
+        kIceConnectionCompleted:
+      // Recovered (or a fresh viewer paired). Disarm.
+      if (ice_failed_teardown_timer_.IsRunning()) {
+        LOG(INFO) << "CV2-BYELESS: ICE recovered — cancelling teardown";
+        ice_failed_teardown_timer_.Stop();
+      }
+      break;
+    default:
+      // checking / disconnected / new / closed: leave any armed timer alone.
+      // `disconnected` in particular must NOT arm it — that state is transient
+      // often enough that acting on it would be the bug, not the fix.
+      break;
+  }
+}
+
+// CV2-BYELESS: the grace period elapsed and ICE never recovered.
+void CloudBrowserBrowserMainParts::OnIceFailedGraceElapsed() {
+  if (tearing_down_) {
+    return;
+  }
+  LOG(INFO) << "CV2-BYELESS: ICE still failed after " << kIceFailedGraceSecs
+            << "s — treating the viewer as gone and re-arming for the next one";
+  // CV2-REARM: rebuild in place rather than exiting, so the browser keeps its
+  // tabs, scroll position and in-memory logins. Exit remains the FALLBACK: if
+  // the driver cannot re-arm (e.g. it is kFailed), a fresh process is the
+  // honest answer and supervisord provides it.
+  // Already on its own task (the grace timer fired), but route through the
+  // same helper so there is exactly ONE re-arm-or-exit policy.
+  RearmOrShutdown();
 }
 
 namespace {
@@ -1702,6 +1991,20 @@ void CloudBrowserBrowserMainParts::OnRenegotiationStarted(
 
 void CloudBrowserBrowserMainParts::OnRenegotiationCompleted() {
   LOG(INFO) << "CV2-69 offerer_driver: renegotiation completed";
+}
+
+void CloudBrowserBrowserMainParts::OnNewViewerNeedsOffer() {
+  LOG(INFO) << "CV2-REARM: a NEW viewer asked for an offer this session cannot "
+               "give it — re-arming so it gets a fresh PeerConnection";
+
+  // POSTED for the same reason OnClosed's re-arm is: this runs from inside the
+  // driver's envelope-handling call stack, and RearmSession tears that driver
+  // down. Re-entering it inline would drop pc_ while the driver is still using
+  // it — a use-after-free, not a test failure.
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&CloudBrowserBrowserMainParts::RearmOrShutdown,
+                     base::Unretained(this), /*announce_bye=*/false));
 }
 
 void CloudBrowserBrowserMainParts::OnClosed(std::string_view reason) {
@@ -1777,10 +2080,28 @@ void CloudBrowserBrowserMainParts::OnClosed(std::string_view reason) {
   // every viewer change. Whoever implements that must give CbOffererDriver a
   // pre-close hook so the lifecycle can stop cleanly on an inbound bye.
 
-  // Shutdown() runs the parked QuitClosure, which unwinds into
-  // PostMainMessageLoopRun's LIFO teardown — so the `bye` still flushes and
-  // the WS still closes 1000, rather than the broker inferring a socket error.
-  Shutdown();
+  // CV2-REARM: the session ended, but this PROCESS does not have to.
+  //
+  // Everything above this line describes why exiting was the original cure:
+  // kClosed is terminal and native_session_started_ was a one-way latch, so a
+  // running worker could never offer again. Both doors are now open
+  // (CbOffererDriver::Rearm + RearmSession), so rebuild in place and keep the
+  // browser's state instead of destroying it on every viewer change.
+  //
+  // The audio pre-close hook the comment above asks for is exactly what
+  // RearmSession does first — see its step 1.
+  //
+  // Exit remains the FALLBACK, so a driver that cannot re-arm still yields a
+  // working worker via supervisord rather than a mute one.
+  // POSTED, not called inline. OnClosed runs from INSIDE the driver's
+  // CloseInternal (cb_offerer_driver.cc), so re-arming here directly would
+  // re-enter the driver and drop pc_ while CloseInternal is still using it —
+  // a use-after-free, not a test failure. Hopping to a fresh task lets
+  // CloseInternal unwind first. Same pattern the GPU-death path uses below.
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&CloudBrowserBrowserMainParts::RearmOrShutdown,
+                     base::Unretained(this), /*announce_bye=*/true));
 }
 
 void CloudBrowserBrowserMainParts::OnFailed(std::string_view reason) {

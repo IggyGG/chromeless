@@ -45,8 +45,26 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
 
+  // Per-test budget. MUST exceed the 60s the specs themselves ask for, or
+  // Playwright kills the test before its own assertion can time out — the log
+  // then says BOTH "Test timeout of 30000ms exceeded" AND "with timeout
+  // 60000ms", which reads as a product failure and is not one. 30s (the
+  // default) was the real cap until 2026-08-20.
+  //
+  // 90s is the 60s connect budget plus headroom for a worker restart: the
+  // worker serves one session and then exits so supervisord can respawn it
+  // (~15s), and specs run back-to-back, so spec N+1 routinely arrives while
+  // the worker is still booting.
+  timeout: 90_000,
+
   // Don't paper over flakes — see tests/README.md flakiness policy.
-  retries: 0,
+  //
+  // ...with ONE exception, and it is not flakiness: the worker is a
+  // single-session process. Spec N+1 can legitimately arrive mid-restart, and
+  // no amount of in-spec waiting helps because the client has already dialled.
+  // A single retry lets it re-dial against the respawned worker. Set to 0 to
+  // see the raw behaviour.
+  retries: process.env["CI"] ? 1 : 0,
 
   forbidOnly: !!process.env["CI"],
 

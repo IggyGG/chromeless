@@ -222,9 +222,45 @@ EOF
   echo "  image  : ${image}"
   echo "  digest : ${digest:-<unresolved>}"
   echo
+  # Rewrite the deploy manifest's pin IN THE SAME BREATH as the provenance
+  # record. Writing only guest-release.json is how the two drift apart, and
+  # that drift is not cosmetic: `deploy.sh` applies stack.yaml, so a stale pin
+  # there means every deploy silently ROLLS THE CLUSTER BACK to an older guest.
+  #
+  # Measured 2026-08-24: stack.yaml pinned an image 64 commits behind the fix
+  # under test, the worker Deployment reached revision 66 in a day as apply and
+  # `kubectl set image` fought each other, and a user lost the day to it —
+  # tests passing against an image they never saw. main has carried this same
+  # drift since 2026-08-11 (guest-release cr7727-44f2e20dece6 vs stack.yaml
+  # cr7727-6047599546e3).
+  #
+  # `make lint-deploy-pin` fails when they disagree; this keeps them agreeing
+  # in the first place, so the lint is a backstop rather than a chore.
+  STACK_MANIFEST="${REPO_ROOT}/infra/k8s/standalone/stack.yaml"
+  if [[ -f "${STACK_MANIFEST}" ]]; then
+    if python3 - "${STACK_MANIFEST}" "${image}" <<'PYEOF'; then
+import pathlib, re, sys
+path, image = pathlib.Path(sys.argv[1]), sys.argv[2]
+text = path.read_text()
+new, n = re.subn(
+    r'(?m)^(\s*image:\s*)registry\.[\w.]+/chromeless/chromeless:\S+',
+    lambda m: m.group(1) + image, text)
+if n:
+    path.write_text(new)
+sys.exit(0 if n else 1)
+PYEOF
+      echo "  updated stack.yaml pin -> ${tag}"
+    else
+      echo "  ⚠ could not update the worker pin in stack.yaml — do it by hand," >&2
+      echo "    or the next deploy.sh rolls the cluster back. See" >&2
+      echo "    make lint-deploy-pin." >&2
+    fi
+  fi
+
   echo "  ACTION REQUIRED — this script does not commit. Run:"
-  echo "    git -C ${REPO_ROOT} add build/guest-release.json && \\"
+  echo "    git -C ${REPO_ROOT} add build/guest-release.json infra/k8s/standalone/stack.yaml && \\"
   echo "      git -C ${REPO_ROOT} commit -m 'chore(cv2-build): record guest release ${tag}'"
+  echo "  BOTH files — committing only the json is what made main drift."
   echo
   if ! git -C "${REPO_ROOT}" merge-base --is-ancestor "${full_sha}" origin/main 2>/dev/null; then
     echo "  ⚠ ${full_sha} is NOT an ancestor of origin/main." >&2
@@ -269,9 +305,48 @@ if [[ -z "${POD:-}" ]]; then
   exit 1
 fi
 
+# Wait until the pod is actually FOLLOWABLE before streaming.
+#
+# The loop above waits for the pod to EXIST, which is not the same thing.
+# `kubectl logs -f` against a pod still in ContainerCreating fails instantly
+# with
+#
+#   Error from server (BadRequest): container "kaniko" ... is waiting to start
+#
+# and because it is the head of a pipe, the failure is invisible: the pipeline
+# succeeds, the script sails past, and the STATUS check below runs against a
+# Job that has not finished. The push itself then SUCCEEDS while the provenance
+# record is never written — not even locally.
+#
+# That is the leak behind the drift on main: guest-release.json still records
+# cr7727-44f2e20dece6 from 2026-08-11 while images have shipped since. Two more
+# instances happened on 2026-08-24, and I hit the same BadRequest four times
+# that day pushing by hand. It needs no mistake by anyone — just a pod that
+# takes a few seconds to start.
+#
+# The existing comment says the record "can never claim an image that does not
+# exist in the registry", which is true. This is the other direction: an image
+# can exist that the record never learns about.
+echo "Waiting for ${POD} to start..."
+for _ in $(seq 1 60); do
+  phase="$(kubectl -n chromeless-build get pod "${POD}" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  case "${phase}" in
+    Running|Succeeded|Failed) break ;;
+  esac
+  sleep 2
+done
+
 echo "Following pod ${POD}..."
-kubectl -n chromeless-build logs -f "${POD}" 2>&1 \
+# `|| true` so a mid-stream disconnect does not abort the run before the Job
+# condition is read — the condition, not the log stream, is the authority.
+{ kubectl -n chromeless-build logs -f "${POD}" 2>&1 || true; } \
   | tee "/tmp/kaniko-push-${CHROMELESS_KANIKO_TAG}.log"
+
+# Belt and braces: the follow can still return early on a transient. Wait for
+# the Job to actually reach a terminal condition before judging it.
+kubectl -n chromeless-build wait --for=condition=complete \
+  --timeout=600s "job/${JOB_NAME}" >/dev/null 2>&1 || true
 
 # Surface final status so the operator can see PASS/FAIL at a glance.
 STATUS="$(kubectl -n chromeless-build get job "${JOB_NAME}" \

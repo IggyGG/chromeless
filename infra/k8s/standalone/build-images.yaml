@@ -143,9 +143,11 @@ spec:
             - name: REPO
               value: https://forgejo.triform.dev/triform/chromeless.git
             - name: BRANCH
-              # main, not feat/standalone-mode. That branch is behind main and
-              # does not contain client/src/control.ts, so a rebuild from it
-              # would faithfully reproduce the bug it was meant to fix.
+              # main, not a feature branch. A build job that lives on main
+              # and clones something else produces an image whose tag says
+              # one thing and whose contents say another — which is how a
+              # gateway rebuilt from a stale branch came to serve a bundle
+              # with no control-channel consumer while the tag looked right.
               value: main
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
@@ -160,7 +162,7 @@ spec:
             # directory, so the context is signaling/, not the repo root.
             - --dockerfile=/workspace/signaling/Dockerfile
             - --context=/workspace/signaling
-            - --destination=registry.triform.cloud/chromeless/signaling:standalone-v3
+            - --destination=registry.triform.cloud/chromeless/signaling:standalone-v7
             - --single-snapshot
             - --push-retry=3
           env:

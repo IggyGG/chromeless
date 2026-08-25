@@ -183,3 +183,155 @@ the call site in `cloud_browser_browser_main_parts.cc` as well.
   is out of scope and the process expects an orchestrator to restart it. This
   finding is the same shape: the embedder assumes something outside it owns the
   lifecycle. For a standalone deployment, nothing does.
+
+## 2026-08-20: measured from the worker's own log — the driver never CLOSES
+
+Task 349025, a standalone `docker compose` stack, worker image
+`cr7727-224c19413e24` (which DOES contain the exit-on-close fix, `0c5e6a1`, by
+git ancestry). Worker log and broker log, same run:
+
+```
+17:43:14    worker joins broker, offers                    (buffered)
+17:47:40.2  spec 01 client joins, replayed:7
+17:47:40.3  ICE -> 1 checking
+17:47:40.3  ICE -> 2 CONNECTED        <- spec 01 passes here
+17:47:40.3  ICE -> 3 COMPLETED
+17:47:40.7  spec 01 ends, client vanishes (NO bye)
+17:47:41.1  spec 02 client joins      -- no replay (broker fix working)
+17:47:46.5  ICE -> 5 disconnected
+17:47:56.5  ICE -> 4 FAILED
+17:48:14    spec 03 client joins      -- no replay
+```
+
+**`session closed` never appears. `Cb.shutdown` never appears. Zero
+renegotiations, zero further offers.** So the exit-and-respawn cure written up
+above never fires *in this path*: the viewer disappears without a `bye`, so
+`CbOffererDriver` is never told the session ended. It just watches ICE rot
+`connected -> disconnected -> failed` and sits there. `OnClosed` — and therefore
+`Shutdown()` — is only reached on an explicit close.
+
+That reframes the defect. It is not only "a closed session is terminal"; it is
+that **a viewer leaving without a bye never closes the session at all**, so the
+process is left holding a FAILED peer connection with no path back and nothing
+to trigger the restart. A real user closing a laptop lid produces exactly this.
+
+Two consequences for whoever fixes it:
+
+- The ICE-failure path needs to reach the same teardown as `bye`. Watching for
+  `kIceConnectionFailed` and routing it into `OnClosed`/`Shutdown` would make
+  the existing autorestart cure cover the common case.
+- Option 1 (make the driver re-armable) still needs this, because it needs to
+  notice the viewer is gone before it can re-offer.
+
+⚠ **Reading the log at all is a trap.** `infra/supervisord.phase2.conf` sends
+chromium's stdout to `/var/log/supervisor/chromium.log` and stderr to
+`/dev/console`; the embedder's `LOG(INFO)` goes to **stderr**, so
+`chromium.log` is EMPTY and `docker logs` shows only supervisord's process
+transitions. Grepping the wrong file prints nothing and reads as "the worker
+says nothing" — which is how this was misdiagnosed twice before the log was
+finally captured.
+
+---
+
+## Resolution, and the three defects the fix uncovered (2026-08-21)
+
+Option 1 was chosen and implemented: `CbOffererDriver::Rearm()` plus
+`CloudBrowserBrowserMainParts::RearmSession()`. **The re-armable driver alone
+did not fix the user-visible problem.** Three further defects surfaced only
+against a live browser, and each one was invisible in the logs in a different
+way. They are recorded here because each was expensive to find and none would
+have been caught by a build, a unit test, or the in-cluster suite.
+
+### 1. A successful re-arm immediately undid itself
+
+`RearmSession` → `Rearm()` → `CloseInternal()` → our own `OnClosed` → posts
+*another* `RearmOrShutdown`. Two entries ~450 µs apart; the second was
+correctly refused by the driver and fell through to `Shutdown()`.
+
+```
+083029.951776  CV2-REARM: driver returned to kIdle
+083029.956753  CV2-REARM: rebuilt
+083029.957207  CV2-REARM: rebuilding the peer connection      <- second entry
+083029.957320  re-arm failed -> falling back to process exit
+```
+
+The log said "rebuilt" and the process died anyway. Fixed with a `rearming_`
+latch mirroring `tearing_down_`.
+
+### 2. A clean client close delivers TWO byes
+
+The client sends its own `bye` and *then* drops the socket; `unregister` then
+synthesised a second one because it checked only whether the peer had
+negotiated, not whether it had already said goodbye. **~49 ms apart.**
+
+Harmless for this code's entire life — a `bye` meant "exit", and the process
+was already going down. Fatal the moment the worker re-arms: bye #1 rebuilt the
+session in ~7 ms, bye #2 closed the rebuild, and the still-pending
+`OnRenegotiationNeeded` landed in `kClosed` → `FailWithReason` → `kFailed` →
+`Rearm()` refuses → exit.
+
+Fixed in both halves: `peer.saidBye` in the broker, and `HandleByeEnvelope`
+dropping a `bye` that arrives in `kIdle`/`kCreatingPc` — the exact window a
+re-armed driver occupies.
+
+### 3. Cold arrival: nothing makes a live worker offer to a NEW viewer
+
+**This one took three more attempts after the first fix, and each attempt was
+only reachable because the previous one worked.** The sequence is worth reading
+as a whole, because every step looked like "the fix didn't work" and was
+actually a different defect underneath:
+
+| attempt | what happened | the real defect |
+| --- | --- | --- |
+| guard `kIceInFlight` | nothing fired at all | a re-armed driver sits in **`kAwaitingAnswer`**, not `kIceInFlight` — the request fell into the mid-dance coalesce and waited for an answer that could never come |
+| guard `kAwaitingAnswer` | fired, rebuilt in 9 ms, viewer went `connecting` → **`closed`** | `Rearm()` emits a `bye`, the broker forwards it to the waiting viewer, and its client calls `teardown("peer said bye")` — killing the peer being rebuilt for, ~1 ms before the offer landed |
+| `announce_bye=false` | **passes** — 34 frames, browser pid unchanged | — |
+
+The state-machine mistake is the instructive one: the enum's comment describes
+`kIceInFlight` as "steady state", which is true for a *connected* session and
+false for a re-armed one. Read which state the code actually reaches, not which
+state the comment calls normal.
+
+
+
+This is the one the user actually hit, and re-arm does **not** address it,
+because the trigger for re-arm was always *the previous viewer leaving*.
+
+```
+09:37:58  worker re-arms; its offer is buffered by the broker
+...       >5 minutes idle
+09:43:19  a NEW viewer joins. The broker CORRECTLY drops the buffered offer
+          (age 322s > the 300s cap). Nothing is replayed.
++45s      the client's offer watchdog sends request_renegotiate
+09:44:49  the only thing that ever produced an offer was the viewer GIVING UP
+```
+
+The worker sat in `kIceInFlight` **from the previous viewer's session**, so
+`request_renegotiate` took the `BeginRenegotiation` branch — which re-offers on
+the *existing* PeerConnection, whose ICE ufrag/pwd and DTLS fingerprint belong
+to a peer that is gone. That is exactly the mismatch that presents as
+`iceConnectionState=failed` with relay candidates on **both** sides.
+
+Fixed by tracking whether the *current* offer was ever answered
+(`current_offer_answered_`, per-offer — distinct from the
+`was_in_ice_flight_once_` latch, which deliberately survives re-arm). An
+unanswered offer means the asker is not the peer we are negotiating with, so
+the driver raises `OnNewViewerNeedsOffer` and the embedder builds a fresh PC.
+
+⚠ `CbAudioLifecycle` sits BETWEEN the driver and the embedder and had to
+forward the new callback explicitly. An un-overridden observer method is
+swallowed by the base class's empty default — **no error, no log line**, and
+the fix would simply have done nothing.
+
+## What the pid proves that video does not
+
+A worker RECYCLE also gives viewer 2 working video. Video alone cannot
+distinguish re-arm from restart, and for weeks the logs said "rebuilt" while
+the browser was dying on every viewer change. The discriminator is the chromium
+**pid inside the worker pod**, and the remote browser still being on the page
+the previous viewer left it on. Both are asserted in
+`tests/local/rearm-scenarios.spec.ts`.
+
+Matching that pid is fussier than it looks: `pgrep -o -f chrome` returns the
+supervisord *wrapper* (`launch-chromeless.sh`), which respawns on every restart
+and would make the assertion vacuously true.

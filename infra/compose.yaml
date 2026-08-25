@@ -13,6 +13,22 @@
 #   client-build one-shot node:20-alpine that builds ../client into
 #                ../client/dist for the gateway's live-reload mount.
 #
+# dind-gc: ci-runs-this-compose
+#
+# ^ Not decoration. The Forgejo runners this stack's e2e lane executes on run a
+# dind-gc sidecar that prunes /var/lib/docker above a high-water mark, and its
+# `--filter until=` compares an image's BUILD time — so a stable upstream tag
+# like node:20-alpine is stale the moment it is pulled and gets deleted out
+# from under a running `compose up`. Task 339575 (2026-08-19) died exactly
+# there: "No such image: node:20-alpine", ~60s after compose said "Pulled".
+#
+# The cure is a pin in the runner StatefulSets, which live in tf-multiverse
+# and cannot see this file. That marker is the handshake: tf-multiverse's
+# scripts/ci/check-dind-gc-pins-cover-workflow-images.sh scans compose files
+# carrying it and fails if any service image is unpinned. So ADDING A PULLED
+# (non-`build:`) SERVICE HERE MAY REQUIRE A tf-multiverse CHANGE — otherwise
+# it fails intermittently in CI, looking exactly like a code failure.
+#
 # Usage (from repo root):
 #
 #   eval "$(cd infra/gateway && go run ./cmd/keygen)"

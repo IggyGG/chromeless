@@ -1,15 +1,19 @@
 # End-to-end tests (Playwright)
 
-Functional E2E for the v0 chromeless stack. Drives a real
-Chromium against the served client, exercising signaling, ICE, and
-(once T34 lands) the full SDP round-trip + media reception. Latency is
-**not** measured here — that lives in `harness/` and `tests/harness/`.
-This suite is purely about correctness of behaviour.
+Functional E2E for the chromeless stack. Drives a real Chromium against the
+gateway-served client, exercising signaling, ICE, the SDP round-trip and
+media reception. Latency is **not** measured here — that lives in `harness/`
+and `tests/harness/`. This suite is purely about correctness of behaviour.
 
-> **Status:** Phase 0. Spec 01 is implemented and active; specs 02–03
-> are scaffolded but `test.skip`'d pending **T34** ("flip T14 client to
-> answerer role"). Comments in each `*.spec.ts` explain the un-skip
-> conditions in detail.
+> **Status:** specs 01–03 and 05–06 are active. The `test.skip` on 02 and 03
+> pending **T34** ("flip T14 client to answerer role") is gone — T34 landed;
+> the client is the answerer.
+>
+> **These specs did not execute in CI until 2026-08-19.** Every e2e job in
+> this repo's history — 120 of them — self-skipped before reaching
+> Playwright, and reported success. If you are relying on a green E2E check,
+> read the "In CI" section below and make sure the run you are looking at
+> actually ran.
 
 ## Layout
 
@@ -19,10 +23,12 @@ tests/e2e/
 ├── playwright.config.ts               # webServer + projects + base URL
 ├── fixtures/
 │   └── audio-tone.html                # 440 Hz Web Audio fixture (T64)
-├── 01-signaling-handshake.spec.ts     # ACTIVE — stub-state handshake
-├── 02-data-channel-open.spec.ts       # SKIP (T34) — input DC opens
-├── 03-receives-video-track.spec.ts    # SKIP (T34/T23) — video receiver
-├── 05-audio-receives.spec.ts          # ACTIVE pending T78 — audio bytes_received > 0
+├── auth.setup.ts                      # setup project — logs in, saves the cookie
+├── 01-signaling-handshake.spec.ts     # peer connection reaches connected
+├── 02-data-channel-open.spec.ts       # input data channel opens
+├── 03-receives-video-track.spec.ts    # video track received AND decoding frames
+├── 05-audio-receives.spec.ts          # audio bytesReceived > 0 (needs DevTools, see below)
+├── 06-camera-passthrough.spec.ts      # client-side camera/mic passthrough (T81)
 └── README.md
 ```
 
@@ -33,7 +39,7 @@ cd tests/e2e
 npm install                                  # one-time
 npx playwright install --with-deps chromium  # one-time, downloads browser
 
-# run the full suite (currently: spec 01 active; 02 and 03 reported as skipped)
+# run the full suite
 npm run test:e2e
 
 # list specs without running them — fast structural sanity check
@@ -117,12 +123,18 @@ the browser, or run them from a machine where 1.48.2 works.
 
 ## Known dependencies
 
-| Spec  | Blocked by | Notes |
-| ----- | ---------- | ----- |
-| 01    | none       | Active. Asserts the documented stub state — passes today and continues to pass after T34 (regex covers both stub and connected states). |
-| 02    | T34        | Data channel cannot open without a real peer answering. Un-skip when T34 lands. |
-| 03    | T34, possibly more T23/T28 follow-up | Needs a connected PC + real media + a client-side `window.__cbwrtc_pc` test hook. |
-| 04    | T78 (T69 + T52 already in) | Audio presence E2E (T64). Active code path; T69 (window.pc) and T52 (host DevTools) are already on main. As of authoring, gated by **T78** — getDisplayMedia inside the cloud Chromium fails with NotReadableError, so the streamer's start() throws before reaching `window.pc = pc`. Once T78 lands, this spec passes without further changes. Failure messages name T78 explicitly. |
+| Spec  | Runs when | Notes |
+| ----- | --------- | ----- |
+| 01    | always    | Peer connection reaches `connected`, signaling reaches `stable`, ICE reaches `connected`/`completed`. The client is the **answerer**, so `have-local-offer` and a client-driven ICE gathering `complete` are unreachable — an earlier version asserted both and could never have passed. |
+| 02    | always    | Input data channel opens. Needs a real peer answering, which is why it was skipped pending T34; T34 landed. |
+| 03    | always    | The load-bearing one: a video receiver **and** `framesDecoded > 0`. A receiver with zero frames is a documented failure mode in this system, so presence alone is not asserted. |
+| 05    | `CHROMELESS_E2E_DEVTOOLS_URL` set | Injects a 440 Hz tone into the worker via CDP, then asserts inbound-rtp audio `bytesReceived > 0`. The stack publishes only 8443, so DevTools must be forwarded deliberately — `docker compose exec` or a port-forward. Absent that, the spec skips: a harness prerequisite, not a product failure. |
+| 06    | always    | Client-side camera/mic passthrough (T81) with a fake device. Asserts senders and `request_renegotiate`; the cloud-side v4l2 sink is a manual smoke, documented in `docs/protocols/webcam-mic-passthrough.md`. |
+
+Spec `04` served `capture/streamer-page/` and asserted `window.pc` on it. That
+directory was deleted in the M7 migration and has no successor — the peer now
+lives in the browser process, where no page-scoped `window.pc` exists. The spec
+was removed rather than rewritten; there is nothing left for it to test.
 
 (A note here used to describe the `client` nginx service serving a 404 on
 `main.js` because it bind-mounted the source rather than the build. That
@@ -177,22 +189,36 @@ behaved alongside audio: cursor-watcher polls Chromium DevTools but
 must NOT throttle, suspend, or replace the AudioContext. If audio
 suddenly stops mid-spec, that's the first regression to chase.
 
-## CI hookup
+## In CI
 
-Playwright tests are explicitly **not** in the default `make test` PR
-gate (see [`tests/README.md`](../README.md#3-ci-plan)). The expected
-shape:
+`.github/workflows/e2e.yml` runs this suite on every pull request and every
+push to main. It is not part of `make test` — it needs Docker and a worker
+image, neither of which a unit-test lane has.
 
-- **`e2e.yml`** — runs on `merge to main` and nightly on a
-  self-hosted Linux runner with Docker. Uses the docker-compose
-  webServer flow.
-- **PR opt-in** — a `ci:e2e` label on a PR triggers the same workflow
-  for that PR, for changes in `client/`, `signaling/`, `capture/`, or
-  `infra/`.
+**A green E2E check does not by itself mean the specs ran.** The job skips
+itself, green, in two cases:
 
-The current `T21` workflow (`.github/workflows/ci.yml`) covers
-Dockerfile build + smoke test only. Adding `e2e.yml` is a follow-up
-T21-style task — flag this when wiring CI for the next phase.
+- the `CHROMELESS_IMAGE` repository variable is unset — there is no browser
+  to test against, and this repo publishes no image;
+- the docker daemon cannot resolve the job's paths, so compose bind-mounts
+  would silently mount empty directories.
+
+Both now emit `::warning::E2E DID NOT RUN`, because for four months they
+emitted only a `::notice::` and 120 consecutive skips read as 120 passes.
+The run also fails outright if Playwright exits without collecting a spec.
+
+Two host-specific things the workflow handles, worth knowing if you port it:
+
+- **Path alignment.** On this CI host the checkout lives in a docker volume;
+  the job container sees `/workspace/<owner>/<repo>` and the daemon sees
+  `/var/lib/docker/volumes/<id>/_data`. Same bytes, different paths — so
+  compose is pointed at the daemon's path via a symlink rather than given
+  one that means nothing on the other side.
+- **Playwright runs in `mcr.microsoft.com/playwright`, not the job
+  container.** The job image is Alpine; Playwright's browser is a glibc
+  binary and dies with a confusing `ENOENT` on the loader. The image tag is
+  pinned to match `package.json` — a browser newer than the client library
+  refuses to start.
 
 ## See also
 

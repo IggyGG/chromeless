@@ -243,6 +243,22 @@ class OffererDriverObserver {
   virtual void OnRenegotiationStarted(std::string_view trigger) {}
   virtual void OnRenegotiationCompleted() {}
 
+  // A NEW viewer is asking for an offer that this session cannot give it.
+  //
+  // Fires when an inbound `request_renegotiate` arrives while we are in
+  // kIceInFlight but our current offer was NEVER ANSWERED. That combination
+  // means the peer asking is not the peer we are negotiating with: the
+  // previous viewer left without a bye, and a fresh one has joined, found the
+  // broker's replay buffer empty (the buffered offer aged out at
+  // iceReplayMaxAge), and run its offer watchdog.
+  //
+  // Renegotiating on the EXISTING PeerConnection is wrong here — its ICE
+  // ufrag/pwd and DTLS fingerprint belong to the viewer that is gone, which is
+  // exactly the mismatch that produced `iceConnectionState=failed` with relay
+  // candidates present on both sides. The embedder must re-arm instead, which
+  // builds a fresh PC. Fires on the driver's UI thread.
+  virtual void OnNewViewerNeedsOffer() {}
+
   // Clean teardown (R6). Fires when either:
   //   * Embedder called Close() — `reason` is the embedder-supplied
   //     reason string (default "session ended").
@@ -330,6 +346,50 @@ class CbOffererDriver
   //
   // Idempotent: a second call is logged + ignored.
   void Start();
+
+  // CV2-REARM: return a closed driver to kIdle so the SAME process can
+  // serve a NEW viewer, keeping the browser's state (open tabs, scroll
+  // position, in-memory logins).
+  //
+  // Before this, a worker offered exactly ONCE per process. `kClosed` is
+  // terminal, `BeginRenegotiation` refuses to run from it, and the
+  // embedder's native_session_started_ latch blocked a second
+  // Cb.startNativeSession — so the only cure for "viewer left" was
+  // process exit + supervisord respawn, which destroys everything the
+  // user had open. Measured 2026-08-20: a viewer arriving at an idle
+  // stack got no offer at all and sat at "waiting for offer" until the
+  // page was closed, because nothing could re-offer.
+  //
+  // Rearm() only resets SESSION state. It deliberately does NOT touch:
+  //   * ws_connected_ / the SignalingWsClient — the socket outlives the
+  //     session; a re-arm mid-connection must not re-handshake.
+  //   * was_in_ice_flight_once_ — "have we ever negotiated" is a
+  //     process-lifetime fact the R6 renegotiation path keys off.
+  //   * observer_, threads, pcf_, ice_config_ — construction-time deps.
+  //
+  // Returns false (and logs) if called from a state where re-arming
+  // makes no sense: kIdle (nothing to re-arm) or kFailed (the PC is
+  // gone for a reason that will recur; a fresh process is the honest
+  // answer there).
+  //
+  // The caller MUST rebuild what it added to the previous PC —
+  // transceivers, data channels, the video track source — exactly as it
+  // does after Start(). See CloudBrowserBrowserMainParts::RearmSession.
+  // |announce_bye| controls whether the close that precedes the re-arm emits a
+  // `bye` on the wire.
+  //
+  //   true  — the previous viewer is GONE (an ICE-failure teardown, an
+  //           embedder-driven recycle). The bye tells the broker to discard
+  //           BOTH replay buffers so a late-joining viewer cannot be handed
+  //           the dead offer. See signaling/server.go's discardReplay.
+  //   false — we are re-arming FOR a viewer that is connected and waiting
+  //           (the cold-arrival path). The broker forwards the bye straight to
+  //           that viewer, whose client treats it as "session over" and tears
+  //           down — so announcing would kill the very peer we are rebuilding
+  //           for. Measured 2026-08-21: the re-arm completed in 9ms and the
+  //           viewer went `connecting` -> `closed` without ever seeing the
+  //           fresh offer.
+  bool Rearm(bool announce_bye = true);
 
   // Renegotiation trigger (R6). Embedder-initiated nudge after mutating
   // transceivers, codecs, or DataChannels on pc(). Valid only from
@@ -615,6 +675,18 @@ class CbOffererDriver
   // renegotiation, which fires OnRenegotiationCompleted on the
   // observer. We don't reset it on teardown — once true, always true.
   bool was_in_ice_flight_once_ = false;
+
+  // True once the CURRENT offer has been answered by a peer. Distinct from
+  // was_in_ice_flight_once_, which is a "have we ever negotiated" latch that
+  // deliberately survives Rearm().
+  //
+  // This one is per-offer: set when an `answer` is applied, cleared by
+  // Rearm() and by every fresh CreateOffer. It is what lets an inbound
+  // `request_renegotiate` in kIceInFlight distinguish
+  //   * our own viewer asking to refresh SDP (answered -> renegotiate), from
+  //   * a NEW viewer that never answered, asking for an offer it never got
+  //     (unanswered -> the embedder must re-arm; see OnNewViewerNeedsOffer).
+  bool current_offer_answered_ = false;
 
   // CV2-69 re-test#4 (Finding A): WS-connected gate for offer
   // emission. ws_connected_ flips true on OnConnected (forwarded by

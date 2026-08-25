@@ -493,9 +493,47 @@ els.passthrough.addEventListener("click", async () => {
   }
 });
 
-window.addEventListener("beforeunload", () => session?.disconnect("page unload"));
+// Teardown on BOTH events, because `beforeunload` is not reliable.
+//
+// It does not fire when a browser context is closed programmatically (which is
+// what Playwright does between specs), and on mobile/bfcache paths it is
+// skipped entirely. Measured 2026-08-20 across a full e2e run: the broker
+// received ZERO `bye` envelopes, so the worker was never told the session had
+// ended — it sat on a peer connection that rotted connected -> disconnected ->
+// failed, and never re-offered for the next viewer.
+//
+// `pagehide` DOES fire on programmatic close and on bfcache eviction, and is
+// the modern recommendation. Both are registered: beforeunload still covers
+// the "user confirms navigation away" case, and disconnect() is idempotent
+// (teardown() early-returns once rws and pc are null), so a double fire is
+// harmless.
+const teardown = (why: string) => session?.disconnect(why);
+window.addEventListener("pagehide", () => teardown("page hidden"));
+window.addEventListener("beforeunload", () => teardown("page unload"));
 
-log("info", "client loaded — click Connect to start");
+// ---------- start automatically ----------
+//
+// A user who has just logged in expects a working browser, not a button. The
+// Connect button stays (it doubles as Disconnect, and reconnecting by hand is
+// genuinely useful when a session goes wrong), but nobody should have to press
+// it to get the thing they asked for.
+//
+// Deliberately NOT gated on any query flag. `?e2e=1` exists only to expose the
+// PeerConnection to tests, and gating behaviour on it is precisely how the
+// suite ended up green while the page a real user loads was broken.
+//
+// Failures surface exactly as before — connect() reports through the status
+// pill and the log — so an auto-start that cannot reach the worker looks the
+// same as a hand-clicked one that cannot.
+function autoConnect(): void {
+  if (session) return;                    // already up (e.g. hot reload)
+  const sessionId = els.sessionId.value.trim() || "dev";
+  els.connect.textContent = "Disconnect";
+  connect(sessionId);
+}
+
+log("info", "client loaded — connecting…");
+autoConnect();
 
 // Part of the public surface via the session's signaling event.
 export type { ReconnectState };

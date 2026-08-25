@@ -68,11 +68,64 @@ test.describe("audio presence end-to-end", () => {
         "port and set it to inject the test tone (see the spec header).",
     );
 
+    // Resolve the websocket URL OURSELVES and force the port back on.
+    //
+    // `connectOverCDP(http://host:9222)` fetches /json/version and then dials
+    // whatever `webSocketDebuggerUrl` says. This worker answers
+    //
+    //     ws://localhost/devtools/browser/<id>          <- NO PORT
+    //
+    // so the client dials port 80 and hangs until the 30s timeout, reporting
+    // "socket hang up" / "Timeout ... retrieving websocket url" — which reads
+    // as the worker being down and is not. CLAUDE.md calls this out, and both
+    // infra/gateway/cdp.go (rewriteWSHost) and tests/cdp/conftest.py already
+    // carry the same workaround; this is the third site that needed it.
+    //
+    // Passing the ws:// endpoint directly skips the discovery step entirely.
+    // RETRY, because the worker restarts as part of normal operation.
+    //
+    // It serves one session and then exits so supervisord can respawn it — see
+    // docs/findings/one-session-per-worker-process.md. Specs run back-to-back,
+    // so this one routinely arrives during the ~15s window when the previous
+    // spec's session has just ended and DevTools is not yet listening. A
+    // single fetch there fails with a bare "fetch failed" and reads as a
+    // broken forward; measured 2026-08-20, the worker respawned 11 times
+    // during one 8-spec run.
+    let wsEndpoint = "";
+    let lastErr: unknown = null;
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(`${DEVTOOLS_HTTP}/json/version`);
+        const body = (await res.json()) as { webSocketDebuggerUrl?: string };
+        const raw = body.webSocketDebuggerUrl ?? "";
+        if (!raw) throw new Error(`no webSocketDebuggerUrl in ${JSON.stringify(body)}`);
+        const u = new URL(raw);
+        // Force host AND port onto it: this worker answers
+        // `ws://localhost/devtools/...` with NO PORT when reached by service
+        // name, which makes a client dial 80 and hang. CLAUDE.md documents
+        // the trap; infra/gateway/cdp.go and tests/cdp/conftest.py both carry
+        // the same workaround.
+        u.host = new URL(DEVTOOLS_HTTP).host;
+        wsEndpoint = u.toString();
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    if (!wsEndpoint) {
+      throw new Error(
+        `could not resolve the DevTools websocket URL from ${DEVTOOLS_HTTP} ` +
+          `within 60s: ${lastErr}. Is the forward up, and is the worker running?`,
+      );
+    }
+
     try {
-      cdpBrowser = await chromium.connectOverCDP(DEVTOOLS_HTTP);
+      cdpBrowser = await chromium.connectOverCDP(wsEndpoint);
     } catch (err) {
       throw new Error(
-        `connectOverCDP(${DEVTOOLS_HTTP}) failed: ${err}. Is the port-forward ` +
+        `connectOverCDP(${wsEndpoint}) failed: ${err}. Is the port-forward ` +
           `still up, and is the worker running?`,
       );
     }
