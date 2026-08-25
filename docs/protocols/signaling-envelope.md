@@ -29,6 +29,7 @@ Three fields. `from` is a **sibling** of `type`, never nested under `data`.
 | `request_renegotiate` | `null` (an absent field is also accepted) |
 | `probe_result` | opaque object; receive-only, the browser peer never emits it |
 | `session_unhealthy` | field omitted, like `bye`. Sent by the guest on permanent renderer/GPU death so the orchestrator recycles it |
+| `peer_absent` | field omitted. **Broker → peer, advisory.** Sent once, at join, when no peer holds the counterpart role in this session |
 
 **`from`** is `"browser"` or `"client"`. Any other value rejects the frame.
 
@@ -78,6 +79,30 @@ This is the load-bearing half of the contract, and the one a new
 implementation is most likely to get wrong: accepting an unknown tag is
 invisible until it meets a peer that assumes the documented behaviour.
 `conformance/run.mjs --role=signaling` checks it.
+
+## `peer_absent`: the broker is the only one who knows
+
+Sent to a joining peer when the counterpart role is unoccupied. It is
+**advisory** — it carries no payload, is not in `validTypes`, is never
+forwarded, and a peer that does not recognise it drops it as an unknown type
+(which is the documented forward-compatibility behaviour, so it is safe to
+send to any client).
+
+It exists because being alone in a session is invisible from the inside. A
+client on the wrong session id has an open socket, accepted auth, a delivered
+ICE config and a green probe; it simply never receives an offer. Before this
+envelope the only signal was the client's own offer watchdog, **65 seconds**
+later, in a log. The observed case was a stray keystroke turning `dev` into
+`devs`.
+
+Sent at most once per join, and **only** when the counterpart is genuinely
+absent. A notice that fired unconditionally would be noise, and noise trains
+people to ignore the one time it matters — `TestWS_LonePeerIsToldTheCounterpartIsAbsent`
+asserts both halves for that reason.
+
+Receiving it does not close the session: the peer may legitimately be early,
+and the counterpart can still join afterwards. It is a diagnosis, not a
+verdict.
 
 ## Replay buffer lifetime: a `bye` is not guaranteed
 
