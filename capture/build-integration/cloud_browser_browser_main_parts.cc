@@ -128,6 +128,10 @@ constexpr base::TimeDelta kRendererCrashWindow = base::Minutes(5);
 // this does. The frame-rate cap matches the BeginFrame driver's 30 Hz;
 // asking the sender for more than the driver produces is meaningless.
 constexpr int kVideoMaxBitrateBps = 6'000'000;
+// Floor, not a target. See the SetParameters call site for the measured trace
+// that produced this number — the ramp started at 741 kbps and took ~6s to
+// become readable, which is what "pixelated after a reload" actually was.
+constexpr int kVideoMinBitrateBps = 1'500'000;
 constexpr double kVideoMaxFramerate = 30.0;
 
 // TCP server-socket factory bound to <address>:<port>. The address
@@ -1323,6 +1327,30 @@ void CloudBrowserBrowserMainParts::RebuildSessionMedia() {
           // than the single vCPU can produce or the relay can carry.
           params.encodings[0].max_bitrate_bps = kVideoMaxBitrateBps;
           params.encodings[0].max_framerate = kVideoMaxFramerate;
+
+          // FLOOR. A ceiling alone leaves the first seconds of every session
+          // unreadable, and a user reported exactly that: "after a page
+          // reload it feels a bit pixelated".
+          //
+          // MEASURED on the live standalone stack 2026-08-25, first RTP
+          // samples of a fresh session:
+          //
+          //   01:41:29   1.24 Mbps
+          //   01:41:31   0.74 Mbps   <- 1280x720 at ~0.05 bits/pixel
+          //   01:41:35   2.68 Mbps
+          //   steady     3.4-4.0 Mbps, fps=30
+          //
+          // Six seconds of mush. Nothing was holding a floor: BWE restarts
+          // from its default probe on every reconnect and re-arm, and with
+          // MAINTAIN_RESOLUTION (below) the whole shortfall is spent on
+          // quantiser at full 720p rather than on a smaller, sharp picture.
+          //
+          // 1.5 Mbps is ~0.10 bits/pixel at 720p30 — legible text rather than
+          // blocks — and is well under the 3.4-4.0 Mbps the link demonstrably
+          // sustains, so it is a floor the path can actually honour rather
+          // than a wish. It does not raise steady-state usage: BWE still
+          // decides everything above it.
+          params.encodings[0].min_bitrate_bps = kVideoMinBitrateBps;
         } else {
           LOG(WARNING) << "CV2-QUALITY: sender has no encodings; bitrate "
                           "ceiling not applied";

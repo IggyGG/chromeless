@@ -233,6 +233,28 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
     // page after a tab-switch). Re-arm so the idle deadline still fires even
     // if the new surface never produces a natural frame.
     ArmIdleRefreshDeadline();
+
+    // TODO(CV2-KEYFRAME-ON-RETARGET): request an encoder keyframe here.
+    //
+    // This branch is the moment the streamed CONTENT changes completely — a
+    // navigation, a tab switch — and nothing tells the encoder. x264 is
+    // configured with i_keyint_max = INT_MAX ("no auto IDR", h264_encoder.cc:147)
+    // plus b_intra_refresh, so after a reload the new page is coded against a
+    // stale reference and recovers over a slow intra-refresh sweep instead of
+    // an instant IDR. That is a concrete mechanism for the user report
+    // "after a page reload it feels a bit pixelated" (2026-08-25).
+    //
+    // The encoder half ALREADY WORKS: h264_encoder.cc:268-276 honours
+    // VideoFrameType::kVideoFrameKey by setting X264_TYPE_IDR. What is missing
+    // is a caller. Doing it properly means a path from here through
+    // CbFramesinkVideoTrackSource to the libwebrtc encoder, which is a real
+    // design decision (whose thread? what if no encoder is attached yet?) and
+    // does not belong bolted onto a one-line bitrate fix.
+    //
+    // Deliberately filed as a TODO that names its own verification: after
+    // wiring it, a reload should show a bitrate SPIKE (the IDR) in the
+    // CV2-RTP outbound[video] samples rather than a slow climb. Per CLAUDE.md
+    // this is a task, not a note — it has a measured symptom behind it.
     return;
   }
 
