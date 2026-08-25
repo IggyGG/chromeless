@@ -426,12 +426,20 @@ class ClientDriver:
         """What the cursor channel last told the client to render.
 
         Reads `[data-role="cursor-overlay"]`'s data-shape, which is what
-        client/src/cursor.ts actually sets. NOT getComputedStyle(...).cursor:
-        the client draws an inline-SVG glyph rather than relying on the CSS
-        cursor property (cursor.ts explains why — CSS `cursor` outside a real
-        hover is unreliable). Reading the CSS property returned the page's
-        default 'auto' no matter what the channel delivered, i.e. a check that
-        could only ever fail.
+        client/src/cursor.ts publishes.
+
+        HISTORY, because this docstring used to say something now false. The
+        renderer originally drew an inline-SVG glyph on a `pointer-events:none`
+        overlay teleported to the guest's reported coordinate, and warned that
+        getComputedStyle(...).cursor "could only ever fail". That was true of
+        THAT design: an element removed from hit-testing is never the cursor's
+        resolution target, so the property stayed 'auto'.
+
+        The renderer now sets `cursor:` on the <video> itself — the real
+        hit-test target — so getComputedStyle WOULD work today. data-shape is
+        still preferred: it reports what the CHANNEL delivered, independent of
+        how the client chose to draw it, which is the thing this suite is
+        actually testing.
         """
         return self.cdp.eval("""(() => {
             const el = document.querySelector('[data-role="cursor-overlay"]');

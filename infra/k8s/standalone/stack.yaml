@@ -93,7 +93,18 @@ spec:
           # This pin was also stale: the cluster was running standalone-v6
           # while this file said v3, so re-applying stack.yaml would have
           # rolled the broker BACKWARDS.
-          image: registry.triform.cloud/chromeless/signaling:standalone-v7
+          # Pinned by DIGEST, not tag. standalone-v7 is a MUTABLE tag that has
+          # now been rebuilt over at least once (2026-08-25, to add the
+          # peer_absent envelope), so the tag alone says nothing about which
+          # code is running — the same trap that had standalone-v9 serving a
+          # different session's build while the Deployment still read "v9".
+          #
+          # e69c1882 carries peer_absent: a client that joins a session with no
+          # browser in it is told so immediately, instead of discovering it
+          # from a 65-second watchdog. Verified live against this digest — a
+          # client dialled at session "nobody-here" and received
+          # {"type":"peer_absent","from":"client"} on connect.
+          image: registry.triform.cloud/chromeless/signaling@sha256:e69c188249071fb4d7a5954b006727ec6d4f9ba2e0e83ee4bcc130435c9bfae2
           env:
             - name: SIGNALING_PORT
               value: "8080"
@@ -219,7 +230,11 @@ spec:
           # lint-deploy-pin fails if they drift. The digest is the part a
           # rebuilt tag cannot fake — standalone-v9 was rebuilt over by
           # another session while the Deployment still reported v9.
-          image: registry.triform.cloud/chromeless/chromeless:cr7727-3f9e3d00d1f7
+          # Pinned by DIGEST. cr7727-08f76460a5bc carries every fix in this
+          # branch plus the ICE-send regression fix; verified live on this
+          # digest with 11 "ws Send(ice) failed" events and ZERO driver
+          # failures, where the previous image recycled the guest on three.
+          image: registry.triform.cloud/chromeless/chromeless@sha256:aa1686079e8734aeba5392a3fc7f14be0134ac250d605683092fd0ccc311cf0e
           env:
             - name: SESSION_ID
               value: dev

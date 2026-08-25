@@ -62,7 +62,11 @@ export type Envelope =
   | { type: "ice";    from: "client" | "browser"; data: RTCIceCandidateInit | null }
   | { type: "bye";    from: "client" | "browser"; data?: undefined }
   | { type: "request_renegotiate"; from: "client" | "browser"; data?: null }
-  | { type: "probe_result"; from: "client" | "browser"; data: ProbeResult };
+  | { type: "probe_result"; from: "client" | "browser"; data: ProbeResult }
+  // Advisory, broker -> peer: nobody holds the counterpart role in this
+  // session. Carries no payload; it exists so a client on the wrong session id
+  // learns that in milliseconds instead of after the 65s offer watchdog.
+  | { type: "peer_absent"; from: "client" | "browser"; data?: undefined };
 
 export type SessionStatus = "idle" | "connecting" | "connected" | "failed" | "closed";
 
@@ -488,6 +492,18 @@ export class ChromelessSession {
         break;
       case "probe_result":
         this.log("info", `← probe_result from ${env.from} (ignored on client)`);
+        break;
+      case "peer_absent":
+        // The broker telling us nobody is on the other end of this session.
+        // Surface it NOW: the connection looks perfect from here — socket
+        // open, auth accepted, ICE config in hand — and the only other signal
+        // is the 45s+20s watchdog below, which is a long time to stare at a
+        // page that appears to be working. The overwhelmingly common cause is
+        // a mistyped session id, so name the session in the message.
+        this.log("err",
+          `no browser is connected to session "${this.sessionId}" — check the ` +
+          `session id, or start a worker for it`);
+        this.emit("status", "failed", `no browser on session "${this.sessionId}"`);
         break;
     }
   }

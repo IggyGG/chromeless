@@ -1174,3 +1174,92 @@ func TestWS_StaleSDPIsNotReplayed(t *testing.T) {
 		t.Fatalf("a fresh offer was NOT replayed (%d); the T96 race is broken", replayed2)
 	}
 }
+
+// A peer that joins an empty session is TOLD, immediately.
+//
+// Regression test for a minute of the user's life. A client dialled session
+// "devs" while the worker was on "dev" — one stray keystroke in a text input
+// that was styled `border:none; outline:none; background:transparent`, so it
+// did not look editable. From the client everything looked correct: socket
+// open, auth accepted, ICE config delivered, probe green. It simply never
+// received an offer, because no browser was in that session. The only signal
+// was the client's own watchdog, 65 seconds later, into a log.
+//
+// The broker is the ONLY party that can know this at join time, and it
+// already had the fact — it just said nothing.
+//
+// Note what this does NOT assert: that a peer joining a POPULATED session gets
+// no notice. That is the second half and is checked below, because a bare
+// "does it send" test would pass just as well if the notice were sent
+// unconditionally, which would make it noise and train people to ignore it.
+func TestWS_LonePeerIsToldTheCounterpartIsAbsent(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/lonely"
+
+	dial := func(name string) (*websocket.Conn, chan string) {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		frames := make(chan string, 32)
+		go func() {
+			defer close(frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				frames <- string(raw)
+			}
+		}()
+		return c, frames
+	}
+	collect := func(frames chan string) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(750 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+
+	// First in: nobody else is here.
+	c1, f1 := dial("client")
+	if err := c1.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"hello","from":"client"}`)); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	got := collect(f1)
+	if !strings.Contains(got, `"type":"peer_absent"`) {
+		t.Fatalf("lone peer was not told it is alone; frames=%q", got)
+	}
+
+	// Second in: the counterpart IS present, so no notice. Without this the
+	// test would pass on an implementation that always warns.
+	c2, f2 := dial("browser")
+	if err := c2.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"hello","from":"browser"}`)); err != nil {
+		t.Fatalf("browser write: %v", err)
+	}
+	got2 := collect(f2)
+	if strings.Contains(got2, `"type":"peer_absent"`) {
+		t.Fatalf("peer joining a POPULATED session was wrongly warned; frames=%q", got2)
+	}
+}

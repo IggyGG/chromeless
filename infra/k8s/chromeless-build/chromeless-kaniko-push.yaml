@@ -73,7 +73,13 @@ spec:
   # transient registry 502 is fine. More than that and it's
   # almost always a cred / scale-down / context-missing bug that
   # retries won't fix.
-  backoffLimit: 1
+  # backoffLimit 1 -> 5. An admission rejection (OutOfcpu) costs about a
+  # second and produces no container, so ONE retry is exhausted before a
+  # neighbouring pod could possibly free capacity — the job then reports
+  # BackoffLimitExceeded, which looks identical to a push that actually
+  # failed. Retries are cheap here precisely because rejection is instant:
+  # the expensive part only begins once a pod is admitted.
+  backoffLimit: 5
   # 5 min hard ceiling. Cold layer push is ~30-60s; this leaves
   # generous headroom for registry flakes.
   activeDeadlineSeconds: 300
@@ -146,7 +152,14 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: "1"
+              # 1 -> 200m (2026-08-25). Same reasoning as build-job-x264.yaml:
+              # the request buys ADMISSION, the limit does the work. On
+              # 2026-08-25 this job died OutOfcpu twice in ten seconds
+              # ("requested: 1000, used: 47725, capacity: 48000") on a node
+              # whose ACTUAL usage was 13241m — 34 cores idle behind a wall of
+              # other teams' reservations. A push that takes ~70s of mostly-IO
+              # work should not hold a full core reserved to start.
+              cpu: "200m"
               memory: "1Gi"
               # Explicit ephemeral REQUEST decoupled from the 8Gi limit
               # (2026-06-29, tightened 2026-07-02). Setting only the limit

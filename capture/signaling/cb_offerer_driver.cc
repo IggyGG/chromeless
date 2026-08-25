@@ -913,7 +913,24 @@ void CbOffererDriver::SendIceCandidateEnvelope(
   payload.sdp_m_line_index = candidate.sdp_mline_index();
   env.data = std::move(payload);
   if (!ws_client_->Send(env)) {
-    FailWithReason("ws Send(ice) failed");
+    // Log and continue. A trickled ICE candidate that cannot be sent means
+    // the SOCKET is gone, not that the driver is broken — the WS layer's own
+    // close path will end the session in the normal way, and if it does not,
+    // the peer connection's ICE timeout will.
+    //
+    // This used to FailWithReason, which is terminal. Once OnFailed started
+    // recycling the guest (rather than only logging), that turned a viewer
+    // closing their tab mid-handshake into a process exit: observed live
+    // 2026-08-25 as three "FAIL state=AwaitingAnswer reason=ws Send(ice)
+    // failed" in a row, each recycling a perfectly healthy browser, with
+    // supervisord reporting "exited: chromium (exit status 0; not expected)".
+    //
+    // Exactly the severity mistake the empty-ICE-candidate fix corrected one
+    // layer up: ICE is lossy by design, and one undeliverable candidate is
+    // one fewer path, not a dead session.
+    LOG(WARNING) << kLogPrefix << "ws Send(ice) failed — candidate dropped; "
+                    "the transport is closing and will end the session on its "
+                    "own path";
   }
 }
 
@@ -922,7 +939,12 @@ void CbOffererDriver::SendIceEndOfCandidates() {
   // single-sited — the negative-test fixture + the M3 R2 wiring + us
   // all share the same constructor.
   if (!ws_client_->Send(MakeIceEndOfCandidates(PeerRole::kBrowser))) {
-    FailWithReason("ws Send(ice end-of-candidates) failed");
+    // Same reasoning as SendIceCandidate above: a marker that cannot be
+    // delivered is not a broken driver. It is also the LEAST consequential
+    // frame to lose — the receiver treats end-of-candidates as an
+    // optimisation, and gathering completes regardless.
+    LOG(WARNING) << kLogPrefix
+                 << "ws Send(ice end-of-candidates) failed — marker dropped";
   }
 }
 

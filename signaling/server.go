@@ -515,6 +515,22 @@ func (s *session) unregister(p *peer) {
 // under the session lock because peers on two goroutines touch the same
 // session; the flag itself is only ever read on p's own goroutine, after its
 // readPump has returned.
+// peerPresent reports whether the counterpart role is currently registered.
+//
+// Exists so a joining peer can be told IMMEDIATELY that it is alone, instead
+// of discovering it by timeout. A client that dials the wrong session id — a
+// stray keystroke turning "dev" into "devs" is the observed case — otherwise
+// sits in a perfectly healthy-looking connection: the WS is open, auth
+// succeeded, the ICE config arrived, and nothing ever explains that no browser
+// is on the other end. The client's own watchdog reaches the right conclusion
+// after 65 seconds, into a log nobody is reading.
+func (s *session) peerPresent(role peerRole) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.peers[role]
+	return ok
+}
+
 func (s *session) markNegotiated(p *peer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -761,6 +777,31 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 		p.log.Info("peer joined")
 	}
 	recordPeerRegistered(p.role, tenantID) // T38/T67 metrics
+
+	// Tell a lone peer it is alone, now rather than by timeout.
+	//
+	// The broker is the only party that knows this. A client on the wrong
+	// session id looks entirely healthy from its own side — socket open, auth
+	// accepted, ICE config delivered — and simply never receives an offer. Its
+	// watchdog eventually prints the right hint ("check that it reached
+	// signaling with the same session id") after 65 seconds, into a log. The
+	// observed case was a stray keystroke turning "dev" into "devs", and it
+	// costs the user a minute of staring at a working-looking page.
+	//
+	// Advisory only: not in validTypes, carries no SDP, and an older client
+	// that does not understand it drops it as an unknown type — which is the
+	// documented behaviour for forward-compatibility, so this is safe to send
+	// unconditionally.
+	if !sess.peerPresent(p.role.other()) {
+		if raw, err := json.Marshal(Envelope{Type: "peer_absent", From: p.role}); err == nil {
+			select {
+			case p.send <- raw:
+				p.log.Info("counterpart absent; advised peer",
+					slog.String("missing_role", string(p.role.other())))
+			default:
+			}
+		}
+	}
 
 	// Forward the first envelope before starting pumps.
 	if _, ok := validTypes[first.Type]; ok {

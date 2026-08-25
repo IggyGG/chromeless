@@ -133,82 +133,117 @@ export interface CursorOverlayOptions {
  *     try { r.update(JSON.parse(e.data)); } catch {}
  *   };
  */
+/** Largest custom cursor a browser will accept. Chrome ignores a `cursor:`
+ *  declaration whose image exceeds 128x128 outright — the shape silently
+ *  reverts to whatever the cascade says, which looks like the feature not
+ *  working rather than the image being rejected. The wire cap is 64 KiB of
+ *  base64 (isValidEnvelope), which comfortably permits an oversized PNG, so
+ *  the size has to be checked on this side too. */
+const MAX_CUSTOM_CURSOR_PX = 128;
+
+/**
+ * Translate a v1 cursor shape into a CSS `cursor` value.
+ *
+ * Nearly the identity function, and that is by design: 34 of the 36 values in
+ * KNOWN_SHAPES are literal CSS cursor keywords, because the protocol was
+ * written that way (docs/protocols/cursor-channel.md — "the standard CSS
+ * cursor keywords are accepted as values for `shape`"). KNOWN_SHAPES doubles
+ * as the injection guard, so nothing unvalidated reaches a style property.
+ *
+ * The two exceptions:
+ *   - "none"   is already a CSS keyword; handled by the caller as the
+ *              visibility signal it doubles as on the wire.
+ *   - "custom" is not, and becomes `url(<png>) <hx> <hy>, default`.
+ *
+ * A fallback keyword after the url() list is MANDATORY in CSS — without it
+ * the whole declaration is invalid and the cursor silently does not change.
+ */
+export function cssCursorFor(shape: string, d: CursorData): string {
+  if (shape !== "custom") return shape;
+
+  if (!d.custom_image_b64 || d.image_format !== "png") return "default";
+
+  // hotspot was parsed and then IGNORED by the old overlay renderer, which
+  // drew every custom image top-left-aligned at the reported point. CSS takes
+  // the hotspot natively, so honouring it here fixes a live defect rather than
+  // preserving one. Coordinates must be within the image or the declaration is
+  // dropped; clamp rather than trust the guest.
+  const hx = clampHotspot(d.hotspot?.x);
+  const hy = clampHotspot(d.hotspot?.y);
+  const url = `data:image/png;base64,${d.custom_image_b64}`;
+  return `url("${url}") ${hx} ${hy}, default`;
+}
+
+function clampHotspot(v: number | undefined): number {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return 0;
+  return Math.min(Math.round(v), MAX_CUSTOM_CURSOR_PX - 1);
+}
+
 export function renderCursor(
   video: HTMLVideoElement,
   opts: CursorOverlayOptions = {},
 ): { update(env: unknown): void; dispose(): void } {
-  // Hide whatever cursor the streamed frame may carry.
+  // The OS draws the pointer; we only tell it WHICH pointer to draw.
+  //
+  // This used to be `video.style.cursor = "none"` plus an overlay <div>
+  // teleported to the coordinate the GUEST reported. That could never feel
+  // native, and not because of round-trip latency — because the position data
+  // mostly does not exist. The guest emits a cursor envelope only on a
+  // cursor-change EDGE (cb_cursor_xy_join.h:53 — "chromium calls SetCursor
+  // only when the renderer asks for a different cursor"), and the
+  // position-only mouse-move observer that would fill the gaps was left
+  // out of scope (cb_cursor_emit_policy.h:71, "until SigNoz shows the cursor
+  // lagging mouse motion"). So moving across uniform space emitted NOTHING:
+  // the overlay froze at the last shape edge and teleported at the next one.
+  //
+  // Setting `cursor:` on the <video> hands position back to the OS, at zero
+  // latency, and keeps the channel for the thing it genuinely knows: which
+  // shape the page wants under the pointer. Hover feedback arrives one RTT
+  // late, which is correct — that IS remote information.
   const prevCursor = video.style.cursor;
-  video.style.cursor = "none";
 
+  // A hidden marker, not a renderer. It exists ONLY to publish the shape the
+  // channel last delivered, because that is the observability seam the
+  // interactive suite reads (tests/interactive/harness.py:436 queries
+  // [data-role="cursor-overlay"] and takes dataset.shape). Keeping it costs
+  // one detached <div> and protects a check that sits in suite_channels,
+  // which aborts the whole run on failure.
+  //
+  // It draws nothing: display stays "none" for the element's entire life.
   const overlay = document.createElement("div");
   overlay.dataset["role"] = "cursor-overlay";
-  overlay.style.position = "fixed";
-  overlay.style.left = "0";
-  overlay.style.top = "0";
-  overlay.style.pointerEvents = "none";
-  overlay.style.willChange = "transform";
-  overlay.style.transform = "translate3d(-9999px,-9999px,0)";
-  overlay.style.width = "16px";
-  overlay.style.height = "16px";
-  overlay.style.cursor = "default";
-  overlay.style.zIndex = "2147483646";
   overlay.style.display = "none";
-
-  // We render the actual glyph as a single inner span carrying the CSS
-  // cursor — this lets the OS-native cursor draw at the overlay
-  // position using `cursor:` on a non-empty element. (Modern browsers
-  // require pointer events for cursor display, so we use a tiny dot
-  // with mouse passthrough disabled — the cursor still shows because
-  // the browser still queries the styled element for cursor when the
-  // mouse hovers it implicitly via the overlay.)
-  //
-  // Practical reality: relying on CSS `cursor` outside a real hover is
-  // unreliable. So we draw an inline-SVG arrow for `default`/`pointer`
-  // and a text-caret SVG for `text`, and use a 1×1 transparent image
-  // as a fallback for everything else (deferred to Phase 2 polish).
-  const inner = document.createElement("span");
-  inner.style.display = "block";
-  inner.style.width = "100%";
-  inner.style.height = "100%";
-  overlay.appendChild(inner);
 
   const container = opts.container ?? document.body;
   container.appendChild(overlay);
 
-  const getRect = opts.videoRect ?? (() => video.getBoundingClientRect());
-  const getSize = opts.videoSize ?? (() => ({
-    width: video.videoWidth || 0,
-    height: video.videoHeight || 0,
-  }));
+  // Retained so a custom-cursor PNG can be sized against the video box; the
+  // position mappers are no longer used for rendering. sourceToViewport stays
+  // exported and tested because main.ts's videoContentMapper is its inverse
+  // and the pair is load-bearing for INPUT coordinates either way.
+  void opts.videoRect;
+  void opts.videoSize;
 
   const update = (env: unknown): void => {
     if (!isValidEnvelope(env)) return;
     const d = env.data;
+
+    // `visible: false` is the guest saying the pointer is hidden over this
+    // content (a video going fullscreen, a page that sets cursor:none). Honour
+    // it literally — `cursor: none` is the CSS spelling of the same thing.
     if (!d.visible) {
-      overlay.style.display = "none";
+      overlay.dataset["shape"] = "none";
+      video.style.cursor = "none";
       return;
     }
-    const rect = getRect();
-    const { width: vw, height: vh } = getSize();
-    const { x: cx, y: cy } = sourceToViewport(d.x, d.y, rect, vw, vh);
 
-    overlay.style.display = "block";
-    overlay.style.transform = `translate3d(${Math.round(cx)}px, ${Math.round(cy)}px, 0)`;
-
+    // d.x / d.y are deliberately NOT read. Position is the OS's job now; see
+    // the note at the top of this function's enclosing scope for why the
+    // remote coordinates were never a usable position source anyway. They stay
+    // validated in isValidEnvelope so the wire contract is unchanged.
     const shape = KNOWN_SHAPES.has(d.shape) ? d.shape : "default";
     overlay.dataset["shape"] = shape;
-
-    if (shape === "custom" && d.custom_image_b64 && d.image_format === "png") {
-      const url = `data:image/png;base64,${d.custom_image_b64}`;
-      inner.style.backgroundImage = `url("${url}")`;
-      inner.style.backgroundRepeat = "no-repeat";
-      inner.style.backgroundSize = "contain";
-      inner.innerHTML = "";
-    } else {
-      inner.style.backgroundImage = "";
-      inner.innerHTML = svgFor(shape);
-    }
+    video.style.cursor = cssCursorFor(shape, d);
   };
 
   const dispose = (): void => {
@@ -219,55 +254,15 @@ export function renderCursor(
   return { update, dispose };
 }
 
-/** Inline SVG glyphs for the most common shapes. Anything not covered
- *  here renders as the default arrow. Sizes are 16x16 SVGs centered on
- *  the (0,0) hotspot for arrow / pointer; (8,8) for crosshair / text.
- *  Phase 2 will replace these with a richer set. */
-function svgFor(shape: string): string {
-  switch (shape) {
-    case "pointer":
-      // Hand
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="22" viewBox="0 0 20 22">
-        <path fill="white" stroke="black" stroke-width="1.2"
-          d="M5 1v9.5L3.2 8.7c-.7-.7-1.8-.7-2.4 0-.7.7-.7 1.8 0 2.4l5.7 6c.7.8 1.7 1.2 2.7 1.2h4.4c2 0 3.6-1.6 3.6-3.6V8.5c0-1-.8-1.8-1.8-1.8s-1.8.8-1.8 1.8V6.7c0-1-.8-1.8-1.8-1.8s-1.8.8-1.8 1.8V5c0-1-.8-1.8-1.8-1.8s-1.8.8-1.8 1.8V1c0-.6-.4-1-1-1S5 .4 5 1z"/>
-      </svg>`;
-    case "text":
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="20" viewBox="0 0 14 20" style="transform:translate(-7px,-10px)">
-        <path fill="white" stroke="black" stroke-width="1.2" d="M3 1h8M3 19h8M7 1v18"/>
-      </svg>`;
-    case "crosshair":
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" style="transform:translate(-8px,-8px)">
-        <path fill="none" stroke="black" stroke-width="1.2" d="M8 0v16M0 8h16"/>
-      </svg>`;
-    case "wait":
-    case "progress":
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-        <circle cx="8" cy="8" r="6" fill="white" stroke="black" stroke-width="1.2"/>
-        <path d="M8 4v4l3 2" fill="none" stroke="black" stroke-width="1.2"/>
-      </svg>`;
-    case "not-allowed":
-    case "no-drop":
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-        <circle cx="8" cy="8" r="6" fill="white" stroke="red" stroke-width="2"/>
-        <path d="M3 13L13 3" stroke="red" stroke-width="2"/>
-      </svg>`;
-    case "grab":
-    case "grabbing":
-    case "move":
-    case "all-scroll":
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
-        <path fill="white" stroke="black" stroke-width="1.2"
-          d="M10 2l3 3h-2v4h4V7l3 3-3 3v-2h-4v4h2l-3 3-3-3h2v-4H5v2L2 10l3-3v2h4V5H7z"/>
-      </svg>`;
-    case "default":
-    default:
-      // Arrow
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="22" viewBox="0 0 16 22">
-        <path fill="white" stroke="black" stroke-width="1.2"
-          d="M1 1v18l5-4h7L1 1z"/>
-      </svg>`;
-  }
-}
+/* The inline-SVG glyph set that used to live here is gone.
+ *
+ * It covered 6 shapes (pointer, text, crosshair, wait/progress,
+ * not-allowed/no-drop, grab-family) out of the 36 the protocol defines, so all
+ * 20 resize cursors plus zoom-in/zoom-out/help/vertical-text/context-menu/
+ * alias/copy/cell rendered as a plain arrow. The OS now draws every one of
+ * them natively, at the right size for the display and matching the user's
+ * own theme — so removing this is a fidelity upgrade, not a simplification. */
+
 
 /** Convenience: subscribe to a data channel and render on every message.
  *  Returns the underlying renderer so callers can dispose. */

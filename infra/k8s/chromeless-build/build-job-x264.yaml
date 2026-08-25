@@ -358,7 +358,28 @@ spec:
               # 12 -> 6 -> 2 -> 1.5, memory 96Gi -> 72Gi). The durable fix is
               # not a better number, it is keeping the request at the floor
               # that buys admission and letting the LIMIT do the work.
-              cpu: "1500m"
+              # 1500m -> 200m (2026-08-25). Fifth adjustment, and the last one
+              # that should ever be needed, because it stops pretending the
+              # request is a capacity estimate.
+              #
+              # Measured on triform-8 today:
+              #   reserved  47725m of 48000m   (275m free)
+              #   ACTUAL    13241m             (34 cores genuinely idle)
+              # The reservation is fiction — every large reserver is another
+              # team's pod (forgejo-runner 6500m x2, longhorn 5760m,
+              # triform-builder 3000m) and none of them are ours to resize.
+              #
+              # The request buys ADMISSION and nothing else. The 40-core LIMIT
+              # is what autoninja actually expands into, and it is unchanged,
+              # so the build's real compute envelope is identical — it still
+              # spreads across whatever is genuinely idle, which today is 34
+              # cores. What a 200m request gives up is a GUARANTEE under
+              # contention, which a batch build competing with latency-
+              # sensitive tenants should not be holding anyway.
+              #
+              # The honest fix remains reservation hygiene on these nodes.
+              # This is a workaround, recorded as one.
+              cpu: "200m"
               # MEASURED, not guessed. A full build of this target list peaks at
               # ~57 GiB (kubectl top, sampled through compile + link on
               # 2026-08-19: steady ~50 GiB, peak 56,963 Mi). The request was
