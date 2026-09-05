@@ -4,15 +4,26 @@ For people with none of the triform infrastructure: one machine, one port, a
 username and a password, a real browser in a tab.
 
 ```bash
-eval "$(cd infra/gateway && go run ./cmd/keygen)"
+CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 make standalone-up
+```
+
+Docker is the only prerequisite. The script (`infra/standalone-up.sh`) builds
+the gateway image, runs `keygen` from inside it, writes the keypair, the
+worker's token and a generated login to `infra/.env` once, starts the stack
+with `compose up --wait`, and prints the URL and the credentials. Open
+<https://localhost:8443>, accept the certificate once, sign in, and type a URL.
+`make standalone-down` stops it; the credentials and the certificate survive so
+the next `up` neither re-warns the browser nor rotates the login.
+
+By hand, the same three steps are:
+
+```bash
+eval "$(cd infra/gateway && go run ./cmd/keygen)"      # needs Go; or run /keygen from the gateway image
 
 CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
 CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
   docker compose -f infra/compose.yaml up
 ```
-
-Open <https://localhost:8443>, accept the certificate once, sign in, and type a
-URL.
 
 Kubernetes deployments do not use any of this — there an Ingress terminates TLS
 and the controller mints sessions. See

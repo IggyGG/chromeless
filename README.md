@@ -44,23 +44,31 @@ build it (below) or use one your organization already built.
 ```bash
 git clone <this-repo> && cd chromeless
 
-# Three exports: the keypair the gateway signs with and the broker verifies
-# against, plus the token the browser itself presents to the broker. All three
-# are needed — with the broker's key set and the worker's token missing, the
-# broker refuses the browser and nothing but a WebSocket close code says so.
-eval "$(cd infra/gateway && go run ./cmd/keygen)"
+CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 make standalone-up
+```
 
+That needs Docker and nothing else. It builds the gateway image, mints the
+keypair the gateway signs with and the broker verifies against plus the token
+the browser presents to the broker, generates a login, writes all of it to
+`infra/.env` once, starts the stack, and prints the URL and credentials. Open
+<https://localhost:8443>, accept the certificate once, sign in, and type a URL:
+you are driving a real Chromium. `make standalone-down` stops it and keeps the
+credentials; delete `infra/.env` to rotate them.
+
+The same thing by hand, if you would rather see the parts:
+
+```bash
+eval "$(docker run --rm --entrypoint /keygen chromeless-gateway:dev)"   # or: cd infra/gateway && go run ./cmd/keygen
 CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
 CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
   docker compose -f infra/compose.yaml up
 ```
 
-Then open <https://localhost:8443>, accept the certificate once, and sign in.
-Type a URL in the address bar and you are driving a real Chromium.
-
-Three variables are required and none has a default. `CHROMELESS_IMAGE`
-because this repo publishes no images and there is nothing honest to point at;
-`CHROMELESS_USER` / `CHROMELESS_PASS` because a built-in default password is
+All three of keygen's exports are needed: with the broker's key set and the
+worker's token missing, the broker refuses the browser and nothing but a
+WebSocket close code says so. `CHROMELESS_IMAGE` has no default because this
+repo publishes no images and there is nothing honest to point at;
+`CHROMELESS_USER` / `CHROMELESS_PASS` have none because a built-in password is
 worse than no login at all — it looks like protection. Compose fails fast on
 each with a message.
 
