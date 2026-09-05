@@ -406,17 +406,18 @@ test-e2e:
 # only because tests/**/README.md counts as an invoker and its README names
 # run.py — true for a human, false for CI. 28 checks that nothing ran.
 #
-# NOT in test-all-ci. It needs a live standalone stack, two port-forwards, and
-# a worker restart per run (one session per worker process — a second run
-# against the same pod gets no video and reports ~20 mysterious failures).
-# Nightly, beside test-e2e.
+# NOT in test-all-ci. It needs a deployed standalone stack and cluster access;
+# run-against-cluster.sh arranges the port-forwards, reaps stray test Chromes,
+# checks the fixture endpoint and reads the credentials — each of which gave a
+# plausible wrong answer at least once when done by hand. Nightly, beside
+# test-e2e. Pass INTERACTIVE_ARGS="--only mouse" or "--restart".
 #
 # Prerequisites are documented in tests/interactive/README.md. The suite
 # reports what is missing rather than failing obscurely.
 test-interactive:
-	@if [ -f tests/interactive/run.py ]; then \
-	  echo ">>> interactive suite (tests/interactive) — needs a live stack"; \
-	  python3 tests/interactive/run.py $(INTERACTIVE_ARGS); \
+	@if [ -f tests/interactive/run-against-cluster.sh ]; then \
+	  echo ">>> interactive suite (tests/interactive) — needs a deployed standalone stack"; \
+	  ./tests/interactive/run-against-cluster.sh $(INTERACTIVE_ARGS); \
 	else \
 	  echo "skip: tests/interactive/ not present"; \
 	fi
