@@ -37,10 +37,20 @@ running chromeless.
 
 ### 1. Build + push images
 
+The browser image is a from-source Chromium build and cannot be produced with a
+plain `docker build`: run `build/chromeless-build.sh` (4–8 h cold, ~1 h warm;
+`build/README.md`), which stages a context for `build/Dockerfile.runtime`, then
+push it with `infra/k8s/chromeless-build/chromeless-kaniko-push.sh`. The tag is
+`cr<chromium-branch>-<repo-sha>` and the result is recorded in
+`build/guest-release.json`. The `infra/Dockerfile` this section used to name
+was the pre-M7 stock-Chromium image and no longer exists.
+
+The Go services build normally:
+
 ```
 docker buildx build --platform linux/amd64 \
-    -t ghcr.io/<org>/chromeless/chromium:<tag> \
-    -f infra/Dockerfile . --push
+    -t ghcr.io/<org>/chromeless/gateway:<tag> \
+    -f infra/gateway/Dockerfile . --push          # context is the repo root
 
 docker buildx build --platform linux/amd64 \
     -t ghcr.io/<org>/chromeless/signaling:<tag> \
@@ -56,8 +66,11 @@ docker buildx build --platform linux/amd64 \
     -f infra/turn-issuer/Dockerfile infra/turn-issuer --push
 ```
 
-(Plus `chromeless-metrics-sidecar`, `input-bridge`, `cursor-watcher`,
-`clipboard-bridge`, `file-bridge` images per `infra/k8s/cloud-browser-session.yaml`.)
+The `input-bridge`, `cursor-watcher`, `clipboard-bridge` and `file-bridge`
+sidecars this section used to list were retired in M7: input, cursor, clipboard
+and file transfer now ride data channels terminated inside the browser process.
+`chromeless-metrics-sidecar` still exists and runs inside the worker image under
+supervisord.
 
 ### 2. Install seccomp profile on every node
 

@@ -1,5 +1,7 @@
 # The first wheel event of every scroll gesture is discarded
 
+> **RESOLVED.** Kept for the diagnosis; see `docs/findings/README.md`.
+
 **Status:** FIXED and VERIFIED WORKING against a live deployment (image
 `cr7727-224c19413e24`, 2026-08-17):
 

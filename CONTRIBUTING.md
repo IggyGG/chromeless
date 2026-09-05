@@ -1,108 +1,92 @@
 # Contributing to chromeless
 
-Short guide for the team working in a shared worktree across many
-parallel tasks. Lives next to [`PROJECT_BRIEF.md`](./PROJECT_BRIEF.md).
+Start with [`CLAUDE.md`](./CLAUDE.md). It is written for anyone making changes
+here, human or agent, and it records the things that cost time to rediscover.
+This file is the short procedural version.
 
-## Staging discipline
+## Before anything else
 
-We work in a single shared worktree. That means several teammates'
-work-in-progress files sit side-by-side in the same directory tree
-between commits.
-
-**Stage by exact path. Never `git add -A`, `git add .`, or
-`git add <directory>` without a clear list of paths.**
-
-Why: those broad forms have repeatedly swept other teammates'
-in-progress files into the wrong commit (e.g., T72's stats handler
-landed inside T71's commit, T76's binary landed inside its own commit
-because nobody pruned it). When that happens:
-
-- The commit message lies about scope.
-- Bisect across history loses meaning.
-- Reviewers miss diffs that are nominally in someone else's lane.
-
-The right pattern:
-
-```sh
-# good — every file is named explicitly
-git add capture/streamer-page/streamer.js \
-        capture/chromeless-metrics-sidecar/stats_handler.go \
-        docs/protocols/stats-channel.md
-
-# also good — pathspec-magic when a directory is genuinely all-yours
-git add 'capture/chromeless-metrics-sidecar/*.go' \
-        'capture/chromeless-metrics-sidecar/*.md'
+```bash
+make verify        # ~15 s. Everything checkable without Chromium or Docker.
+make help          # the rest
 ```
 
-Things to avoid:
+## Work in your own worktree
 
-```sh
-# BAD — sweeps everything in the worktree
-git add -A
-git add .
+Several people and several agent sessions share this repository directory, and
+git gives them no interlock. The primary checkout is for orientation and for
+spawning worktrees, never for authoring:
 
-# RISKY — fine in your own private fork; not in the shared worktree
-git add capture/        # if anyone else has WIP in capture/
-git add tests/          # likewise
+```bash
+git fetch origin
+git worktree add .claude/worktrees/<task> -b <branch> origin/main
+git worktree lock .claude/worktrees/<task> --reason "active session: <task>"
+cd .claude/worktrees/<task>
 ```
 
-`git status` before staging, `git diff --cached` before committing.
-Built artifacts (Go binaries, dist/ output, *.pid, etc.) belong in
-`.gitignore`, not in commits — see the existing
-[`.gitignore`](./.gitignore) and any module-local
-`*/.gitignore` for the patterns.
+Branch from `origin/main`, not from whatever the shared checkout happens to be
+on — it has sat on a stale branch for weeks at a time. Rules that follow, with
+the incident behind each in `CLAUDE.md`:
 
-## Commit messages
+- a failed `git checkout` means stop, not "continue and commit";
+- never `git reset --hard` or `git stash` in the shared checkout;
+- `.claude/worktrees/` is gitignored and holds full checkouts — exclude it from
+  every repo-wide search.
 
-- One commit per task with the exact `T<N>: <short description>`
-  message specified in the task's DoD.
-- Drive-by fixes (touching files outside your task's lane) get a
-  one-line note in the commit message body, not their own commit,
-  unless they're substantive enough to need a separate task.
-- Co-author lines are optional; we don't require them across
-  teammates.
+## Changes land through pull requests on Forgejo
 
-## Branches
+The remote is `forgejo.triform.dev/triform/chromeless`; the GitHub mirror runs no
+CI. Push your branch, open a PR against `main`, and wait for the checks. Finish
+the branch before opening the PR — a push to an open PR can leave it in a
+"checking" state that never resolves (`CLAUDE.md` explains the mechanism).
 
-- We commit to `main` directly in this worktree. Feature branches
-  add coordination overhead the team-lead → teammate task model
-  doesn't need.
-- Force-pushing or rewriting history on `main` is forbidden.
-  Mistakes are fixed forward.
+CI executes `.github/workflows/`, but on Forgejo, which resolves actions from its
+own mirror. Prefer a `run:` step to a third-party `uses:`; `make lint-workflows`
+enforces this.
 
-## Testing
+## Commits
 
-- Each module has its own test suite (Go: `go test ./...`; client:
-  `npm test`; integration: `cd tests/integration && go test ./...`).
-- Run the relevant suite before committing.
-- The integration tests in `tests/integration/` are a single Go
-  module — if your change touches a file that other teammates'
-  tests import (e.g., the shared `envelope` type), the entire
-  module's compile health is your problem to keep green even on a
-  drive-by edit.
-- Don't commit binaries (`signaling/signaling`,
-  `capture/chromeless-metrics-sidecar/chromeless-metrics-sidecar`,
-  `signaling/turn-issuer/turn-issuer`, etc.). Each module's
-  `.gitignore` excludes them; if you see one in `git status`, it
-  means an old binary leaked through — delete and re-run
-  `go build` into a different output path.
+Conventional-commit subjects (`fix(gateway): …`, `feat(client): …`,
+`docs: …`, `test(interactive): …`) with a body that records **why** — what the
+symptom was, what was measured, what was ruled out. The log is the project's
+memory; read a few recent bodies before writing yours.
 
-## Cross-team tasks
+Stage by exact path. `git add -A` and `git add .` have swept other people's
+in-progress files into the wrong commit more than once.
 
-When a task description says "lead is webrtc-dev; flag chromium-dev
-and infra-dev for review":
+## C++ in `capture/` is unverified until the build lane says otherwise
 
-- The lead writes the central piece (e.g., the protocol or design
-  doc + the central module).
-- Adjacent-lane edits are the lead's call: do them yourself if
-  they're ≤ ~50 lines and uncontroversial; flag the relevant
-  teammate in your team-lead message if they're larger.
-- The team-lead routes the review on its end.
+`capture/` is an out-of-tree Chromium embedder. There is no local Chromium tree
+and no way to compile it here; the only compiler is a 1–8 h build lane on a
+cluster. So:
+
+- grep `capture/` for an existing use of any Chromium API before you use it, and
+  check `docs/build/chromium-7727-api-pins.md`;
+- run `make lint-cxx` (a lint, not a compiler);
+- write **UNVERIFIED** in the commit body and the PR, and say so plainly in any
+  summary. Do not describe C++ work as done or working until the lane has built
+  it and `tests/interactive/` has run against the resulting image.
+
+## Tests
+
+| change touches | run |
+| --- | --- |
+| anything | `make verify` |
+| `client/` | `cd client && npm run typecheck && npm test` |
+| `infra/gateway/`, `signaling/` | `go test ./...` in that module |
+| the user-visible page | `tests/local/` against a deployed stack (real Chrome) |
+| input, data channels, dialogs | `tests/interactive/` against a deployed stack |
+| `capture/` | the build lane, then `tests/interactive/` on the new image |
+
+A test you have not watched fail proves nothing. When you fix a bug, revert the
+fix once and confirm the test goes red.
 
 ## Documentation
 
-- Protocol specs live under [`docs/protocols/`](./docs/protocols/).
-- Internal trade-off notes live under [`docs/internal/`](./docs/internal/).
-- Operational runbooks and observability live under [`infra/`](./infra/).
-- One short markdown file per topic; cross-link rather than
-  duplicate.
+- Protocol changes update `docs/protocols/` in the same change.
+- Comments explain **why**, usually by recording the failure that was expensive
+  to diagnose. Match the surrounding style.
+- A confirmed defect that cannot be fixed in the same change is written up in
+  `docs/findings/` with the file and symbol that would fix it.
+- `docs/README.md` says which documents are current and which are history. Keep
+  it that way when you add one. `docs/roadmap-ga.md` is the plan of record.
