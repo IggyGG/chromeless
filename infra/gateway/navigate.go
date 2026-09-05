@@ -32,6 +32,11 @@ import (
 // to cover a slow site — only a wedged or still-booting worker.
 const navTimeout = 15 * time.Second
 
+// contextWithNavTimeout bounds one CDP round trip from an HTTP handler.
+func contextWithNavTimeout(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), navTimeout)
+}
+
 type navigateRequest struct {
 	URL string `json:"url"`
 }

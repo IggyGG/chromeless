@@ -101,6 +101,9 @@ func (g *gateway) routes() http.Handler {
 	mux.Handle("/api/reload", g.requireSession(g.navCommand("Page.reload")))
 	mux.Handle("/api/stop", g.requireSession(g.navCommand("Page.stopLoading")))
 	mux.Handle("/api/current-url", g.requireSession(http.HandlerFunc(g.handleCurrentURL)))
+	// Resize the remote browser to the viewer's stage. See viewport.go for why
+	// this is an HTTP verb and not an input-channel message.
+	mux.Handle("/api/viewport", g.requireSession(http.HandlerFunc(g.handleViewport)))
 
 	// The test fixture has TWO sides, on purpose. The operator STORES it here,
 	// authenticated over TLS; the WORKER fetches it from a separate plain-HTTP

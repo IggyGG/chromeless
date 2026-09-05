@@ -22,6 +22,7 @@ import { attachControlChannel, type ControlChannelHandle } from "./src/control.j
 import { ClipboardChannel } from "./src/clipboard.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { resolveSignalingUrl } from "./src/config.js";
+import { followViewport, type ViewportFollower } from "./src/viewport.js";
 import {
   navigate,
   goBack,
@@ -55,6 +56,9 @@ const els = {
   status: $<HTMLSpanElement>("status"),
   statusText: $<HTMLSpanElement>("status-text"),
   video: $<HTMLVideoElement>("remote"),
+  // The element the video FILLS. The viewport follower watches this, not the
+  // <video>, whose box tracks the stream's own aspect ratio (src/viewport.ts).
+  stage: $<HTMLElement>("stage"),
   log: $<HTMLPreElement>("log"),
   sig: $<HTMLElement>("state-sig"),
   ice: $<HTMLElement>("state-ice"),
@@ -135,6 +139,31 @@ interface DemoAttachments {
 
 let session: ChromelessSession | null = null;
 let attach: DemoAttachments = emptyAttachments();
+
+// ---------- viewport follows the window ----------
+//
+// The remote browser is resized to match the stage, so the stream fills the
+// window instead of sitting in a 1280x720 letterbox. Process-lifetime: the
+// stage exists for the life of the page, and the follower only sends while a
+// session is connected (it is armed on "connected" and re-armed on every
+// reconnect, since a fresh guest may have booted at the default size).
+const viewport: ViewportFollower = followViewport(els.stage, {
+  onResult: (r, requested) => {
+    if (!r.ok) {
+      // One line, then silence: the follower stops itself. The common cause is
+      // a guest image that predates Cb.setViewport, which is a fact about the
+      // deployment, not something to retry on every resize.
+      log("warn", `viewport: remote resize unavailable (${r.error}); the stream stays at the guest's size`);
+      return;
+    }
+    const a = r.applied;
+    if (r.clamped) {
+      log("info", `viewport: asked ${requested.width}x${requested.height}, guest applied ${a.width}x${a.height}`);
+    } else {
+      log("info", `viewport: ${a.width}x${a.height}`);
+    }
+  },
+});
 
 function emptyAttachments(): DemoAttachments {
   return { detachInput: null, cursor: null, detachDrop: null, passthrough: null, fileUpload: null, control: null, detachClipboard: null };
@@ -344,6 +373,10 @@ function connect(sessionId: string): void {
       setPassthroughButtonState(enabled ? "on" : "off", false);
       setNavEnabled(true);
       void syncAddressBar();
+      // Size the remote to the stage NOW, and allow requests again if an
+      // earlier guest had refused them — a reconnect may land on a newer one.
+      viewport.resume();
+      viewport.sync();
     } else if (st === "failed") {
       setPassthroughButtonState("off", true);
       setNavEnabled(false);
