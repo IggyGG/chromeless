@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "base/files/file_path.h"
+#include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/path_service.h"
 #include "base/strings/stringprintf.h"
@@ -23,11 +24,38 @@ namespace {
 
 std::atomic<uint64_t> g_next_profile_id{0};
 
+// The switch name Chrome uses (chrome/common/chrome_switches.h, which this
+// //content embedder does not link). Spelled here rather than taken from
+// //content, which has no such switch of its own.
+constexpr char kUserDataDirSwitch[] = "user-data-dir";
+
 base::FilePath NextProfilePath() {
-  base::FilePath tmp_dir;
-  CHECK(base::PathService::Get(base::DIR_TEMP, &tmp_dir));
   const uint64_t profile_id =
       g_next_profile_id.fetch_add(1, std::memory_order_relaxed);
+
+  // --user-data-dir, when given, is the profile's home — the FIRST context
+  // gets it verbatim. infra/launch-chromeless.sh has passed
+  // `--user-data-dir=/home/cbuser/.config/chromium` since the beginning and
+  // it was read by nothing: every profile went under DIR_TEMP, so the
+  // cookies, history and logins the flag exists to keep died with the
+  // container, and a volume mounted at that path persisted an empty
+  // directory. The second and later contexts (CreateNewTarget's per-target
+  // ones) keep their own numbered dirs beneath it so two contexts never
+  // share a storage partition.
+  const base::CommandLine& cmd = *base::CommandLine::ForCurrentProcess();
+  if (cmd.HasSwitch(kUserDataDirSwitch)) {
+    const base::FilePath root = cmd.GetSwitchValuePath(kUserDataDirSwitch);
+    if (!root.empty()) {
+      return profile_id == 0
+                 ? root
+                 : root.AppendASCII(base::StringPrintf(
+                       "context_%llu",
+                       static_cast<unsigned long long>(profile_id)));
+    }
+  }
+
+  base::FilePath tmp_dir;
+  CHECK(base::PathService::Get(base::DIR_TEMP, &tmp_dir));
   return tmp_dir.AppendASCII(
       base::StringPrintf("cloud_browser_profile_%llu",
                          static_cast<unsigned long long>(profile_id)));

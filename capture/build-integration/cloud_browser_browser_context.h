@@ -14,10 +14,11 @@
 // We hand back nullptr for almost every optional delegate (download
 // manager, notifications, push, SSL state, permissions, …); the worker
 // is single-tenant, single-tab, server-side and has no use for them.
-// The only things we actually populate are GetPath() (a temp dir under
-// base::DIR_TEMP) and IsOffTheRecord() (false — we want stable storage
-// to persist for the duration of the worker's lifetime so chromium's
-// internal caches don't churn).
+// The only things we actually populate are GetPath() (--user-data-dir when
+// the launcher passes one, else a temp dir under base::DIR_TEMP) and
+// IsOffTheRecord() (false — we want stable storage to persist for the
+// duration of the worker's lifetime so chromium's internal caches don't
+// churn, and across restarts when the operator mounts a volume there).
 //
 // We deliberately mirror the headless_browser_context_impl shape, not
 // shell_browser_context — content_shell drags in download manager

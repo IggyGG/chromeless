@@ -11,6 +11,7 @@
 #include "base/logging.h"
 #include "base/values.h"
 #include "base/no_destructor.h"
+#include "base/strings/utf_string_conversions.h"
 #include "capture/build-integration/cb_control_channel.h"
 #include "capture/build-integration/cb_javascript_dialog_manager.h"
 #include "content/public/browser/devtools_agent_host.h"
@@ -89,7 +90,64 @@ content::WebContents* CbWebContentsDelegate::AdoptWebContents(
               << rwhv->GetViewBounds().ToString()
               << " total_adopted=" << adopted_.size();
   }
+  // Tell the viewer. Until this event existed a popup was visible only to
+  // something polling /json; the standalone client polls nothing, so an
+  // OAuth window opened and the user saw the opener sit there "doing
+  // nothing". The gateway's tab list is still authoritative — this is the
+  // nudge to go read it.
+  SendTabEvent("tab_opened", raw);
   return raw;
+}
+
+void CbWebContentsDelegate::SendTabEvent(const char* kind,
+                                         content::WebContents* wc) {
+  if (!control_channel_ || !wc) {
+    return;
+  }
+  base::DictValue payload;
+  // The DevTools target id is what /json lists and what the gateway's tab
+  // verbs take, so the viewer can correlate without a second lookup.
+  // GetOrCreateFor is idempotent: AdoptWebContents already created it.
+  payload.Set("targetId",
+              content::DevToolsAgentHost::GetOrCreateFor(wc)->GetId());
+  payload.Set("url", wc->GetLastCommittedURL().possibly_invalid_spec());
+  payload.Set("title", base::UTF16ToUTF8(wc->GetTitle()));
+  control_channel_->SendEvent(kind, std::move(payload));
+}
+
+void CbWebContentsDelegate::CloseContents(content::WebContents* source) {
+  // window.close() on a popup, or the opener closing it. content's default
+  // is a NO-OP, so before this override a popup that closed itself stayed
+  // alive and invisible — and the commonest real popup, an OAuth window,
+  // closes itself as its last act.
+  //
+  // Notify BEFORE destroying: the payload reads the WebContents.
+  SendTabEvent("tab_closed", source);
+
+  for (auto it = adopted_.begin(); it != adopted_.end(); ++it) {
+    if (it->get() == source) {
+      // The captured tab may be this one. The resolver observes it and
+      // clears itself in WebContentsDestroyed; main_parts then re-arms
+      // capture onto the initial tab (CV2-CAPTURE-FALLBACK) so the stream
+      // does not go dark and the 30 s no-frames watchdog does not fire.
+      //
+      // Erase via a local so the WebContents is destroyed AFTER the vector
+      // is consistent — its destructor can re-enter this delegate
+      // (WebContentsDestroyed observers, dialogs cancelling).
+      std::unique_ptr<content::WebContents> doomed = std::move(*it);
+      adopted_.erase(it);
+      LOG(INFO) << "CbWebContentsDelegate: CloseContents destroying adopted "
+                   "tab, total_adopted=" << adopted_.size();
+      doomed.reset();
+      return;
+    }
+  }
+  // Not ours: the initial tab, which main_parts owns for the life of the
+  // process. Chrome keeps the last tab of a window open too; closing the
+  // only surface a viewer has would strand the session. Logged so a page
+  // that tries is visible in the guest log.
+  LOG(INFO) << "CbWebContentsDelegate: CloseContents on the initial tab "
+               "ignored (a session needs one tab)";
 }
 
 content::WebContents* CbWebContentsDelegate::AddNewContents(

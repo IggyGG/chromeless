@@ -79,6 +79,7 @@
 #include "capture/signaling/cb_offerer_driver.h"
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
+#include "api/rtp_sender_interface.h"  // CV2-KEYFRAME — video_sender_
 #include "content/public/browser/browser_main_parts.h"
 #include "rtc_base/thread.h"
 
@@ -355,6 +356,14 @@ class CloudBrowserBrowserMainParts
   // SetRecaptureOnRvhSwapCallback.
   void RearmCaptureAfterRvhSwap(int attempts_left);
 
+  // CV2-CAPTURE-FALLBACK — the captured tab was destroyed (a popup closed
+  // itself while streamed); re-arm capture on the initial tab.
+  void RearmCaptureOnInitialTab();
+
+  // CV2-KEYFRAME — ask the video encoder for an IDR after the capturer
+  // reports a wholesale content change (retarget, resize).
+  void RequestVideoKeyFrame();
+
   // Reads --remote-debugging-port (default 0 = ephemeral, loopback)
   // and starts content::DevToolsAgentHost::StartRemoteDebuggingServer
   // bound at 127.0.0.1:<port>. Idempotent — only called once from
@@ -610,6 +619,9 @@ class CloudBrowserBrowserMainParts
   // a plain unique_ptr-owned object.
   std::unique_ptr<cloud_browser::signaling::CbOffererDriver> offerer_driver_;
   webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
+  // CV2-KEYFRAME: the video RtpSender of the CURRENT PC, for
+  // RequestVideoKeyFrame. Cleared alongside video_track_ (re-arm, teardown).
+  webrtc::scoped_refptr<webrtc::RtpSenderInterface> video_sender_;
 
   // CV2-WARM — set true once StartNativeSession() succeeds. Guards against a
   // double bring-up (env boot then a stray Cb.startNativeSession, or two CDP
@@ -678,16 +690,17 @@ class CloudBrowserBrowserMainParts
   //     browser process — see cb_active_webcontents_resolver.h).
   //     CV2-75 R1 wired CbInputLoggingDelegate as a transitional
   //     stand-in; CV2-81 retired it once R2..R10 source landed.
-  //   * CbClipboardBridgeWsClient + CbFileUploadBridgeWsClient take
-  //     a `label`/`url` + io_task_runner. We pass url="off" which
-  //     keeps both clients in `disabled()` mode (see
-  //     cb_clipboard_relay.h:207 + cb_file_upload_relay.h:267) —
-  //     the WS production backend has a TODO(M6-R2-ws-backend) and
-  //     the v1 production-WS choice isn't locked yet. The relay
-  //     OnMessage path still fires + logs; bridge POST is
-  //     short-circuited. This satisfies the observer-binding
-  //     architectural requirement without forcing a premature
-  //     production-WS decision.
+  //   * CbClipboardRelay (CV2-CLIPBOARD, 2026-09) handles both directions of
+  //     the clipboard DC directly against ui::Clipboard: an inbound envelope
+  //     writes the guest clipboard and synthesises Ctrl+V, a copy gesture
+  //     arms a window in which the next clipboard change is forwarded. The
+  //     WebSocket bridge relay it replaced never had a backend (url="off")
+  //     and dropped every paste for four months.
+  //   * CbFileUploadBridgeWsClient still takes a `label`/`url` +
+  //     io_task_runner and is passed url="off", which keeps it in
+  //     `disabled()` mode — its WS backend is a TODO(M6-R3-ws-backend) and
+  //     file transfer on the "files" DC is INERT until Batch B replaces it
+  //     the same way.
   //
   // Teardown ordering: explicit LIFO in PostMainMessageLoopRun
   // BEFORE the DataChannel host drops its DC refs. Unbind each
@@ -710,7 +723,6 @@ class CloudBrowserBrowserMainParts
   std::unique_ptr<cursor::EmitPolicy> cursor_emit_policy_;
   std::unique_ptr<cursor::EnvelopeAssembler> cursor_envelope_assembler_;
   std::unique_ptr<cursor::CbCursorDcEmitter> cursor_dc_emitter_;
-  std::unique_ptr<CbClipboardBridgeWsClient> clipboard_ws_;
   std::unique_ptr<CbClipboardRelay> clipboard_relay_;
   std::unique_ptr<CbFileUploadBridgeWsClient> file_upload_ws_;
   std::unique_ptr<CbFileUploadRelay> file_upload_relay_;

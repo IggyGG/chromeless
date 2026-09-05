@@ -372,6 +372,56 @@ virtual void AllowCertificateError(
 
 ---
 
+## Batch A (2026-09-05): CloseContents, clipboard, keyframe, user-data-dir
+
+All read from the tree in the recon pod on 2026-09-05.
+
+✅ **WebContentsDelegate::CloseContents** — `web_contents_delegate.h:234`,
+`virtual void CloseContents(WebContents* source) {}`. Default is a NO-OP, which
+is why `window.close()` did nothing until it was overridden. content_shell's
+override (`shell.cc:626`) just calls its own `Close()`.
+
+✅ **RtpSenderInterface::GenerateKeyFrame** — `api/rtp_sender_interface.h:139`,
+`virtual RTCError GenerateKeyFrame(const std::vector<std::string>& rids)`.
+Has a default body ("make pure virtual again after Chrome roll"), so it exists
+on every sender; `pc/rtp_sender.h:412,478` and the proxy (`rtp_sender_proxy.h:64`)
+implement it. Empty `rids` = every layer. Must be called on the signaling
+thread; `webrtc::Thread::PostTask` takes `absl::AnyInvocable<void() &&>`
+(`api/task_queue/task_queue_base.h:65`), so a lambda converts.
+
+✅ **ui::ScopedClipboardWriter** — `ui/base/clipboard/scoped_clipboard_writer.h:37`,
+`explicit ScopedClipboardWriter(ClipboardBuffer buffer,
+std::unique_ptr<DataTransferEndpoint> src = nullptr)`; `WriteText(std::u16string_view)`
+at `:52`. The write commits in the destructor, which is also when
+`ClipboardMonitor::NotifyClipboardDataChanged` fires (`clipboard_ozone.cc:408`).
+
+✅ **ui::Clipboard::ReadText** — `ui/base/clipboard/clipboard.h:204`,
+`virtual void ReadText(ClipboardBuffer, const std::optional<DataTransferEndpoint>&,
+ReadTextCallback) const = 0`, with `ReadTextCallback =
+base::OnceCallback<void(std::u16string)>` (`:54`). Asynchronous — there is no
+synchronous text read on this interface. `GetForCurrentThread()` at `:137`;
+`ClipboardOzone` DCHECKs the calling thread, so UI thread only.
+
+✅ **ui::ClipboardBuffer** — `ui/base/clipboard/clipboard_buffer.h:13`,
+`enum class ClipboardBuffer { kCopyPaste, kSelection, kDrag }`.
+
+✅ **ui::ClipboardMonitor / ClipboardObserver** —
+`clipboard_monitor.h:25,31,34` (`GetInstance`, `AddObserver`, `RemoveObserver`);
+`clipboard_observer.h:17` `virtual void OnClipboardDataChanged()`, destructor
+protected. GN target: `//ui/base/clipboard` (`component("clipboard")`,
+`ui/base/clipboard/BUILD.gn:109`); `//ui/base` does NOT re-export it on Linux
+(`ui/base/BUILD.gn:580` adds it only for mac/win), so depend on it directly.
+
+✅ **base::CommandLine::GetSwitchValuePath** — `base/command_line.h:206`,
+`FilePath GetSwitchValuePath(std::string_view) const`.
+
+✅ **WebContents::GetTitle / GetLastCommittedURL** — `web_contents.h:720`
+`virtual const std::u16string& GetTitle()` (non-const), `:474`
+`virtual const GURL& GetLastCommittedURL() const`. `DevToolsAgentHost::GetId`
+at `devtools_agent_host.h:199`.
+
+---
+
 ## Re-reading these pins
 
 ```bash

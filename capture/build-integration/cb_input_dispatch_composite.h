@@ -91,6 +91,9 @@
 
 #include <memory>
 #include <string>
+#include <utility>
+
+#include "base/functional/callback.h"
 
 #include "cloud-browser/capture/build-integration/cb_input_dispatch.h"
 #include "cloud-browser/capture/build-integration/cb_input_dispatch_clipboard.h"
@@ -168,7 +171,22 @@ class CbInputDispatchCompositeDelegate : public CbInputDispatchDelegate {
   CbInputDispatchDrag* drag_for_testing() { return drag_.get(); }
   CbInputDispatchClipboard* clipboard_for_testing() { return clipboard_.get(); }
 
+  // CV2-CLIPBOARD: notified on every viewer COPY gesture — a
+  // `clipboard_copy_request` envelope, or a `key_down` of KeyC with Ctrl or
+  // Meta held. CbClipboardRelay arms its forward window from this, which is
+  // what lets it forward a copy the viewer asked for while ignoring clipboard
+  // writes no one asked for. Detected here rather than inside the clipboard
+  // and keyboard dispatchers because this is the one place every envelope
+  // passes, and it keeps the two dispatchers unaware of the relay.
+  void SetOnCopyGesture(base::RepeatingClosure cb) {
+    on_copy_gesture_ = std::move(cb);
+  }
+
  private:
+  // True for the two envelope shapes a copy gesture takes on the wire.
+  static bool IsCopyGesture(const InputEnvelope& envelope);
+  base::RepeatingClosure on_copy_gesture_;
+
   // Shared modifier state injected into R4 (keyboard) + R8 (clipboard).
   // R3 still owns its own held_modifiers_blink_ member; R7 reads R3's
   // accessor. The TODO(M4-R7-shared-modifier-extraction) consolidation

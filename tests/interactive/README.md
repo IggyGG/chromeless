@@ -51,6 +51,10 @@ reporting 20 mysterious failures.
 
 ## Expected result
 
+The clipboard suite expects paste AND copy to round-trip on a guest built after
+2026-09-05 (boot log `CV2-CLIPBOARD: relay bound`); an older guest logs
+`CbClipboardRelay (WS disabled / url=off)` and fails the paste check.
+
 **28 of 28**, on a worker running image `cr7727-224c19413e24` or later.
 Confirmed on two consecutive runs.
 

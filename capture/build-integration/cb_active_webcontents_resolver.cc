@@ -130,6 +130,14 @@ void CbActiveWebContentsResolver::WebContentsDestroyed() {
   active_fsid_ = viz::FrameSinkId();
   // WebContentsObserver auto-detaches in its own teardown path; no
   // explicit Observe(nullptr) needed here.
+
+  // CV2-CAPTURE-FALLBACK: give main_parts the chance to point the
+  // capturer at a tab that still exists. Posted so the doomed WebContents
+  // has finished destructing before anyone resolves a new FrameSinkId.
+  if (captured_gone_) {
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+                                                             captured_gone_);
+  }
 }
 
 void CbActiveWebContentsResolver::RenderViewHostChanged(

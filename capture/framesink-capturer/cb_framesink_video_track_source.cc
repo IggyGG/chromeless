@@ -123,6 +123,14 @@ void CloudBrowserFrameSinkVideoTrackSource::StartCapture(
   capturer_->Start(target);
 }
 
+void CloudBrowserFrameSinkVideoTrackSource::SetOnContentChangedCallback(
+    base::RepeatingClosure on_content_changed) {
+  if (!capturer_) {
+    return;  // Header-only / test-bypass case.
+  }
+  capturer_->SetOnContentChangedCallback(std::move(on_content_changed));
+}
+
 void CloudBrowserFrameSinkVideoTrackSource::SetCaptureResolution(
     const gfx::Size& resolution) {
   if (!capturer_) {

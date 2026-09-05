@@ -5,6 +5,8 @@
 
 #include "cloud-browser/capture/build-integration/cb_input_dispatch_composite.h"
 
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "base/logging.h"
@@ -67,7 +69,26 @@ CbInputDispatchCompositeDelegate::~CbInputDispatchCompositeDelegate() {
   LOG(INFO) << "CV2-81: CbInputDispatchCompositeDelegate dtor";
 }
 
+// Protocol modifier bits (docs/protocols/input-channel.md): SHIFT=1 CTRL=2
+// ALT=4 META=8. Meta counts because a macOS viewer copies with Cmd+C and the
+// client forwards the modifier it saw.
+bool CbInputDispatchCompositeDelegate::IsCopyGesture(
+    const InputEnvelope& envelope) {
+  if (envelope.type == "clipboard_copy_request") {
+    return true;
+  }
+  if (envelope.type != "key_down") {
+    return false;
+  }
+  const std::string* code = envelope.data.FindString("code");
+  const std::optional<int> mods = envelope.data.FindInt("mods");
+  return code && *code == "KeyC" && mods && ((*mods & 2) || (*mods & 8));
+}
+
 void CbInputDispatchCompositeDelegate::OnInputEvent(InputEnvelope envelope) {
+  if (on_copy_gesture_ && IsCopyGesture(envelope)) {
+    on_copy_gesture_.Run();
+  }
   // Each typed dispatcher's OnInputEvent type-switches on envelope.type
   // and silently drops types it doesn't own. The dispatcher set is
   // mutually exclusive on envelope.type, so this fan-out produces at

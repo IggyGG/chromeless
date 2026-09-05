@@ -39,10 +39,12 @@
 // so the long-lived object never holds a dangling pointer into a
 // torn-down session.
 //
-// Adopted popups live in a vector inside the singleton and are likewise
-// never destroyed. That is deliberate: it costs one WebContents per
-// window.open() for the life of a guest (which is measured in minutes),
-// and it removes an entire class of teardown-ordering crash.
+// Adopted popups live in a vector inside the singleton. They are destroyed
+// only when the PAGE closes them (CloseContents — window.close(), or the
+// opener closing its popup), never on teardown: destroying them at exit
+// would race the DevToolsManager singleton that also holds them, the same
+// use-after-free class above. A popup the page never closes therefore costs
+// one WebContents for the life of a guest, which is measured in minutes.
 
 #ifndef CAPTURE_BUILD_INTEGRATION_CB_WEB_CONTENTS_DELEGATE_H_
 #define CAPTURE_BUILD_INTEGRATION_CB_WEB_CONTENTS_DELEGATE_H_
@@ -92,6 +94,13 @@ class CbWebContentsDelegate : public content::WebContentsDelegate {
       const blink::mojom::WindowFeatures& window_features,
       bool user_gesture,
       bool* was_blocked) override;
+
+  // window.close(), or an opener closing its popup. Without this override
+  // content's default is a no-op: the tab stays open, invisible, forever.
+  // Adopted tabs are destroyed here; the initial tab is never ours to
+  // destroy (main_parts owns it), so a page closing it is reported and
+  // ignored, as Chrome does for the last tab of a window.
+  void CloseContents(content::WebContents* source) override;
 
   // Renderer-initiated navigations that content will otherwise drop.
   content::WebContents* OpenURLFromTab(
@@ -160,8 +169,13 @@ class CbWebContentsDelegate : public content::WebContentsDelegate {
   // Non-null while a tab believes it is fullscreen.
   raw_ptr<content::WebContents> fullscreen_contents_ = nullptr;
 
-  // Adopted popups. Never destroyed — see the ownership note above.
+  // Adopted popups. Destroyed only via CloseContents — see the ownership
+  // note above.
   std::vector<std::unique_ptr<content::WebContents>> adopted_;
+
+  // Tell the viewer a tab came or went, so a tab strip can update without
+  // polling /json. Advisory: `/json` stays the source of truth.
+  void SendTabEvent(const char* kind, content::WebContents* wc);
 };
 
 // Process-lifetime accessor. Never returns null.

@@ -31,6 +31,10 @@
 //   guest -> portal, fire-and-forget (no answer expected):
 //     {"v":1,"type":"ui_event","t":<epoch_ms>,"seq":<n>,
 //      "data":{"kind":"fullscreen_changed", ...}}
+//     kinds today: fullscreen_changed {fullscreen:bool};
+//                  tab_opened / tab_closed {targetId, url, title} — advisory
+//                  nudges from CbWebContentsDelegate; the DevTools /json list
+//                  (via the gateway) stays the source of truth for tabs.
 //
 // `id` correlates request to response. A response whose id is unknown
 // (late, duplicated, or invented) is dropped with a log — never trusted,

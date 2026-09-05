@@ -596,33 +596,20 @@ source_set("stats_relay") {
 }
 
 # ---------------------------------------------------------------------
-# Native clipboard DC ↔ bridge WS relay (CV2-34, M6 R2).
+# Clipboard DC relay (CV2-34 → CV2-CLIPBOARD, 2026-09).
 #
-# Bidirectional relay between the WebRTC "clipboard" DataChannel and
-# the existing clipboard-bridge sidecar (capture/clipboard-bridge/).
-# Replaces streamer.js's clipboard wiring (deleted in M7).
+# Both directions of the "clipboard" DataChannel, handled in the browser
+# process against ui::Clipboard. Inbound: a v1 clipboard_offer is written to
+# the guest clipboard and a Ctrl+V pair is synthesised at the active
+# WebContents. Outbound: the relay observes ui::ClipboardMonitor and forwards
+# a change only inside a short window armed by a viewer copy gesture (the
+# input channel's clipboard_copy_request or a Ctrl/Cmd+C key_down, surfaced
+# by :input_dispatch_composite's SetOnCopyGesture).
 #
-# Inbound (DC→bridge): CbClipboardRelay is a DataChannelObserver
-# bound onto the kClipboard channel via M3 R5's BindObserver. Each
-# DC text frame is forwarded verbatim to the bridge's WS source
-# endpoint (default ws://127.0.0.1:9300/clipboard).
-#
-# Outbound (bridge→DC): CbClipboardOutboundServer accepts WS
-# connections from the bridge's WS sink (default 127.0.0.1:9301
-# path /clipboard). Each frame is forwarded via dc_host->Send(
-# kClipboard, text).
-#
-# Standalone source_set so:
-#   * the unit test target (cb_clipboard_relay_test.cc, follow-up R)
-#     can link without dragging in the full embedder set
-#   * M3 R wiring can take a clean dep on us to instantiate both
-#     halves of the relay alongside CbStatsRelay
-#
-# Deps mirror :stats_relay; the WS-backend production wiring (TODO
-# in the .cc) will add either //services/network/public/cpp or
-# //net/server depending on the backend choice locked in for R2's
-# follow-up CL. The DRAFT compiles against the existing deps because
-# the WS hop is stubbed behind an interface for testability.
+# This replaced a relay that shuttled frames to a WebSocket "clipboard
+# bridge" sidecar whose backend was never implemented (url="off",
+# "Pretend-send"), so paste was dropped guest-side from 2026-05 to 2026-09.
+# The sidecar (capture/clipboard-bridge/) is no longer on this path.
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
 # Control channel — the guest's ask-a-human path.
@@ -747,21 +734,30 @@ source_set("clipboard_relay") {
     "cb_clipboard_relay.h",
   ]
   deps = [
-    "//cloud-browser/capture/config:cb_env_config",
+    # WebContentsResolver, for the paste target.
+    ":active_webcontents_resolver",
     "//cloud-browser/capture/signaling:cb_dc_host",
-    "//net/traffic_annotation",
-    "//services/network/public/cpp",
-    "//services/network/public/mojom",
-    "//url",
+    # RenderWidgetHost::ForwardKeyboardEvent + NativeWebKeyboardEvent for the
+    # synthesised Ctrl+V (same deps as :input_dispatch_clipboard, which
+    # synthesises Ctrl+C).
+    "//content/public/browser",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
 
-  # public_deps: this target's PUBLIC header includes "base/...", so //base
-  # is part of its interface — dependents need base's include dirs (which
-  # carry partition_alloc's generated headers) transitively. See the note
-  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
-  # produces when it is a private dep.
-  public_deps = [ "//base" ]
+  # public_deps: this target's PUBLIC header includes "base/..." AND
+  # "ui/base/clipboard/clipboard_observer.h" (CbClipboardRelay IS a
+  # ui::ClipboardObserver), so both are part of its interface — dependents
+  # (the :embedder target, via cloud_browser_browser_main_parts.h) need their
+  # include dirs transitively. See the note on cb_wire_envelope in
+  # capture/signaling/BUILD.gn for the failure a private dep produces here.
+  public_deps = [
+    "//base",
+    # ui::Clipboard, ScopedClipboardWriter, ClipboardMonitor/Observer,
+    # ClipboardBuffer. NOT re-exported by //ui/base on Linux
+    # (ui/base/BUILD.gn adds it only for mac/win), so depended on directly.
+    # Verified in the tree 2026-09-05: docs/build/chromium-7727-api-pins.md.
+    "//ui/base/clipboard",
+  ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
