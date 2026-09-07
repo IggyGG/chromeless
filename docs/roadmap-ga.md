@@ -143,7 +143,11 @@ Everything else is laptop-verifiable and runs in parallel.
    `client/src/ui/*`; reuse `ChromelessSession` events, `navigate.ts`, the
    `control.ts` presenter seam.
 2. **Audio.** Unmute/volume; autoplay-policy handling; level indicator from stats.
-3. **Viewport follows the window.** `ResizeObserver` → debounced `POST /api/viewport`
+3. **Viewport follows the window.** *Landed (#96) and then measured to crash the guest:
+   a resize freezes the BeginFrame loop and the watchdog kills the GPU process ~15 s
+   later (`docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md`).
+   Guest fix is Track 2; until it ships the follower must be switchable off at the
+   gateway.* `ResizeObserver` → debounced `POST /api/viewport`
    → gateway `Cb.setViewport` → apply the echoed size. Scale stays 1.0 until Batch D.
 4. **Fullscreen** button and shortcut; honour the guest's `fullscreen_changed`.
 5. **Keyboard model.** Capture only while the stage has focus; prevent browser
@@ -194,7 +198,13 @@ map to open, open in new tab, copy link, copy, paste, save image).
 the client send `devicePixelRatio`; run the input suites at scale 1 and 2.
 
 Also: the audio `PrepareForTeardown` hook on an inbound bye; IME/dead-key and touch
-checks added to `tests/interactive`.
+checks added to `tests/interactive`; **the two re-arm/resize defects measured
+2026-09-07** — tear the pulse ADM down on re-arm so the second viewer gets audio
+(`docs/findings/audio-dies-after-first-rearm.md`), and make `CbViewportController`
+bracket its resize for the BeginFrame driver so a resize does not end in a GPU
+crash (`docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md`).
+Both are prerequisites for the M1 exit criteria "audio audible" and "resize
+follows".
 
 ### Track 3 — Downloads, tabs, session state
 
