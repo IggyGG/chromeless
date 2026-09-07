@@ -540,6 +540,28 @@ this as understood — three separate confident explanations (starved consumer,
 arrival-only checking, a throughput deficit) were each refuted by re-reading
 the same PRs twenty minutes later.
 
+**One cause is now known (2026-09-07), and it is not a Forgejo defect.** The
+forge's `/data` volume had filled at some point after 2026-09-05 23:31; the
+action-run pruner freed 13 GiB, `df` looked healthy, and the running Forgejo
+process STILL failed every write to its LevelDB queue journal
+(`/data/queues/common/001608.log`, an fd held open since before the disk
+filled) with `no space left on device` — 100+ log lines per half hour. Every
+push to an open PR in that window moved the ref (the API showed the new head)
+but the post-receive hook logged `Failed to Update ... Branch: <name>`, so no
+`pull_request` run was created and no merge check was requeued. From the API
+that is indistinguishable from the wedge above. Diagnose with:
+
+```sh
+kubectl logs -n forgejo <forgejo pod> -c forgejo --since=1h \
+  | grep -cE 'no space left|Failed to Update'     # non-zero = this
+kubectl exec -n forgejo <forgejo pod> -c forgejo -- df -h /data   # may look FINE
+```
+
+Cure: `kubectl -n forgejo rollout restart deploy/forgejo` (the org runbook's
+remedy; single replica, Recreate, ~1 min down), then push a NEW commit to each
+affected PR — the pushes made during the outage never reached the hook and
+nothing replays them. Runs appeared within a minute of the re-push.
+
 ### A PR whose CI runs were pruned can never land
 
 Forgejo prunes `action_run` rows, but the commit **statuses** survive. So the
