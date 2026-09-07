@@ -1,5 +1,12 @@
 # A worker serves exactly one session, then goes quiet forever
 
+> **RESOLVED — and superseded.** The exit-on-close fix described below shipped
+> and was verified; it was then replaced by the re-armable driver
+> (`RearmSession`, `cloud_browser_browser_main_parts.cc`), which keeps the
+> browser process and its state across viewers. Exit is now only the fallback
+> when a re-arm fails. Kept because code and tests cite this file; the
+> audio-teardown note at the bottom is still relevant to the re-arm path.
+
 **Status:** BOTH HALVES FIXED AND VERIFIED (2026-08-14, image
 `cr7727-e654ed644219`). The broker half has two mutation-checked tests
 (`signaling/server.go`, `discardReplay`). The worker half uses option 2 below —

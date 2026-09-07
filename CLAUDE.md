@@ -331,16 +331,18 @@ then returns nothing and the ~30 min cycle bought you no information. Watch
 | `capture/signaling/cb_wire_envelope.h` — the authoritative wire contract | Anything referencing `capture/streamer-page/` (deleted in M7) |
 | `README.md` — rewritten and accurate as of 2026-07 | `docs/audits/`, `docs/measurements/` — point-in-time |
 | `docs/operations/standalone.md` + `infra/gateway/README.md` — the self-hosted path | Anything describing a published `:3000` client or `:8080` broker — that topology is gone |
+| `docs/roadmap-ga.md` — the plan of record; what is done, what is missing, in what order | `docs/findings/` entries whose banner says RESOLVED — kept because code comments cite them |
 
 `docs/operations/triform-deploy.md` documents one real cluster. Useful as a
 worked example; not a generic guide.
 
 ## Work in your own worktree. Never in the shared checkout.
 
-**Before you touch anything, make a worktree:**
+**Before you touch anything, `git fetch` and make a worktree from `origin/main`:**
 
 ```bash
-git worktree add .claude/worktrees/<task> -b <branch>
+git fetch origin
+git worktree add .claude/worktrees/<task> -b <branch> origin/main
 git worktree lock .claude/worktrees/<task> --reason "active session: <task>"
 cd .claude/worktrees/<task>
 ```
@@ -348,6 +350,15 @@ cd .claude/worktrees/<task>
 Multiple agents and multiple Claude sessions routinely share this repo
 directory, and git gives them no interlock. The primary checkout is for
 orientation and spawning worktrees — not for authoring.
+
+**The shared checkout is not the current state of the project.** On 2026-09-05
+it sat on `feat/standalone-mode @ c7e7d10` — the *merge-base* — while
+`origin/main` was 102 commits ahead and carried the re-armable worker, the
+control channel, the clipboard and control wiring in the client, downloads,
+`Cb.setViewport`, and the digest-pinned deploys. A session that read the tree in
+front of it as current would have reported defects that were already fixed and
+missed the ones that were not. Read current files with
+`git show origin/main:<path>`, and branch every worktree from `origin/main`.
 
 This is not hygiene advice. On 2026-08-11 a session in this repo:
 

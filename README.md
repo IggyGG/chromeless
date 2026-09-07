@@ -19,6 +19,8 @@ you need a real Chromium you don't want to run locally.
 **Status: source-available, in production.** This is not a packaged product.
 There are no published container images, no npm package, and no release tags —
 you build it yourself. See [Building](#building) for what that costs.
+[`docs/roadmap-ga.md`](./docs/roadmap-ga.md) is the plan of record for closing
+that gap: what already works, what a first-time user hits, and the order of work.
 
 ---
 
@@ -261,8 +263,11 @@ as a worked example, not as a generic guide.
   ~5 fps. See [`docs/research/rendering-matrix.md`](./docs/research/rendering-matrix.md).
 - **WebGPU is unsupported.** `navigator.gpu` exists but `requestAdapter()`
   returns null — Dawn needs Vulkan.
-- **One tab per session, one session per worker process.** Starting a second
-  session in a live process is not yet supported; the process is single-use.
+- **One tab streamed, one viewer at a time.** Popups open as real tabs but the
+  stream stays on the opener and nothing switches it yet; a second simultaneous
+  viewer is not supported. Between viewers the worker re-arms its peer
+  connection in place, so the browser keeps its state across a reload or a
+  reconnect (`RearmSession`; falls back to a process exit only if re-arm fails).
 - **`Cb.*` is not in `/json/protocol`.** The domain is hand-dispatched, so
   protocol-introspecting CDP clients won't discover it.
 - **Hardware encoders are compile-time.** NVENC/VAAPI/SVT-AV1 availability is
