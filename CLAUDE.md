@@ -555,13 +555,20 @@ kubectl exec -n forgejo <pod> -c forgejo -- tar -C /data/queues -cf - common | t
 
 Cure (needs the process restarted; single replica, ~60 s down, user-approved):
 `mv /data/queues/common /data/queues/common.wedged-<date>` inside the pod, then
-`kubectl -n forgejo rollout restart deploy/forgejo`. On start Forgejo creates a
-fresh queue and `InitializePullRequests` re-queues every status=1 PR; it
-drained ~200 PRs/min (918 → 531 checking in two minutes; all chromeless PRs
-mergeable within one). Cost: whatever else was in that LevelDB — 98 pending
-notifications and one orphaned actions-run entry. Not established: what made
-the hole; the ENOSPC window earlier that day (`high` incremented, the item's
-`Put` failed) is the candidate.
+restart it. On start Forgejo creates a fresh queue and `InitializePullRequests`
+re-queues every status=1 PR; it drained ~200 PRs/min (918 → 531 checking in
+two minutes; all chromeless PRs mergeable within one). Cost: whatever else was
+in that LevelDB — 98 pending notifications and one orphaned actions-run entry.
+Not established: what made the hole; the ENOSPC window earlier that day
+(`high` incremented, the item's `Put` failed) is the candidate.
+
+**Restart with `kubectl delete pod`, not `rollout restart`.** Forgejo is
+Flux-managed, and `rollout restart` works by stamping a `restartedAt`
+annotation on the pod template. Flux's next reconcile (10-minute interval;
+measured 8 minutes after the restart) strips that annotation, which is itself a
+template change, so the Deployment does a **second** Recreate — another ~60 s
+of 503, this time with nobody expecting it. It killed a merge script mid-
+sequence. Deleting the pod changes no template and Flux has nothing to undo.
 
 The rule that survives: **`pull_request.status=1` on a PR you have pushed to
 is the queue, not your PR. Check the queue before theorising about the PR.**
