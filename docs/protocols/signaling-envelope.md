@@ -154,6 +154,59 @@ viewer after the first.
 Implementations that keep their own replay buffer must apply all three rules.
 Dropping only on `bye` is the shape that shipped and was wrong.
 
+## A `bye` ends the session, not the socket
+
+A peer that sends `bye` stays connected. The broker keeps reading from it, and
+the same socket may carry a new `offer`/`answer` for the next session; a peer
+that is actually leaving closes its socket itself (the web client does, and so
+does the worker's exit path).
+
+This matters for the re-armable worker. On a viewer that vanished without a
+`bye` — ICE `failed` for the worker's grace period — the worker announces a
+`bye` for the dead session and immediately offers again **on the same
+socket**. The broker used to close the sender's socket after its `bye`, which
+was right when a `bye` meant "I am leaving" and wrong for a peer that is
+staying: the worker's next `offer` failed to send, its driver went to
+`failed`, and the process recycled itself. Observed live 2026-09-07:
+
+```
+CV2-BYELESS: ICE still failed after 20s — re-arming
+ws_client: channel dropped unexpectedly: code=1006
+FAIL state=CreatingOffer reason=ws Send(offer) failed
+unrecoverable failure — recycling this guest
+```
+
+So every byeless disconnect cost a process restart, on a stack whose point
+is that the browser outlives its viewers. (The remote-`bye` re-arm never hit
+this because the worker skips its own `bye` when the close was remote.)
+
+Three bookkeeping rules a broker must get right:
+
+- a `bye` still drops both replay buffers and still suppresses the synthesised
+  `bye` at unregister time (`peer.saidBye`) — that flag is **cleared by the
+  peer's next `offer`/`answer`**, so if the *new* session drops without a
+  `bye` the counterpart is still told;
+- the `bye` is forwarded to the counterpart exactly as before. A viewer whose
+  ICE died but whose socket lives receives it and tears down; the worker's
+  fresh `offer` then reaches whoever joins next;
+- **a `bye` from a peer that was itself sent a `bye` for this session is an
+  echo, and is dropped** — and so is the synthesised one if that peer's socket
+  then closes, and its closing discards only its *own* replay buffer. The web
+  client's teardown answers a `bye` with a `bye`; the re-armed worker has
+  re-offered within ~40 ms of its own, so the echo would close the session it
+  just rebuilt (measured live 2026-09-07 on the first broker that kept the
+  socket open: two rebuilds per byeless loss), and discarding both buffers on
+  it erased the fresh offer the next viewer needed. The receiver-side flag is
+  cleared by that peer's next `offer`/`answer`, so a `bye` for the *new*
+  session is never suppressed.
+
+Peers written against the old behaviour that *waited* for the broker to close
+them after a `bye` would now wait forever: close your own socket when leaving.
+
+`signaling/replay_test.go` `TestWS_ByeKeepsSenderConnected` and
+`TestWS_ByeEchoIsNotForwarded` pin this; each was watched fail against the
+behaviour it replaced.
+
 ## Known gap: the physics translator is lossy
 
 Today the portal and the browser peer are bridged by

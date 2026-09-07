@@ -11,7 +11,10 @@
 //   - Forwarded message types: offer, answer, ice, bye
 //   - Session holds at most one peer per role; duplicates get
 //     ClosePolicyViolation (1008)
-//   - "bye" is forwarded then the sender's connection is closed by the server
+//   - "bye" is forwarded; the sender's connection STAYS open (a bye ends the
+//     session, not the socket — the re-armable worker offers again on it)
+//   - A peer joining an empty session is sent a `peer_absent` advisory
+//     (readEnvelope skips it; see there)
 //   - Session is dropped from the hub once both peers have left
 package integration_test
 
@@ -158,14 +161,31 @@ func dialPeer(t *testing.T, port int, sessionID string, reg envelope) *websocket
 }
 
 // readEnvelope reads one envelope with a deadline.
+//
+// `peer_absent` advisories are skipped. The broker sends one to a peer that
+// joins an EMPTY session (signaling/server.go: it tells a lone client that no
+// worker is there yet, so a misconfigured stack fails loudly instead of
+// "waiting for offer" forever), so every test that connects the client first
+// gets it as its first frame. It carries no session state and is not part of
+// the offer/answer/ice/bye contract these tests pin. When it landed, five
+// tests in this module went red with `want offer/browser, got peer_absent` —
+// and stayed red, because ci.yml excludes tests/integration from its go-test
+// loop (`make verify` is the only thing that runs it). A test that wants to
+// see the advisory reads the raw frame itself.
 func readEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Duration) envelope {
 	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	var got envelope
-	if err := conn.ReadJSON(&got); err != nil {
-		t.Fatalf("read envelope: %v", err)
+	deadline := time.Now().Add(timeout)
+	for {
+		_ = conn.SetReadDeadline(deadline)
+		var got envelope
+		if err := conn.ReadJSON(&got); err != nil {
+			t.Fatalf("read envelope: %v", err)
+		}
+		if got.Type == "peer_absent" {
+			continue
+		}
+		return got
 	}
-	return got
 }
 
 func writeEnvelope(t *testing.T, conn *websocket.Conn, env envelope) {
@@ -353,8 +373,11 @@ func TestDuplicateRoleRejected(t *testing.T) {
 }
 
 // TestByePropagationAndTeardown asserts that "bye" is forwarded to the
-// other peer, the sender's connection is closed by the server, and after
-// both peers are gone the session_id can be reused cleanly.
+// other peer, that the sender's connection STAYS open and can carry the next
+// offer (a bye ends the session, not the socket — the re-armable worker sends
+// a bye for a dead session and offers again on the same socket; the broker
+// closing that socket recycled the guest, live 2026-09-07), and that after
+// both peers close their own sockets the session_id can be reused cleanly.
 func TestByePropagationAndTeardown(t *testing.T) {
 	port := startServer(t)
 
@@ -381,10 +404,20 @@ func TestByePropagationAndTeardown(t *testing.T) {
 		t.Fatalf("bye envelope: want bye/browser, got %+v", got)
 	}
 
-	// Server should close the bye-sender's connection (it returns from
-	// readPump after forwarding "bye"). Close-code is unspecified so
-	// just assert the connection is gone.
-	expectClosed(t, brw, 2*time.Second)
+	// The bye-sender's connection is still live in BOTH directions: its next
+	// offer, on the same socket, reaches the still-connected client. With the
+	// old readPump `return` the server had stopped reading this socket, so
+	// the write below "succeeded" into a closing connection and the client
+	// never received OFFER-1b.
+	writeEnvelope(t, brw, envelope{
+		Type: "offer", From: "browser",
+		Data: json.RawMessage(`{"sdp":"OFFER-1b"}`),
+	})
+	got = readEnvelope(t, cli, 2*time.Second)
+	if got.Type != "offer" || !bytes.Contains(got.Data, []byte(`"OFFER-1b"`)) {
+		t.Fatalf("offer after the sender's own bye: want offer OFFER-1b, got %+v", got)
+	}
+	// A leaving peer closes its own socket.
 	_ = brw.Close()
 
 	// Disconnect the client too. Now both peers have left; the session

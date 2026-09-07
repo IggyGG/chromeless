@@ -1263,3 +1263,311 @@ func TestWS_LonePeerIsToldTheCounterpartIsAbsent(t *testing.T) {
 		t.Fatalf("peer joining a POPULATED session was wrongly warned; frames=%q", got2)
 	}
 }
+
+// TestWS_ByeKeepsSenderConnected pins the socket semantics of a bye: it ends
+// the negotiated SESSION, not the connection that carried it.
+//
+// The re-armable worker depends on this. On a byeless viewer loss the guest
+// sends a bye for the dead session and, on the SAME socket, offers again for
+// the next viewer. The broker used to close the sender's socket after its bye
+// — right when a bye meant "I am leaving", fatal for a peer that is staying:
+// the guest's next Send(offer) failed, its driver went kFailed, and
+// main_parts recycled the whole process (CV2-BYELESS → code=1006 → "ws
+// Send(offer) failed" → "recycling this guest", live 2026-09-07). Every
+// byeless disconnect cost a restart on a stack whose point is that the
+// browser outlives its viewers.
+//
+// Watched fail against the `return` this replaced: the second offer's write
+// fails or the client never sees it.
+func TestWS_ByeKeepsSenderConnected(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/bye-keeps-socket"
+
+	type client struct {
+		conn   *websocket.Conn
+		frames chan string
+	}
+	dial := func(name string) *client {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		cl := &client{conn: c, frames: make(chan string, 64)}
+		go func() {
+			defer close(cl.frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				cl.frames <- string(raw)
+			}
+		}()
+		return cl
+	}
+	send := func(c *client, who, msg string) {
+		t.Helper()
+		if err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("%s write: %v", who, err)
+		}
+	}
+	// waitFor blocks until a frame containing `needle` arrives on c, or
+	// fails the test. A closed frames channel (the reader goroutine saw a
+	// read error) is reported as such: that is the exact symptom this test
+	// exists to catch, so it must not read as "no frame arrived".
+	waitFor := func(c *client, who, needle string) string {
+		t.Helper()
+		timeout := time.After(2 * time.Second)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					t.Fatalf("%s: socket closed by the broker while waiting for %q", who, needle)
+				}
+				if strings.Contains(f, needle) {
+					return f
+				}
+			case <-timeout:
+				t.Fatalf("%s: no frame containing %q within 2s", who, needle)
+			}
+		}
+	}
+	waitRegistered := func(role peerRole) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "bye-keeps-socket")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s never registered", role)
+	}
+
+	// Session 1: browser offers, client answers.
+	brw := dial("browser")
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 session-1"}}`)
+	waitRegistered(roleBrowser)
+	cli := dial("client")
+	send(cli, "client", `{"type":"hello","from":"client"}`)
+	waitRegistered(roleClient)
+	waitFor(cli, "client", "session-1")
+	send(cli, "client", `{"type":"answer","from":"client","data":{"sdp":"v=0 answer-1"}}`)
+	waitFor(brw, "browser", "answer-1")
+
+	// The viewer vanishes without a bye (1006). The broker synthesises one
+	// to the browser — the byeless path the worker's 20 s grace handles.
+	_ = cli.conn.Close()
+	waitFor(brw, "browser", `"type":"bye"`)
+
+	// The browser re-arms: it announces the dead session's bye and offers
+	// again ON THE SAME SOCKET. Both writes must succeed, and the next
+	// viewer must receive that offer. With the old `return` the socket was
+	// closed after the bye; the offer write raced the close and, whichever
+	// side won, no client ever received session-2.
+	send(brw, "browser", `{"type":"bye","from":"browser"}`)
+	time.Sleep(50 * time.Millisecond) // let the read pump process the bye before the offer
+	if err := brw.conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"offer","from":"browser","data":{"sdp":"v=0 session-2"}}`)); err != nil {
+		t.Fatalf("browser offer after its own bye failed: %v (the broker closed the socket)", err)
+	}
+	cli2 := dial("client-2")
+	send(cli2, "client-2", `{"type":"hello","from":"client"}`)
+	waitRegistered(roleClient)
+	got := waitFor(cli2, "client-2", "session-2")
+	if strings.Contains(got, "session-1") {
+		t.Fatalf("client-2 was replayed the dead session's offer: %q", got)
+	}
+
+	// And the browser's read pump is still live: the second viewer's answer
+	// reaches it through the same socket.
+	send(cli2, "client-2", `{"type":"answer","from":"client","data":{"sdp":"v=0 answer-2"}}`)
+	waitFor(brw, "browser", "answer-2")
+
+	// The bye is spent: if THIS session now drops byelessly on the browser
+	// side, the client must still be told (clearSaidBye on the new offer).
+	_ = brw.conn.Close()
+	waitFor(cli2, "client-2", `"type":"bye"`)
+}
+
+// TestWS_ByeEchoIsNotForwarded pins the echo rule: a bye from a peer that
+// was itself sent a bye for this session is not forwarded, and neither is
+// the synthesised one if that peer's socket drops.
+//
+// The main case is the timeline measured live 2026-09-07 on the first
+// broker that kept the bye sender's socket open: the worker's bye reached
+// the client; the worker re-offered ~40 ms later; the client's teardown
+// then answered with its own bye, and the broker forwarded it into the
+// worker's freshly rebuilt session — a second rebuild per byeless loss.
+// Keying the rule on the RECEIVER of the original bye is what makes that
+// ordering safe; the sender's bookkeeping is already reset by the re-offer.
+//
+// Watched fail two ways: forwarding the echo (case 2) and synthesising at
+// unregister (case 1).
+func TestWS_ByeEchoIsNotForwarded(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/bye-echo"
+
+	type client struct {
+		conn   *websocket.Conn
+		frames chan string
+	}
+	dial := func(name string) *client {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		cl := &client{conn: c, frames: make(chan string, 64)}
+		go func() {
+			defer close(cl.frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				cl.frames <- string(raw)
+			}
+		}()
+		return cl
+	}
+	send := func(c *client, who, msg string) {
+		t.Helper()
+		if err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("%s write: %v", who, err)
+		}
+	}
+	collect := func(c *client) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(750 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+	waitFor := func(c *client, who, needle string) {
+		t.Helper()
+		timeout := time.After(2 * time.Second)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					t.Fatalf("%s: socket closed while waiting for %q", who, needle)
+				}
+				if strings.Contains(f, needle) {
+					return
+				}
+			case <-timeout:
+				t.Fatalf("%s: no frame containing %q within 2s", who, needle)
+			}
+		}
+	}
+	waitRegistered := func(role peerRole) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "bye-echo")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s never registered", role)
+	}
+
+	brw := dial("browser")
+	send(brw, "browser", `{"type":"hello","from":"browser"}`)
+	waitRegistered(roleBrowser)
+	// negotiate offers from the browser, joins a fresh client, and answers.
+	negotiate := func(tag, who string) *client {
+		t.Helper()
+		send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 `+tag+`"}}`)
+		c := dial(who)
+		send(c, who, `{"type":"hello","from":"client"}`)
+		waitRegistered(roleClient)
+		waitFor(c, who, "v=0 "+tag)
+		send(c, who, `{"type":"answer","from":"client","data":{"sdp":"v=0 answer-`+tag+`"}}`)
+		waitFor(brw, "browser", "v=0 answer-"+tag)
+		return c
+	}
+
+	// Case 1: the browser ends the session; the client's socket then drops
+	// WITHOUT a bye of its own. unregister must not synthesise one for the
+	// browser, which already ended this session.
+	cli := negotiate("s1", "client-1")
+	send(brw, "browser", `{"type":"bye","from":"browser"}`)
+	waitFor(cli, "client-1", `"type":"bye"`)
+	_ = cli.conn.Close()
+	if got := collect(brw); strings.Contains(got, `"type":"bye"`) {
+		t.Fatalf("browser received a SYNTHESISED bye after ending the session itself: %q", got)
+	}
+
+	// Case 2, the live timeline: the browser ends the session and re-offers
+	// at once (the re-arm); only THEN does the client's teardown answer the
+	// bye with its own. That echo must not reach the browser's new session.
+	cli2 := negotiate("s2", "client-2")
+	send(brw, "browser", `{"type":"bye","from":"browser"}`)
+	waitFor(cli2, "client-2", `"type":"bye"`)
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 s3"}}`)
+	waitFor(cli2, "client-2", "v=0 s3") // the re-offer has been processed before the echo below
+	send(cli2, "client-2", `{"type":"bye","from":"client"}`)
+	if got := collect(brw); strings.Contains(got, `"type":"bye"`) {
+		t.Fatalf("browser received the client's bye ECHO into its rebuilt session: %q", got)
+	}
+	_ = cli2.conn.Close()
+	if got := collect(brw); strings.Contains(got, `"type":"bye"`) {
+		t.Fatalf("browser received a synthesised bye for the echoing client: %q", got)
+	}
+
+	// Case 3: the rule is per session. A client that answers the new offer
+	// and then leaves byelessly must still produce a bye for the browser.
+	cli3 := dial("client-3")
+	send(cli3, "client-3", `{"type":"hello","from":"client"}`)
+	waitRegistered(roleClient)
+	waitFor(cli3, "client-3", "v=0 s3")
+	send(cli3, "client-3", `{"type":"answer","from":"client","data":{"sdp":"v=0 answer-s3"}}`)
+	waitFor(brw, "browser", "v=0 answer-s3")
+	_ = cli3.conn.Close()
+	waitFor(brw, "browser", `"type":"bye"`)
+
+	// And the browser's OWN next bye is not suppressed either (it received
+	// one above and then re-offered, which cleared it).
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 s4"}}`)
+	cli4 := dial("client-4")
+	send(cli4, "client-4", `{"type":"hello","from":"client"}`)
+	waitRegistered(roleClient)
+	waitFor(cli4, "client-4", "v=0 s4")
+	send(brw, "browser", `{"type":"bye","from":"browser"}`)
+	waitFor(cli4, "client-4", `"type":"bye"`)
+}

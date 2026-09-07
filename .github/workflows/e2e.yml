@@ -520,14 +520,26 @@ jobs:
           # exactly like a bad tag; it is not.
           #
           # These were 3 of the 5 at-risk images in this lane.
-          if ! docker compose -f infra/compose.yaml up -d --wait; then
+          # "${COMPOSE_FILE_PATH}", NOT infra/compose.yaml. The daemon on these
+          # runners lives in a different filesystem namespace from the job
+          # container; the "Align the workspace path" step above computes the
+          # path the DAEMON can see and every other compose call in this file
+          # uses it. This block was rewritten in d7a7a54 with the relative
+          # path, so the daemon bind-mounted the wrong directory into
+          # client-build: `npm install` died with
+          #   ENOENT: no such file or directory, open '/work/package.json'
+          # (exit 254) on EVERY run from 2026-08-21 to 2026-09-07 — the E2E
+          # lane was red on main for two weeks over a path that the step
+          # immediately before it had already resolved correctly. The failure
+          # read as a client-build defect; it was this line.
+          if ! docker compose -f "${COMPOSE_FILE_PATH}" up -d --wait; then
             echo "::error::docker compose up failed — dumping service state and logs"
             echo "::group::compose ps"
-            docker compose -f infra/compose.yaml ps -a || true
+            docker compose -f "${COMPOSE_FILE_PATH}" ps -a || true
             echo "::endgroup::"
-            for svc in $(docker compose -f infra/compose.yaml config --services 2>/dev/null); do
+            for svc in $(docker compose -f "${COMPOSE_FILE_PATH}" config --services 2>/dev/null); do
               echo "::group::logs ${svc}"
-              docker compose -f infra/compose.yaml logs --tail 120 "${svc}" 2>&1 || true
+              docker compose -f "${COMPOSE_FILE_PATH}" logs --tail 120 "${svc}" 2>&1 || true
               echo "::endgroup::"
             done
             exit 1
