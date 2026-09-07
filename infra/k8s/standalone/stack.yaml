@@ -232,12 +232,13 @@ spec:
           # another session while the Deployment still reported v9.
           # Pinned by DIGEST. cr7727-08f76460a5bc carried every fix up to the
           # ICE-send regression fix (verified live: 11 "ws Send(ice) failed"
-          # events and ZERO driver failures). cr7727-29235e6a2135 is Batch A on
+          # events and ZERO driver failures). cr7727-c5f2eb91c6f0 is Batch A on
           # top of it (re-arm cancels dialogs, popups close + tab events,
           # --user-data-dir, keyframe on retarget, clipboard both ways) —
-          # compiled clean 2026-09-07; its interactive verdict is recorded in
-          # the PR that landed this pin.
-          image: registry.triform.cloud/chromeless/chromeless@sha256:9e62f9d2bb785d5abf9f5f90745860ac63891a1ff91e21ec4551698b129a6176
+          # plus the peer_absent decode fix without which a cold-booted guest
+          # closes its own signaling socket. Compiled clean 2026-09-07; the
+          # interactive verdict is recorded in the PR that landed this pin.
+          image: registry.triform.cloud/chromeless/chromeless@sha256:5813600c68f861b761074fb6a691f7532951838df05c4ed70bd90f4081c26be2
           env:
             - name: SESSION_ID
               value: dev
