@@ -63,6 +63,7 @@ The page and the WebSocket share an origin. That is load-bearing, not tidiness:
 | `CHROMELESS_SESSION_TTL` | `12h` | Cookie lifetime. |
 | `CHROMELESS_AUTH_PRIVKEY` | generated | Ed25519 signing key, base64 or hex. |
 | `CHROMELESS_AUTH_PUBKEY` | — | Cross-check only; see below. |
+| `CHROMELESS_VIEWPORT_FOLLOW` | `1` | `0` makes `POST /api/viewport` answer 501, so the client stops resizing the remote browser. Set it while the guest image still crashes on a resize (`docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md`). |
 
 There is no default credential. A gateway that boots with a built-in password
 is worse than one that refuses to boot, because it looks protected.

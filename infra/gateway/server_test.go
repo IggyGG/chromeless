@@ -22,6 +22,9 @@ func newTestGateway(t *testing.T, backend http.Handler) (*gateway, *httptest.Ser
 		signalingURL: upstream.URL,
 		staticDir:    t.TempDir(),
 		sessionTTL:   time.Hour,
+		// The production default (loadConfig: unset → on). Tests that want
+		// the switch off flip it explicitly.
+		viewportFollow: true,
 	}
 	g, err := newGateway(cfg, quietLogger())
 	if err != nil {

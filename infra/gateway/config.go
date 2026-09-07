@@ -42,6 +42,9 @@ const (
 	envStartURL = "CHROMIUM_START_URL"
 	// Test-only fixture endpoint; see fixture.go.
 	envEnableTestFixture = "CHROMELESS_ENABLE_TEST_FIXTURE"
+	// Kill switch for the client's "viewport follows the window" feature.
+	// See viewport.go for why an operator would want it off.
+	envViewportFollow = "CHROMELESS_VIEWPORT_FOLLOW"
 
 	defaultPort       = "8443"
 	defaultTLSDir     = "/data/certs"
@@ -82,6 +85,14 @@ type config struct {
 	// with auth disabled, but compose supplies it so the broker can be handed
 	// the matching public half at ITS startup, before this service exists.
 	authPrivkey string
+	// viewportFollow gates POST /api/viewport. Default on. Off answers 501,
+	// which the client reads as "resize unsupported" and stops asking — the
+	// same path a guest without Cb.setViewport takes. Exists because a resize
+	// currently crashes a fresh guest's GPU process ~15 s later
+	// (docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md);
+	// until that lands in a guest image, an operator with a real window
+	// needs a way to keep the browser alive that is not "edit the client".
+	viewportFollow bool
 
 	// authPubkey is what the operator gave the broker. Not used for anything
 	// here except a startup cross-check: a mismatched pair is the one
@@ -122,6 +133,7 @@ func loadConfig() (*config, error) {
 		authPubkey:        strings.TrimSpace(os.Getenv(envAuthPubkey)),
 		startURL:          strings.TrimSpace(os.Getenv(envStartURL)),
 		enableTestFixture: os.Getenv(envEnableTestFixture) == "1",
+		viewportFollow:    os.Getenv(envViewportFollow) != "0",
 	}
 
 	// Half a TLS pair is a misconfiguration, not a fallback. Silently

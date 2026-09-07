@@ -303,6 +303,13 @@ services:
       CHROMELESS_PASS: ${CHROMELESS_PASS:?set CHROMELESS_PASS to the login password for https://localhost:8443}
       CHROMELESS_SIGNALING_URL: ws://signaling:8080
       CHROMELESS_CDP_URL: http://chromium:9222
+      # The client sizes the remote browser to its window on connect. On the
+      # current guest images that resize freezes the picture and restarts the
+      # browser ~50 s later (docs/findings/viewport-resize-freezes-beginframe-
+      # and-crashes-gpu.md), so the follower is OFF by default here until a
+      # guest with the fix is pinned. `1` turns it back on; the stream then
+      # matches the window instead of staying at the guest's 1280x720.
+      CHROMELESS_VIEWPORT_FOLLOW: ${CHROMELESS_VIEWPORT_FOLLOW:-0}
       # Signing key for session tokens; its public half goes to signaling as
       # CHROMELESS_AUTH_PUBKEY. Unset → the gateway generates one per boot,
       # which is fine on its own but leaves the broker verifying against a key
