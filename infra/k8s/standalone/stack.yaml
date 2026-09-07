@@ -416,7 +416,16 @@ spec:
           # rolled. And the tag is mutable: v9 was rebuilt over by another
           # session, serving a bundle with none of the expected markers while
           # the deployment still read "v9". Check the digest.
-          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
+          #
+          # 9ef7f4db (tag vpswitch-4f9215f, built from
+          # feat/gateway-viewport-follow-switch at 4f9215f): carries the
+          # connect-on-load client fixes (#103) AND CHROMELESS_VIEWPORT_FOLLOW.
+          # Verified live 2026-09-07 20:57 UTC with the switch off: one connect
+          # from a 1400x900 window, zero Cb.setViewport at the guest, zero
+          # stall-watchdog fires, worker pid unchanged, framesDecoded 4 -> 740
+          # over 75 s. On the previous gateway the same connect restarted the
+          # browser ~50 s in.
+          image: registry.triform.cloud/chromeless/chromeless-gateway@sha256:9ef7f4db32c86dcb34274814855a0bb77c8953f12e5d4673bfc7f85bb6cfbdcd
           env:
             - name: CHROMELESS_USER
               valueFrom:
