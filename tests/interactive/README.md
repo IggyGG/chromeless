@@ -38,30 +38,35 @@ python3 tests/interactive/run.py --only mouse,keyboard
 Credentials are read from `infra/k8s/standalone/.standalone-creds`, which
 `deploy.sh` writes.
 
-**Restart the worker before each run:**
+**A restart between runs is no longer required** on a current image: the
+worker re-arms its peer connection when a viewer leaves
+(`docs/findings/one-session-per-worker-process.md`, now resolved). It is still
+the fastest way to get a known-clean guest, and the runner aborts rather than
+cascading if the session ends mid-run:
 
 ```sh
 kubectl rollout restart deploy/chromeless-standalone-worker -n chromeless
 ```
 
-Not fastidiousness — a worker serves exactly one session per process
-(`docs/findings/one-session-per-worker-process.md`), so a second run against
-the same pod cannot get video. The suite says so when it happens rather than
-reporting 20 mysterious failures.
-
 ## Expected result
 
-The clipboard suite expects paste AND copy to round-trip on a guest built after
-2026-09-05 (boot log `CV2-CLIPBOARD: relay bound`); an older guest logs
-`CbClipboardRelay (WS disabled / url=off)` and fails the paste check.
+**58 of 58** on the pinned guest (`infra/k8s/standalone/stack.yaml`), with one
+caveat and one check that reports a preflight rather than a product verdict:
 
-**28 of 28**, on a worker running image `cr7727-224c19413e24` or later.
-Confirmed on two consecutive runs.
+- the clipboard suite expects paste AND copy to round-trip on a guest built
+  after 2026-09-05 (boot log `CV2-CLIPBOARD: relay bound`). An older guest logs
+  `CbClipboardRelay (WS disabled / url=off)` and fails the paste check; a
+  `<denied>` in the copy check means the client Chrome refused the clipboard
+  read, not that the guest did not send.
+- the passthrough and dialogs suites need the gateway bundle that carries the
+  `control` consumer; the preflight names a stale gateway, a stale guest, or
+  "cannot tell" explicitly.
 
-**Any failure is a regression.** Earlier images score 24/28 — the four extra
-failures are the wheel and keyboard defects in `docs/findings/`, fixed in that
-image. If you see those exact four, check the worker's image tag before
-debugging anything.
+**Any other failure is a regression.** Images before `cr7727-224c19413e24`
+score four lower on the wheel and keyboard checks (the resolved findings in
+`docs/findings/`); a served bundle without `window.__cb_client_consumers`
+containing `control` fails every dialog check. Check the image tag and the
+bundle marker before debugging anything else.
 
 ## When a check fails
 
@@ -91,7 +96,8 @@ compare.
 
 - `harness.py` — `CDP` (stdlib websocket), `WorkerOracle` (truth),
   `ClientDriver` (the user), fixture upload, login.
-- `run.py` — the suites: video, navigation, mouse, scroll, keyboard, channels.
+- `run.py` — the suites: dialogs, downloads, clipboard, passthrough, stats, video,
+  navigation, mouse, scroll, keyboard, channels.
 
 Input is dispatched as genuine DOM events on the client's `<video>` element,
 never as synthetic CDP input at the client — that would bypass the very code

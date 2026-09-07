@@ -6,18 +6,26 @@ with the file and line that would fix it. They are open tasks, not notes.
 CLAUDE.md's rule applies to this directory in particular: *a TODO that names
 its own verification step is a defect nobody has run yet.* These name theirs.
 
-All three below are now FIXED and COMPILED (build lane e654ed6, image
-`cr7727-e654ed644219`). They stay here until their behaviour is re-verified
-against a deployment running that image — compiling is not working, and this
-repo's unit tests do not exercise any of these paths.
+## Resolved, kept for the citations
 
-| finding | fixed in | still needs |
+Three findings below are **fixed and verified working** on a deployed image
+(`tests/interactive/`: wheel down/up, Tab, Space, and the re-arm scenarios in
+`tests/local/`). Their README contract says "delete the file when the fix lands";
+they stay because code and tests cite them by path
+(`cb_input_dispatch_keyboard.cc`, `cloud_browser_browser_main_parts.cc`,
+`signaling/server.go`, `tests/interactive/harness.py`) and each records a
+diagnosis that took a day and impersonated a different failure. Each carries a
+RESOLVED banner at the top. Do not treat them as open work.
+
+| finding | fixed in | verified by |
 | --- | --- | --- |
-| [`wheel-phase-start-delta-dropped.md`](./wheel-phase-start-delta-dropped.md) | `cb_input_dispatch_mouse.cc` | `tests/interactive/` scroll checks on the new image |
-| [`keyboard-dom-code-never-set.md`](./keyboard-dom-code-never-set.md) | `cb_input_dispatch_keyboard.cc` + BUILD.gn | `tests/interactive/` tab/space checks on the new image |
-| [`one-session-per-worker-process.md`](./one-session-per-worker-process.md) | `cloud_browser_browser_main_parts.{h,cc}` | connect, reload, confirm video returns |
+| [`wheel-phase-start-delta-dropped.md`](./wheel-phase-start-delta-dropped.md) | `cb_input_dispatch_mouse.cc` (delta and sign) | `tests/interactive/` scroll suite, image `cr7727-224c19413e24` |
+| [`keyboard-dom-code-never-set.md`](./keyboard-dom-code-never-set.md) | `cb_input_dispatch_keyboard.cc` + BUILD.gn | `tests/interactive/` tab/space checks, image `cr7727-e654ed644219` |
+| [`one-session-per-worker-process.md`](./one-session-per-worker-process.md) | broker replay rules; then the re-armable driver (`RearmSession`) superseded exit-on-close | `tests/local/rearm-scenarios.spec.ts`: pid unchanged across viewers, image `cr7727-8d2ce2e66288` |
 
-Not a code defect, but the same shape — measured, with a named owner:
+## Open
+
+Not code defects, but the same shape — measured, with a named owner:
 
 | finding | owner | what it blocks |
 | --- | --- | --- |

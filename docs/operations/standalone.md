@@ -247,10 +247,12 @@ halves are apart:
 
 - **Not multi-user.** One credential, from the environment. No accounts, no
   roles, no registration. That matches what the stack supports anyway.
-- **Not multi-session.** One session per worker process:
-  `StartNativeSession` rejects a second bring-up
-  (`cloud_browser_browser_main_parts.cc`). After a `bye`, restart the container
-  for a new session.
+- **Not multi-viewer.** One viewer at a time. When a viewer leaves, the worker
+  re-arms its peer connection in place and the next viewer gets the browser as
+  it was left (`RearmSession` in `cloud_browser_browser_main_parts.cc`; the
+  chromium pid does not change — `tests/local/README.md`). Two people cannot
+  watch the same session at once. If a re-arm fails the process exits and
+  supervisord starts a fresh one, which loses open tabs and in-memory state.
 - **Not multi-tab.** The client drives one page. The portal has a tab strip;
   this does not.
 - **Not a hardened public deployment.** Static TURN credentials, an in-memory
@@ -318,12 +320,17 @@ No `relay` line means no relay. Both peers need one — the worker via
 `CHROMELESS_ICE_SERVERS`, the browser via the broker's `TURN_URLS` /
 `TURN_USER` / `TURN_PASS`. Setting only one side fails the same way.
 
-**Video worked once, then a second client gets nothing.** One session per
-worker process. After the first client sends `bye` the worker logs
-`session closed, reason=remote bye` and will not start another —
-`StartNativeSession` rejects a second bring-up. Restart the container between
-sessions. This bites during testing more than in use, because a page reload is
-a new client.
+**Video worked once, then a second client gets nothing.** On a current image
+this should not happen: after the first client sends `bye` the worker logs
+`CV2-REARM: rebuilt; awaiting OnRenegotiationNeeded` and offers again to the
+next viewer. If you see `session closed, reason=remote bye` with nothing after
+it, the guest predates the re-armable driver (images before
+`cr7727-8d2ce2e66288`, 2026-08-21) — roll the image, or restart the container
+as a stopgap. If you see `CV2-REARM: re-arm failed`, the process exits and
+supervisord respawns it within a few seconds; the next connect works but the
+browser state is gone. Either way the tell is in the worker's own log, which is
+not in `docker logs` — use `docker compose exec chromium cat
+/var/log/supervisor/chromium.err.log`.
 
 **The address bar does nothing.** The gateway needs `CHROMELESS_CDP_URL` to
 reach the worker's DevTools. In the single-host stack that is automatic; in a

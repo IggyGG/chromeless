@@ -93,10 +93,12 @@ That is exactly why triform's coturn lives in `triform-production`, where the
 same policy is only audited. Use an existing relay, or run one in a namespace
 without enforcement. The manifest is kept as the reference config.
 
-**One session per worker process.** After a client disconnects (`bye`), the
-worker's session is closed for good and the next client gets nothing —
-`kubectl rollout restart` the worker between runs. This is a real constraint of
-the embedder, not a deployment quirk.
+**One viewer at a time, re-armed between viewers.** After a client disconnects
+(`bye`), the worker rebuilds its peer connection in place and offers again to the
+next viewer, keeping the browser where it was (`CV2-REARM` in the worker log).
+Images before `cr7727-8d2ce2e66288` (2026-08-21) instead went quiet for the life
+of the process and needed `kubectl rollout restart` between runs; if you see
+that, check the image tag before anything else.
 
 **Distroless images need a numeric `runAsUser`.** They declare `USER nonroot`
 by name, and with `runAsNonRoot: true` the kubelet cannot verify that and

@@ -1,5 +1,7 @@
 # Non-printing keys do nothing: `dom_code`/`dom_key` are never set
 
+> **RESOLVED.** Kept for the diagnosis; see `docs/findings/README.md`.
+
 **Status:** FIXED and VERIFIED WORKING against a live deployment
 (2026-08-14, image `cr7727-e654ed644219`). Both checks that could not pass
 before now pass:
