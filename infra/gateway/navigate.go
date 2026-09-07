@@ -27,10 +27,27 @@ import (
 	"time"
 )
 
-// navTimeout bounds a CDP round trip. Page.navigate returns when the
-// navigation is COMMITTED, not when the page has loaded, so this does not need
-// to cover a slow site — only a wedged or still-booting worker.
-const navTimeout = 15 * time.Second
+// navTimeout bounds a CDP round trip.
+//
+// The original 15s rested on "Page.navigate returns when the navigation is
+// COMMITTED, not when the page has loaded, so this does not need to cover a
+// slow site". That is true of a site that ANSWERS. It is not true of one that
+// misbehaves: measured 2026-08-17 against httpbin.org while it was flapping
+// between 200 and 503, Page.navigate did not return within 15s at all, and —
+// because the renderer was still working on it — the NEXT navigation timed out
+// too, at exactly 15.0s. Two failed navigations, one misbehaving third party,
+// no defect in this gateway or the worker.
+//
+// 45s covers a site that is retrying or slow to commit, while still bounding a
+// genuinely wedged worker to well under a minute. The cost of being too
+// generous here is a slower error; the cost of being too tight is a false
+// failure attributed to chromeless, which is strictly worse.
+//
+// Note this bounds a SINGLE round trip. The renderer commits navigations
+// serially, so a request queued behind a slow one waits for it — a caller
+// issuing back-to-back navigations to unreliable hosts should expect the
+// second to inherit the first's delay.
+const navTimeout = 45 * time.Second
 
 type navigateRequest struct {
 	URL string `json:"url"`

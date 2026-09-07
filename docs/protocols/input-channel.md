@@ -111,7 +111,7 @@ double-click timing rules.
 | field         | type    | values                                                          |
 |---------------|---------|-----------------------------------------------------------------|
 | `dx`          | int     | horizontal delta                                                |
-| `dy`          | int     | vertical delta (negative = up, matching `WheelEvent.deltaY`)    |
+| `dy`          | int     | vertical delta (negative = up, matching `WheelEvent.deltaY`) — see [the sign warning](#implementer-notes-two-traps-this-wheel-spec-has-already-sprung) |
 | `mode`        | int     | `0` pixel, `1` line, `2` page (`WheelEvent.deltaMode`)          |
 | `delta_mode`  | string? | `"pixel"` \| `"line"` \| `"page"` — string alias for `mode`. (v1.1) Servers SHOULD prefer this over `mode` when both are present. |
 | `phase`       | string? | `"start"` \| `"changed"` \| `"end"` \| `null`. (v1.1) Servers without inertia handling MAY ignore. See [Wheel phase machine](#wheel-phase-machine). |
@@ -148,6 +148,52 @@ two `phase=changed` deltas in one rAF tick can sum into one envelope).
 Coalescing across phase boundaries is forbidden — `start` and `end`
 are semantic boundary markers.
 
+### Implementer notes: two traps this wheel spec has already sprung
+
+Both were found against a live deployment in 2026-08 and each cost a day
+because it impersonated a different failure. Written up in full in
+`docs/findings/wheel-phase-start-delta-dropped.md` (resolved); the durable half
+lives here.
+
+**The sign is INVERTED relative to blink.** `dy` follows the DOM
+(`WheelEvent.deltaY`): **positive means scrolling DOWN**. But
+`blink::WebMouseWheelEvent::delta_y` is the opposite — positive moves the
+CONTENT down, i.e. scrolls up. An embedder that passes the value through
+unchanged scrolls backwards. `cb_input_dispatch_mouse.cc` negates
+(`kProtocolToBlinkSign`) on both `delta_*` and `wheel_ticks_*`, since they
+describe the same gesture and a mismatch tells the compositor's smoothing the
+opposite of the motion.
+
+This went unnoticed for a long time because a second defect hid it: the
+`phase: "start"` envelope's delta was being discarded, so slow scrolling
+produced no motion at all and there was no direction to be wrong about. Fixing
+the delta is what made the inversion observable — and even then it presents as
+"nothing happened", because a page at `scrollY 0` cannot scroll up.
+
+**`phase: "start"` CARRIES A REAL DELTA.** It is defined above as the "first
+**non-zero** wheel event after a quiet period", and `client/src/input.ts` sends
+it that way. A server that synthesises a zero-delta `kPhaseBegan` from it must
+also dispatch the carried delta — as a follow-on `kPhaseChanged`, if the
+compositor needs the Begin to be zero. Dropping it means the first event of
+every gesture is lost, which is invisible when scrolling fast (the next event
+arrives within the 150 ms gesture window) and total when scrolling slowly (every
+event is a `start`, so nothing ever moves).
+
+### Debugging input that "does not work"
+
+One step separates a product defect from a test defect, and it is cheap:
+
+> **Inject the same interaction directly at the worker over CDP**
+> (`Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`). If it works there,
+> Blink and the page are fine and the fault is in the chromeless input path. If
+> it fails there too, the fault is in the page or the test.
+
+That step found the wheel and keyboard defects above, and cleared three
+suspected bugs that turned out to be test errors. It also isolates root causes
+by bisection: dispatching the same `windowsVirtualKeyCode` **with and without**
+the `code`/`key` params — the two that populate `dom_code`/`dom_key` — is the
+entire difference between Tab moving focus and Tab doing nothing.
+
 ### `key_down` / `key_up`
 
 ```jsonc
@@ -163,6 +209,16 @@ are semantic boundary markers.
 The server uses `code` for layout-independent dispatch (e.g. when the
 remote keyboard layout differs) and falls back to `key` for printable
 characters that have no mapping.
+
+**Non-printing keys need `dom_code`/`dom_key`, not just `windows_key_code`.**
+Blink's focus traversal and default-action handling read the DOM fields. With
+them zero, Tab does not move focus and Space does not activate a focused
+control, while typing keeps working — because characters are inserted by the
+separate `kChar` text-synthesis path. That asymmetry is what hid the defect:
+the keyboard looks fine until someone tabs between fields. Convert with
+`ui::KeycodeConverter::CodeStringToDomCode()` / `KeyStringToDomKey()`, which
+take exactly the `code`/`key` strings this protocol already carries
+(`docs/findings/keyboard-dom-code-never-set.md`, resolved).
 
 ### `composition_start` / `composition_update` / `composition_end` / `composition_cancel`
 

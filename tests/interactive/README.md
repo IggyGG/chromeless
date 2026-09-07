@@ -35,6 +35,26 @@ python3 tests/interactive/run.py             # all suites
 python3 tests/interactive/run.py --only mouse,keyboard
 ```
 
+Or let one script arrange all of that — the port-forwards, the stray-Chrome
+reap, the fixture check, the credentials — and run it:
+
+```sh
+./tests/interactive/run-against-cluster.sh                # all suites
+./tests/interactive/run-against-cluster.sh --only mouse   # one suite
+./tests/interactive/run-against-cluster.sh --restart      # fresh worker first
+make test-interactive                                     # the same, via make
+```
+
+Each of those five prerequisites produced a plausible WRONG result at least
+once when arranged by hand, which is why it is a script and not a paragraph.
+
+**A third-party outage is not a failure here.** On a navigation error the suite
+asks the site directly from the test machine: unreachable there too means the
+site is down, and the check is SKIPPED loudly rather than failed. Reachable
+means the fault really is ours, and it fails saying so. That discriminator once
+caught a wrong diagnosis: two failures had been written off as "httpbin is
+down" until it reported HTTP 200 at the moment of failure.
+
 Credentials are read from `infra/k8s/standalone/.standalone-creds`, which
 `deploy.sh` writes.
 
