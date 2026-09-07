@@ -99,12 +99,22 @@ spec:
           # code is running — the same trap that had standalone-v9 serving a
           # different session's build while the Deployment still read "v9".
           #
-          # e69c1882 carries peer_absent: a client that joins a session with no
+          # e69c1882 carried peer_absent: a client that joins a session with no
           # browser in it is told so immediately, instead of discovering it
-          # from a 65-second watchdog. Verified live against this digest — a
+          # from a 65-second watchdog. Verified live against that digest — a
           # client dialled at session "nobody-here" and received
           # {"type":"peer_absent","from":"client"} on connect.
-          image: registry.triform.cloud/chromeless/signaling@sha256:e69c188249071fb4d7a5954b006727ec6d4f9ba2e0e83ee4bcc130435c9bfae2
+          #
+          # ff99ee1c (tag bye-20b6c94, built from fix/broker-bye-keeps-socket
+          # at 20b6c94 — the code in that PR): a bye ends the session, not the
+          # socket, and a bye ECHO is dropped. Verified live 2026-09-07 with a
+          # viewer whose PeerConnection was closed byelessly: the worker
+          # re-armed ONCE (pid unchanged), its re-offer stayed in the replay
+          # buffer (replayed=16 to the next viewer) and the next viewer got
+          # video. On e69c1882 the same loss recycled the whole browser
+          # process ("ws Send(offer) failed"). Rebuild from main after the
+          # merge and re-pin if you want the tag to say standalone-v8.
+          image: registry.triform.cloud/chromeless/signaling@sha256:ff99ee1c20b8e0469c9543641e786907fc5dc741e72f0d0234003e22ea9387c0
           env:
             - name: SIGNALING_PORT
               value: "8080"
