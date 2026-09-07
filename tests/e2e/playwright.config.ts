@@ -74,10 +74,25 @@ export default defineConfig({
 
   use: {
     baseURL,
+    // CHROMELESS_E2E_CHANNEL=chrome runs every project — the auth setup
+    // included, which is why this sits here and not on the chromium project
+    // — in an installed Google Chrome instead of Playwright's bundled
+    // Chromium. For a laptop where `playwright install` is slow or blocked
+    // (the 147 MB download sat at 200 KB for ten minutes on 2026-09-07; see
+    // the arm64 section of the README for the older failure modes), and for
+    // checking the client in the browser users actually have. CI leaves it
+    // unset and uses the pinned build.
+    ...(process.env["CHROMELESS_E2E_CHANNEL"]
+      ? { channel: process.env["CHROMELESS_E2E_CHANNEL"] }
+      : {}),
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
     trace: "retain-on-failure",
-    video: "retain-on-failure",
+    // Video needs Playwright's bundled ffmpeg, which on an arm64 Mac is the
+    // x86 build (`spawn Unknown system error -88`, EBADARCH) — so a run in
+    // the installed Chrome (CHROMELESS_E2E_CHANNEL above) still died in
+    // newPage until this could be switched off. CHROMELESS_E2E_VIDEO=off.
+    video: process.env["CHROMELESS_E2E_VIDEO"] === "off" ? "off" : "retain-on-failure",
     screenshot: "only-on-failure",
     // The gateway generates a self-signed certificate on first boot (there is
     // nothing to issue a real one for "localhost"), so every navigation and
