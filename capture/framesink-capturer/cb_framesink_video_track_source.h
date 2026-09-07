@@ -128,6 +128,7 @@
 #include <memory>
 
 #include "base/memory/scoped_refptr.h"
+#include "base/functional/callback.h"
 #include "base/sequence_checker.h"
 #include "capture/framesink-capturer/capturer.h"
 #include "capture/framesink-capturer/video_frame_conversion.h"
@@ -294,6 +295,11 @@ class CloudBrowserFrameSinkVideoTrackSource : public webrtc::VideoTrackSource {
   // seam named "for_test" is how seams quietly become API. No-op if
   // capturer_ is null.
   void SetCaptureResolution(const gfx::Size& resolution);
+
+  // CV2-KEYFRAME: forwarded to the capturer. Fires on the capturer's
+  // sequence whenever the streamed content changes wholesale (retarget,
+  // resize). See CloudBrowserFrameSinkCapturer::SetOnContentChangedCallback.
+  void SetOnContentChangedCallback(base::RepeatingClosure on_content_changed);
 
  protected:
   ~CloudBrowserFrameSinkVideoTrackSource() override;

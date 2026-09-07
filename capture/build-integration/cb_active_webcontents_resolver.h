@@ -231,6 +231,14 @@ class CbActiveWebContentsResolver : public WebContentsResolver,
   //
   // Recovery therefore has to be driven from the crash itself, which is
   // what this hook is for. Optional; unset = old behaviour (freeze).
+  // Fired from WebContentsDestroyed when the ACTIVE (captured) WebContents
+  // goes away — a popup closing itself while it was the streamed tab.
+  // Posted, not called inline, for the same reason as the RVH-swap
+  // callback: the WebContents is mid-destruction when the observer runs.
+  void SetCapturedContentsGoneCallback(base::RepeatingClosure cb) {
+    captured_gone_ = std::move(cb);
+  }
+
   void SetRendererGoneCallback(base::RepeatingClosure cb) {
     renderer_gone_ = std::move(cb);
   }
@@ -310,6 +318,7 @@ class CbActiveWebContentsResolver : public WebContentsResolver,
   // active. Empty by default (no-op → the pre-existing behaviour, which
   // is a permanently frozen stream). See SetRendererGoneCallback.
   base::RepeatingClosure renderer_gone_;
+  base::RepeatingClosure captured_gone_;
 };
 
 }  // namespace cloud_browser

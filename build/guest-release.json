@@ -1,9 +1,9 @@
 {
   "schema": "chromeless.guest-release/v1",
-  "commit": "08f76460a5bc6fbc77ddd7cbe12e4f788878bd34",
-  "image": "registry.triform.cloud/chromeless/chromeless:cr7727-08f76460a5bc",
-  "digest": "sha256:aa1686079e8734aeba5392a3fc7f14be0134ac250d605683092fd0ccc311cf0e",
+  "commit": "c5f2eb91c6f0e6f61203750f76809fbb72f3133c",
+  "image": "registry.triform.cloud/chromeless/chromeless:cr7727-c5f2eb91c6f0",
+  "digest": "sha256:5813600c68f861b761074fb6a691f7532951838df05c4ed70bd90f4081c26be2",
   "dockerfile": "build/Dockerfile.runtime",
-  "built_at": "2026-08-25T04:06:09Z",
+  "built_at": "2026-09-07T14:36:23Z",
   "recorded_by": "chromeless-kaniko-push.sh"
 }

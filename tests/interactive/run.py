@@ -768,16 +768,21 @@ def suite_downloads(client, worker):
     dep = os.environ.get("CHROMELESS_WORKER_DEPLOY",
                          "deploy/chromeless-standalone-worker")
     # Look in the profile's Downloads dir directly rather than `find /`.
-    # The delegate resolves the target under the BrowserContext's own path,
-    # which is /tmp/cloud_browser_profile_<n>/Downloads. A whole-filesystem
-    # find takes longer than the poll window in this container and returned
-    # empty every time — a TEST timeout that reads exactly like "the download
-    # never happened". Verified by hand first: the file was always there.
+    # The delegate resolves the target under the BrowserContext's own path.
+    # Since 2026-09-07 that path is --user-data-dir when the launcher passes
+    # one (/home/cbuser/.config/chromium in the runtime image; the switch was
+    # ignored before and every profile went under DIR_TEMP), so both spellings
+    # are listed: the old one keeps this oracle honest against an older guest,
+    # and a whole-filesystem find took longer than the poll window and
+    # returned empty every time — a TEST timeout that reads exactly like "the
+    # download never happened". Verified by hand first: the file was there.
+    DL_DIRS = ("/home/cbuser/.config/chromium/Downloads",
+               "/tmp/cloud_browser_profile_*/Downloads")
+    ls_cmd = "ls -1 " + " ".join(f"{d}/" for d in DL_DIRS) + " 2>/dev/null | head -8"
     found, listing = _poll(
         lambda: subprocess.run(
             ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
-             "bash", "-c",
-             "ls -1 /tmp/cloud_browser_profile_*/Downloads/ 2>/dev/null | head -5"],
+             "bash", "-c", ls_cmd],
             capture_output=True, text=True, timeout=30).stdout.strip(),
         lambda out: bool(out) and "chromeless-probe" in out,
         timeout=30)
@@ -788,8 +793,8 @@ def suite_downloads(client, worker):
         body = subprocess.run(
             ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
              "bash", "-c",
-             "cat /tmp/cloud_browser_profile_*/Downloads/chromeless-probe.txt "
-             "2>/dev/null | head -c 200"],
+             "cat " + " ".join(f"{d}/chromeless-probe.txt" for d in DL_DIRS) +
+             " 2>/dev/null | head -c 200"],
             capture_output=True, text=True, timeout=30).stdout
         check("the downloaded file has the right contents",
               "chromeless-download-probe-42" in body, f"got {body[:80]!r}",
@@ -841,33 +846,72 @@ def suite_clipboard(client, worker):
         return true; })()""" % PASTED)
     check("a paste event is dispatched at the client", fired is True)
 
-    # KNOWN GUEST-SIDE GAP, verified in the source rather than guessed at.
+    # The guest half landed on 2026-09-05 (cb_clipboard_relay.cc rewritten to
+    # write the guest clipboard and synthesise Ctrl+V). Until then this check
+    # asserted the OPPOSITE — "client->guest clipboard is INERT guest-side
+    # (known gap)" — so that implementing the relay would turn it red and tell
+    # whoever did it to invert it. This is that inversion.
     #
-    # The client half now works: the channel is wired (asserted above),
-    # onPaste fires, and ClipboardChannel.sendPaste() puts a valid
-    # clipboard_offer on the wire. The GUEST discards it.
-    #
-    # capture/build-integration/cb_clipboard_relay.cc:
-    #   OnMessage()          forwards the raw body to client_->PostText()
-    #   PostOnIoSequence()   is a DRAFT: "Pretend-send", then `(void)frame;`
-    #                        -- the body is dropped on the floor
-    #   EnsureConnected()    is empty  (TODO(M6-R2-ws-backend))
-    # and cloud_browser_browser_main_parts.cc:1120 logs
-    #   "CbClipboardRelay (WS disabled / url=off)"
-    # at boot. There is no WebSocket backend to receive the frame.
-    #
-    # Exactly the same inert-relay shape as cb_file_upload_relay, which is
-    # constructed with url="off" and an empty EnsureConnected() too.
-    #
-    # Asserted as a known gap rather than deleted, so that implementing the
-    # guest half turns this RED and tells whoever does it to flip the check.
+    # A guest image that predates the relay fails here with the paste never
+    # arriving; the boot log of such a guest says "CbClipboardRelay (WS
+    # disabled / url=off)", the new one says "CV2-CLIPBOARD: relay bound".
     ok2, val = worker.wait_for("document.getElementById('target').value",
                                lambda v: v and PASTED in v, timeout=15)
-    check("client->guest clipboard is INERT guest-side (known gap)",
-          not ok2,
-          "" if not ok2 else
-          "the paste now reaches the page -- if you implemented the relay's "
-          "WS backend, invert this check")
+    check("the paste reaches the remote input", ok2,
+          f"value={val!r} — a guest without CV2-CLIPBOARD in its boot log "
+          "predates the relay")
+
+    # COPY: cloud -> client. Select the remote input's text, send Ctrl+C
+    # through the input channel (the gesture that arms the relay's forward
+    # window), and read the CLIENT's clipboard back through its own DevTools.
+    #
+    # Chrome only lets a page read the clipboard with permission and focus;
+    # the harness grants clipboard-read/write to the client's origin over CDP,
+    # and the client bundle (clipboard.ts) writes via navigator.clipboard.
+    COPIED = "copied-from-the-guest-77"
+    worker.eval("(() => { const t = document.getElementById('target'); "
+                f"t.value = {COPIED!r}; t.focus(); t.select(); return 1; }})()")
+    time.sleep(0.3)
+    # Observe the WRITE the client bundle makes, not the OS clipboard. Headless
+    # Chrome refuses navigator.clipboard.readText() from automation even with
+    # Browser.grantPermissions (measured 2026-09-07: '<denied>' on every poll
+    # while the guest had forwarded the text), so reading the clipboard back
+    # tests the harness's Chrome, not the product. The bundle writes through
+    # navigator.clipboard.writeText (client/src/clipboard.ts defaultWriteText);
+    # wrapping it records exactly what arrived over the channel and would have
+    # been written, which is the thing the guest half is responsible for.
+    #
+    # And the bundle only writes while document.hasFocus() is true — a
+    # background tab must not have its clipboard overwritten, so
+    # clipboard.ts queues the text for the next `focus` event. A headless
+    # Chrome is never focused and never gets one, so the queued write sat
+    # there forever and the first version of this check reported "the guest
+    # did not forward the copy" against a guest that had. Emulate focus (the
+    # CDP switch that exists for exactly this) and put the focus state in the
+    # failure line so the two causes cannot be confused again.
+    try:
+        client.cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    except Exception as e:  # noqa: BLE001 — reported through the focus state below
+        print(f"  ..  Emulation.setFocusEmulationEnabled: {e}")
+    client.cdp.eval("""(() => {
+        window.__cbClipboardWrites = [];
+        const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+        navigator.clipboard.writeText = (t) => {
+            window.__cbClipboardWrites.push(t);
+            return orig(t).catch(() => {});
+        };
+        return 1; })()""")
+    client.key("KeyC", "c", mods=2)
+    ok3, got = _poll(lambda: client.cdp.eval(
+        "JSON.stringify(window.__cbClipboardWrites || [])"),
+        lambda v: v and COPIED in v, timeout=15)
+    focused = client.cdp.eval("document.hasFocus()")
+    check("a remote copy reaches the client (clipboard channel, cloud->client)",
+          ok3, f"client writes={got!r} (expected {COPIED!r}), "
+          f"document.hasFocus()={focused!r}; empty writes with focus=True means "
+          "the guest did not forward the copy — check CV2-CLIPBOARD in its log "
+          "(the relay's copy lines are VLOG(1): set CHROMELESS_CHROME_VMODULE to "
+          "include cb_clipboard_relay=1); focus=False means the client queued it")
 
 
 # --------------------------------------------------------------------------

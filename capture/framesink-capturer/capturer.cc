@@ -124,6 +124,12 @@ void CloudBrowserFrameSinkCapturer::Configure(
   min_capture_period_ = min_capture_period;
 }
 
+void CloudBrowserFrameSinkCapturer::SetOnContentChangedCallback(
+    base::RepeatingClosure on_content_changed) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  on_content_changed_ = std::move(on_content_changed);
+}
+
 void CloudBrowserFrameSinkCapturer::SetOnFrameCallback(
     OnFrameCallback on_frame) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -195,10 +201,14 @@ void CloudBrowserFrameSinkCapturer::SetCaptureResolution(
   // reach the wire until the page happens to paint — on a static page
   // that can be seconds, and the user sees their resize do nothing.
   producer_->RequestRefreshFrame();
+  // A resize is a wholesale content change too: every macroblock moves.
+  if (on_content_changed_) {
+    on_content_changed_.Run();
+  }
 
   LOG(INFO) << "CloudBrowserFrameSinkCapturer: capture resolution "
             << previous.ToString() << " -> " << resolution_.ToString()
-            << " (constraints re-pinned; refresh requested)";
+            << " (constraints re-pinned; refresh requested; keyframe asked)";
 }
 
 void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
@@ -234,27 +244,23 @@ void CloudBrowserFrameSinkCapturer::Start(viz::VideoCaptureTarget target) {
     // if the new surface never produces a natural frame.
     ArmIdleRefreshDeadline();
 
-    // TODO(CV2-KEYFRAME-ON-RETARGET): request an encoder keyframe here.
+    // CV2-KEYFRAME: this branch is the moment the streamed CONTENT changes
+    // completely — a navigation's RenderWidgetHost swap, a tab switch — and
+    // until this callback existed nothing told the encoder. x264 runs with
+    // i_keyint_max = INT_MAX ("no auto IDR", h264_encoder.cc) plus
+    // intra-refresh, so a reload coded the new page against a stale
+    // reference of the old one and recovered over a slow intra sweep instead
+    // of an instant IDR. That is the mechanism behind "after a page reload it
+    // feels a bit pixelated" (2026-08-25). The encoder half already honoured
+    // kVideoFrameKey; this is the caller it lacked. The owner (main_parts)
+    // resolves the video RtpSender and asks it for a keyframe.
     //
-    // This branch is the moment the streamed CONTENT changes completely — a
-    // navigation, a tab switch — and nothing tells the encoder. x264 is
-    // configured with i_keyint_max = INT_MAX ("no auto IDR", h264_encoder.cc:147)
-    // plus b_intra_refresh, so after a reload the new page is coded against a
-    // stale reference and recovers over a slow intra-refresh sweep instead of
-    // an instant IDR. That is a concrete mechanism for the user report
-    // "after a page reload it feels a bit pixelated" (2026-08-25).
-    //
-    // The encoder half ALREADY WORKS: h264_encoder.cc:268-276 honours
-    // VideoFrameType::kVideoFrameKey by setting X264_TYPE_IDR. What is missing
-    // is a caller. Doing it properly means a path from here through
-    // CbFramesinkVideoTrackSource to the libwebrtc encoder, which is a real
-    // design decision (whose thread? what if no encoder is attached yet?) and
-    // does not belong bolted onto a one-line bitrate fix.
-    //
-    // Deliberately filed as a TODO that names its own verification: after
-    // wiring it, a reload should show a bitrate SPIKE (the IDR) in the
-    // CV2-RTP outbound[video] samples rather than a slow climb. Per CLAUDE.md
-    // this is a task, not a note — it has a measured symptom behind it.
+    // Verification, as the TODO this replaces demanded: after a reload the
+    // CV2-RTP outbound[video] samples show a bitrate SPIKE (the IDR) rather
+    // than a slow climb.
+    if (on_content_changed_) {
+      on_content_changed_.Run();
+    }
     return;
   }
 

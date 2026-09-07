@@ -30,6 +30,7 @@ std::optional<EnvelopeType> TagFromString(std::string_view tag) {
   if (tag == "request_renegotiate") return EnvelopeType::kRequestRenegotiate;
   if (tag == "probe_result") return EnvelopeType::kProbeResult;
   if (tag == "session_unhealthy") return EnvelopeType::kSessionUnhealthy;
+  if (tag == "peer_absent") return EnvelopeType::kPeerAbsent;
   // Source-pin: every other string (`hello`, `restart_ice`, …) MUST fall
   // through to nullopt. The negative test in cb_wire_envelope_test.cc
   // locks this. The PORTAL dialect's tags are handled by
@@ -87,6 +88,7 @@ std::string_view TagToString(EnvelopeType type) {
     case EnvelopeType::kRequestRenegotiate: return "request_renegotiate";
     case EnvelopeType::kProbeResult: return "probe_result";
     case EnvelopeType::kSessionUnhealthy: return "session_unhealthy";
+    case EnvelopeType::kPeerAbsent: return "peer_absent";
   }
   // Unreachable — enum is closed and exhaustively matched above.
   // CHECK rather than fall through so a future expansion that forgets
@@ -182,6 +184,14 @@ EncodedData EncodeData(EnvelopeType type, const EnvelopeData& data) {
       // CV2-GPU-DEATH: like kBye — no payload, `data` field omitted on the
       // wire. The type alone is the signal (physics releases the registry
       // entry for this element). Monostate is the only legal variant.
+      if (!std::holds_alternative<std::monostate>(data)) return out;
+      out.ok = true;
+      out.omit_field = true;
+      return out;
+    }
+    case EnvelopeType::kPeerAbsent: {
+      // Broker-emitted; this peer never encodes one in production, but the
+      // enum is closed and exhaustively matched. Same shape as kBye.
       if (!std::holds_alternative<std::monostate>(data)) return out;
       out.ok = true;
       out.omit_field = true;
@@ -342,6 +352,12 @@ std::optional<EnvelopeData> DecodeData(EnvelopeType type,
     }
     case EnvelopeType::kSessionUnhealthy: {
       // CV2-GPU-DEATH: like kBye — `data` MUST be absent. No payload at all.
+      if (data) return std::nullopt;
+      return EnvelopeData{std::monostate{}};
+    }
+    case EnvelopeType::kPeerAbsent: {
+      // CV2-PEER-ABSENT: like kBye — `data` MUST be absent. The broker's Go
+      // struct has `json:"data,omitempty"`, so it never writes one.
       if (data) return std::nullopt;
       return EnvelopeData{std::monostate{}};
     }

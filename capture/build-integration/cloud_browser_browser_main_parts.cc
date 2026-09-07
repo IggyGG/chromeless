@@ -290,6 +290,69 @@ void CloudBrowserBrowserMainParts::SetActiveCapture(
             << frame_sink_id.ToString();
 }
 
+// CV2-CAPTURE-FALLBACK. The captured WebContents was destroyed under the
+// capturer — an adopted popup that closed itself while it was the streamed
+// tab. Point capture back at the initial tab, which main_parts owns for the
+// life of the process and which therefore always exists.
+//
+// Resolution walks WC -> RWHV -> RWH -> FrameSinkId live, exactly as
+// RearmCaptureAfterRvhSwap does; a retarget with the same FrameSinkId is a
+// no-op in the capturer and a different one retargets the running producer.
+// SetActiveCapture re-points the input resolver and the viewport controller
+// so clicks and resizes follow the picture.
+void CloudBrowserBrowserMainParts::RearmCaptureOnInitialTab() {
+  if (!cb_track_source_ || !initial_web_contents_ || tearing_down_) {
+    return;
+  }
+  content::WebContents* wc = initial_web_contents_.get();
+  content::RenderWidgetHostView* rwhv = wc->GetRenderWidgetHostView();
+  content::RenderWidgetHost* rwh = rwhv ? rwhv->GetRenderWidgetHost() : nullptr;
+  const viz::FrameSinkId fsid = rwh ? rwh->GetFrameSinkId() : viz::FrameSinkId();
+  if (!fsid.is_valid()) {
+    LOG(WARNING) << "CV2-CAPTURE-FALLBACK: initial tab has no FrameSinkId; "
+                    "capture stays unarmed until the next "
+                    "Cb.startFrameSinkCapture";
+    return;
+  }
+  if (!rwhv->IsShowing()) {
+    // Same gating as Cb.startFrameSinkCapture: a hidden view stays
+    // BeginFrame-throttled and would produce nothing even when captured.
+    for (aura::Window* w = rwhv->GetNativeView(); w; w = w->parent()) {
+      w->Show();
+    }
+    wc->WasShown();
+  }
+  cb_track_source_->StartCapture(viz::VideoCaptureTarget(fsid));
+  SetActiveCapture(wc, fsid);
+  LOG(INFO) << "CV2-CAPTURE-FALLBACK: captured tab was destroyed; capture "
+               "re-armed on the initial tab, fsid=" << fsid.ToString();
+}
+
+// CV2-KEYFRAME. Ask the video encoder for a keyframe so the next frame is
+// coded as an IDR. Called by the capturer on a retarget or resize (UI
+// sequence); RtpSenderInterface must be driven on the signaling thread, so
+// hop. Best-effort: with no sender yet (before the first offer) there is no
+// encoder to ask and the first frame is a keyframe anyway.
+//
+// GenerateKeyFrame takes the rids to key; an empty vector means every
+// layer (there is one — simulcast is off). It is a virtual with a default
+// body at 7727 ("make pure virtual again after Chrome roll"), so it exists
+// on every RtpSenderInterface and returns OK where a sender ignores it.
+void CloudBrowserBrowserMainParts::RequestVideoKeyFrame() {
+  if (!video_sender_ || !signaling_thread_) {
+    return;
+  }
+  webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender = video_sender_;
+  signaling_thread_->PostTask([sender] {
+    const webrtc::RTCError err = sender->GenerateKeyFrame({});
+    if (!err.ok()) {
+      LOG(WARNING) << "CV2-KEYFRAME: GenerateKeyFrame failed: " << err.message();
+    } else {
+      VLOG(1) << "CV2-KEYFRAME: keyframe requested after content change";
+    }
+  });
+}
+
 void CloudBrowserBrowserMainParts::RearmCaptureAfterRvhSwap(int attempts_left) {
   // CV2-CAPTURE-REARM. Posted from
   // CbActiveWebContentsResolver::RenderViewHostChanged after a
@@ -775,6 +838,15 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       << "ServerError on every invocation. ChromelessV2 M2 R4 (CV2-39) "
       << "requires a non-null track source for the M3 peer-track wiring.";
 
+  // CV2-KEYFRAME: when the capturer retargets or resizes, ask the encoder
+  // for a keyframe. The capturer runs on the UI sequence (it is constructed
+  // and driven here), and RequestVideoKeyFrame hops to the signaling thread
+  // itself. Unretained: cb_track_source_ (and the capturer it owns) is
+  // released in PostMainMessageLoopRun, on this thread, before |this| dies.
+  cb_track_source_->SetOnContentChangedCallback(base::BindRepeating(
+      &CloudBrowserBrowserMainParts::RequestVideoKeyFrame,
+      base::Unretained(this)));
+
   // The capture pipeline now exists, so the viewport controller can reach
   // it. Until this point Apply() updates the display + aura host and skips
   // the capturer step; the resolution it stored is picked up by the first
@@ -858,6 +930,15 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
   active_webcontents_resolver_.SetRendererGoneCallback(base::BindRepeating(
       &CloudBrowserBrowserMainParts::OnCapturedRendererGone,
       base::Unretained(this)));
+
+  // A captured popup closing itself (window.close() at the end of an OAuth
+  // flow is the common case) would otherwise leave the capturer bound to a
+  // dead FrameSink: no frames, and after 30 s the no-frames watchdog kills
+  // the worker. Fall back to the initial tab. Same Unretained rationale.
+  active_webcontents_resolver_.SetCapturedContentsGoneCallback(
+      base::BindRepeating(
+          &CloudBrowserBrowserMainParts::RearmCaptureOnInitialTab,
+          base::Unretained(this)));
 
   // ============== CV2-69 (M55-R5-merge-with-m3-r4-r6) F5 + F6 ==============
   //
@@ -1140,15 +1221,27 @@ void CloudBrowserBrowserMainParts::RebuildNativeDataChannels() {
                     "client is missing";
     }
 
-    clipboard_ws_ = std::make_unique<CbClipboardBridgeWsClient>(
-        /*label=*/"inbound",
-        /*url=*/"off", content::GetIOThreadTaskRunner({}));
-    clipboard_relay_ =
-        std::make_unique<CbClipboardRelay>(std::move(clipboard_ws_));
+    // CV2-CLIPBOARD: the relay writes the guest clipboard and pastes on an
+    // inbound envelope, and forwards a copy the viewer asked for. It needs
+    // the resolver for the paste target and the UI runner for ui::Clipboard,
+    // which is UI-thread-only. Until this landed the relay forwarded frames
+    // to a WebSocket bridge that was never implemented, so paste reached the
+    // wire and was dropped (cb_clipboard_relay.h has the history).
+    clipboard_relay_ = std::make_unique<CbClipboardRelay>(
+        dc_host_.get(), &active_webcontents_resolver_,
+        content::GetUIThreadTaskRunner({}));
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kClipboard,
                            clipboard_relay_.get());
-    LOG(INFO) << "CV2-75: \"clipboard\" DC observer = "
-                 "CbClipboardRelay (WS disabled / url=off)";
+    // The copy window is armed by the viewer's copy gestures, which arrive on
+    // the INPUT channel (clipboard_copy_request, or a Ctrl/Cmd+C keydown) and
+    // are handled by the composite delegate constructed above. WeakPtr: the
+    // relay is destroyed before the delegate on re-arm and teardown, and a
+    // gesture in that gap must be a no-op, not a use-after-free.
+    input_delegate_->SetOnCopyGesture(base::BindRepeating(
+        &CbClipboardRelay::ArmCopyWindow, clipboard_relay_->AsWeakPtr()));
+    LOG(INFO) << "CV2-75: \"clipboard\" DC observer = CbClipboardRelay "
+                 "(paste -> guest clipboard + Ctrl+V; copy forwarded within "
+                 "the gesture window)";
 
     file_upload_ws_ = std::make_unique<CbFileUploadBridgeWsClient>(
         /*url=*/"off", content::GetIOThreadTaskRunner({}));
@@ -1317,6 +1410,10 @@ void CloudBrowserBrowserMainParts::RebuildSessionMedia() {
       // ref for the duration of the Get/Set pair.
       webrtc::scoped_refptr<webrtc::RtpSenderInterface> video_sender =
           tx_result.value()->sender();
+      // CV2-KEYFRAME: kept so RequestVideoKeyFrame can reach the encoder
+      // when the capturer reports a wholesale content change. Cleared with
+      // video_track_ on re-arm and teardown (it belongs to this PC).
+      video_sender_ = video_sender;
       if (video_sender) {
         webrtc::RtpParameters params = video_sender->GetParameters();
         params.degradation_preference =
@@ -1469,6 +1566,32 @@ webrtc::RTCError CloudBrowserBrowserMainParts::RearmSession(bool announce_bye) {
   //    below IS a std::unique_ptr, where .reset() is correct — which is
   //    exactly why the odd one out was easy to miss.
   video_track_ = nullptr;
+  video_sender_ = nullptr;
+
+  // 2a. The control channel FIRST, and in the same three steps
+  //     PostMainMessageLoopRun uses: detach the delegate's pointer, resolve
+  //     every in-flight request with its default, unbind, destroy.
+  //
+  //     Until this existed a re-arm reset dc_host_ with control_channel_'s
+  //     requests still pending, then RebuildNativeDataChannels replaced
+  //     control_channel_ — and CbControlChannel's destructor deliberately
+  //     does NOT resolve (the consumers owning those callbacks may be gone),
+  //     it only LOG(ERROR)s. So a viewer who left mid-confirm() left the
+  //     page's JS thread blocked inside RunJavaScriptDialog for the NEXT
+  //     viewer, who then saw a wedged page with nothing in the client to
+  //     explain it. The exit-on-close fix this replaced never hit it: the
+  //     process died milliseconds later.
+  GetCloudBrowserWebContentsDelegate()->SetSessionContext(
+      aura_root_window(), /*control_channel=*/nullptr);
+  if (control_channel_) {
+    control_channel_->CancelAllPending();
+  }
+  if (dc_host_) {
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kControl,
+                           nullptr);
+  }
+  control_channel_.reset();
+
   cursor_dc_emitter_.reset();
   cursor_xy_join_.reset();
   clipboard_relay_.reset();
@@ -1648,7 +1771,6 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
                            nullptr);
   }
   clipboard_relay_.reset();
-  clipboard_ws_.reset();
   cursor_dc_emitter_.reset();
   cursor_envelope_assembler_.reset();
   cursor_emit_policy_.reset();
@@ -1673,6 +1795,7 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // ============== END CV2-75/CV2-81/CV2-83 TEARDOWN ==============
 
   video_track_ = nullptr;
+  video_sender_ = nullptr;
   if (offerer_driver_) {
     if (audio_lifecycle_) {
       audio_lifecycle_->PrepareForTeardown("session ended");

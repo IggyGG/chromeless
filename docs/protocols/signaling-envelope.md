@@ -88,6 +88,20 @@ forwarded, and a peer that does not recognise it drops it as an unknown type
 (which is the documented forward-compatibility behaviour, so it is safe to
 send to any client).
 
+**The browser peer must accept it too.** The broker sends it to whichever
+role joins alone — and on every cold boot that is the browser, whose offer is
+then buffered for the first viewer. From 2026-08-25 to 2026-09-07 the C++ peer
+rejected the tag per the closed accept-list, and `SignalingWsClient` treats a
+decode rejection as a transport failure: the guest closed its own signaling
+socket on the first frame it received, on every boot where no viewer was
+already waiting. E2E was red for two weeks and the standalone stack worked
+only if the page was open before the worker started. The guest now decodes
+`peer_absent` (monostate, `data` omitted, `from` = the recipient's own role)
+and logs it. An advisory that is "safe to send to any peer" has to be one the
+peer survives; a codec that must reject unknown tags needs the ws client to
+treat rejection as *drop the frame*, not *drop the socket* — that half is
+still open.
+
 It exists because being alone in a session is invisible from the inside. A
 client on the wrong session id has an open socket, accepted auth, a delivered
 ICE config and a green probe; it simply never receives an offer. Before this

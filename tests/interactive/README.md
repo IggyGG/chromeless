@@ -50,21 +50,30 @@ kubectl rollout restart deploy/chromeless-standalone-worker -n chromeless
 
 ## Expected result
 
-**58 of 58** on the pinned guest (`infra/k8s/standalone/stack.yaml`), with two
-checks that are *expected* to report a known gap rather than pass:
+**65 of 65** on the pinned guest (`infra/k8s/standalone/stack.yaml`,
+`cr7727-c5f2eb91c6f0` or later), with one check that reports a preflight
+rather than a product verdict:
 
-- `client->guest clipboard is INERT guest-side (known gap)` — the guest's
-  clipboard relay is a stub; the check flips RED when someone implements it, so
-  they know to invert it.
+- the clipboard suite expects paste AND copy to round-trip on a guest built
+  after 2026-09-05 (boot log `CV2-CLIPBOARD: relay bound`). An older guest logs
+  `CbClipboardRelay (WS disabled / url=off)` and fails the paste check. The
+  copy check observes the WRITE the client bundle makes (it wraps
+  `navigator.clipboard.writeText`) rather than reading the harness Chrome's
+  clipboard back, which a headless Chrome refuses; its failure line carries
+  `document.hasFocus()` because the bundle queues the write until the
+  document is focused, and the harness enables focus emulation for exactly
+  that reason.
 - the passthrough and dialogs suites need the gateway bundle that carries the
   `control` consumer; the preflight names a stale gateway, a stale guest, or
   "cannot tell" explicitly.
+- the download oracle lists the profile's `Downloads/` under
+  `/home/cbuser/.config/chromium` (the guest honours `--user-data-dir` since
+  the same image) and the older `/tmp/cloud_browser_profile_*` path, so it
+  stays honest against an older guest.
 
-**Any other failure is a regression.** Images before `cr7727-224c19413e24`
-score four lower on the wheel and keyboard checks (the resolved findings in
-`docs/findings/`); a served bundle without `window.__cb_client_consumers`
-containing `control` fails every dialog check. Check the image tag and the
-bundle marker before debugging anything else.
+**Any failure is a regression.** Earlier images score lower for reasons
+recorded in `docs/findings/`; if the failures cluster in one suite, check the
+worker's image tag before debugging anything.
 
 ## When a check fails
 

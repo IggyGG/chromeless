@@ -11,7 +11,10 @@ dedicated `RTCDataChannel` named `"clipboard"` (separate from
 > changes bump the `v` field.
 
 The client side is `client/src/clipboard.ts` (T31, platform-dev). The
-server side is `capture/clipboard-bridge/` (same task).
+server side WAS `capture/clipboard-bridge/` (a Phase-1 sidecar for the
+streamer page deleted in M7); since 2026-09 it is
+`capture/build-integration/cb_clipboard_relay.{h,cc}` in the browser process,
+which owns both directions directly — see [Guest implementation](#guest-implementation).
 
 The project brief calls clipboard sync "a notable rabbit hole"; v1 is
 a deliberately narrow path: **text only, user-triggered, never
@@ -110,6 +113,33 @@ connection itself; v1 has no per-channel authentication on top.
 Phase 3 work.
 
 ---
+
+## Guest implementation
+
+`CbClipboardRelay` is bound to the `"clipboard"` DataChannel as its observer
+and is also a `ui::ClipboardObserver`. It enforces this spec at the only place
+that can:
+
+- **client→cloud (paste).** A valid v1 envelope is written to the guest's
+  clipboard (`ui::ScopedClipboardWriter`, `kCopyPaste`) and a Ctrl+V key pair
+  is synthesised against the active WebContents — the same shape the copy
+  gesture uses for Ctrl+C — so the page's own `keydown`/`paste` handlers run
+  exactly as for a physical keypress. Wrong direction, wrong `source`, wrong
+  version, or more than 1 MiB: dropped with a warning, never truncated.
+- **cloud→client (copy).** A clipboard change is forwarded **only inside a 2 s
+  window armed by a viewer gesture**: the `clipboard_copy_request` envelope on
+  the input channel, or a Ctrl/Cmd+C `key_down` that reached the guest. One
+  change per window. A change whose text equals the relay's own last paste
+  write is an echo and is dropped. This is rule 1 of the security model
+  (no silent polling) made mechanical: a page calling
+  `navigator.clipboard.writeText()` from a timer changes the guest clipboard
+  and nothing leaves the guest.
+- Text only, 1 MiB cap on read as on write; the copied text is read
+  asynchronously (`ui::Clipboard::ReadText`) on the UI thread.
+
+Rule 5's "`Browser.grantPermissions` scoped to the streamer-page origin" no
+longer applies — there is no page-side writer; the browser process writes the
+clipboard itself.
 
 ## Versioning
 

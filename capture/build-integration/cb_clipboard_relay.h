@@ -3,412 +3,201 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// CbClipboardRelay — browser-process replacement for streamer.js's
-// clipboard hookup (capture/streamer-page/streamer.js, deleted in M7).
-// Bidirectional bridge between the WebRTC "clipboard" DataChannel and
-// the existing clipboard-bridge sidecar (capture/clipboard-bridge/),
-// which owns the CDP-driven OS-clipboard write + the in-page copy
-// probe.
+// CbClipboardRelay — the guest half of the "clipboard" DataChannel.
 //
-// # Wire model (preserved across the cutover)
+// WHAT THIS REPLACED, AND WHY
 //
-// The wire envelope on BOTH the DC and the bridge WS is the v1
-// clipboard_offer shape documented in docs/protocols/clipboard-
-// channel.md and parsed by clipboard-bridge/main.go:
+// The first version of this file relayed frames byte-for-byte to a
+// WebSocket "clipboard bridge" sidecar (capture/clipboard-bridge/, Go) that
+// owned the OS-clipboard write and the in-page copy probe. The WebSocket
+// halves were landed as DRAFTS — `PostOnIoSequence` logged "Pretend-send"
+// and dropped the frame, `EnsureConnected()` was empty — and the sidecar
+// itself was never composed into the standalone stack. So from 2026-05 to
+// 2026-09 the client put a valid `clipboard_offer` on the wire on every
+// paste and the guest discarded it. tests/interactive/run.py carried that as
+// an explicit known-gap check ("client->guest clipboard is INERT
+// guest-side"). Copy never worked either: nothing on the guest produced a
+// cloud->client envelope.
 //
-//     {
-//       "v": 1,
-//       "type": "clipboard_offer",
-//       "t": <unix-ms>,
-//       "seq": <monotonic int>,
-//       "data": {
-//         "direction": "client->cloud" | "cloud->client",
-//         "source":    "user_action",
-//         "text":      "<utf-8 string, ≤1 MiB>"
-//       }
-//     }
+// The bridge was a Phase-1 shape for a streamer PAGE that no longer exists
+// (deleted in M7). The relay now lives in the browser process, which has
+// direct access to the one thing the bridge existed to reach: ui::Clipboard.
+// No sidecar, no sockets, no second copy of the envelope parser.
 //
-// The relay does NOT mint or rewrite this envelope — it shuttles the
-// raw text body between the DC and the bridge byte-for-byte. The seq
-// counter, timestamp, and direction are authored by whichever side
-// originated the event (portal client on inbound; bridge's outbound
-// probe on outbound). Re-stamping here would desync the seq stream
-// against the portal-side dedup window.
+// PASTE (client -> cloud)
 //
-// # Topology
+//   1. OnMessage on the libwebrtc signaling thread: parse the v1 envelope
+//      (ReadDict, strict RFC), enforce direction/source/version and the 1 MiB
+//      cap, then hop to the UI thread with the text.
+//   2. Write the text to the guest's clipboard (ui::ScopedClipboardWriter,
+//      kCopyPaste). The guest's Chromium is an ozone/X11 process under Xvfb,
+//      so this is a real clipboard the renderer can read back.
+//   3. Synthesise Ctrl+V against the active WebContents, exactly as
+//      CbInputDispatchClipboard synthesises Ctrl+C for copy: a
+//      kRawKeyDown + kKeyUp pair with the Ctrl modifier on the per-event
+//      modifiers only. The page's own `keydown`/`paste` handlers run, so a
+//      page that intercepts paste (editors do) behaves as it does for a
+//      physical keypress — which `WebContents::Paste()` would bypass.
 //
-//   ┌──────────────────────────┐                  ┌────────────────────────┐
-//   │ cb-chromium browser proc │                  │ clipboard-bridge (Go)  │
-//   │  ┌────────────────────┐  │  inbound (push)  │   --source=ws          │
-//   │  │ CbClipboardRelay   │──┼─→ WS client ────→│  ws://127.0.0.1:9300/  │
-//   │  │ DataChannelObserver│  │                  │  /clipboard            │
-//   │  └────────────────────┘  │                  │                        │
-//   │           ↑              │                  │                        │
-//   │           │ DC msg       │                  │   --sink=ws            │
-//   │  ┌────────┴───────────┐  │  outbound (pull) │  dials this server     │
-//   │  │ Outbound listener  │←─┼── WS server ←────│  ws://127.0.0.1:9301/  │
-//   │  │ (host->Send)       │  │                  │  /clipboard            │
-//   │  └────────────────────┘  │                  │                        │
-//   └──────────────────────────┘                  └────────────────────────┘
+//   The two halves are separate on purpose: writing the clipboard without
+//   pasting is what a "copy to remote clipboard" affordance would do, and
+//   the last-written text is what echo suppression (below) compares against.
 //
-// Both endpoints loopback because the bridge runs in the same
-// supervisord-managed container as the chromium binary. The default
-// addresses match clipboard-bridge/main.go's --ws-addr 127.0.0.1:9300
-// and --sink-url ws://127.0.0.1:9301/clipboard flag defaults.
+// COPY (cloud -> client)
 //
-// # Why two unidirectional WS connections, not one duplex
+//   The page's copy lands in the OS clipboard via content's ClipboardHostImpl
+//   -> ui::ScopedClipboardWriter, whose destructor notifies
+//   ui::ClipboardMonitor. This relay is a ui::ClipboardObserver, so it learns
+//   of every write — including ones NO user asked for: a page calling
+//   `navigator.clipboard.writeText()` from a timer, an extension, a
+//   focus-stealing script. Forwarding every change would hand a hostile page
+//   the viewer's clipboard. So:
 //
-// Two reasons:
-//   1. Zero bridge changes. The bridge's source (WS server) and sink
-//      (WS client) shapes already match what we need; we just have to
-//      stand up the complement on the chromium side — a client for
-//      the source, a server for the sink. A duplex variant would need
-//      either a third mode in the bridge or a different framing
-//      contract; neither pays for itself.
-//   2. Clean failure isolation. Inbound failures (bridge sidecar
-//      unreachable / OS-clipboard write failed) MUST NOT cascade into
-//      outbound delivery and vice versa. Separate sockets give us
-//      independent reconnect timers + independent burst-rate-limited
-//      log lines.
+//   * A change is forwarded only inside a short WINDOW armed by an explicit
+//     user gesture: the client's `clipboard_copy_request` envelope (its copy
+//     gesture on the input channel), or a Ctrl/Cmd+C keydown that reached the
+//     guest via the keyboard dispatcher. The window is kArmWindow long.
+//   * A change whose text equals what WE last wrote for a paste is an echo of
+//     our own write and is dropped (the spec's "receiver does not echo").
+//   * Text is read asynchronously (ui::Clipboard::ReadText takes a callback),
+//     capped at 1 MiB, and sent as a v1 cloud->client envelope on the
+//     clipboard DC via CbDataChannelHost::SendAsync.
 //
-// # Echo suppression
+//   This is the spec's "no silent polling" rule, enforced at the only place
+//   that can enforce it. It also means a copy the page performs on its own
+//   (a "Copy link" button that calls writeText from a click handler) IS
+//   forwarded if the click came through the input channel within the window
+//   — the click is the gesture.
 //
-// Lives in the BRIDGE (main.go's `b.last` field), not here. When the
-// bridge writes `text` to the cloud clipboard via CDP, it stashes
-// `text` and drops the next outbound that matches. The relay forwards
-// envelopes verbatim and trusts the bridge's suppression. This avoids
-// a relay-side memory of "what did we just push" (which would race
-// the bridge's CDP timing) and keeps the relay stateless aside from
-// the WS connections.
+// THREADING
 //
-// # Threading
+//   * OnMessage: libwebrtc signaling thread -> parse -> PostTask(UI).
+//   * ui::Clipboard is UI-thread-only (ClipboardOzone DCHECKs the thread);
+//     every clipboard call here runs on |ui_task_runner_|.
+//   * ClipboardObserver notifications arrive on the UI thread.
+//   * Outbound send goes through dc_host_->SendAsync, which hops to the
+//     signaling thread itself and replies on |ui_task_runner_|.
 //
-// CbClipboardRelay's webrtc::DataChannelObserver methods fire on the
-// libwebrtc signaling/network thread (same as CbStatsRelay). Body
-// construction is cheap (no parse, no mint) so we PostTask onto the
-// io_task_runner_ where the inbound WS client lives, no hop in the
-// hot path beyond that.
+// LIFETIME
 //
-// CbClipboardOutboundReceiver's WS frames arrive on the io_task_-
-// runner_ sequence; the relay PostTasks onto signaling_task_runner_
-// before invoking dc_host_->Send(kClipboard, text) because
-// DataChannelInterface::Send is signaling-only.
-//
-// # R2 scope (CV2-34)
-//
-//   * inbound: forward "clipboard" DC text frames to the bridge's WS
-//     source endpoint (default ws://127.0.0.1:9300/clipboard)
-//   * outbound: accept WS connections from the bridge on the sink
-//     endpoint (default 127.0.0.1:9301 path /clipboard) and forward
-//     each text frame via dc_host_->Send(kClipboard, ...)
-//   * burst-rate-limited log on inbound POST failures (same 1st /
-//     every-10th cadence as CbStatsRelay; see ShouldLogFailure)
-//   * `off` sentinel disables the relay entirely (test-friendly,
-//     matches CbStatsRelay's kSentinelOff)
-//
-// # Non-goals for R2
-//
-//   * parsing the clipboard_offer envelope — that's the bridge's job
-//     (validation, version gate, source gate, 1 MiB cap). The relay
-//     forwards bytes; an oversized DC frame is dropped with a WARN
-//     before the WS hop only as defence-in-depth.
-//   * mutating direction. The relay never rewrites `direction` —
-//     client->cloud envelopes flow inbound only, cloud->client flow
-//     outbound only. Wrong-direction envelopes are forwarded
-//     verbatim and dropped by the receiving side per the v1 contract.
-//   * synthesising clipboard_offer envelopes from non-DC sources
-//     (e.g. host paste-into-cb-chromium). The bridge's outbound
-//     probe is the sole authority on cloud→client events.
-//   * reconnect storm protection. We reconnect with the same
-//     exponential-backoff cadence the rest of the M6 family uses
-//     (initial 1s, doubles to a 30s cap). A wedged bridge or wedged
-//     DC each independently surface in metrics — no relay-side
-//     circuit-breaker.
+//   Session-scoped, like CbControlChannel: constructed in
+//   RebuildNativeDataChannels, bound with BindObserver(kClipboard), destroyed
+//   on re-arm and in PostMainMessageLoopRun. The destructor unregisters from
+//   ClipboardMonitor; |dc_host_| and |resolver| must outlive this object.
 
 #ifndef CLOUD_BROWSER_CAPTURE_BUILD_INTEGRATION_CB_CLIPBOARD_RELAY_H_
 #define CLOUD_BROWSER_CAPTURE_BUILD_INTEGRATION_CB_CLIPBOARD_RELAY_H_
 
 #include <cstdint>
-#include <memory>
 #include <string>
-#include <string_view>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/synchronization/lock.h"
+#include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "cloud-browser/capture/signaling/cb_dc_host.h"
 #include "third_party/webrtc/api/data_channel_interface.h"
-#include "third_party/webrtc/api/scoped_refptr.h"
+#include "ui/base/clipboard/clipboard_observer.h"
+
+namespace content {
+class WebContents;
+}  // namespace content
 
 namespace cloud_browser {
 
-// Default endpoints. Mirror clipboard-bridge/main.go's flag defaults:
-//   --ws-addr 127.0.0.1:9300  (bridge's source — relay dials this)
-//   --sink-url ws://127.0.0.1:9301/clipboard (bridge's sink — relay
-//                                             accepts here)
-// Loopback because the bridge runs in the same container as cb-
-// chromium under supervisord.
-inline constexpr char kDefaultBridgeInboundUrl[] =
-    "ws://127.0.0.1:9300/clipboard";
-inline constexpr char kDefaultRelayOutboundAddr[] = "127.0.0.1:9301";
-inline constexpr char kDefaultRelayOutboundPath[] = "/clipboard";
+class WebContentsResolver;
 
-// "off" sentinel matching CbStatsRelay's kSentinelOff. When either
-// URL/addr equals this value (case-insensitive), the corresponding
-// half of the relay constructs in disabled state and emits no
-// traffic. Lets tests run the M3 host stack without dragging in a
-// real bridge sidecar.
-inline constexpr char kClipboardSentinelOff[] = "off";
+// Hard 1 MiB cap from docs/protocols/clipboard-channel.md, enforced on both
+// directions: an oversize inbound frame is dropped before it is parsed, an
+// oversize outbound read is dropped before it is sent.
+inline constexpr size_t kMaxClipboardTextBytes = 1 << 20;
 
-// CbClipboardBridgeWsClient — small adapter that wraps the actual
-// WebSocket client used to push inbound envelopes at the bridge's
-// source endpoint. Parallel to CbMetricsSidecarClient in M6 R1, but
-// over WS instead of HTTP because the bridge already speaks WS.
-//
-// Lifetime: created on the io_task_runner sequence, lives for the
-// life of CbClipboardRelay. Reconnects opaquely on transport loss
-// with exponential backoff. PostText() may be called from any thread;
-// it PostTasks onto io_task_runner_ before touching the WS handle.
-//
-// # WS-backend choice (production wiring is a follow-up)
-//
-// Chromium browser process exposes WebSocket clients through two
-// surfaces: services/network's mojo-fronted WebSocket (the Web API
-// surface) and net/websockets/WebSocketChannel (the raw-net surface
-// used by the network service itself). Both work for loopback; the
-// network-service surface is heavier wiring (mojo pipes, profile-
-// scoped URLLoaderFactory) but matches the pattern CbStatsRelay
-// already uses. The raw-net surface is simpler but bypasses the
-// network-traffic-annotation chain.
-//
-// TODO(M6-R2-ws-backend): pick one and wire. R2 draft leaves this
-// behind an interface so the rest of the relay can land + be
-// integration-tested with a fake WS client before the production
-// choice is locked in. The integration-test fake covered by the
-// follow-up cb_clipboard_relay_test.cc target uses an in-process
-// fake satisfying the same WsTransport interface.
-class CbClipboardBridgeWsClient {
+// How long after a copy gesture a clipboard change is treated as the result
+// of that gesture. Long enough for the renderer round trip (the copy is
+// dispatched as a key event, handled in the renderer, written back via
+// ClipboardHostImpl); short enough that a page cannot ride the window for
+// long. Measured renderer copy latency on the standalone stack is tens of
+// milliseconds.
+inline constexpr base::TimeDelta kClipboardArmWindow = base::Seconds(2);
+
+class CbClipboardRelay : public webrtc::DataChannelObserver,
+                         public ui::ClipboardObserver {
  public:
-  CbClipboardBridgeWsClient(
-      std::string label,                                   // "inbound"
-      std::string url,                                     // or "off"
-      scoped_refptr<base::SequencedTaskRunner> io_task_runner);
-
-  CbClipboardBridgeWsClient(const CbClipboardBridgeWsClient&) = delete;
-  CbClipboardBridgeWsClient& operator=(const CbClipboardBridgeWsClient&) =
-      delete;
-
-  virtual ~CbClipboardBridgeWsClient();
-
-  // True when the URL is the "off" sentinel or empty — callers can
-  // short-circuit body construction.
-  bool disabled() const { return disabled_; }
-
-  // Send a single text frame to the bridge. Fire-and-forget; the
-  // relay does not await a response (the bridge's HTTP/WS source
-  // does not produce a per-frame reply). If the WS is not currently
-  // connected, the frame is dropped and a failure is recorded; the
-  // relay does NOT queue across reconnects because the bridge expects
-  // monotone-seq envelopes from the portal client and a queued
-  // backlog can reorder relative to fresh frames the portal is also
-  // sending. JS shape matches: streamer.js dropped on disconnect too.
-  //
-  // Marked virtual so cb_clipboard_relay_test.cc can subclass with a
-  // capture sink. Production callers always invoke through the base
-  // pointer.
-  virtual void PostText(std::string frame);
-
- protected:
-  // Body of PostText after the io_task_runner hop. Exposed to the
-  // test seam — production callers go through PostText.
-  void PostOnIoSequence(std::string frame);
-
-  // Connection lifecycle hooks — production impl wires WS open /
-  // close / message; test fake leaves them no-op and synthesises
-  // OnFrameSent directly. TODO(M6-R2-ws-backend) lands the bodies.
-  virtual void EnsureConnected();    // idempotent connect
-  virtual void OnTransportConnected();
-  virtual void OnTransportDisconnected(int net_error_or_status);
-  virtual void OnFrameSent(bool ok, int net_error_or_status);
-
-  // Rate-limited log helper. Same cadence as CbStatsRelay's
-  // ShouldLogFailure (1st of a burst, every 10th, then every 100th).
-  void RecordSuccess();
-  void RecordFailure(int net_error_or_status);
-
-  const std::string label_;
-  const std::string url_;
-  const bool disabled_;
-  const scoped_refptr<base::SequencedTaskRunner> io_task_runner_;
-
-  // Burst counters — all touched only on io_task_runner_.
-  int64_t consecutive_failures_ = 0;
-  int64_t success_count_ = 0;
-
-  // Reconnect backoff state — all touched only on io_task_runner_.
-  // Initial 1 s, doubles up to 30 s cap, resets on connect success.
-  // Matches the cadence the rest of M6 uses.
-  base::TimeDelta reconnect_backoff_ = base::Seconds(1);
-  bool reconnect_pending_ = false;
-
-  base::WeakPtrFactory<CbClipboardBridgeWsClient> weak_factory_{this};
-};
-
-// CbClipboardRelay — webrtc::DataChannelObserver attached to the
-// "clipboard" DC. On each inbound text message, forwards the raw
-// body to the bridge WS source endpoint via CbClipboardBridgeWsClient.
-//
-// Ownership: the M3 PCF host constructs this and calls
-// dc_host_->BindObserver(CbDcLabel::kClipboard, this). The host's
-// per-channel trampoline keeps a raw pointer back via BindObserver;
-// callers MUST BindObserver(kClipboard, nullptr) (or destroy the
-// host) before destroying this relay.
-class CbClipboardRelay : public webrtc::DataChannelObserver {
- public:
-  CbClipboardRelay(std::unique_ptr<CbClipboardBridgeWsClient> client);
-
+  // |dc_host| sends outbound envelopes; |resolver| supplies the active
+  // WebContents for the synthesised paste; |ui_task_runner| is the
+  // BrowserThread::UI runner (injectable for tests). All three are
+  // caller-owned and must outlive this object.
+  CbClipboardRelay(signaling::CbDataChannelHost* dc_host,
+                   WebContentsResolver* resolver,
+                   scoped_refptr<base::SequencedTaskRunner> ui_task_runner);
   CbClipboardRelay(const CbClipboardRelay&) = delete;
   CbClipboardRelay& operator=(const CbClipboardRelay&) = delete;
-
   ~CbClipboardRelay() override;
 
-  // webrtc::DataChannelObserver — invoked on libwebrtc signaling/
-  // network thread.
+  // Arm the copy window: the viewer performed a copy gesture and the next
+  // clipboard change within kClipboardArmWindow is theirs to receive. Called
+  // by CbInputDispatchClipboard on `clipboard_copy_request` and by the
+  // keyboard dispatcher on a Ctrl/Cmd+C keydown. UI thread.
+  void ArmCopyWindow();
+
+  // webrtc::DataChannelObserver (signaling thread):
   void OnMessage(const webrtc::DataBuffer& buffer) override;
   void OnStateChange() override;
   void OnBufferedAmountChange(uint64_t sent_data_size) override;
   bool IsOkToCallOnTheNetworkThread() override;
 
+  // ui::ClipboardObserver (UI thread):
+  void OnClipboardDataChanged() override;
+
+  // For callbacks that may outlive this session-scoped object (the input
+  // delegate's copy-gesture hook): a WeakPtr receiver makes them no-ops
+  // after destruction instead of use-after-frees.
+  base::WeakPtr<CbClipboardRelay> AsWeakPtr() {
+    return weak_factory_.GetWeakPtr();
+  }
+
+  // Test seams.
+  void OnMessageForTesting(const std::string& json);
+  int64_t pastes_applied_for_testing() const { return pastes_applied_; }
+  int64_t copies_sent_for_testing() const { return copies_sent_; }
+  int64_t changes_ignored_for_testing() const { return changes_ignored_; }
+
  private:
-  const std::unique_ptr<CbClipboardBridgeWsClient> client_;
-};
+  // Signaling-thread half of OnMessage: validate, then hop with the text.
+  void HandleInboundJson(const std::string& raw);
 
-// CbClipboardOutboundServer — small WS server that the bridge's sink
-// dials into. For every text frame the bridge emits, forwards via
-// dc_host_->Send(CbDcLabel::kClipboard, text).
-//
-// Lifetime: caller (the M3 host wiring) constructs and owns. The
-// constructor binds + listens; Shutdown() (or dtor) tears the listen
-// socket + any active connection down. The bridge re-dials as part
-// of its own reconnect loop; the server tolerates churn.
-//
-// # Why a server-side trampoline instead of a libwebrtc inbound
-// channel
-//
-// The DC's "clipboard" inbound direction is already in use by
-// portal-client→cb-chromium (handled by CbClipboardRelay above). The
-// bridge's outbound stream is a *separate* path: it originates from
-// in-chromium copy events that the bridge observes via its CDP probe,
-// not from DC traffic. So we need a second sink that the bridge can
-// dump those into, and the cleanest shape is a tiny WS server that
-// re-injects them into the outbound DC direction.
-//
-// TODO(M6-R2-ws-server): like CbClipboardBridgeWsClient, the server
-// is left behind an interface (CbClipboardOutboundTransport) so the
-// rest of the relay lands testably. The production server is a thin
-// wrapper over net/server/http_server.h with WebSocket upgrade — that
-// is the same dep chromium uses for its DevTools WS server, so the
-// lifecycle + threading patterns transfer directly.
-class CbClipboardOutboundServer {
- public:
-  // |dc_host|: M3 R5's CbDataChannelHost. Must outlive this server.
-  //     Outbound frames are forwarded via dc_host->Send(kClipboard,
-  //     text); the host handles the signaling-thread hop internally.
-  // |listen_addr|: "host:port" the bridge's sink dials into (default
-  //     127.0.0.1:9301). The "off" sentinel disables — the server
-  //     never binds, and incoming frames (since there's no way for
-  //     them to arrive) are trivially dropped.
-  // |listen_path|: WS upgrade path (default /clipboard). The bridge
-  //     dials ws://<addr><path>; mismatched path returns 404.
-  // |io_task_runner|: the task runner the listen socket + accepted
-  //     connection run on. Typically the browser's network IO
-  //     thread; in unit tests, a TestSimpleTaskRunner.
-  CbClipboardOutboundServer(
-      signaling::CbDataChannelHost* dc_host,
-      std::string listen_addr,
-      std::string listen_path,
-      scoped_refptr<base::SequencedTaskRunner> io_task_runner);
+  // UI thread: write |text| to the guest clipboard and synthesise Ctrl+V.
+  void ApplyPaste(std::string text);
+  void SynthesizePaste(content::WebContents* wc);
 
-  CbClipboardOutboundServer(const CbClipboardOutboundServer&) = delete;
-  CbClipboardOutboundServer& operator=(const CbClipboardOutboundServer&) =
-      delete;
+  // UI thread: ReadText completion for an armed clipboard change.
+  void OnClipboardTextRead(std::u16string text);
 
-  virtual ~CbClipboardOutboundServer();
+  // UI thread: build and send a cloud->client envelope.
+  void SendCopy(const std::string& text);
 
-  // True iff the listen address is the "off" sentinel or empty.
-  bool disabled() const { return disabled_; }
-
-  // Bind + listen. Idempotent; returns true on a fresh bind or when
-  // already listening, false on bind error. Disabled state returns
-  // true (the no-op path is considered successful — tests assert
-  // disabled() && Start() rather than racing a port).
-  //
-  // Thread: caller's thread; internally posts onto io_task_runner_.
-  // Blocks on the post in production but a test seam can override.
-  virtual bool Start();
-
-  // Stop accepting + drop any active connection. Idempotent. Called
-  // by the dtor; the M3 host calls this explicitly during shutdown
-  // to ensure the listen socket releases before the host's PC
-  // teardown progresses.
-  virtual void Shutdown();
-
- protected:
-  // OnFrameReceived — invoked on io_task_runner_ when the bridge's
-  // sink connection emits a text frame. Default impl validates +
-  // forwards to dc_host_->Send(kClipboard, text). Subclasses can
-  // override for test capture; production goes through the base.
-  virtual void OnFrameReceived(std::string frame);
-
-  // Forward the validated frame to the DC. PostTasks onto the host's
-  // signaling runner via host's own Send() (host handles that hop).
-  void ForwardToDc(std::string text);
-
-  // Per-frame guard. R2 enforces the 1 MiB cap as defence-in-depth
-  // even though the bridge already does — a misconfigured bridge
-  // shouldn't be able to wedge the relay with a giant frame.
-  bool FrameWithinCap(const std::string& frame) const;
-
-  // raw_ptr because dc_host_ is caller-owned and must outlive us.
-  // CV2-75 fix-forward: wrapped in raw_ptr<T> wrapper per chromium-
-  // rawptr lint (author comment already declared raw_ptr intent).
   const raw_ptr<signaling::CbDataChannelHost> dc_host_;
-  const std::string listen_addr_;
-  const std::string listen_path_;
-  const bool disabled_;
-  const scoped_refptr<base::SequencedTaskRunner> io_task_runner_;
+  const raw_ptr<WebContentsResolver> resolver_;
+  const scoped_refptr<base::SequencedTaskRunner> ui_task_runner_;
 
-  // Burst counters — touched only on io_task_runner_.
-  int64_t frames_received_ = 0;
-  int64_t frames_dropped_oversize_ = 0;
-  int64_t consecutive_send_failures_ = 0;
+  // Echo suppression: the UTF-8 text of our most recent paste write. A
+  // clipboard change carrying exactly this text is our own write coming
+  // back through the monitor, not a user copy.
+  std::string last_written_text_;
 
-  // Listen state — touched only on io_task_runner_.
-  bool listening_ = false;
+  // Copy window. Zero when unarmed.
+  base::TimeTicks copy_armed_until_;
 
-  base::WeakPtrFactory<CbClipboardOutboundServer> weak_factory_{this};
+  int64_t next_seq_ = 0;
+  int64_t pastes_applied_ = 0;
+  int64_t copies_sent_ = 0;
+  int64_t changes_ignored_ = 0;
+
+  SEQUENCE_CHECKER(ui_sequence_checker_);
+  base::WeakPtrFactory<CbClipboardRelay> weak_factory_{this};
 };
-
-// ---------------------------------------------------------------------
-// Env-var helpers — match the M6 R1 ResolveStatsSidecarUrl shape.
-// ---------------------------------------------------------------------
-
-// Returns the value of CHROMELESS_CLIPBOARD_INBOUND_URL if set (with
-// the "off" sentinel forwarded unchanged), otherwise the default
-// inbound URL. Lives here so the M3 wiring code doesn't need to
-// know the env-var name shape.
-std::string ResolveClipboardInboundUrl();
-
-// Returns the value of CHROMELESS_CLIPBOARD_OUTBOUND_ADDR if set,
-// otherwise kDefaultRelayOutboundAddr.
-std::string ResolveClipboardOutboundAddr();
-
-// Returns the value of CHROMELESS_CLIPBOARD_OUTBOUND_PATH if set,
-// otherwise kDefaultRelayOutboundPath.
-std::string ResolveClipboardOutboundPath();
 
 }  // namespace cloud_browser
 

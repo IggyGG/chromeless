@@ -153,6 +153,14 @@ class CloudBrowserFrameSinkCapturer
   // then bind the final track-source ingress after ownership is established.
   void SetOnFrameCallback(OnFrameCallback on_frame);
 
+  // CV2-KEYFRAME: invoked on the capturer's sequence each time the streamed
+  // CONTENT changes wholesale — a retarget to a different FrameSink (tab
+  // switch, cross-document navigation's RenderWidgetHost swap) or a resize.
+  // The owner uses it to ask the encoder for a keyframe, so the new page is
+  // coded as an IDR instead of against a stale reference of the old one.
+  // Optional; unset means no request is made.
+  void SetOnContentChangedCallback(base::RepeatingClosure on_content_changed);
+
   // Enable (or, with a zero/negative period, disable) the idle-refresh
   // deadline — the constant-frame-rate hold-and-repeat that keeps WebRTC
   // streaming the last painted frame when the captured renderer goes idle
@@ -259,6 +267,7 @@ class CloudBrowserFrameSinkCapturer
   mojo::Receiver<viz::mojom::FrameSinkVideoConsumer> consumer_{this};
 
   OnFrameCallback on_frame_;
+  base::RepeatingClosure on_content_changed_;
 
   // Configuration cached for Start().
   gfx::Size resolution_{1280, 720};
