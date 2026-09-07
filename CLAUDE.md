@@ -531,14 +531,40 @@ however green it is, and the state is entered once and never restored:
 Read `pull_request.status` in postgres; the API's `mergeable` field is the same
 information but the enum above is what makes it interpretable.
 
-**Unresolved, deliberately:** chromeless #74 held status=2 for five hours and
-merged; tf-multiverse #14055 dropped 2→1 in ninety seconds, untouched. Neither
-base branch moved during its window, so base churn does not explain the
-difference. Candidate variables nobody has tested: base-branch activity in
-general, and per-repo queue depth (`dev` is by far the busiest). Do not report
-this as understood — three separate confident explanations (starved consumer,
-arrival-only checking, a throughput deficit) were each refuted by re-reading
-the same PRs twenty minutes later.
+**Resolved 2026-09-07: the merge checker's queue was wedged, and it was a
+Forgejo data defect, not a throughput one.** Forgejo runs its merge checks off
+a persistent LevelDB queue (`[queue] TYPE=level`, `/data/queues/common`). The
+`pr_patch_checker_queue` had a **hole at its `low` pointer**: `low`=3953540,
+4955 items whose lowest id was `low+1`. `levelqueue.LPop` reads the item AT
+`low`, gets `ErrNotFound`, and Forgejo's `PopItem` treats that as "queue empty"
+and backs off forever — so the pointer never advanced, and every PR that was
+ever *re-queued* (any head or base push) sat at status=1 for good. A brand-new
+PR is checked synchronously at creation, which is why #74 (and #100, for four
+minutes) were mergeable and everything re-pushed was not. Instance-wide: 918
+open PRs at "checking", the oldest from 2026-05-22; 7 mergeable, all decided at
+creation. Every earlier theory was refuted because none of them predicted "new
+PRs work, re-queued ones never do".
+
+Diagnose by reading the queue, read-only, from a copy:
+
+```sh
+kubectl exec -n forgejo <pod> -c forgejo -- tar -C /data/queues -cf - common | tar -x
+# decode "<name>-low"/"<name>-high" with binary.Varint (goleveldb, ReadOnly);
+# if no item exists at `low` and the count is large, this is it.
+```
+
+Cure (needs the process restarted; single replica, ~60 s down, user-approved):
+`mv /data/queues/common /data/queues/common.wedged-<date>` inside the pod, then
+`kubectl -n forgejo rollout restart deploy/forgejo`. On start Forgejo creates a
+fresh queue and `InitializePullRequests` re-queues every status=1 PR; it
+drained ~200 PRs/min (918 → 531 checking in two minutes; all chromeless PRs
+mergeable within one). Cost: whatever else was in that LevelDB — 98 pending
+notifications and one orphaned actions-run entry. Not established: what made
+the hole; the ENOSPC window earlier that day (`high` incremented, the item's
+`Put` failed) is the candidate.
+
+The rule that survives: **`pull_request.status=1` on a PR you have pushed to
+is the queue, not your PR. Check the queue before theorising about the PR.**
 
 **One cause is now known (2026-09-07), and it is not a Forgejo defect.** The
 forge's `/data` volume had filled at some point after 2026-09-05 23:31; the
