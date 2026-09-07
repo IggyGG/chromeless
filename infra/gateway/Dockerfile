@@ -44,7 +44,15 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/gateway .
 # An empty directory to seed /data/certs with. distroless has no shell and no
 # mkdir, so the runtime stage cannot create it — and it MUST exist in the image
 # with the right owner. See the COPY in the runtime stage for why.
-RUN mkdir -p /out/certs && chmod 700 /out/certs
+#
+# The .keep file is load-bearing. Docker's LEGACY builder (a daemon without
+# buildx) drops empty directories when it COPYs from a stage, so on those hosts
+# an empty /out/certs never reaches the runtime image, the volume mountpoint
+# comes back root-owned, and the first-boot failure this guards against returns
+# silently. A "clean this up" that removes the file reverts the fix. The gateway
+# opens cert.pem and key.pem by name and never lists the directory, so the file
+# is inert at runtime.
+RUN mkdir -p /out/certs && chmod 700 /out/certs && touch /out/certs/.keep
 
 # ---------- runtime ----------
 FROM gcr.io/distroless/static-debian12:nonroot
