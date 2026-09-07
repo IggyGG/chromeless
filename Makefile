@@ -4,7 +4,7 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
+.PHONY: help standalone-up standalone-down verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
         lint-runtime-contracts lint-tests-wired lint-pod-resources \
         lint-guest-release lint-deploy-pin test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
@@ -39,6 +39,10 @@ help:
 	@echo "  make test-harness        # tests/harness/loopback-baseline.sh (single hermetic check)"
 	@echo "  make test-harness-all    # all four hermetic harness baselines"
 	@echo "  make test-e2e            # tests/e2e/ Playwright specs (full compose stack)"
+	@echo ""
+	@echo "  make standalone-up       # the self-hosted stack, one command, Docker only"
+	@echo "                           # (CHROMELESS_IMAGE=<worker image> is the one input)"
+	@echo "  make standalone-down     # stop it; credentials and certs are kept"
 	@echo ""
 	@echo "See tests/regression-suite.md for the full reference + gate split."
 
@@ -421,3 +425,16 @@ test-interactive:
 	else \
 	  echo "skip: tests/interactive/ not present"; \
 	fi
+
+# ---- standalone: the self-hosted stack, one command --------------------------
+#
+# Wraps infra/standalone-up.sh: builds the gateway image (which carries keygen
+# and worker-token, so no Go toolchain is needed on the host), mints the keypair
+# + the worker's token + a login into infra/.env ONCE, brings the stack up with
+# `compose up --wait`, and prints the URL and credentials. CHROMELESS_IMAGE is
+# the one input you must bring — this repo publishes no worker image.
+standalone-up:
+	@./infra/standalone-up.sh
+
+standalone-down:
+	@./infra/standalone-up.sh --down

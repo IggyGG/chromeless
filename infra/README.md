@@ -34,15 +34,13 @@ Helm chart and controller, and the glue that runs inside the worker image.
 ## Running it
 
 ```bash
-# Three exports: the gateway's signing key, the broker's verifying key, and
-# SIGNALING_TOKEN — the worker's own credential. All three, or the broker
-# refuses the browser and only a WebSocket close code says so.
-eval "$(cd infra/gateway && go run ./cmd/keygen)"
-
-CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 \
-CHROMELESS_USER=me CHROMELESS_PASS=hunter2 \
-  docker compose -f infra/compose.yaml up
+CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 make standalone-up
 ```
+
+`standalone-up.sh` mints the three credentials (the gateway's signing key, the
+broker's verifying key, and `SIGNALING_TOKEN`, the worker's own — all three, or
+the broker refuses the browser and only a WebSocket close code says so) into
+`infra/.env` once, then runs `docker compose -f infra/compose.yaml up --wait`.
 
 Then <https://localhost:8443>. The full guide, including TURN and the
 split-host layout, is

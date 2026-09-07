@@ -39,7 +39,9 @@ COPY infra/gateway/ ./infra/gateway/
 
 WORKDIR /src/infra/gateway
 ENV CGO_ENABLED=0 GOOS=linux
-RUN go build -trimpath -ldflags="-s -w" -o /out/gateway .
+RUN go build -trimpath -ldflags="-s -w" -o /out/gateway . \
+    && go build -trimpath -ldflags="-s -w" -o /out/keygen ./cmd/keygen \
+    && go build -trimpath -ldflags="-s -w" -o /out/worker-token ./cmd/worker-token
 
 # An empty directory to seed /data/certs with. distroless has no shell and no
 # mkdir, so the runtime stage cannot create it — and it MUST exist in the image
@@ -59,6 +61,15 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /
 
 COPY --from=build /out/gateway /gateway
+
+# The two credential tools, so a host with Docker and nothing else can set the
+# stack up. The quickstart used to be `go run ./cmd/keygen`, which requires a
+# Go toolchain on the operator's machine — the one prerequisite the rest of the
+# stack had already removed. `make standalone-up` runs these from this image
+# (docker run --rm --entrypoint /keygen chromeless-gateway:dev), so the
+# documented path needs Docker alone.
+COPY --from=build /out/keygen /keygen
+COPY --from=build /out/worker-token /worker-token
 
 # The client bundle, from the stage above. Baked in so the published image is
 # self-contained; compose can still mount client/dist over this path for live
