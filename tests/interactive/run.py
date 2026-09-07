@@ -768,16 +768,21 @@ def suite_downloads(client, worker):
     dep = os.environ.get("CHROMELESS_WORKER_DEPLOY",
                          "deploy/chromeless-standalone-worker")
     # Look in the profile's Downloads dir directly rather than `find /`.
-    # The delegate resolves the target under the BrowserContext's own path,
-    # which is /tmp/cloud_browser_profile_<n>/Downloads. A whole-filesystem
-    # find takes longer than the poll window in this container and returned
-    # empty every time — a TEST timeout that reads exactly like "the download
-    # never happened". Verified by hand first: the file was always there.
+    # The delegate resolves the target under the BrowserContext's own path.
+    # Since 2026-09-07 that path is --user-data-dir when the launcher passes
+    # one (/home/cbuser/.config/chromium in the runtime image; the switch was
+    # ignored before and every profile went under DIR_TEMP), so both spellings
+    # are listed: the old one keeps this oracle honest against an older guest,
+    # and a whole-filesystem find took longer than the poll window and
+    # returned empty every time — a TEST timeout that reads exactly like "the
+    # download never happened". Verified by hand first: the file was there.
+    DL_DIRS = ("/home/cbuser/.config/chromium/Downloads",
+               "/tmp/cloud_browser_profile_*/Downloads")
+    ls_cmd = "ls -1 " + " ".join(f"{d}/" for d in DL_DIRS) + " 2>/dev/null | head -8"
     found, listing = _poll(
         lambda: subprocess.run(
             ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
-             "bash", "-c",
-             "ls -1 /tmp/cloud_browser_profile_*/Downloads/ 2>/dev/null | head -5"],
+             "bash", "-c", ls_cmd],
             capture_output=True, text=True, timeout=30).stdout.strip(),
         lambda out: bool(out) and "chromeless-probe" in out,
         timeout=30)
@@ -788,8 +793,8 @@ def suite_downloads(client, worker):
         body = subprocess.run(
             ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
              "bash", "-c",
-             "cat /tmp/cloud_browser_profile_*/Downloads/chromeless-probe.txt "
-             "2>/dev/null | head -c 200"],
+             "cat " + " ".join(f"{d}/chromeless-probe.txt" for d in DL_DIRS) +
+             " 2>/dev/null | head -c 200"],
             capture_output=True, text=True, timeout=30).stdout
         check("the downloaded file has the right contents",
               "chromeless-download-probe-42" in body, f"got {body[:80]!r}",
@@ -867,20 +872,46 @@ def suite_clipboard(client, worker):
     worker.eval("(() => { const t = document.getElementById('target'); "
                 f"t.value = {COPIED!r}; t.focus(); t.select(); return 1; }})()")
     time.sleep(0.3)
+    # Observe the WRITE the client bundle makes, not the OS clipboard. Headless
+    # Chrome refuses navigator.clipboard.readText() from automation even with
+    # Browser.grantPermissions (measured 2026-09-07: '<denied>' on every poll
+    # while the guest had forwarded the text), so reading the clipboard back
+    # tests the harness's Chrome, not the product. The bundle writes through
+    # navigator.clipboard.writeText (client/src/clipboard.ts defaultWriteText);
+    # wrapping it records exactly what arrived over the channel and would have
+    # been written, which is the thing the guest half is responsible for.
+    #
+    # And the bundle only writes while document.hasFocus() is true — a
+    # background tab must not have its clipboard overwritten, so
+    # clipboard.ts queues the text for the next `focus` event. A headless
+    # Chrome is never focused and never gets one, so the queued write sat
+    # there forever and the first version of this check reported "the guest
+    # did not forward the copy" against a guest that had. Emulate focus (the
+    # CDP switch that exists for exactly this) and put the focus state in the
+    # failure line so the two causes cannot be confused again.
     try:
-        client.cdp.call("Browser.grantPermissions", {
-            "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"],
-            "origin": H.GATEWAY})
-    except Exception as e:  # noqa: BLE001 — older Chrome names differ; the read below reports
-        print(f"  ..  Browser.grantPermissions: {e}")
-    client.cdp.eval("navigator.clipboard.writeText('') .then(()=>1, ()=>0)")
+        client.cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    except Exception as e:  # noqa: BLE001 — reported through the focus state below
+        print(f"  ..  Emulation.setFocusEmulationEnabled: {e}")
+    client.cdp.eval("""(() => {
+        window.__cbClipboardWrites = [];
+        const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+        navigator.clipboard.writeText = (t) => {
+            window.__cbClipboardWrites.push(t);
+            return orig(t).catch(() => {});
+        };
+        return 1; })()""")
     client.key("KeyC", "c", mods=2)
     ok3, got = _poll(lambda: client.cdp.eval(
-        "navigator.clipboard.readText().then(t => t, () => '<denied>')"),
-        lambda v: v == COPIED, timeout=15)
-    check("a remote copy reaches the client's clipboard", ok3,
-          f"client clipboard={got!r} (expected {COPIED!r}); '<denied>' means "
-          "the client Chrome refused the read, not that the guest did not send")
+        "JSON.stringify(window.__cbClipboardWrites || [])"),
+        lambda v: v and COPIED in v, timeout=15)
+    focused = client.cdp.eval("document.hasFocus()")
+    check("a remote copy reaches the client (clipboard channel, cloud->client)",
+          ok3, f"client writes={got!r} (expected {COPIED!r}), "
+          f"document.hasFocus()={focused!r}; empty writes with focus=True means "
+          "the guest did not forward the copy — check CV2-CLIPBOARD in its log "
+          "(the relay's copy lines are VLOG(1): set CHROMELESS_CHROME_VMODULE to "
+          "include cb_clipboard_relay=1); focus=False means the client queued it")
 
 
 # --------------------------------------------------------------------------
