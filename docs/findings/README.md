@@ -27,7 +27,7 @@ RESOLVED banner at the top. Do not treat them as open work.
 
 | finding | where the fix is | what it costs today |
 | --- | --- | --- |
-| [`viewport-resize-freezes-beginframe-and-crashes-gpu.md`](./viewport-resize-freezes-beginframe-and-crashes-gpu.md) | `cb_viewport_controller.cc` `Apply` must bracket the resize for `CbBeginFrameDriver`; the watchdog must not re-issue into a rebinding controller | **every connect from a real window** freezes the picture and restarts the browser ~50 s later (since #96) |
+| [`viewport-resize-freezes-beginframe-and-crashes-gpu.md`](./viewport-resize-freezes-beginframe-and-crashes-gpu.md) | `cb_viewport_controller.cc` `Apply` must bracket the resize for `CbBeginFrameDriver`; the watchdog must not re-issue into a rebinding controller | on a **fresh worker process** the first connect from a real window freezes the picture and restarts the browser ~50 s later (3/3; since #96) |
 | [`audio-dies-after-first-rearm.md`](./audio-dies-after-first-rearm.md) | `RearmSession` step 3b / `CbAudioLifecycle::Rearm` — tear the pulse ADM's recording down before the next `StartRecording` | audio for the first viewer of a process only; silent for everyone after |
 | [`worker-signaling-no-redial.md`](./worker-signaling-no-redial.md) | `cloud_browser_browser_main_parts.cc` `StartNativeSession` — wire the existing `cb_signaling_reconnect` (R7) | every broker redeploy restarts the browser ~70 s later; a waiting viewer's first attempt fails |
 
