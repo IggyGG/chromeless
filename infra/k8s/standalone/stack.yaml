@@ -437,6 +437,15 @@ spec:
               value: ws://chromeless-standalone-signaling:8080
             - name: CHROMELESS_CDP_URL
               value: http://chromeless-standalone-worker:9222
+            # OFF until a guest that survives a resize is pinned above. With
+            # it on, every connect from a real window (never exactly 1280x720)
+            # sends Cb.setViewport, a fresh guest's BeginFrame loop freezes,
+            # and 15 s later its watchdog crashes the GPU process — the
+            # browser restarts ~50 s after connect, tabs gone. Measured 3/3 on
+            # 2026-09-07; docs/findings/viewport-resize-freezes-beginframe-and-
+            # crashes-gpu.md. Flip to "1" together with the worker pin.
+            - name: CHROMELESS_VIEWPORT_FOLLOW
+              value: "0"
             # Reached by port-forward, so localhost is what the browser types
             # and the generated cert's default SANs already cover it.
             - name: CHROMELESS_TLS_DIR

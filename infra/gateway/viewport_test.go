@@ -129,3 +129,40 @@ func TestViewportSurfacesMethodNotFound(t *testing.T) {
 		t.Errorf("body should carry the CDP error, got %s", rec.Body.String())
 	}
 }
+
+// CHROMELESS_VIEWPORT_FOLLOW=0 must answer 501 WITHOUT calling the guest, and
+// with a JSON body the client can read as "unsupported" — a bare 501 with an
+// HTML body would still stop the follower, but it would log `HTTP 501` where
+// the operator's own setting should be named.
+func TestViewportFollowSwitchRefusesBeforeCDP(t *testing.T) {
+	called := false
+	worker := newFakeWorkerWithHandler(t, func(method string, params map[string]any) map[string]any {
+		if method == "Cb.setViewport" {
+			called = true
+		}
+		return map[string]any{"width": 800, "height": 600, "deviceScaleFactor": 1}
+	})
+	g, _ := newTestGateway(t, http.NotFoundHandler())
+	g.cdp = &cdpClient{baseURL: worker.URL}
+	g.cfg.viewportFollow = false
+
+	c := login(t, g, "operator", "s3cret")
+	req := httptest.NewRequest(http.MethodPost, "/api/viewport", strings.NewReader(`{"width":800,"height":600}`))
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	g.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, rec.Body.String())
+	}
+	if !strings.Contains(body["error"].(string), "CHROMELESS_VIEWPORT_FOLLOW") {
+		t.Fatalf("error should name the switch, got %q", body["error"])
+	}
+	if called {
+		t.Fatal("Cb.setViewport reached the guest with the follow switch off")
+	}
+}

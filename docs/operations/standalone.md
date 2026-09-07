@@ -108,6 +108,7 @@ Common:
 | `SIGNALING_TOKEN` | — | the worker's own credential, also from `cmd/keygen`. Required once the keys are set |
 | `CHROMELESS_TURN_SECRET` | — | required by the `turn` profile |
 | `CHROMIUM_START_URL` | `about:blank` | page to open once the worker is up |
+| `CHROMELESS_VIEWPORT_FOLLOW` | `0` in compose | `1` lets the client resize the remote browser to its window. Off until the guest fix for the resize crash ships (`docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md`) |
 | `SESSION_ID` | `dev` | must match what the client connects with |
 
 The full gateway list is in [`infra/gateway/README.md`](../../infra/gateway/README.md).
