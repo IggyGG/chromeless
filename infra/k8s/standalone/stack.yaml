@@ -416,7 +416,17 @@ spec:
           # rolled. And the tag is mutable: v9 was rebuilt over by another
           # session, serving a bundle with none of the expected markers while
           # the deployment still read "v9". Check the digest.
-          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
+          #
+          # 32860a21 (tag autoconnect-test, built from
+          # test/e2e-specs-follow-auto-connect at 1aaaf4e): the bundle whose
+          # Disconnect button is usable once connected and whose camera/mic
+          # button unlocks on connected rather than on pcCreated. Rolled
+          # 2026-09-07 19:25 UTC; tests/e2e 7/8 against it in a real Chrome
+          # (the 8th was the audio spec's own stale click, fixed in the same
+          # PR) and tests/interactive 65/65. The cluster ran standalone-v12
+          # (a95b452a) before that, while this file said v8 — a third pin that
+          # would have rolled a component backwards on apply.
+          image: registry.triform.cloud/chromeless/chromeless-gateway@sha256:32860a21f9f38dd86d1868eead4ca5f45cda9680abc380239c8dd429638035fa
           env:
             - name: CHROMELESS_USER
               valueFrom:
