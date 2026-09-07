@@ -114,7 +114,7 @@ enum class EnvelopeType {
 };
 
 // Decode-side: returns the EnvelopeType matching `tag` or nullopt if
-// `tag` is not one of the six pinned strings. EVERY caller MUST treat
+// `tag` is not one of the pinned strings (see the enum). EVERY caller MUST treat
 // nullopt as a rejected envelope — no fallthrough, no "best-effort"
 // remap. The negative-test fixture in cb_wire_envelope_test.cc locks
 // this with `sdp_offer` (the historic v0 tag the contract intentionally
