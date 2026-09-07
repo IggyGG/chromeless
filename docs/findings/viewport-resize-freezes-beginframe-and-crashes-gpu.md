@@ -7,11 +7,18 @@ called `Cb.setViewport`. Lives in `capture/build-integration/` and needs a
 lane build; a client-side mitigation is laptop-verifiable (below).
 
 **Impact for a standalone deployment:** the client now sizes the remote
-browser to its window on connect. Any window whose stage is not exactly
-1280×720 — every real window — triggers a resize, the picture freezes
-within a second, and about 50 seconds later the browser process exits and
-restarts: tabs, history and logins gone, on **every connect**. The interactive
-suite still scores 65/65 because it finishes its checks inside that window.
+browser to its window on connect, and no real window's stage is exactly
+1280×720, so every connect sends a resize. On a **freshly started worker** —
+the state every deployment boots into, and the state supervisord returns it
+to after each crash — the first viewer's resize freezes the picture within a
+second and about 50 seconds later the browser process exits and restarts:
+tabs, history and logins gone. Measured three for three on fresh processes.
+One long-lived process (pid 120, ~3.5 h and ~15 sessions old) took 14 resizes
+in ten minutes and kept producing frames throughout (`tests/interactive`
+65/65 during them, video and stats suites included), so the trigger has a
+precondition tied to process age or session count that is **not yet
+identified**; do not read the fresh-process result as "always", and do not
+read the old-process result as "intermittent".
 
 ## What happens
 
@@ -75,12 +82,15 @@ survives a resize; today it doubles the chance.
   `bytesReceived=0`. The audio finding above is real and separate; this one
   was hiding behind it. Block `*/api/viewport` in the test browser to separate
   the two.
-- **One older process seemed immune.** Pod `5jkkr` (pid 120, up since 16:14)
-  took six resizes between 19:34 and 19:42 and kept decoding frames
-  (`tests/interactive` 65/65 at 19:4x). Its log went with the pod, so whether
-  it stalled and recovered or never stalled is not established. Do not read
-  that as "intermittent": three fresh processes, three crashes, identical
-  timelines.
+- **An old process is fine, so it reads as flaky.** Pod `5jkkr` (pid 120, up
+  since 16:14 after ~15 sessions) took 14 resizes between 19:34 and 19:42 —
+  the gateway log has every `viewport applied` — and kept decoding frames
+  (`tests/interactive` 65/65 across them). Its log went with the pod, so
+  whether it stalled and recovered or never stalled is not established. What
+  IS established: three fresh processes (19:56, 20:07, 20:26), three crashes,
+  identical timelines to the second. The fresh-process case is the one every
+  deployment is in at boot and after every crash, so it is the one that
+  matters; the old-process case is the clue to the precondition.
 
 ## The fix
 
