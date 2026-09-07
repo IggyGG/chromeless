@@ -109,6 +109,24 @@ type peer struct {
 	//
 	// Guarded by the session mutex, same as negotiated above.
 	saidBye bool
+	// byeReceived records that a `bye` was DELIVERED to this peer, ending
+	// its session. A bye this peer sends afterwards is an echo — it has no
+	// session left to end — and must not be forwarded, and neither must the
+	// synthesised one if its socket drops. Cleared by this peer's next
+	// offer/answer, which puts it in a new session.
+	//
+	// Measured live 2026-09-07 on the first broker that kept the bye
+	// sender's socket open: the worker's bye (byeless viewer loss) reached
+	// the client at t+5 ms; the worker had re-offered by t+40 ms; the
+	// client's teardown answered with its own bye, forwarded at t+90 ms, and
+	// it closed the session the worker had JUST rebuilt — a second rebuild
+	// per byeless loss, with the next viewer racing the second offer. Keyed
+	// on the RECEIVER of the original bye, not the sender, precisely because
+	// the sender's own bookkeeping is already reset by the time the echo
+	// arrives.
+	//
+	// Guarded by the session mutex.
+	byeReceived bool
 }
 
 // anonymousTenant is the tenant id used when auth is disabled. T67 keys
@@ -560,6 +578,22 @@ func (s *session) didSayBye(p *peer) bool {
 	return p.saidBye
 }
 
+// receivedBye reads p.byeReceived under the session lock. Set by forward()
+// when a bye is delivered to p; cleared by clearByeReceived.
+func (s *session) receivedBye(p *peer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return p.byeReceived
+}
+
+// clearByeReceived forgets a delivered bye once p starts a NEW negotiation
+// (sends an offer or answer) — its next bye is about that session.
+func (s *session) clearByeReceived(p *peer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.byeReceived = false
+}
+
 // didNegotiate reads p.negotiated under the session lock. Both the write
 // (markNegotiated / register) and this read take s.mu, so the flag is
 // race-free even though in practice they run on the same goroutine.
@@ -629,6 +663,11 @@ func (s *session) forward(role peerRole, envType string, raw []byte) bool {
 		s.recentICE[sender] = queue
 	}
 	target, ok := s.peers[role]
+	if ok && envType == "bye" {
+		// See peer.byeReceived: the receiver's session is over, so its own
+		// bye from here on is an echo.
+		target.byeReceived = true
+	}
 	s.mu.Unlock()
 	if !ok {
 		return false
@@ -854,9 +893,18 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	// destroy that still-valid offer. Only a peer that SENT SDP has made the
 	// counterpart's buffer describe a connection that is now gone — being
 	// replayed the offer is passive and happens to every joiner.
+	//
+	// ...unless the counterpart ENDED the session first (p.byeReceived). Its
+	// buffer then describes the NEXT session — the re-armed worker re-offers
+	// within ~40 ms of its bye, while the old viewer's socket is still open,
+	// and that viewer's socket closing must not erase the offer the next
+	// viewer needs. Measured 2026-09-07: with the echo suppressed but this
+	// discard still unconditional, the second viewer joined to an empty
+	// replay buffer.
 	roles := []peerRole{p.role}
 	negotiated := sess.didNegotiate(p)
-	if negotiated {
+	ended := sess.receivedBye(p)
+	if negotiated && !ended {
 		roles = append(roles, p.role.other())
 	}
 	sess.discardReplay(roles...)
@@ -889,7 +937,11 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	// re-arming worker cannot survive — the first rebuilds the session and the
 	// second closes the rebuild, stranding OnRenegotiationNeeded in kClosed.
 	// See peer.saidBye for the measured trace.
-	if negotiated && !sess.didSayBye(p) {
+	// ...and not for a peer that was itself sent a bye for this session (the
+	// same echo rule as readPump: the worker announced the session over, the
+	// client's socket then dropped, and a synthesised bye would close the
+	// session the worker has since rebuilt).
+	if negotiated && !ended && !sess.didSayBye(p) {
 		if raw, err := json.Marshal(Envelope{Type: "bye", From: p.role}); err == nil {
 			if sess.forward(p.role.other(), "bye", raw) {
 				p.log.Info("synthesised bye to counterpart (peer left without one)",
@@ -956,15 +1008,37 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			// that bye is spent, so if this session drops without one the
 			// counterpart must still be told (see unregister).
 			sess.clearSaidBye(p)
+			sess.clearByeReceived(p)
 		}
-		if !sess.forward(p.role.other(), env.Type, raw) {
+		// A bye from a peer that was itself sent a bye for this session is an
+		// echo (client/src/session.ts teardown answers a bye with a bye), and
+		// an echo is not harmless once the counterpart re-arms: it closed the
+		// worker's freshly rebuilt session, live 2026-09-07 — see
+		// peer.byeReceived for the measured timeline. Dropped here; a bye
+		// for the NEW session still gets through because the flag is cleared
+		// by this peer's next offer/answer.
+		echo := env.Type == "bye" && sess.receivedBye(p)
+		if echo {
+			p.log.Info("dropping bye echo: this peer was already sent a bye for this session")
+		} else if !sess.forward(p.role.other(), env.Type, raw) {
 			p.log.Debug("no counterpart yet (buffered if replayable)", slog.String("type", env.Type))
 		}
 		if env.Type == "bye" {
-			// The negotiated session is over for BOTH sides, not just the
-			// sender's — so drop both buffers. See discardReplay for what
-			// replaying a dead session's offer costs.
-			sess.discardReplay(roleClient, roleBrowser)
+			if echo {
+				// The counterpart ended this session and may ALREADY have
+				// buffered the offer for the next one (the re-armed worker
+				// re-offers within ~40 ms of its bye, while the old viewer's
+				// socket is still open). Only this peer's own buffer is
+				// dead. Dropping both here handed the next viewer an empty
+				// replay — "waiting for offer" against a worker that had
+				// offered.
+				sess.discardReplay(p.role)
+			} else {
+				// The negotiated session is over for BOTH sides, not just
+				// the sender's — so drop both buffers. See discardReplay for
+				// what replaying a dead session's offer costs.
+				sess.discardReplay(roleClient, roleBrowser)
+			}
 			// Recorded so a later unregister does not synthesise a SECOND
 			// bye on top of this one. See peer.saidBye.
 			sess.markSaidBye(p)
