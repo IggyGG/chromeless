@@ -53,6 +53,25 @@ export async function waitForFrames(page: Page, min = 30, timeoutMs = 60_000): P
   return n;
 }
 
+
+/**
+ * Press Connect only on a bundle that is still idle after a beat.
+ *
+ * The client connects on load (client/main.ts autoConnect, 2026-08-24), and
+ * from that moment #connect reads "Disconnect". Clicking it unconditionally —
+ * which every spec here did — either waited on a disabled button or, once it
+ * became usable, ended the session the spec was about to measure. This keeps
+ * working against a bundle that still needs the click.
+ */
+export async function connectIfIdle(page: Page): Promise<void> {
+  try {
+    await expect(page.locator("#status")).not.toHaveAttribute("data-state", "idle", { timeout: 3_000 });
+  } catch {
+    await expect(page.locator("#connect")).toBeEnabled();
+    await page.locator("#connect").click();
+  }
+}
+
 /**
  * Connect and assert the full media path is live.
  *
@@ -67,8 +86,7 @@ export async function connectAndVerify(
   connectTimeoutMs = 90_000,
 ): Promise<number> {
   await page.goto("/?e2e=1");
-  await expect(page.locator("#connect")).toBeEnabled();
-  await page.locator("#connect").click();
+  await connectIfIdle(page);
 
   await expect(page.locator("#status"),
     `${label}: never reached connected (this is the "waiting for offer" hang)`)

@@ -86,7 +86,7 @@ spec:
             # listening. Bump this tag whenever client/ changes: the bundle is
             # baked in at image build time, so a client fix does not reach a
             # browser until the gateway image is rebuilt AND rolled.
-            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
+            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v13
             - --single-snapshot          # one layer; these images are small
             - --push-retry=3             # the registry 500s intermittently (BUGS-511/513)
           env:

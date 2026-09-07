@@ -43,7 +43,8 @@ const CLIENT_DIST = path.resolve(HERE, "../../client/dist");
 // configurations).
 async function serveDist(): Promise<{ url: string; close: () => void }> {
   const server: Server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    let url = req.url || "/";
+    // Query strings are the page's business (`?e2e=1`), not the file's.
+    let url = (req.url || "/").split("?")[0] || "/";
     if (url === "/") url = "/index.html";
     const file = path.join(CLIENT_DIST, url);
     try {
@@ -87,8 +88,24 @@ test.describe("client camera/mic passthrough button", () => {
   test.afterAll(() => dist.close());
 
   test("button is disabled until a peer connection is up", async ({ page }) => {
-    await page.goto(dist.url);
+    // The bundle connects on load. Off this static server there is no gateway
+    // behind it, so the session never gets past "connecting" — but the client
+    // BUILDS its RTCPeerConnection before dialling, and ?e2e=1 exposes it.
+    // That is exactly the state this test is about: a PeerConnection exists,
+    // nothing is up, and the button must still be disabled. Until 2026-09-07
+    // main.ts enabled it on pcCreated, so with connect-on-load the button
+    // unlocked a few hundred ms after every page load and this test was red
+    // on every E2E run after 2026-08-24. The "and it DOES unlock once
+    // connected" half is asserted by spec 01 against the real stack.
+    await page.goto(`${dist.url}/?e2e=1`);
     const btn = page.locator("#passthrough-toggle");
+    await expect(btn).toBeDisabled();
+    await expect(btn).toHaveAttribute("data-state", "off");
+    await page.waitForFunction(
+      () => Boolean((window as unknown as { __cbwrtc_pc?: unknown }).__cbwrtc_pc),
+      undefined,
+      { timeout: 10_000 },
+    );
     await expect(btn).toBeDisabled();
     await expect(btn).toHaveAttribute("data-state", "off");
   });

@@ -7,6 +7,7 @@
 // difference is what hid a live bug (a 23-minute-old buffered offer being
 // replayed with dead ICE credentials) from every test that passed in CI.
 import { expect, test } from "@playwright/test";
+import { connectIfIdle } from "./helpers.js";
 
 const USER = process.env["CHROMELESS_USER"] ?? "chromeless";
 const PASS = process.env["CHROMELESS_PASS"] ?? "";
@@ -26,10 +27,10 @@ test("real Chrome: login, connect, decode video, and navigate", async ({ page })
 
   // ---- 2. the app loads ---------------------------------------------------
   await page.goto("/?e2e=1");
-  await expect(page.locator("#connect")).toBeEnabled();
 
   // ---- 3. connect ---------------------------------------------------------
-  await page.locator("#connect").click();
+  // (on load, by the client itself; helpers.ts connectIfIdle explains)
+  await connectIfIdle(page);
 
   // The pill must reach "connected" — NOT "connecting", which is precisely the
   // state a broken stack sits in forever.

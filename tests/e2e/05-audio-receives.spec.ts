@@ -38,6 +38,7 @@ import {
   type Browser,
   type Page,
 } from "@playwright/test";
+import { openConnected } from "./fixtures/connect.js";
 
 // Supplied by the harness — see the header. No default: the stack does not
 // publish DevTools, so guessing an endpoint would only produce a confusing
@@ -186,12 +187,17 @@ test.describe("audio presence end-to-end", () => {
     page,
   }) => {
     // ?e2e=1 turns on `window.__cbwrtc_pc` per client/main.ts.
-    await page.goto("/?e2e=1");
-    await expect(page.locator("#connect")).toBeEnabled();
-    await page.locator("#connect").click();
-
+    // The client connects on load; openConnected waits for that (see
+    // fixtures/connect.ts). This spec used to wait for #connect to be
+    // ENABLED and click it — which, now that Disconnect is usable once
+    // connected, waited for the session to come up and then ENDED it, and
+    // the 10 s audio poll below ran against a closed PeerConnection
+    // ("bytesReceived stayed at 0", 2026-09-07). CI never saw it because
+    // this spec skips without CHROMELESS_E2E_DEVTOOLS_URL.
+    //
     // Reach connected. The post-T34 flow: streamer is offerer; client
     // is answerer. ICE is exchanged in both directions.
+    await openConnected(page, "/?e2e=1");
     await expect(
       page.locator("#state-conn"),
       "client peer connection didn't reach 'connected' — check the broker log " +
