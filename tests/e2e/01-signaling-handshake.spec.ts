@@ -32,32 +32,31 @@
 // signaling `stable` → connection `connected`. That is what we check.
 
 import { expect, test } from "@playwright/test";
+import { CONNECT_TIMEOUT_MS, openConnected } from "./fixtures/connect.js";
 
 // A cold worker takes a while to emit its first offer — triform measured ~35s
 // p99 on a cold Firecracker guest. The client's own offer-wait watchdog
 // (client/src/session.ts) fires at 45s, so anything below that would fail the
 // test before the code under test has given up. Sit above it.
-const CONNECT_TIMEOUT_MS = 60_000;
 
 test.describe("signaling handshake", () => {
   test("Connect reaches a connected peer connection", async ({ page }) => {
-    await page.goto("/");
-
-    // Sanity: the connect button is interactable. If the page did not load at
-    // all this fails here rather than in a confusing state assertion.
-    const connect = page.locator("#connect");
-    await expect(connect).toBeVisible();
-    await expect(connect).toBeEnabled();
-
-    await connect.click();
-
+    // The client connects on load (client/main.ts autoConnect); the fixture
+    // waits for that and only clicks on a bundle that still needs it. This
+    // used to click #connect first, which from 2026-08-24 pressed a DISABLED
+    // "Disconnect" — see fixtures/connect.ts for the run history.
+    //
     // The pill must reach "connected" — NOT "connecting", which is precisely
     // the state a broken stack sits in forever.
-    await expect(page.locator("#status")).toHaveAttribute(
-      "data-state",
-      "connected",
-      { timeout: CONNECT_TIMEOUT_MS },
-    );
+    await openConnected(page, "/");
+
+    // Once up, the button is the way out: it reads Disconnect and is usable.
+    const connect = page.locator("#connect");
+    await expect(connect).toHaveText("Disconnect");
+    await expect(connect).toBeEnabled();
+    // ...and the camera/mic button unlocks only now. Spec 06 covers the
+    // "not before" half against a bundle with no stack behind it.
+    await expect(page.locator("#passthrough-toggle")).toBeEnabled();
 
     // stable = the answer was created and applied. For an answerer this is
     // the state that proves the SDP round trip completed.
