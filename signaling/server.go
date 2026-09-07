@@ -545,6 +545,14 @@ func (s *session) markSaidBye(p *peer) {
 	p.saidBye = true
 }
 
+// clearSaidBye forgets an earlier bye once the same peer starts a NEW
+// negotiation on the same socket (a re-armed worker offering again).
+func (s *session) clearSaidBye(p *peer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.saidBye = false
+}
+
 // didSayBye reads p.saidBye under the session lock.
 func (s *session) didSayBye(p *peer) bool {
 	s.mu.Lock()
@@ -944,6 +952,10 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 		// working.
 		if env.Type == "offer" || env.Type == "answer" {
 			sess.markNegotiated(p)
+			// A new negotiation on a socket that said bye for a previous one:
+			// that bye is spent, so if this session drops without one the
+			// counterpart must still be told (see unregister).
+			sess.clearSaidBye(p)
 		}
 		if !sess.forward(p.role.other(), env.Type, raw) {
 			p.log.Debug("no counterpart yet (buffered if replayable)", slog.String("type", env.Type))
@@ -953,10 +965,35 @@ func (p *peer) readPump(sess *session, done chan struct{}) {
 			// sender's — so drop both buffers. See discardReplay for what
 			// replaying a dead session's offer costs.
 			sess.discardReplay(roleClient, roleBrowser)
-			// Recorded so the imminent unregister does not synthesise a
-			// SECOND bye on top of this one. See peer.saidBye.
+			// Recorded so a later unregister does not synthesise a SECOND
+			// bye on top of this one. See peer.saidBye.
 			sess.markSaidBye(p)
-			return
+			// A bye ends the SESSION, not the socket. Keep reading.
+			//
+			// This used to `return`, which ran the deferred conn.Close() and
+			// dropped the sender. That was right when a bye meant "I am
+			// leaving" — a client closing its tab, a worker about to exit.
+			// It is wrong for a worker that RE-ARMS: on a byeless viewer
+			// loss (ICE failed, 20 s grace) the guest sends a bye for the
+			// dead session and immediately offers again on the SAME socket.
+			// The broker closed that socket under it, the offer's Send
+			// failed, the driver went kFailed, and main_parts recycled the
+			// whole guest — every byeless disconnect cost a process restart
+			// and a viewer-visible outage, on a stack whose entire point was
+			// that the browser outlives its viewers. Observed live 2026-09-07:
+			//   CV2-BYELESS: ICE still failed after 20s — re-arming
+			//   ws_client: channel dropped unexpectedly: code=1006
+			//   FAIL state=CreatingOffer reason=ws Send(offer) failed
+			//   unrecoverable failure — recycling this guest
+			// The remote-bye re-arm never hit this because the driver skips
+			// its own bye when the close source is "remote".
+			//
+			// A peer that is genuinely leaving closes the socket itself
+			// (client/src/session.ts does; the worker's exit path does), and
+			// unregister runs then exactly as before. saidBye is reset on
+			// the next SDP so a second session on the same socket gets its
+			// own unregister-time bye if IT drops without one.
+			continue
 		}
 	}
 }
