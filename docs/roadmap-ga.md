@@ -198,7 +198,12 @@ map to open, open in new tab, copy link, copy, paste, save image).
 the client send `devicePixelRatio`; run the input suites at scale 1 and 2.
 
 Also: the audio `PrepareForTeardown` hook on an inbound bye; IME/dead-key and touch
-checks added to `tests/interactive`; **the two re-arm/resize defects measured
+Also: the audio `PrepareForTeardown` hook on an inbound bye; IME/dead-key and touch
+checks added to `tests/interactive`; **wire the R7 reconnect supervisor**
+(`cb_signaling_reconnect`, built and never constructed) into `StartNativeSession`
+so a broker restart does not cost the worker its process
+(`docs/findings/worker-signaling-no-redial.md`) — then the liveness probe in
+`stack.yaml` that stands in for it can go; **the two re-arm/resize defects measured
 2026-09-07** — tear the pulse ADM down on re-arm so the second viewer gets audio
 (`docs/findings/audio-dies-after-first-rearm.md`), and make `CbViewportController`
 bracket its resize for the BeginFrame driver so a resize does not end in a GPU
