@@ -96,6 +96,48 @@ func newFakeWorker(t *testing.T) *fakeWorker {
 	return fw
 }
 
+// newFakeWorkerWithHandler is newFakeWorker with the reply chosen per method
+// by the test, for endpoints whose result body matters (Cb.setViewport echoes
+// the geometry it applied). Returns the server, not the fakeWorker, because
+// the handler is the assertion surface.
+func newFakeWorkerWithHandler(t *testing.T, reply func(method string, params map[string]any) map[string]any) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/json", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Host, "localhost") {
+			http.Error(w, "Host header is not localhost", http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]cdpTarget{{
+			Type:                 "page",
+			URL:                  "https://current.example/",
+			WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/FAKE",
+		}})
+	})
+	mux.HandleFunc("/devtools/page/FAKE", func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			var req struct {
+				ID     int            `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if err := c.ReadJSON(&req); err != nil {
+				return
+			}
+			_ = c.WriteJSON(map[string]any{"id": req.ID, "result": reply(req.Method, req.Params)})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func (fw *fakeWorker) methods() []string {
 	<-fw.mu
 	defer func() { fw.mu <- struct{}{} }()

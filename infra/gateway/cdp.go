@@ -23,7 +23,7 @@
 // Page.navigate to file://. The whole point of unpublishing 9222 is that
 // nothing gets to speak CDP except this file, and this file only says
 // Page.navigate / getNavigationHistory / navigateToHistoryEntry / reload /
-// stopLoading / Cb.startFrameSinkCapture.
+// stopLoading / Cb.startFrameSinkCapture / Cb.setViewport (viewport.go).
 
 package main
 

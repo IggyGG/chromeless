@@ -6,6 +6,10 @@ a login, the client bundle, and a reverse proxy to the signaling broker.
 ```
 https://localhost:8443/          the client bundle
               /login  /logout    operator credential → session cookie
+              /api/navigate …    address-bar verbs → CDP on the worker
+              /api/viewport      resize the remote browser → Cb.setViewport
+              /api/navigate …    address-bar verbs → CDP on the worker
+              /api/viewport      resize the remote browser → Cb.setViewport
               /ws/               → broker (WebSocket)
               /turn-credentials  → broker
               /probe             → broker (token-authed, no cookie)

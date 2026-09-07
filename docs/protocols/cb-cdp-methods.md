@@ -154,6 +154,12 @@ instead of guessing.
 
 Latency is not a concern — the portal already debounces resize at 250 ms.
 
+In a standalone deployment the caller is the gateway's `POST /api/viewport`
+(`infra/gateway/viewport.go`), driven by `client/src/viewport.ts`, which watches
+the stage with a `ResizeObserver`, debounces at the same 250 ms, applies the
+same clamp before sending, and stops asking after one failure so a guest that
+predates this method costs one request rather than one per resize.
+
 ### HiDPI is not enabled yet
 
 `deviceScaleFactor` is accepted and clamped to 1.0. The blocker is
