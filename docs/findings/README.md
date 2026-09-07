@@ -25,6 +25,10 @@ RESOLVED banner at the top. Do not treat them as open work.
 
 ## Open
 
+| finding | where the fix is | what it costs today |
+| --- | --- | --- |
+| [`worker-signaling-no-redial.md`](./worker-signaling-no-redial.md) | `cloud_browser_browser_main_parts.cc` `StartNativeSession` — wire the existing `cb_signaling_reconnect` (R7) | every broker redeploy restarts the browser ~70 s later; a waiting viewer's first attempt fails |
+
 Not code defects, but the same shape — measured, with a named owner:
 
 | finding | owner | what it blocks |
