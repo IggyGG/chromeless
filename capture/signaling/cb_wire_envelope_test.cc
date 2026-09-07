@@ -352,6 +352,22 @@ TEST(CbWireEnvelopeDecodeTest, RealSessionUnhealthyDecodes) {
   EXPECT_TRUE(std::holds_alternative<std::monostate>(env->data));
 }
 
+TEST(CbWireEnvelopeDecodeTest, RealPeerAbsentDecodes) {
+  // CV2-PEER-ABSENT: byte-for-byte what signaling/server.go marshals for a
+  // lone BROWSER peer (`from` is the recipient's own role, not a sender).
+  // Rejecting this frame was fatal for the session — see the header.
+  auto env = Decode(R"({"type":"peer_absent","from":"browser"})");
+  ASSERT_TRUE(env);
+  EXPECT_EQ(env->type, EnvelopeType::kPeerAbsent);
+  EXPECT_EQ(env->from, PeerRole::kBrowser);
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(env->data));
+}
+
+TEST(CbWireEnvelopeDecodeTest, RejectsPeerAbsentWithDataField) {
+  EXPECT_EQ(Decode(R"({"type":"peer_absent","from":"browser","data":null})"),
+            std::nullopt);
+}
+
 // ---------------------------------------------------------------------
 // Negative test — load-bearing rejection
 // ---------------------------------------------------------------------

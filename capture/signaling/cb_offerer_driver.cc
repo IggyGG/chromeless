@@ -391,6 +391,16 @@ void CbOffererDriver::OnEnvelope(const Envelope& env) {
     case EnvelopeType::kProbeResult:
       HandleProbeResultEnvelope(env);
       break;
+    case EnvelopeType::kPeerAbsent:
+      // CV2-PEER-ABSENT: the broker telling us no viewer holds the client
+      // role yet. For the OFFERER that is the normal cold-boot state — the
+      // offer is already buffered at the broker and is replayed to the next
+      // viewer — so there is nothing to do but note it. Before this tag was
+      // accepted, receiving it was a fatal decode error (see
+      // cb_wire_envelope.h), which is the opposite of advisory.
+      LOG(INFO) << kLogPrefix << "peer_absent from the broker: no viewer in "
+                   "the session yet; offer stays buffered for the next one";
+      break;
     case EnvelopeType::kSessionUnhealthy:
       // CV2-GPU-DEATH: this is an OUTBOUND-only type (guest→physics). The
       // guest never legitimately receives it; a peer sending it here is a

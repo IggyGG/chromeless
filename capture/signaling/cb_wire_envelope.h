@@ -94,6 +94,23 @@ enum class EnvelopeType {
   // tab, guest is fine" from "guest self-detected permanent death, recycle it".
   // Lockstep with physics webrtc_signaling.rs SignalingEnvelope serde enum.
   kSessionUnhealthy,
+  // CV2-PEER-ABSENT: broker -> peer, advisory. Sent once at join when nobody
+  // holds the counterpart role. Carries NO payload (monostate, `data`
+  // omitted), like kBye. The broker stamps `from` with the RECIPIENT's own
+  // role (signaling/server.go marshals Envelope{Type:"peer_absent",
+  // From:p.role}), so a browser peer receives from="browser" — do not read
+  // `from` as the sender for this tag.
+  //
+  // Why it is in the accept-list at all: the spec says an unknown tag is
+  // rejected, and this codec did exactly that — but SignalingWsClient treats
+  // a Decode() rejection as a TRANSPORT FAILURE (FailWithError -> kClosed ->
+  // OnError), so from 2026-08-25, when the broker began sending this to every
+  // lone peer, EVERY guest that booted before a viewer arrived killed its own
+  // signaling socket on the first frame it received. Two weeks of red E2E and
+  // a standalone stack that only worked if the viewer connected first. An
+  // advisory the broker is documented as "safe to send to any peer" has to be
+  // something the peer survives.
+  kPeerAbsent,
 };
 
 // Decode-side: returns the EnvelopeType matching `tag` or nullopt if
