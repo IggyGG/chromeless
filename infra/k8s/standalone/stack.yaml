@@ -416,7 +416,25 @@ spec:
           # rolled. And the tag is mutable: v9 was rebuilt over by another
           # session, serving a bundle with none of the expected markers while
           # the deployment still read "v9". Check the digest.
-          image: registry.triform.cloud/chromeless/chromeless-gateway:standalone-v8
+          #
+          # 32860a21 (tag autoconnect-test, built from
+          # test/e2e-specs-follow-auto-connect at 1aaaf4e) was the bundle whose
+          # Disconnect button is usable once connected and whose camera/mic
+          # button unlocks on connected rather than on pcCreated. Rolled
+          # 2026-09-07 19:25 UTC; tests/e2e 7/8 against it in a real Chrome
+          # (the 8th was the audio spec's own stale click, fixed in the same
+          # PR) and tests/interactive 65/65. The cluster ran standalone-v12
+          # (a95b452a) before that, while this file said v8 — a third pin that
+          # would have rolled a component backwards on apply.
+          # 9ef7f4db (tag vpswitch-4f9215f, built from
+          # feat/gateway-viewport-follow-switch at 4f9215f): carries the
+          # connect-on-load client fixes (#103) AND CHROMELESS_VIEWPORT_FOLLOW.
+          # Verified live 2026-09-07 20:57 UTC with the switch off: one connect
+          # from a 1400x900 window, zero Cb.setViewport at the guest, zero
+          # stall-watchdog fires, worker pid unchanged, framesDecoded 4 -> 740
+          # over 75 s. On the previous gateway the same connect restarted the
+          # browser ~50 s in.
+          image: registry.triform.cloud/chromeless/chromeless-gateway@sha256:9ef7f4db32c86dcb34274814855a0bb77c8953f12e5d4673bfc7f85bb6cfbdcd
           env:
             - name: CHROMELESS_USER
               valueFrom:
@@ -437,6 +455,15 @@ spec:
               value: ws://chromeless-standalone-signaling:8080
             - name: CHROMELESS_CDP_URL
               value: http://chromeless-standalone-worker:9222
+            # OFF until a guest that survives a resize is pinned above. With
+            # it on, every connect from a real window (never exactly 1280x720)
+            # sends Cb.setViewport, a fresh guest's BeginFrame loop freezes,
+            # and 15 s later its watchdog crashes the GPU process — the
+            # browser restarts ~50 s after connect, tabs gone. Measured 3/3 on
+            # 2026-09-07; docs/findings/viewport-resize-freezes-beginframe-and-
+            # crashes-gpu.md. Flip to "1" together with the worker pin.
+            - name: CHROMELESS_VIEWPORT_FOLLOW
+              value: "0"
             # Reached by port-forward, so localhost is what the browser types
             # and the generated cert's default SANs already cover it.
             - name: CHROMELESS_TLS_DIR

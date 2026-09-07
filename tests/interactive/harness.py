@@ -320,7 +320,15 @@ class ClientDriver:
         # ?e2e=1 exposes window.__cbwrtc_pc (client/main.ts maybeExposePcForE2e).
         self.cdp.call("Page.navigate", {"url": f"{GATEWAY}/?e2e=1"})
         time.sleep(3)
-        self.cdp.eval("document.getElementById('connect').click(); 1")
+        # The client connects on load (client/main.ts autoConnect). Click only
+        # if this bundle is still idle: on a live session the button is
+        # Disconnect, and pressing it would end the session this harness is
+        # about to measure. (Until 2026-09-07 the button was disabled for the
+        # whole session, so this click was a silent no-op on a Disconnect
+        # button and nobody noticed what it was pressing.)
+        self.cdp.eval("(() => { const s = document.getElementById('status');"
+                      " if (s && s.dataset.state === 'idle')"
+                      " document.getElementById('connect').click(); return 1; })()")
 
         end = time.time() + timeout
         while time.time() < end:

@@ -19,25 +19,25 @@
 // track was negotiated" and "you can see the browser".
 
 import { expect, test } from "@playwright/test";
+import { CONNECT_TIMEOUT_MS, openConnected } from "./fixtures/connect.js";
 
-// A cold worker can take ~35s to offer, then frames have to start flowing.
-const CONNECT_TIMEOUT_MS = 60_000;
+// A cold worker can take ~35s to offer (CONNECT_TIMEOUT_MS, in
+// fixtures/connect.ts), then frames have to start flowing.
 const FRAMES_TIMEOUT_MS = 30_000;
 
 test.describe("video track reception", () => {
   test("client receives a video track that actually decodes frames", async ({
     page,
   }) => {
-    // ?e2e=1 turns on window.__cbwrtc_pc (client/main.ts:248).
-    await page.goto("/?e2e=1");
-    await page.locator("#connect").click();
-
+    // ?e2e=1 turns on window.__cbwrtc_pc (client/main.ts maybeExposePcForE2e).
+    //
     // Stage 1 — the connection. Diagnostic ordering matters here: if this
-    // fails, nothing below can pass, and the message should say so.
-    await expect(
-      page.locator("#state-conn"),
-      "peer connection never reached 'connected' — negotiation problem, not a media one",
-    ).toHaveText("connected", { timeout: CONNECT_TIMEOUT_MS });
+    // fails, nothing below can pass, and the message should say so. (The
+    // client connects on load; see fixtures/connect.ts.)
+    await openConnected(page, "/?e2e=1");
+    await expect(page.locator("#state-conn")).toHaveText("connected", {
+      timeout: CONNECT_TIMEOUT_MS,
+    });
 
     // Stage 2 — a video receiver exists. Necessary, not sufficient.
     const hasVideoReceiver = await page.evaluate(() => {

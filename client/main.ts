@@ -372,6 +372,12 @@ function connect(sessionId: string): void {
       const enabled = attach.passthrough?.getState().enabled ?? false;
       setPassthroughButtonState(enabled ? "on" : "off", false);
       setNavEnabled(true);
+      // The button reads "Disconnect" from the moment connect() ran, but it
+      // was left DISABLED until `closed` — so it could never be pressed while
+      // a session existed, and the `if (session)` branch of its click handler
+      // was dead code. Auto-connect made that visible: the only button on
+      // the page was greyed out for the whole session. Usable from here on.
+      els.connect.disabled = false;
       void syncAddressBar();
       // Size the remote to the stage NOW, and allow requests again if an
       // earlier guest had refused them — a reconnect may land on a newer one.
@@ -380,6 +386,9 @@ function connect(sessionId: string): void {
     } else if (st === "failed") {
       setPassthroughButtonState("off", true);
       setNavEnabled(false);
+      // A failed connect used to leave a disabled "Disconnect" and no way
+      // back but a reload. Let the user end it and try again.
+      els.connect.disabled = false;
     }
   });
   s.on("connectionState", (st) => { els.conn.textContent = st; });
@@ -393,8 +402,16 @@ function connect(sessionId: string): void {
   s.on("pcCreated", (pc) => {
     // Initial pc AND every reconnect rebuild land here: drop the
     // previous generation's DOM attachments, re-arm the e2e hook.
+    //
+    // The passthrough button stays DISABLED here (dropAttachments leaves it
+    // so) and is enabled by the "connected" status above — not by the
+    // existence of a PeerConnection. Enabling it on pcCreated let a user add
+    // camera tracks to a PeerConnection that was still negotiating, with no
+    // session to renegotiate on; with connect-on-load that window opened on
+    // every page load, and tests/e2e/06 ("disabled until a peer connection
+    // is up") went red because the contract in its name was never the one
+    // the code implemented.
     dropAttachments();
-    setPassthroughButtonState("off", false);
     maybeExposePcForE2e(pc);
   });
   s.on("closed", () => {

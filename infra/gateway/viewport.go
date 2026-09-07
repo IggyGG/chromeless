@@ -74,6 +74,26 @@ func (g *gateway) handleViewport(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "width and height must be positive integers")
 		return
 	}
+	// CHROMELESS_VIEWPORT_FOLLOW=0: refuse before touching the guest
+	// (after validation, so a malformed body is still a 400 and the log line
+	// can say what was asked). 501 is
+	// a real answer, not an outage: client/src/viewport.ts treats any
+	// non-2xx as "remote resize unavailable", logs one line, and stops the
+	// follower until the next connect — exactly what it does for a guest
+	// that predates Cb.setViewport. Measured 2026-09-07: on a fresh guest
+	// the first resize froze the BeginFrame loop and the watchdog's re-issue
+	// crashed the GPU process 15 s later, so every connect from a real
+	// window restarted the browser ~50 s in. This switch is the laptop-side
+	// half of that finding; the guest-side fix needs a lane build.
+	if !g.cfg.viewportFollow {
+		// One line per connect (the client stops after the first refusal), so
+		// the gateway log shows the switch doing its job.
+		g.log.Info("viewport request refused: CHROMELESS_VIEWPORT_FOLLOW=0",
+			slog.Int("requested_w", body.Width), slog.Int("requested_h", body.Height))
+		writeJSONError(w, http.StatusNotImplemented,
+			"remote resize disabled on this gateway (CHROMELESS_VIEWPORT_FOLLOW=0)")
+		return
+	}
 	width, height := clampViewport(body.Width, body.Height)
 
 	ctx, cancel := contextWithNavTimeout(r)

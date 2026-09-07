@@ -65,6 +65,12 @@ CHROMELESS_E2E_USE_RUNNING_STACK=1 npm run test:e2e
 CHROMELESS_E2E_BASE_URL=https://my-host:8443 \
 CHROMELESS_E2E_USE_RUNNING_STACK=1 \
   npm run test:e2e
+
+# ...in your installed Google Chrome instead of Playwright's Chromium
+# (no `playwright install` needed; see the arm64 section below). VIDEO=off
+# because the bundled ffmpeg is the x86 build on an arm64 Mac:
+CHROMELESS_E2E_CHANNEL=chrome CHROMELESS_E2E_VIDEO=off \
+CHROMELESS_E2E_USE_RUNNING_STACK=1 npm run test:e2e
 ```
 
 Three things about the topology are worth knowing before debugging a failure
