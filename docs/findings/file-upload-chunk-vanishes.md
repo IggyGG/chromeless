@@ -1,6 +1,6 @@
 # A file upload's chunk reaches the guest and vanishes
 
-**Status: OPEN — under diagnosis.** Reproduced against the live standalone
+**Status: ROOT-CAUSED, fix awaiting live verification.** Reproduced against the live standalone
 stack on 2026-09-08 with guest `cr7727-2b93ba93` (batch B). The chooser, the
 request, the picker and the transport all work; the file never appears.
 
@@ -107,6 +107,56 @@ download delegate writes files in this same process and works, using
 `60e9c99` switches all five file operations to that shape. Whether it fixes
 this is what the next roll says — do not record it as fixed until the uploads
 suite passes.
+
+## ROOT CAUSE, 2026-09-08 — a race between `end` and the chunk's write
+
+**The task-runner theory above was WRONG.** Swapping the sequenced runner for
+`base::ThreadPool` (guest `cr7727-60e9c992ed3b`) produced the identical
+failure. Recorded rather than quietly folded into the eventual fix, because
+"the previous theory was refuted" is the useful half of a diagnosis.
+
+The actual sequence:
+
+```
+t0  HandleChunk   posts AppendChunk to the pool   -> returns immediately
+t1  HandleEnd     posts HashFile to the pool      -> returns immediately
+t2  HashFile runs. The write has not.
+t3  OnFinalised(ok=false) -> "could not read the file back", ERASES the entry
+t4  OnChunkWritten's reply lands -> find() fails -> silent return
+```
+
+The client sends the last chunk and `end` back to back; the guest handles
+both on the UI sequence in microseconds, while the write is a pool task.
+`HandleEnd` never waited for it.
+
+**Two silent paths hid it from each other.** `OnChunkWritten`'s "entry already
+gone" branch returned with no log, so the write's own outcome — success or
+failure — was never reported. The only evidence anywhere was `end`'s error
+message, which describes a consequence and names no cause. That is why three
+image rolls went into theories about *why the write failed* when the write had
+simply not happened yet.
+
+### The fix (`24ebd98`)
+
+`Upload` gains `writes_in_flight` and `end_pending`. `HandleEnd` defers when
+writes are outstanding (and says so); the last write's reply calls
+`FinaliseUpload` instead. `OnChunkWritten`'s orphan branch now LOGS.
+
+### Cost, and what would have avoided it
+
+Five build-and-roll cycles, ~20 minutes each. Every one of the three real
+defects in this feature was a **silent path**, not a wrong computation:
+
+| defect | how it presented |
+| --- | --- |
+| `AppendToFile` has no `O_CREAT` | `write_failed`, four steps from the cause |
+| chunk-drop guards (`return`, `VLOG(1)`) | nothing at all |
+| `OnChunkWritten` orphan branch | nothing at all |
+
+On a component whose only feedback loop is a 20-minute build plus an image
+roll, **a silent branch costs a full cycle every time it is hit.** The
+per-frame log added in `eee0fae` is what finally made the shape visible, and
+it should have been there from the first failure.
 
 ## Next step
 
