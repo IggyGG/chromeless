@@ -412,6 +412,13 @@ export class InputChannel {
     this.enqueue("composition_cancel", {});
   }
 
+  /**
+   * v1 `clipboard_paste`. Kept for direct callers of this channel, but NOT
+   * wired to the browser's paste event — see the note in attach(). The
+   * guest recognises the type and handles it nowhere, so a paste sent here
+   * is silently dropped; the working path is the clipboard channel's
+   * `clipboard_offer` (client/src/clipboard.ts).
+   */
   sendClipboardPaste(text: string): void {
     this.enqueue("clipboard_paste", { text });
   }
@@ -668,10 +675,20 @@ export class InputChannel {
         this.sendComposition("end", { data: text });
       }
     };
-    const onPaste = (e: ClipboardEvent) => {
-      const text = e.clipboardData?.getData("text/plain");
-      if (typeof text === "string" && text.length > 0) this.sendClipboardPaste(text);
-    };
+    // NO paste listener here, deliberately.
+    //
+    // Every paste used to be sent TWICE and consumed ZERO times: this
+    // listener put a `clipboard_paste` envelope on the INPUT channel while
+    // main.ts's ClipboardChannel put a `clipboard_offer` on the CLIPBOARD
+    // channel. The guest lists clipboard_paste in kKnownInputTypes — so it
+    // is not even logged as unknown — and then nothing anywhere handles it
+    // (cb_input_dispatch_clipboard.h says so explicitly: "Handling
+    // clipboard_paste ... we leave the dispatch surface unclaimed here").
+    // The offer on the clipboard channel is the one that works.
+    //
+    // The envelope stays in the v1 spec and `sendClipboardPaste` stays on
+    // this class for anyone driving the channel directly; what is removed
+    // is this client wiring a browser event to a path that goes nowhere.
     const onCopy = (_e: ClipboardEvent) => { this.sendClipboardCopyRequest(); };
 
     // ----- v1.1 drag-and-drop -----
@@ -788,7 +805,9 @@ export class InputChannel {
     target.addEventListener("compositionstart", onCompStart as EventListener);
     target.addEventListener("compositionupdate", onCompUpdate as EventListener);
     target.addEventListener("compositionend", onCompEnd as EventListener);
-    win.addEventListener("paste", onPaste);
+    // `copy` only — see the note above `onCopy` for why there is no paste
+    // listener. clipboard_copy_request IS consumed (it arms the guest's
+    // copy window, cb_input_dispatch_composite.cc:77), so this one stays.
     win.addEventListener("copy", onCopy);
     target.addEventListener("dragenter", onDragEnter as EventListener);
     target.addEventListener("dragover", onDragOver as EventListener);
@@ -813,7 +832,6 @@ export class InputChannel {
       target.removeEventListener("compositionstart", onCompStart as EventListener);
       target.removeEventListener("compositionupdate", onCompUpdate as EventListener);
       target.removeEventListener("compositionend", onCompEnd as EventListener);
-      win.removeEventListener("paste", onPaste);
       win.removeEventListener("copy", onCopy);
       target.removeEventListener("dragenter", onDragEnter as EventListener);
       target.removeEventListener("dragover", onDragOver as EventListener);

@@ -627,6 +627,55 @@ describe("attach() key gating", () => {
   });
 });
 
+// The paste that went nowhere, twice.
+//
+// attach() used to wire the browser's `paste` event to a clipboard_paste
+// envelope on the INPUT channel, while main.ts separately sent a
+// clipboard_offer on the CLIPBOARD channel. The guest lists clipboard_paste
+// in kKnownInputTypes — so it is not even logged as unknown — and handles
+// it nowhere. Two sends, zero effect.
+describe("attach() does not duplicate the paste path", () => {
+  function fakeDom() {
+    const listeners: Record<string, Array<(e: unknown) => void>> = {};
+    const win = {
+      addEventListener: (t: string, h: (e: unknown) => void) => {
+        (listeners[t] ??= []).push(h);
+      },
+      removeEventListener: () => {},
+      getSelection: () => null,
+    };
+    const target = {
+      addEventListener: () => {}, removeEventListener: () => {},
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }),
+    };
+    return { win, target, listeners };
+  }
+
+  it("registers no paste listener", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+    const dom = fakeDom();
+
+    ic.attach(dom.target as unknown as HTMLElement,
+              { window: dom.win as unknown as Window });
+
+    expect(dom.listeners["paste"]).toBeUndefined();
+  });
+
+  it("still registers copy — clipboard_copy_request IS consumed by the guest", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+    const dom = fakeDom();
+
+    ic.attach(dom.target as unknown as HTMLElement,
+              { window: dom.win as unknown as Window });
+
+    expect(dom.listeners["copy"]).toHaveLength(1);
+  });
+});
+
 describe("modsFromEvent", () => {
   it("packs each modifier into its expected bit", () => {
     expect(modsFromEvent({ shiftKey: false, ctrlKey: false, altKey: false, metaKey: false })).toBe(0);
