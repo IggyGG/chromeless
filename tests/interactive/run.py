@@ -1281,6 +1281,44 @@ def suite_stats(client, worker):
         print("  SKIP  the stats counter is still moving   "
               "session already ended (one session per worker process)")
 
+    # ---- HUD: the stats the client renders ----------------------------
+    #
+    # The session has emitted a StatsSample every second since T82 and
+    # nothing subscribed to it, so these fields are the difference between
+    # a viewer who can see a connection degrading and one who cannot. Read
+    # what is ON SCREEN rather than what getStats returns: the point is
+    # that the numbers reach a person.
+    hud = json.loads(client.cdp.eval(
+        "JSON.stringify({"
+        "  fps: (document.getElementById('hud-fps')||{}).textContent,"
+        "  bitrate: (document.getElementById('hud-bitrate')||{}).textContent,"
+        "  res: (document.getElementById('hud-res')||{}).textContent,"
+        "  q: (document.getElementById('hud-dot')||{dataset:{}}).dataset.q"
+        "})") or "{}")
+    check("the HUD is present in the served bundle", hud.get("fps") is not None,
+          "no #hud-fps element — a stale gateway bundle, not a product fault")
+    if hud.get("fps") is not None:
+        # A dash means "no sample yet", which after several seconds of video
+        # means the subscriber is not wired.
+        check("the HUD shows a real frame rate",
+              hud["fps"] not in ("\u2014", "", None),
+              "fps reads %r — the stats event has had a subscriber only "
+              "since 2026-09-08; before that it read the em-dash forever"
+              % hud["fps"], pass_detail=hud["fps"])
+        check("the HUD shows a real bitrate",
+              hud["bitrate"] not in ("\u2014", "", None),
+              "bitrate reads %r" % hud["bitrate"], pass_detail=hud["bitrate"])
+        check("the HUD shows the stream resolution",
+              hud["res"] not in ("\u2014", "", None, "0x0"),
+              "resolution reads %r — read off the <video>'s "
+              "videoWidth/Height, so 0x0 means no frame is painted"
+              % hud["res"], pass_detail=hud["res"])
+        check("the HUD reaches a quality verdict",
+              hud.get("q") in ("good", "fair", "poor"),
+              "quality dot is %r — 'unknown' after seconds of video means "
+              "no sample reached the summariser" % hud.get("q"),
+              pass_detail=hud.get("q"))
+
     # ---- AUDIO: received, and audible ---------------------------------
     #
     # The guest has sent an audio track since the first session. Nothing

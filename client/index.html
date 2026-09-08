@@ -293,6 +293,17 @@
         background: transparent;
         color: var(--fg);
       }
+
+      /* HUD quality dot. Three states plus "don't know yet" — and the
+         unknown state is deliberately grey rather than green, because a
+         green dot before any sample has arrived is a claim we cannot
+         support. */
+      .hud .dot { display: inline-block; width: 8px; height: 8px;
+                  border-radius: 50%; margin-right: 4px; }
+      .hud .dot[data-q="good"]    { background: #3fb950; }
+      .hud .dot[data-q="fair"]    { background: #d29922; }
+      .hud .dot[data-q="poor"]    { background: #f85149; }
+      .hud .dot[data-q="unknown"] { background: var(--muted); }
     </style>
   </head>
   <body>
@@ -377,6 +388,20 @@
         <video id="remote" autoplay playsinline muted></video>
       </div>
       <aside>
+        <!-- HUD. The session has emitted a full StatsSample every second
+             since T82 and nothing subscribed to it, so a viewer watching a
+             stream degrade had no way to tell a slow network from a broken
+             guest — the panel said `connected` either way. -->
+        <h2>connection</h2>
+        <dl class="states hud">
+          <dt>quality</dt>     <dd><span id="hud-dot" class="dot" data-q="unknown"></span> <span id="hud-quality">—</span></dd>
+          <dt>fps</dt>         <dd id="hud-fps">—</dd>
+          <dt>bitrate</dt>     <dd id="hud-bitrate">—</dd>
+          <dt>rtt</dt>         <dd id="hud-rtt">—</dd>
+          <dt>loss</dt>        <dd id="hud-loss">—</dd>
+          <dt>resolution</dt>  <dd id="hud-res">—</dd>
+        </dl>
+
         <h2>peer connection</h2>
         <dl class="states">
           <dt>signaling</dt>   <dd id="state-sig">—</dd>

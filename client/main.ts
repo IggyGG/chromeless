@@ -16,6 +16,7 @@
 //   await session.connect(sessionId);
 
 import { InputChannel, keyBelongsToClient } from "./src/input.js";
+import { summarise, formatResolution } from "./src/hud.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
 import {
@@ -76,6 +77,13 @@ const els = {
   // and discarded.
   audio: $<HTMLButtonElement>("audio-toggle"),
   fullscreen: $<HTMLButtonElement>("fullscreen-toggle"),
+  hudDot: $<HTMLElement>("hud-dot"),
+  hudQuality: $<HTMLElement>("hud-quality"),
+  hudFps: $<HTMLElement>("hud-fps"),
+  hudBitrate: $<HTMLElement>("hud-bitrate"),
+  hudRtt: $<HTMLElement>("hud-rtt"),
+  hudLoss: $<HTMLElement>("hud-loss"),
+  hudRes: $<HTMLElement>("hud-res"),
   // Address bar. Navigation goes over HTTP to the gateway, not over the peer
   // connection — see src/navigate.ts.
   addressBar: $<HTMLFormElement>("addressbar"),
@@ -533,6 +541,26 @@ function connect(sessionId: string): void {
   s.on("signalingState", (st) => { els.sig.textContent = st; });
   s.on("iceConnectionState", (st) => { els.ice.textContent = st; });
   s.on("iceGatheringState", (st) => { els.iceg.textContent = st; });
+  // The `stats` event has fired once a second since T82 with NOBODY
+  // listening — the sample was assembled, shipped to the broker over the
+  // stats channel, and dropped locally. src/hud.ts turns it into five
+  // numbers; this renders them.
+  s.on("stats", (sample, prev) => {
+    const h = summarise(sample, prev);
+    els.hudFps.textContent = h.fps;
+    els.hudBitrate.textContent = h.bitrate;
+    els.hudRtt.textContent = h.rtt;
+    els.hudLoss.textContent = h.loss;
+    els.hudQuality.textContent = h.quality;
+    els.hudDot.dataset["q"] = h.quality;
+    // Resolution comes off the <video>, not getStats: videoWidth/Height is
+    // what is actually being PAINTED, which is the number a user can check
+    // against their own window. getStats reports the decoder's frame size,
+    // which can differ mid-renegotiation.
+    els.hudRes.textContent =
+      formatResolution(els.video.videoWidth, els.video.videoHeight);
+  });
+
   s.on("track", (_track, stream) => {
     if (els.video.srcObject !== stream) els.video.srcObject = stream;
   });
