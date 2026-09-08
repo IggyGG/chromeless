@@ -240,6 +240,66 @@ describe("attachControlChannel", () => {
     h.dispose();
   });
 
+  // ui_event: fire-and-forget notices. fullscreen_changed is the one that
+  // matters — the guest has emitted it since it was written and nothing
+  // listened, so a page that went fullscreen did so inside a window that
+  // still showed the sidebar.
+  describe("ui_event", () => {
+    const guestEvent = (kind: string, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ v: 1, type: "ui_event", t: 1, seq: 1,
+                       data: { kind, ...extra } });
+
+    it("hands the kind and data to onEvent", () => {
+      const dc = new FakeChannel();
+      const seen: Array<[string, Record<string, unknown>]> = [];
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onEvent: (k, d) => { seen.push([k, d]); },
+      });
+
+      dc.pushMessage(guestEvent("fullscreen_changed", { fullscreen: true }));
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]![0]).toBe("fullscreen_changed");
+      expect(seen[0]![1]["fullscreen"]).toBe(true);
+      // An event is fire-and-forget: answering one would be a protocol error.
+      expect(dc.sent).toHaveLength(0);
+      h.dispose();
+    });
+
+    it("survives a handler that THROWS", () => {
+      const dc = new FakeChannel();
+      let requests = 0;
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onEvent: () => { throw new Error("handler exploded"); },
+        onFileChooser: () => { requests++; return false; },
+      });
+
+      dc.pushMessage(guestEvent("fullscreen_changed", { fullscreen: true }));
+      // The channel must still be alive: every later frame arrives through
+      // the same callback, INCLUDING the requests the guest blocks on.
+      dc.pushMessage(guestRequest({ kind: "file_chooser", id: "20" }));
+
+      expect(requests).toBe(1);
+      h.dispose();
+    });
+
+    it("does not invoke onEvent for a ui_request", () => {
+      const dc = new FakeChannel();
+      const seen: string[] = [];
+      const cap = capturing();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        present: cap.present,
+        onEvent: (k) => { seen.push(k); },
+      });
+
+      dc.pushMessage(guestRequest({ kind: "js_dialog", id: "21" }));
+
+      expect(seen).toEqual([]);
+      expect(cap.seen).toHaveLength(1);
+      h.dispose();
+    });
+  });
+
   // file_chooser: the guest is holding chromium's FileSelectListener and the
   // page cannot proceed until we answer. Every branch below must produce
   // exactly one response.

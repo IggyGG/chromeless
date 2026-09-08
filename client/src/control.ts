@@ -179,6 +179,13 @@ export interface AttachControlOptions {
   // a picker on this side there is no file to send, and leaving the guest
   // to wait out its five-minute deadline would look like a frozen page.
   onFileChooser?: (req: FileChooserRequest) => Promise<boolean> | boolean;
+  // A guest ui_event. `fullscreen_changed {fullscreen}` fires when the
+  // streamed page enters or leaves the Fullscreen API; tab_opened /
+  // tab_closed are advisory nudges. Absent, events are logged and dropped,
+  // which is what happened to fullscreen_changed for its whole existence:
+  // the guest sent it, nothing listened, and the viewer's chrome stayed put
+  // while the page believed it was fullscreen.
+  onEvent?: (kind: string, data: Record<string, unknown>) => void;
   log?: (level: SessionLogLevel, msg: string, extra?: unknown) => void;
 }
 
@@ -335,6 +342,7 @@ export function attachControlChannel(
 ): ControlChannelHandle {
   const log = opts.log ?? (() => {});
   const onFileChooser = opts.onFileChooser;
+  const onEvent = opts.onEvent;
   const mount = opts.mount ?? (typeof document !== "undefined" ? document.body : null);
   const present =
     opts.present ??
@@ -389,10 +397,23 @@ export function attachControlChannel(
     }
 
     if (isValidEvent(parsed)) {
-      // fullscreen_changed today; nothing to answer. Logged so a future
-      // event type is visible rather than invisible.
-      const k = (parsed as { data?: { kind?: unknown } }).data?.kind;
-      log("ok", `control: event ${typeof k === "string" ? k : "(unknown)"}`);
+      // Fire-and-forget: nothing to answer, but not nothing to DO. Logged
+      // either way so an event kind nobody handles is visible rather than
+      // invisible.
+      const d = (parsed as { data?: Record<string, unknown> }).data ?? {};
+      const k = d["kind"];
+      const kind = typeof k === "string" ? k : "(unknown)";
+      log("ok", `control: event ${kind}`);
+      if (onEvent && typeof k === "string") {
+        try {
+          onEvent(k, d);
+        } catch (err) {
+          // A throwing handler must not kill the channel: every later
+          // frame, including the requests the guest BLOCKS on, arrives
+          // through this same callback.
+          log("err", `control: event handler threw for ${kind}: ${String(err)}`);
+        }
+      }
       return;
     }
 

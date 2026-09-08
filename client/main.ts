@@ -75,6 +75,7 @@ const els = {
   // existed the <video> was hard-muted with no control, so it was decoded
   // and discarded.
   audio: $<HTMLButtonElement>("audio-toggle"),
+  fullscreen: $<HTMLButtonElement>("fullscreen-toggle"),
   // Address bar. Navigation goes over HTTP to the gateway, not over the peer
   // connection — see src/navigate.ts.
   addressBar: $<HTMLFormElement>("addressbar"),
@@ -199,6 +200,7 @@ function dropAttachments(): void {
   // purpose — a reconnect must not silently re-mute a user who unmuted, so
   // only the control is disabled, not the preference behind it.
   els.audio.disabled = true;
+  els.fullscreen.disabled = true;
 }
 
 function wireDataChannel(dc: RTCDataChannel): void {
@@ -258,11 +260,39 @@ function wireCursorChannel(dc: RTCDataChannel): void {
  */
 function wireControlChannel(dc: RTCDataChannel): void {
   attach.control?.dispose();
-  attach.control = attachControlChannel(dc, { log, onFileChooser: pickAndUpload });
+  attach.control = attachControlChannel(dc, {
+    log,
+    onFileChooser: pickAndUpload,
+    onEvent: onGuestEvent,
+  });
   dc.addEventListener("close", () => {
     try { attach.control?.dispose(); } catch { /* ignore */ }
     attach.control = null;
   });
+}
+
+/**
+ * A fire-and-forget notice from the guest.
+ *
+ * `fullscreen_changed` is the load-bearing one: the streamed PAGE called
+ * requestFullscreen (a video player, a game) and chromium granted it, so
+ * the page's :fullscreen CSS applies and its layout has already changed.
+ * If the viewer's chrome does not follow, the page is fullscreen inside a
+ * window that still shows a 380px sidebar — the guest emitted this event
+ * from the day it was written and nothing ever listened.
+ *
+ * Requesting fullscreen here can be refused: the browser wants a user
+ * gesture and a network event is not one. setFullscreen() logs the refusal
+ * rather than pretending, and the page is no worse off than before.
+ */
+function onGuestEvent(kind: string, data: Record<string, unknown>): void {
+  if (kind === "fullscreen_changed") {
+    void setFullscreen(data["fullscreen"] === true);
+    return;
+  }
+  // tab_opened / tab_closed are advisory; the gateway's /json list is the
+  // source of truth and the tab strip is not built yet. Logged by
+  // control.ts already, so nothing to add here.
 }
 
 /**
@@ -468,6 +498,8 @@ function connect(sessionId: string): void {
       // should not be re-muted by a broker blip.
       els.audio.disabled = false;
       syncAudioButton();
+      els.fullscreen.disabled = false;
+      syncFullscreenButton();
       // The button reads "Disconnect" from the moment connect() ran, but it
       // was left DISABLED until `closed` — so it could never be pressed while
       // a session existed, and the `if (session)` branch of its click handler
@@ -645,6 +677,43 @@ els.audio.addEventListener("click", () => {
 // The element can be muted from outside our button (the browser's own
 // media controls, or another script). Keep the label truthful.
 els.video.addEventListener("volumechange", syncAudioButton);
+
+/**
+ * Fullscreen the stage. The label follows the DOCUMENT's state rather than
+ * our own flag, because the user can leave fullscreen with Escape or the
+ * browser's own control and never touch this button.
+ */
+function syncFullscreenButton(): void {
+  const on = document.fullscreenElement === els.stage;
+  els.fullscreen.dataset["state"] = on ? "on" : "off";
+  els.fullscreen.textContent = on ? "⛶ Exit fullscreen" : "⛶ Fullscreen";
+}
+
+async function setFullscreen(want: boolean): Promise<void> {
+  try {
+    if (want && document.fullscreenElement !== els.stage) {
+      await els.stage.requestFullscreen();
+    } else if (!want && document.fullscreenElement) {
+      await document.exitFullscreen();
+    }
+  } catch (err) {
+    // Refused (no gesture, an iframe without allowfullscreen, a platform
+    // that does not do it). Say so — silence here looks like a dead button.
+    log("warn", "fullscreen: the browser refused", String(err));
+  }
+  // Whatever happened, the label must match reality.
+  syncFullscreenButton();
+  // The stage just changed size; the remote should follow it.
+  viewport.sync();
+}
+
+els.fullscreen.addEventListener("click", () => {
+  void setFullscreen(document.fullscreenElement !== els.stage);
+});
+document.addEventListener("fullscreenchange", () => {
+  syncFullscreenButton();
+  viewport.sync();
+});
 
 els.passthrough.addEventListener("click", async () => {
   const pc = session?.getPeerConnection();

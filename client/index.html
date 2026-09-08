@@ -333,6 +333,17 @@
               title="Unmute the cloud browser's audio">
         🔇 Unmute
       </button>
+      <!-- Fullscreen the STAGE, not the document: the panel and log stay
+           out of the way while the stream keeps its own aspect ratio. The
+           guest also emits `fullscreen_changed` when the streamed PAGE
+           calls requestFullscreen (a video player, a game), and the client
+           follows it — otherwise the page believes it is fullscreen while
+           the viewer still sees a 380px sidebar. -->
+      <button id="fullscreen-toggle"
+              disabled
+              title="Fill the window with the cloud browser">
+        ⛶ Fullscreen
+      </button>
     </header>
     <!--
       Address bar. Navigation does NOT ride the peer connection: this posts to
