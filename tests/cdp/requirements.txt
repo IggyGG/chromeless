@@ -4,5 +4,5 @@
 # silently break promotion.
 websockets==12.0
 requests==2.32.3
-pytest==8.3.3
+pytest==9.0.3
 pytest-asyncio==0.24.0
