@@ -101,15 +101,26 @@ bool AppendChunk(const base::FilePath& path,
                  const std::string& bytes,
                  bool first_chunk) {
   if (!base::CreateDirectory(path.DirName())) {
+    LOG(ERROR) << kLog << "could not create " << path.DirName().value();
     return false;
   }
-  if (first_chunk) {
-    // Truncating create. A leftover file at this path can only be a stale
-    // partial from an upload_id we already abandoned; appending to it would
-    // silently corrupt the new one.
-    return base::WriteFile(path, bytes);
-  }
-  return base::AppendToFile(path, bytes);
+  const bool ok = first_chunk
+                      // Truncating create. A leftover file here can only be a
+                      // stale partial from an abandoned upload_id; appending
+                      // to it would silently corrupt the new one.
+                      ? base::WriteFile(path, bytes)
+                      : base::AppendToFile(path, bytes);
+  // Read the size straight back. A write that returns true and leaves no
+  // file is the exact shape being chased here (the hash then fails with
+  // "could not read the file back" and the write looks innocent), so the
+  // two facts are logged together on ONE line.
+  const std::optional<int64_t> on_disk = base::GetFileSize(path);
+  LOG(INFO) << kLog << (first_chunk ? "WriteFile" : "AppendToFile") << " -> "
+            << (ok ? "ok" : "FAILED") << ", " << bytes.size()
+            << " bytes; file is now "
+            << (on_disk ? base::NumberToString(*on_disk) : std::string("ABSENT"))
+            << " at " << path.value();
+  return ok;
 }
 
 // Blocking. Reads the finished file back and returns its SHA-256 as
@@ -119,6 +130,15 @@ bool AppendChunk(const base::FilePath& path,
 std::string HashFile(const base::FilePath& path, int64_t* size_out) {
   std::string contents;
   if (!base::ReadFileToString(path, &contents)) {
+    // Distinguish "the file is gone" from "it is there and unreadable".
+    // Those are different bugs — a delete racing the read, versus
+    // permissions or a directory in the way — and the caller only reports
+    // "could not read the file back", which covers both.
+    const std::optional<int64_t> sz = base::GetFileSize(path);
+    LOG(ERROR) << kLog << "ReadFileToString FAILED for " << path.value()
+               << "; the file is "
+               << (sz ? base::NumberToString(*sz) + " bytes on disk"
+                      : std::string("ABSENT"));
     return std::string();
   }
   *size_out = static_cast<int64_t>(contents.size());
@@ -471,6 +491,12 @@ void CbFileUploadReceiver::FinaliseUpload(const std::string& upload_id) {
     return;
   }
   const base::FilePath path = it->second.path;
+  // Log the path AS A STRING here and in AppendChunk. If a write succeeds and
+  // a read of "the same" path fails a millisecond later, the two paths being
+  // different is the first thing to rule out, and only printing both rules
+  // it out.
+  LOG(INFO) << kLog << "finalising " << upload_id << "; hashing "
+            << path.value();
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, kFileIoTraits,
       base::BindOnce(
