@@ -512,9 +512,31 @@ void CbFileUploadReceiver::FinaliseUpload(const std::string& upload_id) {
             if (!self) {
               return;
             }
+            // THE BUG, and it hid behind an error message that named the
+            // wrong thing for five image rolls.
+            //
+            // This used to read:
+            //
+            //   OnFinalised(..., std::move(result.first), result.second,
+            //               !result.first.empty());
+            //
+            // `result.first` is MOVED into argument 3 and READ in argument
+            // 5, and C++ leaves argument evaluation order UNSPECIFIED. On
+            // this toolchain argument 3 won, so `ok` was computed from a
+            // moved-from (empty) string: every upload reported failure
+            // while the file sat correct and complete on disk.
+            //
+            // It compiled clean, it linted clean, and the failure surfaced
+            // as OnFinalised's "could not read the file back" — a message
+            // about a read that, the logs eventually proved, had never
+            // failed once.
+            //
+            // Compute the flag FIRST, into a named local. Never read a
+            // value in the same call that moves it.
+            const bool hashed_ok = !result.first.empty();
             self->OnFinalised(std::move(id), std::move(p),
                               std::move(result.first), result.second,
-                              !result.first.empty());
+                              hashed_ok);
           },
           weak_factory_.GetWeakPtr(), upload_id, path));
 }
@@ -537,7 +559,14 @@ void CbFileUploadReceiver::OnFinalised(std::string upload_id,
   // below only counts uploads that SUCCEEDED, so nothing else bounds a
   // retry loop.
   if (!ok) {
-    AbandonUpload(it, "write_failed", "could not read the file back");
+    // "could not read the file back" was this message for five image rolls,
+    // and it was WRONG: `ok` is "HashFile returned a hash", which a
+    // use-after-move could falsify while the read had succeeded. The read
+    // now logs its own failure (see HashFile), so this message says only
+    // what it actually knows.
+    AbandonUpload(it, "hash_failed",
+                  "the file could not be hashed — see the guest log for "
+                  "whether the read itself failed");
     return;
   }
   if (total_bytes != up.declared_size) {

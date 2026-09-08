@@ -6,6 +6,7 @@
 
 .PHONY: help standalone-up standalone-down verify lint lint-cxx lint-workflows lint-github-boundary lint-shell lint-build-targets \
         lint-runtime-contracts lint-tests-wired lint-pod-resources lint-yaml-dupe-keys lint-cxx-orphan \
+        lint-cxx-use-after-move \
         lint-guest-release lint-deploy-pin test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
@@ -26,6 +27,7 @@ help:
 	@echo "  make lint-pod-resources  # ephemeral-storage limit implies a reservation"
 	@echo "  make lint-yaml-dupe-keys # a duplicate key silently discards the first value"
 	@echo "  make lint-cxx-orphan     # a method declared in a .h and defined nowhere"
+	@echo "  make lint-cxx-use-after-move # a value moved and read in one argument list"
 	@echo "  make lint-guest-release  # the worker-image pin names real code"
 	@echo "  make lint-deploy-pin     # manifests agree with the guest-release pin"
 	@echo "  make test-interactive    # real Chrome + real worker (needs a live stack)"
@@ -69,7 +71,7 @@ verify: lint test-unit test-integration
 
 # ---- lint ------------------------------------------------------------------
 
-lint: lint-cxx lint-cxx-orphan lint-workflows lint-github-boundary lint-shell lint-build-targets lint-runtime-contracts \
+lint: lint-cxx lint-cxx-orphan lint-cxx-use-after-move lint-workflows lint-github-boundary lint-shell lint-build-targets lint-runtime-contracts \
       lint-tests-wired lint-silent-noop lint-pod-resources lint-yaml-dupe-keys \
       lint-guest-release lint-deploy-pin
 
@@ -205,6 +207,14 @@ lint-pod-resources:
 lint-cxx-orphan:
 	@echo ">>> cxx orphan declaration lint"
 	@python3 tools/lint/cxx_orphan_decl_lint.py capture
+
+# A value moved into one argument and read in another, in the SAME call.
+# Argument evaluation order is unspecified, so it is a coin flip whether the
+# read sees the value or a moved-from husk. Cost five image rolls on
+# 2026-09-08 — the symptom was four layers away and named the wrong cause.
+lint-cxx-use-after-move:
+	@echo ">>> cxx use-after-move lint"
+	@python3 tools/lint/cxx_use_after_move_lint.py capture
 
 lint-yaml-dupe-keys:
 	@echo ">>> yaml duplicate key lint"

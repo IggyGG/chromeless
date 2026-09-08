@@ -173,7 +173,8 @@ is why this list is exhaustive rather than illustrative.
 | `session_quota`   | this session has already written 512 MiB                        |
 | `out_of_order`    | a chunk's `seq` was not the next expected one                   |
 | `bad_base64`      | a chunk's `data` did not decode                                 |
-| `write_failed`    | the disk write failed, or the file could not be read back to hash it |
+| `write_failed`    | the disk write itself failed                                    |
+| `hash_failed`     | the file could not be hashed. Until 2026-09-08 this case was also reported as `write_failed` with the text "could not read the file back", which named a read failure that had not happened — the guest log now says whether the read failed |
 | `truncated`       | `file_upload_end` arrived but bytes on disk ≠ declared `size`    |
 | `hash_mismatch`   | sha256 of what landed ≠ the client's declared `sha256`          |
 | `cancelled`       | the client sent `file_upload_cancel`                            |
