@@ -59,9 +59,29 @@ std::string SafeId(std::string_view raw) {
 }
 
 // Blocking. Appends |bytes| to |path|, creating it on the first chunk.
-bool AppendChunk(const base::FilePath& path, const std::string& bytes) {
+//
+// base::AppendToFile does NOT create the file. Its POSIX implementation
+// opens with `O_WRONLY | O_APPEND` and no `O_CREAT`
+// (base/files/file_util_posix.cc:1269), so on a path that does not exist
+// yet it returns false — and its header says only "Appends |data| to
+// |filename|", which is exactly true and reads as if it creates one.
+//
+// Measured on the live guest 2026-09-08: every upload failed at the FIRST
+// chunk with `write_failed`, having already parked the chooser, sent the
+// request, shown the viewer a picker and received the bytes. The whole
+// path worked and the file was never created. So the first chunk goes
+// through WriteFile (which does create) and the rest append.
+bool AppendChunk(const base::FilePath& path,
+                 const std::string& bytes,
+                 bool first_chunk) {
   if (!base::CreateDirectory(path.DirName())) {
     return false;
+  }
+  if (first_chunk) {
+    // Truncating create. A leftover file at this path can only be a stale
+    // partial from an upload_id we already abandoned; appending to it would
+    // silently corrupt the new one.
+    return base::WriteFile(path, bytes);
   }
   return base::AppendToFile(path, bytes);
 }
@@ -298,8 +318,12 @@ void CbFileUploadReceiver::HandleChunk(const base::DictValue& data) {
   // the guard test 0 > declared_size on every chunk, i.e. never fire.
   up.received += chunk_bytes;
   const base::FilePath path = up.path;
+  // next_seq was incremented above, so seq 0 is the chunk that has just
+  // taken it to 1. That chunk creates the file; the rest append.
+  const bool first_chunk = up.next_seq == 1;
   io_runner_->PostTaskAndReplyWithResult(
-      FROM_HERE, base::BindOnce(&AppendChunk, path, std::move(bytes)),
+      FROM_HERE,
+      base::BindOnce(&AppendChunk, path, std::move(bytes), first_chunk),
       base::BindOnce(&CbFileUploadReceiver::OnChunkWritten,
                      weak_factory_.GetWeakPtr(), upload_id, chunk_bytes));
 }

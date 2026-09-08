@@ -836,7 +836,21 @@ _UPLOAD_FIXTURE = """<!doctype html><meta charset=utf-8>
 <title>upload fixture</title>
 <body style="font:16px system-ui;padding:40px">
 <h1>upload fixture</h1>
-<input id=f type=file accept=".txt,text/plain">
+<!-- A BIG target, for the same reason the download fixture's anchor is a
+     padded block and says so: the click is dispatched at the element's
+     centre in remote viewport fractions, and a bare `<input type=file>` is
+     a ~200x20 control whose centre lands on the "No file chosen" LABEL,
+     not the button — the click is delivered and the element never sees it.
+     Measured here on 2026-09-08: window.__clicks stayed 0 against a bare
+     input and the suite reported "no picker appeared", which reads as a
+     broken RunFileChooser override and is not one.
+     transform:scale makes the whole control a large hit area without
+     changing what it IS — still a real file input, still the real chooser
+     path. -->
+<div style="padding:40px;background:#eee;text-align:center">
+  <input id=f type=file accept=".txt,text/plain"
+         style="transform:scale(3);transform-origin:center">
+</div>
 <script>
   // What the PAGE sees. This is the whole point of the test: the bytes
   // landing in the guest's Uploads/ directory prove the transport worked,
@@ -847,6 +861,15 @@ _UPLOAD_FIXTURE = """<!doctype html><meta charset=utf-8>
   document.getElementById('f').addEventListener('change', (e) => {
     const f = e.target.files[0];
     window.__file = f ? {name: f.name, size: f.size, type: f.type} : "EMPTY";
+  });
+  // Did the click even LAND on the input? Without this, "no picker
+  // appeared" is indistinguishable from "the mouse missed the element",
+  // and the failure message would send the reader to the wrong half of a
+  // feature whose two halves already failed independently once. The
+  // download suite learned the same lesson (window.__clicks).
+  window.__clicks = 0;
+  document.getElementById('f').addEventListener('click', () => {
+    window.__clicks++;
   });
 </script>
 """
@@ -914,6 +937,16 @@ def suite_uploads(client, worker):
     worker.eval("window.scrollTo(0,0); 1")
     time.sleep(0.4)
     client.click(box["x"], box["y"])
+
+    # Did the click reach the input? Nothing below can mean anything if it
+    # did not, and "no picker appeared" would blame the wrong half.
+    clicked, n = worker.wait_for("window.__clicks || 0",
+                                 lambda v: (v or 0) >= 1, timeout=15)
+    check("the click reached the file input", clicked,
+          f"the input saw {n} click(s) — the input path missed the target, "
+          f"so this is a MOUSE problem, not an upload one")
+    if not clicked:
+        return
 
     # The client should now be showing its own picker bar. That bar is the
     # observable proof the request crossed the wire.
