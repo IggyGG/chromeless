@@ -482,6 +482,76 @@ same raw pointer the R2 client did
 
 ---
 
+## Batch B (2026-09-08): file chooser, upload receiver
+
+Read from the tree on the build node. Two of these were WRONG in a first
+draft and one of those survived the compiler — a signature can be right
+while the semantics are not, and only the live guest said so.
+
+✅ **`content::FileSelectListener::FileSelected`** — see the section above.
+Two traps in the arguments rather than the signature:
+
+- `base_dir` is **empty except for `kUploadFolder`**. The header is explicit:
+  "This has non-empty directory path if |mode| argument is kUploadFolder ...
+  This is an empty FilePath otherwise" (`file_select_listener.h:20-24`).
+  Passing the uploads directory compiles and advertises an enumeration root
+  that describes nothing.
+- `NativeFileInfo::display_name` is what the page reads as **`File.name`**.
+  Left empty, blink falls back to "the base part of the |file_path|"
+  (`file_chooser.mojom:88-90`) — for us the sanitised `<upload_id>__<name>`.
+  A site that echoes the filename, or validates its extension, sees the
+  wrong thing while every other check passes.
+
+```cpp
+// third_party/blink/public/mojom/choosers/file_chooser.mojom:82
+struct NativeFileInfo {
+  mojo_base.mojom.FilePath file_path;
+  mojo_base.mojom.String16 display_name;      // File.name — DO NOT leave empty
+  array<mojo_base.mojom.String16> base_subdirs;  // android only
+};
+```
+
+⚠️ **`base::AppendToFile` DOES NOT CREATE THE FILE.** The header says only
+"Appends |data| to |filename|. Returns true iff |data| were written"
+(`file_util.h:604-611`), which is true and reads as if a missing file is
+created. It is not:
+
+```cpp
+// base/files/file_util_posix.cc:1269 — no O_CREAT
+int fd = HANDLE_EINTR(open(filename.value().c_str(), O_WRONLY | O_APPEND));
+```
+
+This compiled, linted, and passed the build lane. It failed on the live
+guest at the FIRST chunk of every upload, after the chooser had been parked,
+the request sent, the picker shown and the bytes received — so the symptom
+was "the page sees no file selected", four layers away from the cause. Use
+`base::WriteFile` for the first write ("If the file does not exist, it gets
+created with read/write permissions for all", `file_util.h:577-579`;
+it also truncates, which is what you want for a stale partial) and append
+from the second on.
+
+✅ **`base::JSONReader::ReadDict(json, options)`** — `options` has **no
+default** at 7727 (`json_reader.h:113-116`). Every in-tree caller passes
+`base::JSON_PARSE_RFC`. Omitting it is a compile error, which cost one
+~18-minute lane cycle.
+
+✅ **`base::GetDeleteFileCallback(path, reply_callback = {})`**
+(`file_util.h:131`) returns a `OnceClosure` — post it directly, do not wrap
+it in `BindOnce`.
+
+✅ **`crypto::hash::Sha256(base::span<const uint8_t>)`** and
+**`Sha256(std::string_view)`** both exist (`crypto/hash.h:36-38`), returning
+`std::array<uint8_t, 32>`. The GN dep is `//crypto` (`hash.cc`/`hash.h` are
+in its `component("crypto")` sources).
+
+✅ **`blink::mojom::FileChooserParams::Mode`** — `kOpen`, `kOpenMultiple`,
+`kUploadFolder`, `kOpenDirectory`, `kSave` (`file_chooser.mojom:15-36`). The
+mojom lives in `//third_party/blink/public/mojom:mojom_platform`; non-Blink
+targets are told to reach it through `//content/public/common`, which
+re-exports it (`third_party/blink/public/mojom/BUILD.gn:20-24`).
+
+---
+
 ## Re-reading these pins
 
 ```bash

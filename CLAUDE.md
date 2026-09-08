@@ -51,6 +51,21 @@ Consequences:
   `FROM_HERE` with neither header included. It is a lint, not a compiler:
   clean means "that specific mistake is absent", not "this builds".
 
+  **And a green lane means "this builds", not "this works".** The signature
+  can be right while the SEMANTICS are wrong, and then nothing short of a
+  live guest tells you. `base::AppendToFile` compiled, linted, and passed the
+  lane; it opens `O_WRONLY | O_APPEND` with no `O_CREAT`
+  (`file_util_posix.cc:1269`), so it cannot create the file it appends to,
+  and every upload died on its first chunk — four layers from the symptom
+  ("the page sees no file selected"). Its header says only "Appends |data| to
+  |filename|", which is true and reads as if it creates one.
+
+  So when reading a pinned header, read what it does NOT say. If the contract
+  is about a side effect — does it create, does it truncate, does it need the
+  parent to exist — the declaration will not tell you. Read the `_posix.cc`
+  implementation, or budget a live run to find out. Both are cheaper than the
+  cycle where the whole feature looks broken.
+
 When you finish C++ work, **say plainly that it is unverified.** Do not
 describe it as done or working.
 
