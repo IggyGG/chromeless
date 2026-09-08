@@ -178,14 +178,14 @@ jobs:
 
   native-peer-gate-strict:
     name: native-peer-gate-strict (M7 gate)
-    if: github.server_url != 'https://github.com' || vars.CHROMELESS_IMAGE != ''
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     # Strict runs on PRs targeting main (so the M7 squash-merge MUST be
     # green-strict) AND on pushes to integration/native-peer (operator
     # check). Other PRs see only the scaffold job.
     if: |
-      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/integration/native-peer')
+      (github.server_url != 'https://github.com' || vars.CHROMELESS_IMAGE != '') &&
+      ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/integration/native-peer'))
     steps:
       - uses: actions/checkout@v4
 

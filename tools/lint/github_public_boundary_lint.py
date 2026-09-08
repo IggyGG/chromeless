@@ -15,8 +15,7 @@ import sys
 
 
 PUBLIC_IMAGE_GUARD = (
-    "if: github.server_url != 'https://github.com' "
-    "|| vars.CHROMELESS_IMAGE != ''"
+    "github.server_url != 'https://github.com' || vars.CHROMELESS_IMAGE != ''"
 )
 
 REQUIRED_JOBS = {

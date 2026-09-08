@@ -765,7 +765,11 @@ jobs:
           echo "--- playwright.log tail (artifact upload is unsupported on this host) ---"
           tail -100 playwright.log 2>/dev/null || echo "(no playwright.log)"
           echo "--- test-results tree ---"
-          ls -R test-results 2>/dev/null | head -50 || echo "(no test-results)"
+          if [ -d test-results ]; then
+            find test-results -print | head -50
+          else
+            echo "(no test-results)"
+          fi
 
       # Same reason as above: no upload-artifact on this host, so the logs go
       # to the run log where they are actually readable. Tail-bounded per
