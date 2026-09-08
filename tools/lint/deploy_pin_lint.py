@@ -31,7 +31,7 @@ the user never saw, and the user hit a bug the tests had "proved" fixed.
 
 WHAT IT CHECKS
 --------------
-1. Every k8s manifest that pins the worker/gateway image agrees with
+1. Every listed k8s manifest has an immutable worker image pin agreeing with
    build/guest-release.json. Disagreement is the drift that makes `apply` a
    rollback.
 2. guest-release.json records a DIGEST, not only a tag — so the pin identifies
@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -57,7 +56,8 @@ MANIFESTS = [
     ROOT / "infra" / "k8s" / "standalone" / "stack.yaml",
 ]
 
-WORKER_IMAGE_RE = re.compile(r"registry\.[\w.]+/chromeless/chromeless:(\S+)")
+sys.path.insert(0, str(ROOT / "tools"))
+from release_pins import immutable_image, worker_images
 
 
 def main() -> int:
@@ -79,32 +79,23 @@ def main() -> int:
     if not pinned_tag:
         problems.append("build/guest-release.json has no usable `image`")
 
-    # A tag is a name; a digest is the artifact. The gateway's standalone-v9 tag
-    # was rebuilt over by another session while the Deployment still reported
-    # v9, so the tag proved nothing about the running code.
-    if not str(pin.get("digest", "")).startswith("sha256:"):
-        problems.append(
-            "build/guest-release.json has no sha256 digest — a tag alone cannot "
-            "prove which artifact is deployed (a tag can be rebuilt over)")
+    try:
+        expected = immutable_image(pinned_image, pin.get("digest", ""))
+    except (TypeError, ValueError):
+        problems.append("build/guest-release.json has an invalid worker image or digest")
+        expected = None
 
     for man in MANIFESTS:
-        if not man.is_file():
-            continue
         rel = man.relative_to(ROOT)
-        for lineno, line in enumerate(man.read_text().splitlines(), 1):
-            if line.lstrip().startswith("#"):
-                continue
-            m = WORKER_IMAGE_RE.search(line)
-            if not m:
-                continue
-            tag = m.group(1)
-            if pinned_tag and tag != pinned_tag:
-                problems.append(
-                    f"{rel}:{lineno} pins worker image {tag!r} but "
-                    f"build/guest-release.json says {pinned_tag!r}.\n"
-                    f"    `kubectl apply -f {rel}` would roll the cluster to the "
-                    f"stale one. Update both together, or the next apply "
-                    f"silently reverts whatever is running.")
+        if not man.is_file():
+            problems.append(f"missing deployment manifest {rel}")
+            continue
+        images = worker_images(man.read_text())
+        if not images:
+            problems.append(f"{rel} has no recognized worker image pin")
+        for image in images:
+            if expected and image not in (expected, pinned_image + "@" + pin["digest"]):
+                problems.append(f"{rel} pins {image!r}; expected immutable worker {expected!r}")
 
     if problems:
         print("deploy-pin-lint: FAIL", file=sys.stderr)

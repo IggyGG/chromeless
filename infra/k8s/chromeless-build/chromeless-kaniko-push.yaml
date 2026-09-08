@@ -19,7 +19,7 @@
 #
 # >>> THIS MANIFEST IS A TEMPLATE — DO NOT `kubectl apply -f` DIRECTLY <<<
 #
-# Three fields are envsubst placeholders driven by the operator's environment:
+# Four fields are envsubst placeholders driven by the operator's environment:
 #   - CHROMELESS_KANIKO_TAG  — REQUIRED, the unique destination tag.
 #                              MUST match what chromeless-build.sh Step 9
 #                              wrote to ${CHROMELESS_WORK_ROOT}/artifacts/
@@ -27,6 +27,7 @@
 #                              "cr<branch>-<commit-sha>" form, e.g.
 #                              cr7727-8367359). Auditability is broken
 #                              if this is reused across distinct builds.
+#   - KANIKO_JOB_NAME        — REQUIRED, assigned by the wrapper for this attempt.
 #   - KANIKO_NODE            — REQUIRED, "triform-7" or "triform-8" (the
 #                              node whose hostPath holds the build
 #                              artifacts). Operator hard-constraint:
@@ -61,7 +62,7 @@ metadata:
   # Tag-suffixed Job name so successive pushes don't collide on the
   # immutable Job resource (kubectl apply on an existing Job is a no-op
   # for spec changes — we want a fresh Job per tag).
-  name: chromeless-kaniko-push-${CHROMELESS_KANIKO_TAG}
+  name: ${KANIKO_JOB_NAME}
   namespace: chromeless-build
   labels:
     app.kubernetes.io/name: chromeless
@@ -106,6 +107,33 @@ spec:
       nodeName: ${KANIKO_NODE}
       nodeSelector:
         kubernetes.io/hostname: ${KANIKO_NODE}
+      initContainers:
+        - name: verify-build-tag
+          image: busybox:1.36.1
+          command:
+            - sh
+            - -ec
+            - |
+              if [ "$(cat /workspace/IMAGE_TAG)" != "$CHROMELESS_KANIKO_TAG" ]; then
+                echo "ERROR: staged build tag differs from the requested image" >&2
+                exit 1
+              fi
+          env:
+            - name: CHROMELESS_KANIKO_TAG
+              value: "${CHROMELESS_KANIKO_TAG}"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+              ephemeral-storage: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+              ephemeral-storage: "32Mi"
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:v1.23.2

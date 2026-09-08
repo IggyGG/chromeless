@@ -265,7 +265,7 @@ spec:
           # stopped explicitly); the worker redials the broker instead of
           # waiting for the liveness probe to kill it. All three were measured
           # broken on 5813600c the day before — see docs/findings/.
-          image: registry.triform.cloud/chromeless/chromeless@sha256:4a0fafe13b01cd0e670c6a9706836b2bb646a182c3c402dda66bc0f46c6e99a2
+          image: registry.triform.cloud/chromeless/chromeless@sha256:0c62400d8481211252b068a0f8437210452ef7ea868337b78bcfb395ff3e6cd0
           env:
             - name: SESSION_ID
               value: dev
