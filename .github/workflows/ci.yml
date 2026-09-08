@@ -293,6 +293,10 @@ jobs:
 
   smoke:
     name: Container smoke test
+    # The tree pin currently lives in Triform's private registry. Public GitHub
+    # runs must not receive that registry credential; opt them in only after a
+    # public worker image is configured as a repository variable.
+    if: github.server_url != 'https://github.com' || vars.CHROMELESS_IMAGE != ''
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
       - uses: actions/checkout@v4
