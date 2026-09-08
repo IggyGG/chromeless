@@ -70,9 +70,19 @@ kubectl rollout restart deploy/chromeless-standalone-worker -n chromeless
 
 ## Expected result
 
-**65 of 65** on the pinned guest (`infra/k8s/standalone/stack.yaml`,
-`cr7727-c5f2eb91c6f0` or later), with one check that reports a preflight
-rather than a product verdict:
+**65 of 65** was the score before 2026-09-08. The suite now carries **91
+check() sites** — `uploads` is new (12) and `stats` grew from 6 to 13 (audio
+reception, the unmute control, the HUD) — so the number a full run prints is
+higher and depends on which optional preflights fire.
+
+**Do not treat a bare total as the pass criterion.** The reliable statement is
+*zero FAILED lines*; the run prints `N/N checks passed` and names every
+failure. Suites skip whole blocks when a preflight says the guest or the
+gateway bundle predates a feature, and that is reported, not silently counted.
+
+On the pinned guest (`infra/k8s/standalone/stack.yaml`, `cr7727-c5f2eb91c6f0`
+or later), with these checks reporting a preflight rather than a product
+verdict:
 
 - the clipboard suite expects paste AND copy to round-trip on a guest built
   after 2026-09-05 (boot log `CV2-CLIPBOARD: relay bound`). An older guest logs
