@@ -161,6 +161,29 @@ export class TokenRefresher {
     return tok;
   }
 
+  /**
+   * Take ownership of a token someone else already fetched, WITHOUT
+   * fetching another.
+   *
+   * ChromelessSession fetches one itself as part of building the dial URL;
+   * calling start() after that would issue a second token immediately, for
+   * no reason, and on a broker that counts issuance that is a visible
+   * difference. Pair with scheduleNext().
+   */
+  adopt(tok: IssuedToken): void {
+    this.stopped = false;
+    this.token = tok;
+  }
+
+  /**
+   * Arm the refresh timer for the token currently held. No-op with no
+   * token — there is nothing to refresh, and scheduling against a null
+   * expiry would fire immediately and forever.
+   */
+  scheduleNext(): void {
+    if (this.token) this.schedule(this.token);
+  }
+
   /** Cancel the next refresh and stop the loop. */
   stop(): void {
     this.stopped = true;

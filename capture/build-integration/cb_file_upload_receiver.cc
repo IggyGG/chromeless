@@ -180,7 +180,13 @@ void CbFileUploadReceiver::OnEnvelopeForTesting(const std::string& json) {
 }
 
 void CbFileUploadReceiver::HandleEnvelope(const std::string& json) {
-  std::optional<base::DictValue> parsed = base::JSONReader::ReadDict(json);
+  // JSON_PARSE_RFC, like every other ReadDict caller in this tree
+  // (cb_control_channel.cc:257, cb_clipboard_relay.cc:109,
+  // cb_devtools_agent.cc:664). The options argument is REQUIRED at 7727 —
+  // it has no default — and omitting it is a compile error, which is what
+  // this line was until the lane found it.
+  std::optional<base::DictValue> parsed =
+      base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
   if (!parsed) {
     LOG(WARNING) << kLog << "inbound frame is not a JSON object — dropped";
     return;
