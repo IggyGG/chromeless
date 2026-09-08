@@ -5,7 +5,7 @@
 # pointing at the task that will deliver them, rather than silently passing.
 
 .PHONY: help standalone-up standalone-down verify lint lint-cxx lint-workflows lint-github-boundary lint-shell lint-build-targets \
-        lint-runtime-contracts lint-tests-wired lint-pod-resources \
+        lint-runtime-contracts lint-tests-wired lint-pod-resources lint-yaml-dupe-keys \
         lint-guest-release lint-deploy-pin test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
@@ -24,6 +24,7 @@ help:
 	@echo "  make lint-github-boundary # public jobs cannot consume private worker images"
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
 	@echo "  make lint-pod-resources  # ephemeral-storage limit implies a reservation"
+	@echo "  make lint-yaml-dupe-keys # a duplicate key silently discards the first value"
 	@echo "  make lint-guest-release  # the worker-image pin names real code"
 	@echo "  make lint-deploy-pin     # manifests agree with the guest-release pin"
 	@echo "  make test-interactive    # real Chrome + real worker (needs a live stack)"
@@ -68,7 +69,8 @@ verify: lint test-unit test-integration
 # ---- lint ------------------------------------------------------------------
 
 lint: lint-cxx lint-workflows lint-github-boundary lint-shell lint-build-targets lint-runtime-contracts \
-      lint-tests-wired lint-silent-noop lint-pod-resources lint-guest-release lint-deploy-pin
+      lint-tests-wired lint-silent-noop lint-pod-resources lint-yaml-dupe-keys \
+      lint-guest-release lint-deploy-pin
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
 # all of them before running any step, so one missing action fails the whole
@@ -189,6 +191,15 @@ lint-pod-resources:
 	@python3 tools/lint/test_pod_resource_request_lint.py >/dev/null 2>&1 && \
 	  echo ">>> pod-resource-request-lint self-tests pass" || \
 	  { echo "!!! pod-resource-request-lint SELF-TESTS FAILED — the linter itself is broken"; exit 1; }
+
+# A duplicate mapping key silently discards the EARLIER value. Found in
+# build-job-x264-t7.yaml on 2026-09-08, where twenty lines of measured
+# reasoning argued for a 64Gi memory request while every build actually got
+# the 72Gi on the next line. kubectl, PyYAML and the lane all accept it
+# without a word, so nothing but this catches it.
+lint-yaml-dupe-keys:
+	@echo ">>> yaml duplicate key lint"
+	@python3 tools/lint/yaml_duplicate_key_lint.py .
 
 lint-runtime-contracts:
 	@echo ">>> runtime contracts"

@@ -537,8 +537,17 @@ spec:
               # fitting today's headroom with ~23 GiB to spare. As with CPU,
               # the LIMIT is untouched at 192Gi, so the build's ceiling is
               # unchanged; only the guarantee shrinks.
+              #
+              # (2026-09-08) This line was a DUPLICATE KEY for three weeks.
+              # The 64Gi edit above was inserted ABOVE the existing
+              # `memory: "72Gi"` rather than replacing it, so the file
+              # argued at length for 64Gi while YAML's last-key-wins gave
+              # every build 72Gi. Neither kubectl nor the lane complains
+              # about a duplicate mapping key, and both values schedule, so
+              # nothing ever surfaced it — the manifest simply did not mean
+              # what it said. 64Gi is the value the reasoning above supports
+              # and the one now applied.
               memory: "64Gi"
-              memory: "72Gi"
               # Explicit ephemeral REQUEST decoupled from the 8Gi limit
               # (2026-07-02, same class as chromeless-kaniko-push.yaml's
               # 2026-06-29 fix). A limit with no request makes K8s mirror
