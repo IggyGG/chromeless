@@ -27,6 +27,32 @@ namespace {
 constexpr char kLog[] = "CV2-UPLOAD: ";
 constexpr int kProtocolVersion = 1;
 
+// File IO traits.
+//
+// A SEQUENCED runner built in the constructor is what this used to use, and
+// it was the only base::ThreadPool::CreateSequencedTaskRunner anywhere in
+// capture/ — the download delegate's own comment warns that "no in-tree
+// precedent is a cost paid hours later in the build lane", and this cost
+// three rolls: the chunk reached HandleChunk, passed every guard, was posted
+// to that runner, and the file never appeared.
+//
+// cb_download_manager_delegate.cc:98 is the shape that demonstrably works in
+// this process, so this matches it exactly.
+//
+// ORDERING, stated precisely, because dropping a sequenced runner is not
+// free: two chunks posted to the pool can run on different threads. What
+// makes that safe here is that they cannot be in flight at once — the
+// receiver posts a chunk's write only from HandleChunk, which runs on the
+// UI sequence, and the seq check (`*seq != up.next_seq`) rejects any chunk
+// that arrives before the previous one has been counted. The client is also
+// strictly serial (file-upload.ts awaits each send). If either of those ever
+// changes, this needs a sequence again — and the first chunk's WriteFile
+// truncates, so an out-of-order first write would silently discard data
+// rather than fail loudly.
+constexpr base::TaskTraits kFileIoTraits = {
+    base::MayBlock(), base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN,
+    base::TaskPriority::USER_VISIBLE};
+
 // Everything the client can put in `name` becomes one path component, and
 // nothing in it can escape the directory. Not a "sanitiser" in the sense of
 // trying to preserve intent — a deliberate reduction to [A-Za-z0-9._-].
@@ -108,9 +134,7 @@ CbFileUploadReceiver::CbFileUploadReceiver(
     scoped_refptr<base::SequencedTaskRunner> ui_runner)
     : dc_host_(dc_host),
       uploads_dir_(profile_dir.Append(FILE_PATH_LITERAL("Uploads"))),
-      ui_runner_(std::move(ui_runner)),
-      io_runner_(base::ThreadPool::CreateSequencedTaskRunner(
-          {base::MayBlock(), base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN})) {
+      ui_runner_(std::move(ui_runner)) {
   LOG(INFO) << kLog << "receiver bound — uploads land in "
             << uploads_dir_.value() << " (max " << (kMaxUploadBytes >> 20)
             << " MiB per file, " << (kMaxSessionUploadBytes >> 20)
@@ -170,12 +194,11 @@ void CbFileUploadReceiver::ResetForNewSession() {
   uploads_.clear();
   session_bytes_ = 0;
   // Fire-and-forget: the next session's writes create the directory again.
-  io_runner_->PostTask(
-      FROM_HERE, base::BindOnce(
-                     [](const base::FilePath& dir) {
-                       base::DeletePathRecursively(dir);
-                     },
-                     uploads_dir_));
+  base::ThreadPool::PostTask(
+      FROM_HERE, kFileIoTraits,
+      base::BindOnce(
+          [](const base::FilePath& dir) { base::DeletePathRecursively(dir); },
+          uploads_dir_));
   LOG(INFO) << kLog << "Uploads/ wiped for the next viewer";
 }
 
@@ -348,8 +371,8 @@ void CbFileUploadReceiver::HandleChunk(const base::DictValue& data) {
   // next_seq was incremented above, so seq 0 is the chunk that has just
   // taken it to 1. That chunk creates the file; the rest append.
   const bool first_chunk = up.next_seq == 1;
-  io_runner_->PostTaskAndReplyWithResult(
-      FROM_HERE,
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, kFileIoTraits,
       base::BindOnce(&AppendChunk, path, std::move(bytes), first_chunk),
       base::BindOnce(&CbFileUploadReceiver::OnChunkWritten,
                      weak_factory_.GetWeakPtr(), upload_id, chunk_bytes));
@@ -362,7 +385,8 @@ void CbFileUploadReceiver::AbandonUpload(
   const std::string upload_id = it->first;
   const base::FilePath path = it->second.path;
   uploads_.erase(it);
-  io_runner_->PostTask(FROM_HERE, base::GetDeleteFileCallback(path));
+  base::ThreadPool::PostTask(FROM_HERE, kFileIoTraits,
+                             base::GetDeleteFileCallback(path));
   ReplyError(upload_id, code, message);
 }
 
@@ -405,8 +429,8 @@ void CbFileUploadReceiver::HandleEnd(const base::DictValue& data) {
                     " will fail; look for a chunk-drop warning above";
   }
   const base::FilePath path = it->second.path;
-  io_runner_->PostTaskAndReplyWithResult(
-      FROM_HERE,
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, kFileIoTraits,
       base::BindOnce(
           [](const base::FilePath& p) {
             int64_t size = 0;

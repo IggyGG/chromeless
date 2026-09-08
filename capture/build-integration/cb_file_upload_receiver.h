@@ -185,9 +185,6 @@ class CbFileUploadReceiver : public webrtc::DataChannelObserver {
   const raw_ptr<signaling::CbDataChannelHost> dc_host_;
   const base::FilePath uploads_dir_;
   const scoped_refptr<base::SequencedTaskRunner> ui_runner_;
-  // The pool sequence every byte is written on. One sequence, so chunks for
-  // one upload land in order without the receiver holding a file handle.
-  scoped_refptr<base::SequencedTaskRunner> io_runner_;
 
   std::map<std::string, Upload> uploads_;
   int64_t session_bytes_ = 0;
