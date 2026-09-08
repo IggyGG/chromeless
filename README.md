@@ -1,5 +1,6 @@
 # chromeless
 
+[![GitHub](https://img.shields.io/badge/source-IggyGG%2Fchromeless-181717?logo=github)](https://github.com/IggyGG/chromeless)
 [![CI](https://forgejo.triform.dev/triform/chromeless/actions/workflows/ci.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
 [![E2E](https://forgejo.triform.dev/triform/chromeless/actions/workflows/e2e.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
 [![Harness](https://forgejo.triform.dev/triform/chromeless/actions/workflows/harness-loopback.yml/badge.svg?branch=main)](https://forgejo.triform.dev/triform/chromeless/actions)
@@ -16,11 +17,17 @@ uploads, cursor updates, and audio round-trip through the same peer connection.
 Useful for browser isolation, agent tooling, embedded co-browsing, and anywhere
 you need a real Chromium you don't want to run locally.
 
-**Status: source-available, in production.** This is not a packaged product.
+**Status: Apache-2.0 open source, in production.** This is not a packaged product.
 There are no published container images, no npm package, and no release tags —
 you build it yourself. See [Building](#building) for what that costs.
 [`docs/roadmap-ga.md`](./docs/roadmap-ga.md) is the plan of record for closing
 that gap: what already works, what a first-time user hits, and the order of work.
+
+The canonical public source is
+[github.com/IggyGG/chromeless](https://github.com/IggyGG/chromeless). Triform's
+Forgejo repository remains the protected CI and integration surface used by
+maintainers; reviewed `main` history is published to GitHub for users and
+external contributors.
 
 ---
 
@@ -44,7 +51,7 @@ You need a `cloud_browser_worker` image. Nothing here publishes one, so either
 build it (below) or use one your organization already built.
 
 ```bash
-git clone <this-repo> && cd chromeless
+git clone https://github.com/IggyGG/chromeless.git && cd chromeless
 
 CHROMELESS_IMAGE=my-registry/chromeless:cr7727-abc1234 make standalone-up
 ```

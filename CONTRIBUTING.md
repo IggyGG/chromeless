@@ -33,16 +33,21 @@ the incident behind each in `CLAUDE.md`:
 - `.claude/worktrees/` is gitignored and holds full checkouts — exclude it from
   every repo-wide search.
 
-## Changes land through pull requests on Forgejo
+## Changes land through reviewed pull requests
 
-The remote is `forgejo.triform.dev/triform/chromeless`; the GitHub mirror runs no
-CI. Push your branch, open a PR against `main`, and wait for the checks. Finish
-the branch before opening the PR — a push to an open PR can leave it in a
+External contributors should open pull requests at
+<https://github.com/IggyGG/chromeless>. Maintainers relay the reviewed exact
+head to `forgejo.triform.dev/triform/chromeless`, whose protected CI and
+integration lane remains authoritative before the result reaches `main`.
+Internal contributors can open the Forgejo PR directly. Finish the branch
+before opening its Forgejo PR — a push to an open PR can leave it in a
 "checking" state that never resolves (`CLAUDE.md` explains the mechanism).
 
-CI executes `.github/workflows/`, but on Forgejo, which resolves actions from its
-own mirror. Prefer a `run:` step to a third-party `uses:`; `make lint-workflows`
-enforces this.
+CI executes `.github/workflows/` on both hosts. Public GitHub jobs use
+GitHub-hosted runners and never receive Triform's private registry credentials;
+Forgejo resolves actions from its own mirror and runs the integration jobs.
+Prefer a `run:` step to a third-party `uses:`; `make lint-workflows` enforces
+this.
 
 ## Commits
 

@@ -48,7 +48,7 @@ permissions:
 jobs:
   native-peer-gate-scaffold:
     name: native-peer-gate-scaffold (permissive)
-    # STOPGAP (2026-08-20): `priority`, not `ubuntu-latest`.
+    # Forgejo stopgap (2026-08-20): use `priority`; GitHub uses its hosted runner.
     #
     # `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
     # tf-multiverse saturated them: measured 470 queued `docker` jobs against 19
@@ -72,7 +72,7 @@ jobs:
     # (Chromium + 1GB shm + three small services) is expected to fit, but this
     # is the one difference between the pools that could bite. An OOM in
     # `compose up` here is THIS, not a product defect.
-    runs-on: priority
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -177,7 +177,7 @@ jobs:
 
   native-peer-gate-strict:
     name: native-peer-gate-strict (M7 gate)
-    runs-on: priority
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     # Strict runs on PRs targeting main (so the M7 squash-merge MUST be
     # green-strict) AND on pushes to integration/native-peer (operator
     # check). Other PRs see only the scaffold job.
