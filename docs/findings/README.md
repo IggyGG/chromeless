@@ -28,6 +28,7 @@ RESOLVED banner at the top. Do not treat them as open work.
 | finding | where the fix is | what it costs today |
 | --- | --- | --- |
 | [`worker-signaling-no-redial.md`](./worker-signaling-no-redial.md) | **FIXED 2026-09-08** — kept for the diagnosis | (was: every broker redeploy restarted the browser ~70 s later) |
+| [`file-upload-chunk-vanishes.md`](./file-upload-chunk-vanishes.md) | `cb_file_upload_receiver.cc` `HandleChunk` | `<input type=file>` still ends in "no file selected": the chooser, request, picker and transport all work and the chunk is dropped inside the receiver |
 | [`viewport-resize-freezes-beginframe-and-crashes-gpu.md`](./viewport-resize-freezes-beginframe-and-crashes-gpu.md) | `cb_viewport_controller.cc` `Apply` must bracket the resize for `CbBeginFrameDriver`; the watchdog must not re-issue into a rebinding controller | **partly fixed 2026-09-08**: the GPU abort is gone, the freeze remains — two attempts documented. Mitigated by `CHROMELESS_VIEWPORT_FOLLOW=0` |
 | [`audio-dies-after-first-rearm.md`](./audio-dies-after-first-rearm.md) | **three ADM-level fixes tried and refuted** — the next probe is libwebrtc's audio send stream, not the ADM. Read the finding first | audio for the first viewer of a process only; silent for everyone after |
 
