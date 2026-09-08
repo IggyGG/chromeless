@@ -218,6 +218,13 @@ void CbFileUploadReceiver::HandleEnvelope(const std::string& json) {
                             "dropped";
     return;
   }
+  // Log EVERY inbound type with its size. This is what would have told me
+  // in one look, on 2026-09-08, whether a chunk reached the guest at all —
+  // instead of two rebuild cycles spent narrowing it down from the outside.
+  // One line per frame is affordable: a 100 MiB upload at 64 KiB chunks is
+  // 1600 lines, and the alternative is a channel whose failures are only
+  // visible as a symptom four steps downstream.
+  LOG(INFO) << kLog << "<- " << *type << " (" << json.size() << " bytes)";
   if (*type == "file_upload_start") {
     HandleStart(*parsed);
   } else if (*type == "file_upload_chunk") {
@@ -277,14 +284,34 @@ void CbFileUploadReceiver::HandleChunk(const base::DictValue& data) {
   const std::string* id = data.FindString("upload_id");
   const std::string* b64 = data.FindString("data");
   const std::optional<int> seq = data.FindInt("seq");
-  if (!id || !b64 || !seq) {
+  // `.has_value()` spelled out because the three operands convert to bool
+  // for DIFFERENT reasons — the pointers by non-null, the optional by
+  // contains-a-value — and the uniform `!x` reads as if seq==0 would be
+  // rejected. It would not (std::optional::operator bool IS has_value), and
+  // cb_input_dispatch.cc:196 spells it out for the same reason. Kept
+  // explicit so nobody has to re-derive that, as I did.
+  if (!id || !b64 || !seq.has_value()) {
+    // LOG, not a bare return. A dropped chunk surfaces four steps later as
+    // "could not read the file back" from file_upload_end, and a silent
+    // return here means the log cannot tell you WHY the file is missing —
+    // which cost a full diagnose-rebuild-roll cycle on 2026-09-08. Same
+    // rule as CLAUDE.md's "a guard whose skipped path is silent is not a
+    // guard": the drop must report differently from the success.
+    LOG(WARNING) << kLog << "file_upload_chunk missing a required field"
+                 << " (upload_id=" << (id ? "yes" : "NO")
+                 << " data=" << (b64 ? "yes" : "NO")
+                 << " seq=" << (seq.has_value() ? "yes" : "NO") << ")";
     return;
   }
   const std::string upload_id = SafeId(*id);
   auto it = uploads_.find(upload_id);
   if (it == uploads_.end()) {
-    VLOG(1) << kLog << "chunk for unknown upload " << upload_id << " — the "
-            << "upload was cancelled or never started; dropped";
+    // Was VLOG(1), i.e. invisible in production. Same reasoning as the
+    // field check above — this is one of only two ways a chunk vanishes
+    // without a reply, and both have to be readable in a normal log.
+    LOG(WARNING) << kLog << "chunk for unknown upload " << upload_id
+                 << " — cancelled, never started, or the id did not survive"
+                    " sanitising; dropped";
     return;
   }
   Upload& up = it->second;
@@ -364,7 +391,18 @@ void CbFileUploadReceiver::HandleEnd(const base::DictValue& data) {
   const std::string upload_id = SafeId(*id);
   auto it = uploads_.find(upload_id);
   if (it == uploads_.end()) {
+    LOG(WARNING) << kLog << "file_upload_end for unknown upload "
+                 << upload_id << " — nothing to finalise";
     return;
+  }
+  // How many chunks did we actually take? If this is 0 the file does not
+  // exist and HashFile is about to fail with "could not read the file
+  // back", which describes the symptom and not the cause. Say the cause
+  // here, where it is known.
+  if (it->second.next_seq == 0) {
+    LOG(WARNING) << kLog << "file_upload_end for " << upload_id
+                 << " but NOT ONE chunk was accepted — the read-back below"
+                    " will fail; look for a chunk-drop warning above";
   }
   const base::FilePath path = it->second.path;
   io_runner_->PostTaskAndReplyWithResult(

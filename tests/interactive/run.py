@@ -982,10 +982,20 @@ def suite_uploads(client, worker):
     got, val = worker.wait_for("JSON.stringify(window.__file)",
                                lambda v: v not in (None, "null", ""),
                                timeout=45)
+    # The CLIENT's own log says which half failed, and without it this
+    # check can only report the symptom. FileUploadChannel logs
+    # file_upload_complete / file_upload_error with the guest's code, so a
+    # transport failure (write_failed, hash_mismatch) is distinguishable
+    # from "the bytes arrived and the listener was never resolved" — which
+    # are different bugs in different files.
+    upl = [ln for ln in (client.cdp.eval(
+               "document.getElementById('log').innerText") or "").splitlines()
+           if "file_upload" in ln]
     check("the file reached the page's own <input>", got,
-          "window.__file never populated — the upload may have landed on "
-          "disk, but the FileSelectListener was not resolved, so the page "
-          "sees nothing")
+          "window.__file never populated. Client log said: "
+          + (" | ".join(l.strip()[:120] for l in upl[-3:]) or
+             "NOTHING about file_upload at all — the client never started "
+             "one, so look at the picker, not the guest"))
     if not got:
         return
 
