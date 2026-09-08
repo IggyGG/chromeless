@@ -48,6 +48,7 @@ permissions:
 jobs:
   native-peer-gate-scaffold:
     name: native-peer-gate-scaffold (permissive)
+    if: github.server_url != 'https://github.com' || vars.CHROMELESS_IMAGE != ''
     # Forgejo stopgap (2026-08-20): use `priority`; GitHub uses its hosted runner.
     #
     # `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
@@ -182,8 +183,9 @@ jobs:
     # green-strict) AND on pushes to integration/native-peer (operator
     # check). Other PRs see only the scaffold job.
     if: |
-      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/integration/native-peer')
+      (github.server_url != 'https://github.com' || vars.CHROMELESS_IMAGE != '') &&
+      ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/integration/native-peer'))
     steps:
       - uses: actions/checkout@v4
 

@@ -46,6 +46,10 @@ permissions:
 jobs:
   e2e:
     name: docker-compose + Playwright
+    # Forgejo can authenticate to the private tree-pinned worker image. GitHub
+    # cannot and must not receive that credential, so public runs require an
+    # explicitly configured public CHROMELESS_IMAGE override.
+    if: github.server_url != 'https://github.com' || vars.CHROMELESS_IMAGE != ''
     # Forgejo stopgap (2026-08-20): use `priority`; GitHub uses its hosted runner.
     #
     # `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
@@ -87,11 +91,10 @@ jobs:
     # edge and keeps every compose step independently gated (see the
     # teardown comment at the bottom).
     #
-    # The job-level `if:` is GONE, deliberately. It gated on the repo variable
-    # being set, which was the mechanism that let this lane skip 120 times in a
-    # row while reporting success. The image now comes from a file that is
-    # always present, so there is always something to test and the job always
-    # has to justify itself. See "Resolve the worker image" below.
+    # On Forgejo this job remains unconditional: the image comes from the
+    # reviewed tree pin, so the historical false-green variable gate cannot
+    # recur. The host-aware gate above applies only on public GitHub, where the
+    # private registry intentionally has no credential.
 
     steps:
       - uses: actions/checkout@v4
@@ -762,7 +765,11 @@ jobs:
           echo "--- playwright.log tail (artifact upload is unsupported on this host) ---"
           tail -100 playwright.log 2>/dev/null || echo "(no playwright.log)"
           echo "--- test-results tree ---"
-          ls -R test-results 2>/dev/null | head -50 || echo "(no test-results)"
+          if [ -d test-results ]; then
+            find test-results -print | head -50
+          else
+            echo "(no test-results)"
+          fi
 
       # Same reason as above: no upload-artifact on this host, so the logs go
       # to the run log where they are actually readable. Tail-bounded per

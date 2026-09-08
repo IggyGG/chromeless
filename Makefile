@@ -4,7 +4,7 @@
 # strategy. Targets that aren't yet wired print a "not implemented" notice
 # pointing at the task that will deliver them, rather than silently passing.
 
-.PHONY: help standalone-up standalone-down verify lint lint-cxx lint-workflows lint-shell lint-build-targets \
+.PHONY: help standalone-up standalone-down verify lint lint-cxx lint-workflows lint-github-boundary lint-shell lint-build-targets \
         lint-runtime-contracts lint-tests-wired lint-pod-resources \
         lint-guest-release lint-deploy-pin test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
@@ -21,6 +21,7 @@ help:
 	@echo "  make lint-cxx            # C++ include lint — catches missing #includes"
 	@echo "                           # that would otherwise fail 4-8 h into a build"
 	@echo "  make lint-workflows      # every 'uses:' must exist on the CI action mirror"
+	@echo "  make lint-github-boundary # public jobs cannot consume private worker images"
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
 	@echo "  make lint-pod-resources  # ephemeral-storage limit implies a reservation"
 	@echo "  make lint-guest-release  # the worker-image pin names real code"
@@ -66,7 +67,7 @@ verify: lint test-unit test-integration
 
 # ---- lint ------------------------------------------------------------------
 
-lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contracts \
+lint: lint-cxx lint-workflows lint-github-boundary lint-shell lint-build-targets lint-runtime-contracts \
       lint-tests-wired lint-silent-noop lint-pod-resources lint-guest-release lint-deploy-pin
 
 # Every `uses:` must exist on the CI host's action mirror. Forgejo resolves
@@ -76,6 +77,16 @@ lint: lint-cxx lint-workflows lint-shell lint-build-targets lint-runtime-contrac
 lint-workflows:
 	@echo ">>> workflow actions lint"
 	@python3 tools/lint/workflow_actions_lint.py
+
+# The checked-in worker pin is private. GitHub-hosted runners must never be
+# given Triform registry credentials, so image-dependent jobs need an explicit
+# public-image opt-in while Forgejo continues to run them unconditionally.
+lint-github-boundary:
+	@echo ">>> GitHub public/private image boundary lint"
+	@python3 tools/lint/github_public_boundary_lint.py
+	@python3 tools/lint/test_github_public_boundary_lint.py >/dev/null && \
+	  echo ">>> GitHub boundary lint self-tests pass" || \
+	  { echo "!!! GitHub boundary lint SELF-TESTS FAILED"; exit 1; }
 
 # Static include check for the Chromium embedder. See the docstring in
 # tools/lint/cxx_include_lint.py for what it does and deliberately doesn't.
