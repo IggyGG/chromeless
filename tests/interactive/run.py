@@ -832,6 +832,169 @@ def suite_downloads(client, worker):
               f"Downloads/ still holds an intermediate: {listing!r}")
 
 
+_UPLOAD_FIXTURE = """<!doctype html><meta charset=utf-8>
+<title>upload fixture</title>
+<body style="font:16px system-ui;padding:40px">
+<h1>upload fixture</h1>
+<input id=f type=file accept=".txt,text/plain">
+<script>
+  // What the PAGE sees. This is the whole point of the test: the bytes
+  // landing in the guest's Uploads/ directory prove the transport worked,
+  // but only a File object reaching the page's own <input> proves the
+  // FileSelectListener was resolved — which is the half that was missing
+  // entirely (there was no RunFileChooser override at all).
+  window.__file = null;
+  document.getElementById('f').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    window.__file = f ? {name: f.name, size: f.size, type: f.type} : "EMPTY";
+  });
+</script>
+"""
+
+
+def suite_uploads(client, worker):
+    """`<input type=file>` on the remote page, satisfied from the viewer.
+
+    Both halves of this were missing until 2026-09-08 and BOTH are needed,
+    so the preflights below distinguish them: a guest with no
+    RunFileChooser override never sends a ui_request (the page is told "no
+    file selected" instantly), and a client bundle with no file_chooser
+    handler declines every request it does get. Those look identical from
+    the outside — a file input that does nothing — and reporting either as
+    "upload is broken" would send the next person to the wrong half.
+    """
+    print("\n[uploads]")
+
+    if not _session_alive(client):
+        check("the WebRTC session is still up (uploads need a live guest)",
+              False, "session already ended (one session per worker process)")
+        return
+
+    # PREFLIGHT 1: the guest must have opened a `files` channel at all.
+    # Same reasoning as suite_dialogs' control-channel probe, and the same
+    # known-positive discipline: `control` is checked alongside, because a
+    # probe that returns false for everything is broken, not informative.
+    log = client.cdp.eval("document.getElementById('log').innerText") or ""
+    has_files = 'wiring data channel "files"' in log
+    has_control = 'wiring data channel "control"' in log
+    if not has_files or not has_control:
+        check("the guest opened both the files and control channels",
+              False,
+              f'files={has_files} control={has_control} — a file upload '
+              f'needs BOTH (the ask goes out on control, the bytes come '
+              f'back on files). If control is present and files is not, '
+              f'the guest predates CbFileUploadReceiver.')
+        return
+
+    _arm_n[0] += 1
+    try:
+        H.navigate(H.fixture_url(_UPLOAD_FIXTURE) + f"?up={_arm_n[0]}")
+    except Exception as exc:
+        check("the gateway could navigate the guest", False,
+              f"{type(exc).__name__}: {exc}")
+        return
+    loaded, _ = worker.wait_for("document.getElementById('f') ? 1 : 0", 1,
+                                timeout=25)
+    check("the upload fixture loaded", loaded)
+    if not loaded:
+        return
+
+    # Write the file the viewer will "pick" onto the harness machine. It is
+    # the CLIENT's local filesystem that a real picker reads from, so this
+    # is the honest place for it.
+    payload = "chromeless-upload-probe-42\n"
+    local = "/tmp/chromeless-upload-probe.txt"
+    with open(local, "w") as fh:
+        fh.write(payload)
+
+    # Click the REMOTE page's file input with a real mouse event routed
+    # through the input channel — the same path a user's click takes, and
+    # the only thing that makes chromium call RunFileChooser.
+    box = worker.rect("f")
+    worker.eval("window.scrollTo(0,0); 1")
+    time.sleep(0.4)
+    client.click(box["x"], box["y"])
+
+    # The client should now be showing its own picker bar. That bar is the
+    # observable proof the request crossed the wire.
+    appeared, geo = _poll(lambda: _overlay(client, ".cb-filepick"),
+                          lambda g: g is not None, timeout=20)
+    check("the page's file input raises a picker in the client", appeared,
+          "no .cb-filepick appeared — either the guest sent no "
+          "file_chooser ui_request (no RunFileChooser override) or the "
+          "served client bundle has no handler for the kind")
+    if not appeared:
+        return
+    check("the picker is actually on screen",
+          geo["w"] > 0 and geo["h"] > 0 and geo["top"] < geo["vh"],
+          f"geometry {geo!r} — present in the DOM but not visible, which "
+          f"a user cannot act on")
+
+    # Drive the client's <input type=file> the only way CDP can: a real
+    # file dialog cannot be scripted, so set the files directly on the
+    # element and dispatch the change the browser would have.
+    doc = client.cdp.call("DOM.getDocument", {"depth": -1})
+    node = client.cdp.call("DOM.querySelector",
+                           {"nodeId": doc["root"]["nodeId"],
+                            "selector": ".cb-filepick-input"})
+    client.cdp.call("DOM.setFileInputFiles",
+                    {"nodeId": node["nodeId"], "files": [local]})
+
+    # THE REAL ORACLE: what the REMOTE PAGE received.
+    #
+    # Bytes on the guest's disk would only prove the transport ran. The
+    # defect this suite exists for is that the page's own <input> never
+    # fired `change` — so that is what is asserted, and it is read from the
+    # page itself rather than from a log line.
+    got, val = worker.wait_for("JSON.stringify(window.__file)",
+                               lambda v: v not in (None, "null", ""),
+                               timeout=45)
+    check("the file reached the page's own <input>", got,
+          "window.__file never populated — the upload may have landed on "
+          "disk, but the FileSelectListener was not resolved, so the page "
+          "sees nothing")
+    if not got:
+        return
+
+    info = json.loads(val) if val and val != "EMPTY" else None
+    check("the page got a File, not an empty selection", info is not None,
+          f"change fired with no file: {val!r}")
+    if info is None:
+        return
+
+    # The name matters on its own: an empty NativeFileInfo::display_name
+    # makes blink fall back to the base of the on-disk path, which is our
+    # sanitised "<upload_id>__<name>". A site that echoes the filename, or
+    # validates its extension, would see the wrong thing — and the upload
+    # would still "work" by every other measure.
+    check("the page sees the ORIGINAL filename", 
+          info["name"] == "chromeless-upload-probe.txt",
+          f"File.name is {info['name']!r} — expected the name the viewer "
+          f"picked, not the guest's on-disk spelling",
+          pass_detail=info["name"])
+    check("the file is the right size", info["size"] == len(payload),
+          f"File.size is {info['size']}, expected {len(payload)}",
+          pass_detail=f"{info['size']} bytes")
+
+    # And the bytes themselves, read by the page. A correct name and size
+    # with wrong contents is exactly what a base64 or chunking bug looks
+    # like, and neither check above would catch it.
+    read, text = worker.wait_for(
+        """(() => {
+             const i = document.getElementById('f');
+             if (!i.files[0]) return "";
+             if (!window.__text) {
+               window.__text = "READING";
+               i.files[0].text().then(t => { window.__text = t; });
+             }
+             return window.__text;
+           })()""",
+        lambda v: bool(v) and v != "READING", timeout=25)
+    check("the page can read the file's contents", read and text == payload,
+          f"read {text!r}, expected {payload!r}",
+          pass_detail="contents match byte for byte")
+
+
 def suite_clipboard(client, worker):
     print("\n[clipboard]")
 
@@ -1231,7 +1394,12 @@ def main():
         #
         # `channels` runs early for a related reason: it reads the client's
         # log for the one-time wiring lines emitted at connect.
-        suites = {"dialogs": suite_dialogs, "downloads": suite_downloads,
+        # `uploads` sits with dialogs near the front for the same reason:
+        # it needs the guest to send TO the client (a file_chooser
+        # ui_request), so it is one of the few suites that notices a dead
+        # session rather than silently doing nothing.
+        suites = {"dialogs": suite_dialogs, "uploads": suite_uploads,
+                  "downloads": suite_downloads,
                   "channels": suite_channels,
                   "video": suite_video, "navigation": suite_navigation,
                   "mouse": suite_mouse, "scroll": suite_scroll,
