@@ -453,13 +453,21 @@ jobs:
       # mirror and therefore failed this job before any step executed.
       #
       # --no-progress keeps logs short. --max-concurrency caps load on
-      # third-party hosts. Glob limited to repo markdown.
+      # third-party hosts. Localhost examples are not external links; the three
+      # named research sources return bot-only 403/406 responses while remaining
+      # reachable in browsers, so exclude those exact citation URLs. The image
+      # digest is the one proven by the first public GitHub run.
       - name: lychee link check
         run: |
-          docker run --rm -v "$PWD:/w" -w /w lycheeverse/lychee:latest \
+          docker run --rm -v "$PWD:/w" -w /w \
+            lycheeverse/lychee@sha256:eaff3e0a13603c9a701accfcc84f44158bb77bf36ecfa4622b626056c3463892 \
             --verbose \
             --no-progress \
             --max-concurrency 4 \
+            --exclude '^https?://localhost(:[0-9]+)?/' \
+            --exclude '^https://www\.cdnetworks\.com/blog/media-delivery/compression-standards-explained/' \
+            --exclude '^https://bitmovin\.com/blog/apple-av1-support/' \
+            --exclude '^https://www\.neowin\.net/news/firefox-134-finally-gets-windows-hardware-h265-support-improves-popup-blocking-and-more/' \
             --exclude-path node_modules \
             --exclude-path .claude \
             './**/*.md'
