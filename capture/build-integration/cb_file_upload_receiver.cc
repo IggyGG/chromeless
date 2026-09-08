@@ -493,6 +493,85 @@ void CbFileUploadReceiver::FinaliseUpload(const std::string& upload_id) {
           weak_factory_.GetWeakPtr(), upload_id, path));
 }
 
+void CbFileUploadReceiver::OnFinalised(std::string upload_id,
+                                       base::FilePath path,
+                                       std::string actual_sha256,
+                                       int64_t total_bytes,
+                                       bool ok) {
+  auto it = uploads_.find(upload_id);
+  if (it == uploads_.end()) {
+    return;
+  }
+  const Upload up = it->second;
+
+  // Every rejection below leaves bytes on disk that nothing will ever read,
+  // so each goes through AbandonUpload (erase + delete + reply) rather than
+  // a bare ReplyError. An upload that fails its hash ten times must not cost
+  // ten files' worth of the guest's disk, and the session quota credited
+  // below only counts uploads that SUCCEEDED, so nothing else bounds a
+  // retry loop.
+  if (!ok) {
+    AbandonUpload(it, "write_failed", "could not read the file back");
+    return;
+  }
+  if (total_bytes != up.declared_size) {
+    AbandonUpload(it, "truncated",
+                  "expected " + base::NumberToString(up.declared_size) +
+                      " bytes, have " + base::NumberToString(total_bytes));
+    return;
+  }
+  if (!up.sha256.empty() && actual_sha256 != up.sha256) {
+    // The client hashes what it read off the disk; we hash what landed on
+    // ours. A mismatch means the bytes changed in transit, and handing a
+    // corrupt file to the page is worse than failing the upload.
+    AbandonUpload(it, "hash_mismatch",
+                  "expected " + up.sha256 + ", got " + actual_sha256);
+    return;
+  }
+  // Committed: past every rejection, so the entry can go and the bytes stay.
+  uploads_.erase(it);
+  session_bytes_ += total_bytes;
+
+  const bool attached = ResolveChooserWith(path, up.display_name);
+  LOG(INFO) << kLog << "upload " << upload_id << " complete: " << total_bytes
+            << " bytes, sha ok, "
+            << (attached ? "attached to the page's file chooser"
+                         : "stored (no chooser was waiting)");
+  ReplyComplete(upload_id, path, attached);
+}
+
+bool CbFileUploadReceiver::ResolveChooserWith(
+    const base::FilePath& path,
+    const std::u16string& display_name) {
+  if (!pending_listener_) {
+    return false;
+  }
+  // The park is over — stop the deadline before it can fire against a
+  // listener we have already resolved.
+  chooser_deadline_.Stop();
+  scoped_refptr<content::FileSelectListener> listener =
+      std::move(pending_listener_);
+  pending_listener_ = nullptr;
+
+  // display_name is what the page reads as File.name. Passing it empty makes
+  // blink fall back to the base of file_path, which here is our sanitised
+  // "<upload_id>__<name>" — so a site that echoes the filename, or validates
+  // its extension after our sanitiser mangled it, sees the wrong thing.
+  // Read from file_chooser.mojom:88 on the pinned tree.
+  auto info = blink::mojom::FileChooserFileInfo::NewNativeFile(
+      blink::mojom::NativeFileInfo::New(path, display_name,
+                                        std::vector<std::u16string>()));
+  std::vector<blink::mojom::FileChooserFileInfoPtr> files;
+  files.push_back(std::move(info));
+  // base_dir is EMPTY for everything except kUploadFolder — the listener
+  // header is explicit ("This is an empty FilePath otherwise",
+  // file_select_listener.h:24). We reject kUploadFolder in the delegate, so
+  // it is always empty here; passing uploads_dir_ would advertise an
+  // enumeration root that does not describe this selection.
+  listener->FileSelected(std::move(files), base::FilePath(), pending_mode_);
+  return true;
+}
+
 void CbFileUploadReceiver::HandleCancel(const base::DictValue& data) {
   const std::string* id = data.FindString("upload_id");
   if (!id) {

@@ -5,7 +5,7 @@
 # pointing at the task that will deliver them, rather than silently passing.
 
 .PHONY: help standalone-up standalone-down verify lint lint-cxx lint-workflows lint-github-boundary lint-shell lint-build-targets \
-        lint-runtime-contracts lint-tests-wired lint-pod-resources lint-yaml-dupe-keys \
+        lint-runtime-contracts lint-tests-wired lint-pod-resources lint-yaml-dupe-keys lint-cxx-orphan \
         lint-guest-release lint-deploy-pin test-interactive test test-unit test-integration \
         test-smoke test-smoke-all test-harness test-harness-all test-e2e \
         test-all-ci test-all-nightly \
@@ -25,6 +25,7 @@ help:
 	@echo "  make lint-build-targets  # every test() target is built by some lane"
 	@echo "  make lint-pod-resources  # ephemeral-storage limit implies a reservation"
 	@echo "  make lint-yaml-dupe-keys # a duplicate key silently discards the first value"
+	@echo "  make lint-cxx-orphan     # a method declared in a .h and defined nowhere"
 	@echo "  make lint-guest-release  # the worker-image pin names real code"
 	@echo "  make lint-deploy-pin     # manifests agree with the guest-release pin"
 	@echo "  make test-interactive    # real Chrome + real worker (needs a live stack)"
@@ -68,7 +69,7 @@ verify: lint test-unit test-integration
 
 # ---- lint ------------------------------------------------------------------
 
-lint: lint-cxx lint-workflows lint-github-boundary lint-shell lint-build-targets lint-runtime-contracts \
+lint: lint-cxx lint-cxx-orphan lint-workflows lint-github-boundary lint-shell lint-build-targets lint-runtime-contracts \
       lint-tests-wired lint-silent-noop lint-pod-resources lint-yaml-dupe-keys \
       lint-guest-release lint-deploy-pin
 
@@ -197,6 +198,14 @@ lint-pod-resources:
 # reasoning argued for a 64Gi memory request while every build actually got
 # the 72Gi on the next line. kubectl, PyYAML and the lane all accept it
 # without a word, so nothing but this catches it.
+# A method declared in a .h and defined in no .cc. The linker only notices
+# once something CALLS it, and it notices ~13 minutes into a build lane —
+# which is how `OnFinalised` and `ResolveChooserWith` were lost to a scripted
+# edit on 2026-09-08 and found by ld.lld rather than by anything local.
+lint-cxx-orphan:
+	@echo ">>> cxx orphan declaration lint"
+	@python3 tools/lint/cxx_orphan_decl_lint.py capture
+
 lint-yaml-dupe-keys:
 	@echo ">>> yaml duplicate key lint"
 	@python3 tools/lint/yaml_duplicate_key_lint.py .
