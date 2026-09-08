@@ -273,31 +273,43 @@ func (c *cdpClient) simpleCommand(ctx context.Context, method string) error {
 }
 
 // currentURL reports what the page is showing.
-func (c *cdpClient) currentURL(ctx context.Context) (string, error) {
+// currentPage returns the page target's URL and title.
+//
+// The title was already being parsed off /json and thrown away: cdpTarget has
+// had a Title field since it was written, and currentURL returned only the
+// URL. So the client had nothing to show but the address, and a tab of a
+// streamed browser looked like a URL bar with no page behind it.
+func (c *cdpClient) currentPage(ctx context.Context) (url, title string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/json", nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Host = "localhost"
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var targets []cdpTarget
 	if err := json.Unmarshal(body, &targets); err != nil {
-		return "", err
+		return "", "", err
 	}
 	for _, t := range targets {
 		if t.Type == "page" {
-			return t.URL, nil
+			return t.URL, t.Title, nil
 		}
 	}
-	return "", nil
+	return "", "", nil
+}
+
+// currentURL keeps the single-value form for callers that only want the URL.
+func (c *cdpClient) currentURL(ctx context.Context) (string, error) {
+	url, _, err := c.currentPage(ctx)
+	return url, err
 }
 
 // validateNavigationURL is the allowlist between a logged-in caller and the

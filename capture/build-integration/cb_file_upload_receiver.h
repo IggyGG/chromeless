@@ -143,12 +143,27 @@ class CbFileUploadReceiver : public webrtc::DataChannelObserver {
     int64_t received = 0;
     int32_t next_seq = 0;
     base::FilePath path;
+    // Chunk writes posted to the pool that have not replied yet.
+    //
+    // file_upload_end arrives while these are still in flight — the client
+    // sends chunk and end back-to-back and the guest handles both on the UI
+    // sequence in microseconds, while the write is a pool task. Hashing then
+    // reads a file that does not exist yet and reports "could not read the
+    // file back", which describes the symptom of a race and names no cause.
+    int32_t writes_in_flight = 0;
+    // Set when file_upload_end arrived early. Finalisation runs from the
+    // last write's reply instead.
+    bool end_pending = false;
   };
 
   void HandleEnvelope(const std::string& json);
   void HandleStart(const base::DictValue& data);
   void HandleChunk(const base::DictValue& data);
   void HandleEnd(const base::DictValue& data);
+  // Hash the finished file and resolve the chooser. Called from HandleEnd
+  // when nothing is in flight, or from OnChunkWritten when the last
+  // outstanding write lands.
+  void FinaliseUpload(const std::string& upload_id);
   void HandleCancel(const base::DictValue& data);
 
   // Runs on the UI sequence with the result of the blocking write.

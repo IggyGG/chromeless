@@ -39,6 +39,7 @@ func newFakeWorker(t *testing.T) *fakeWorker {
 		}
 		_ = json.NewEncoder(w).Encode([]cdpTarget{{
 			Type:                 "page",
+			Title:                "Current Example Page",
 			URL:                  "https://current.example/",
 			WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/FAKE",
 		}})
@@ -110,6 +111,7 @@ func newFakeWorkerWithHandler(t *testing.T, reply func(method string, params map
 		}
 		_ = json.NewEncoder(w).Encode([]cdpTarget{{
 			Type:                 "page",
+			Title:                "Current Example Page",
 			URL:                  "https://current.example/",
 			WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/FAKE",
 		}})
@@ -218,6 +220,26 @@ func TestCurrentURL(t *testing.T) {
 	}
 	if got != "https://current.example/" {
 		t.Errorf("currentURL = %q", got)
+	}
+}
+
+// The title is right there in /json and was parsed into cdpTarget.Title and
+// then dropped, so the client could show an address and nothing else. A
+// streamed browser with no page title reads as a URL bar with no page behind
+// it.
+func TestCurrentPageReturnsTheTitle(t *testing.T) {
+	fw := newFakeWorker(t)
+	c := &cdpClient{baseURL: fw.srv.URL}
+
+	url, title, err := c.currentPage(context.Background())
+	if err != nil {
+		t.Fatalf("currentPage: %v", err)
+	}
+	if url != "https://current.example/" {
+		t.Errorf("url = %q", url)
+	}
+	if title != "Current Example Page" {
+		t.Errorf("title = %q, want the page's own title", title)
 	}
 }
 

@@ -367,6 +367,7 @@ void CbFileUploadReceiver::HandleChunk(const base::DictValue& data) {
   // at zero (as the same draft did, by never incrementing it at all) makes
   // the guard test 0 > declared_size on every chunk, i.e. never fire.
   up.received += chunk_bytes;
+  ++up.writes_in_flight;
   const base::FilePath path = up.path;
   // next_seq was incremented above, so seq 0 is the chunk that has just
   // taken it to 1. That chunk creates the file; the rest append.
@@ -395,7 +396,17 @@ void CbFileUploadReceiver::OnChunkWritten(std::string upload_id,
                                           bool ok) {
   auto it = uploads_.find(upload_id);
   if (it == uploads_.end()) {
+    // The upload was abandoned (or wrongly finalised) while this write was
+    // in flight. Worth saying: a silent return here is what MASKED the race
+    // this function now closes — the write reply arrived after OnFinalised
+    // had already erased the entry, so the only thing the log showed was
+    // end's "could not read the file back".
+    LOG(WARNING) << kLog << "write reply for upload " << upload_id
+                 << " arrived after it was erased (ok=" << ok << ")";
     return;
+  }
+  if (it->second.writes_in_flight > 0) {
+    --it->second.writes_in_flight;
   }
   if (!ok) {
     AbandonUpload(it, "write_failed",
@@ -405,6 +416,12 @@ void CbFileUploadReceiver::OnChunkWritten(std::string upload_id,
   // Progress is best-effort per the spec; the client falls back to its own
   // bytes-sent count. Report what is actually on disk after each chunk.
   ReplyProgress(upload_id, it->second.received, it->second.declared_size);
+
+  // file_upload_end got here first and deferred to us. This is the last
+  // write, so the file is now complete on disk and safe to hash.
+  if (it->second.end_pending && it->second.writes_in_flight == 0) {
+    FinaliseUpload(upload_id);
+  }
 }
 
 void CbFileUploadReceiver::HandleEnd(const base::DictValue& data) {
@@ -419,14 +436,39 @@ void CbFileUploadReceiver::HandleEnd(const base::DictValue& data) {
                  << upload_id << " — nothing to finalise";
     return;
   }
-  // How many chunks did we actually take? If this is 0 the file does not
-  // exist and HashFile is about to fail with "could not read the file
-  // back", which describes the symptom and not the cause. Say the cause
-  // here, where it is known.
   if (it->second.next_seq == 0) {
     LOG(WARNING) << kLog << "file_upload_end for " << upload_id
                  << " but NOT ONE chunk was accepted — the read-back below"
                     " will fail; look for a chunk-drop warning above";
+  }
+
+  // THE RACE THIS CLOSES.
+  //
+  // The client sends the last chunk and `end` back to back, and the guest
+  // handles both on the UI sequence within microseconds — while the chunk's
+  // WRITE is a pool task that has not run yet. Hashing here read a file that
+  // did not exist and reported "could not read the file back": a truthful
+  // description of a consequence, naming no cause.
+  //
+  // It was invisible from both ends. OnChunkWritten's reply landed after
+  // OnFinalised had already erased the map entry, so its `find` failed and it
+  // returned silently; the only evidence was end's own error. Three rolls
+  // went into theories about the task runner before the ordering itself was
+  // the answer — see docs/findings/file-upload-chunk-vanishes.md.
+  if (it->second.writes_in_flight > 0) {
+    it->second.end_pending = true;
+    LOG(INFO) << kLog << "file_upload_end for " << upload_id << " arrived with "
+              << it->second.writes_in_flight
+              << " write(s) still in flight; finalising when they land";
+    return;
+  }
+  FinaliseUpload(upload_id);
+}
+
+void CbFileUploadReceiver::FinaliseUpload(const std::string& upload_id) {
+  auto it = uploads_.find(upload_id);
+  if (it == uploads_.end()) {
+    return;
   }
   const base::FilePath path = it->second.path;
   base::ThreadPool::PostTaskAndReplyWithResult(
@@ -449,85 +491,6 @@ void CbFileUploadReceiver::HandleEnd(const base::DictValue& data) {
                               !result.first.empty());
           },
           weak_factory_.GetWeakPtr(), upload_id, path));
-}
-
-void CbFileUploadReceiver::OnFinalised(std::string upload_id,
-                                       base::FilePath path,
-                                       std::string actual_sha256,
-                                       int64_t total_bytes,
-                                       bool ok) {
-  auto it = uploads_.find(upload_id);
-  if (it == uploads_.end()) {
-    return;
-  }
-  const Upload up = it->second;
-
-  // Every rejection below leaves bytes on disk that nothing will ever read,
-  // so each goes through AbandonUpload (erase + delete + reply) rather than
-  // a bare ReplyError. An upload that fails its hash ten times must not cost
-  // ten files' worth of the guest's disk, and the session quota credited
-  // below only counts uploads that SUCCEEDED, so nothing else bounds a
-  // retry loop.
-  if (!ok) {
-    AbandonUpload(it, "write_failed", "could not read the file back");
-    return;
-  }
-  if (total_bytes != up.declared_size) {
-    AbandonUpload(it, "truncated",
-                  "expected " + base::NumberToString(up.declared_size) +
-                      " bytes, have " + base::NumberToString(total_bytes));
-    return;
-  }
-  if (!up.sha256.empty() && actual_sha256 != up.sha256) {
-    // The client hashes what it read off the disk; we hash what landed on
-    // ours. A mismatch means the bytes changed in transit, and handing a
-    // corrupt file to the page is worse than failing the upload.
-    AbandonUpload(it, "hash_mismatch",
-                  "expected " + up.sha256 + ", got " + actual_sha256);
-    return;
-  }
-  // Committed: past every rejection, so the entry can go and the bytes stay.
-  uploads_.erase(it);
-  session_bytes_ += total_bytes;
-
-  const bool attached = ResolveChooserWith(path, up.display_name);
-  LOG(INFO) << kLog << "upload " << upload_id << " complete: " << total_bytes
-            << " bytes, sha ok, "
-            << (attached ? "attached to the page's file chooser"
-                         : "stored (no chooser was waiting)");
-  ReplyComplete(upload_id, path, attached);
-}
-
-bool CbFileUploadReceiver::ResolveChooserWith(
-    const base::FilePath& path,
-    const std::u16string& display_name) {
-  if (!pending_listener_) {
-    return false;
-  }
-  // The park is over — stop the deadline before it can fire against a
-  // listener we have already resolved.
-  chooser_deadline_.Stop();
-  scoped_refptr<content::FileSelectListener> listener =
-      std::move(pending_listener_);
-  pending_listener_ = nullptr;
-
-  // display_name is what the page reads as File.name. Passing it empty makes
-  // blink fall back to the base of file_path, which here is our sanitised
-  // "<upload_id>__<name>" — so a site that echoes the filename, or validates
-  // its extension after our sanitiser mangled it, sees the wrong thing.
-  // Read from file_chooser.mojom:88 on the pinned tree.
-  auto info = blink::mojom::FileChooserFileInfo::NewNativeFile(
-      blink::mojom::NativeFileInfo::New(path, display_name,
-                                        std::vector<std::u16string>()));
-  std::vector<blink::mojom::FileChooserFileInfoPtr> files;
-  files.push_back(std::move(info));
-  // base_dir is EMPTY for everything except kUploadFolder — the listener
-  // header is explicit ("This is an empty FilePath otherwise",
-  // file_select_listener.h:24). We reject kUploadFolder in the delegate, so
-  // it is always empty here; passing uploads_dir_ would advertise an
-  // enumeration root that does not describe this selection.
-  listener->FileSelected(std::move(files), base::FilePath(), pending_mode_);
-  return true;
 }
 
 void CbFileUploadReceiver::HandleCancel(const base::DictValue& data) {
