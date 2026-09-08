@@ -248,7 +248,24 @@ spec:
           # plus the peer_absent decode fix without which a cold-booted guest
           # closes its own signaling socket. Compiled clean 2026-09-07; the
           # interactive verdict is recorded in the PR that landed this pin.
-          image: registry.triform.cloud/chromeless/chromeless@sha256:5813600c68f861b761074fb6a691f7532951838df05c4ed70bd90f4081c26be2
+          #
+          # 4a0fafe1 (tag cr7727-0f336fbd1c7d, batch R at 0f336fb): the resize
+          # handler waits for the pending ack AND nudges the compositor with a
+          # full redraw once a second so viz can dispatch it (waiting alone
+          # traded the GPU abort for a 30 s freeze — measured). Supersedes:
+          # 8ffdf29f (tag cr7727-fbd8e55c948b, built from batch R at fbd8e55):
+          # the resize handler WAITS for the pending ack instead of re-issuing
+          # (071d082's 100 ms "settle" re-issue just moved the GPU abort 15 s
+          # earlier — measured), and the shared pulse ADM is pre-armed on
+          # re-arm so libwebrtc attaches to a running capture instead of
+          # running its own broken start. Supersedes:
+          # 2b738a70 (tag cr7727-071d0828f342, built from batch R at 071d082):
+          # a viewport resize no longer freezes the BeginFrame loop and aborts
+          # the GPU process; audio survives a re-arm (the shared pulse ADM is
+          # stopped explicitly); the worker redials the broker instead of
+          # waiting for the liveness probe to kill it. All three were measured
+          # broken on 5813600c the day before — see docs/findings/.
+          image: registry.triform.cloud/chromeless/chromeless@sha256:4a0fafe13b01cd0e670c6a9706836b2bb646a182c3c402dda66bc0f46c6e99a2
           env:
             - name: SESSION_ID
               value: dev

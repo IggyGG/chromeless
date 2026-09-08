@@ -422,6 +422,66 @@ at `devtools_agent_host.h:199`.
 
 ---
 
+## Batch R (2026-09-08): resize/BeginFrame, ADM re-arm, signaling redial
+
+Read from the tree and from the pinned libwebrtc
+(`c6e2f245448d10f2e419ffa1e061c42f050d3f45`, the revision chromium 7727's
+DEPS names) on 2026-09-08.
+
+✅ **The resize→GPU-abort mechanism, confirmed in viz source.**
+`ExternalBeginFrameSourceMojo::IssueExternalBeginFrame`
+(`components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc:32`)
+opens with `DCHECK(!pending_frame_callback_) << "Got overlapping
+IssueExternalBeginFrame"`, and only `OnDisplayDidFinishFrame` (`:133`) clears
+that callback. `DisplayScheduler::DesiredBeginFrameDeadlineMode`
+(`display_scheduler.cc`) returns `kLate` while
+`damage_tracker_->expecting_root_surface_damage_because_of_resize()`, which
+`Display::Resize` (`display.cc:451` → `damage_tracker_->DisplayResized()`)
+sets. So a resize withholds the deadline, the pending callback is never run,
+our ack never arrives — and the stall watchdog's re-issue lands on the DCHECK.
+In a release build that DCHECK compiles out and the CHECK in `viz_main_impl.cc:342`
+is what fires; either way the GPU process dies. `CbBeginFrameDriver::NotifyDisplayReconfigured`
+now abandons the frame and re-issues after a settle delay instead.
+
+✅ **`ui::Compositor::IssueExternalBeginFrame`** — `ui/compositor/compositor.cc:782`,
+`void IssueExternalBeginFrame(const viz::BeginFrameArgs&, bool force,
+base::OnceCallback<void(const viz::BeginFrameAck&)>)`. When the controller is
+not yet bound it stashes into `pending_begin_frame_args_` and `DCHECK(!pending_begin_frame_args_)`
+fires on a second call — the driver's pre-first-ack indefinite wait already
+covers that window, and the settle re-issue happens strictly after an ack has
+been seen at least once.
+
+✅ **`webrtc::AudioDeviceModule::StopRecording / Recording / RecordingIsInitialized`** —
+`api/audio/audio_device.h` (pure virtual on the ADM interface). On the Linux
+backend `AudioDeviceLinuxPulse::StopRecording`
+(`modules/audio_device/linux/audio_device_pulse_linux.cc:1104`) is what
+disconnects the pulse record stream, unrefs it, and clears `_recIsInitialized`
+— and `StartRecording` (`:1063`) returns -1 with `"failed to activate
+recording"` unless `_recIsInitialized` is true and `_recording` false. Every
+one of these is `RTC_DCHECK(thread_checker_.IsCurrent())`, and the checker is
+bound to the thread the ADM was created on — `worker_thread_` here
+(`cloud_browser_browser_main_parts.cc`, the `BlockingCall` that constructs it).
+Hence `CbAudioLifecycle::SetAdmWorkerThread` + `BlockingCall` in `Rearm()`.
+
+✅ **libwebrtc's own recording lifecycle is send-stream-scoped.**
+`AudioState::AddSendingStream` (`audio/audio_state.cc:136`) calls
+`InitRecording()` + `StartRecording()` when `!adm->Recording()`, and
+`RemoveSendingStream` (`:158`) calls `StopRecording()` — but only when it
+drops the LAST sending stream, and it is driven off the send stream's
+teardown, not the transceiver's. That is the ordering the re-arm path could
+not rely on; the explicit stop makes the next `InitRecording` deterministic.
+
+✅ **`webrtc::Thread::BlockingCall`** — `rtc_base/thread.h`, already used in
+this tree by `CloudBrowserBrowserMainParts` for the ADM construction and the
+audio transceiver, both on `worker_thread_`/`signaling_thread_`. Returns the
+lambda's value; a `std::tuple` return is fine.
+
+✅ **`network::mojom::NetworkContext`** — unchanged; the R7 wrapper takes the
+same raw pointer the R2 client did
+(`browser_context_->GetDefaultStoragePartition()->GetNetworkContext()`).
+
+---
+
 ## Re-reading these pins
 
 ```bash

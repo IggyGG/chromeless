@@ -5,6 +5,8 @@
 
 #include "capture/build-integration/cb_viewport_controller.h"
 
+#include "capture/build-integration/cb_begin_frame_driver.h"  // CV2-RESIZE
+
 #include <algorithm>
 
 #include "base/logging.h"
@@ -70,6 +72,11 @@ CbViewportController::CbViewportController(
 
 CbViewportController::~CbViewportController() = default;
 
+void CbViewportController::SetBeginFrameDriver(CbBeginFrameDriver* driver) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  begin_frame_driver_ = driver;
+}
+
 void CbViewportController::SetTrackSource(
     CloudBrowserFrameSinkVideoTrackSource* track_source) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -121,6 +128,20 @@ CbViewportSpec CbViewportController::Apply(const CbViewportSpec& spec,
             << target.size_dip.ToString() << " @"
             << target.device_scale_factor << "x (pixels "
             << size_px.ToString() << ") reason=" << reason;
+
+  // ── 0. The BeginFrame driver, BEFORE anything touches the Display. ──
+  //
+  // Steps 1-2 reconfigure viz's Display (UpdatePrimaryDisplay →
+  // OnDisplayMetricsChanged, SetBoundsInPixels → Compositor::SetScaleAndSize
+  // → Display::Resize). That drops the external BeginFrame in flight, and
+  // the driver's stall watchdog would then re-issue into it 15 s later and
+  // abort the GPU process. Measured 2026-09-07, three for three on fresh
+  // guests; the browser restarted ~50 s after every connect from a real
+  // window. The driver abandons the in-flight frame and restarts itself
+  // once the Display has settled.
+  if (begin_frame_driver_) {
+    begin_frame_driver_->NotifyDisplayReconfigured(reason);
+  }
 
   // ── 1. The display, FIRST. ──
   //

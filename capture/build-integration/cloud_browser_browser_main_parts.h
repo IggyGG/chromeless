@@ -77,6 +77,7 @@
 #include "capture/build-integration/cb_viewport_controller.h"  // CbViewportSpec (by value)
 #include "capture/signaling/cb_ice_config.h"        // CV2-WARM — NativeSessionConfig::ice
 #include "capture/signaling/cb_offerer_driver.h"
+#include "capture/signaling/cb_signaling_reconnect.h"  // CV2-REDIAL — the R7 wrapper
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
 #include "api/rtp_sender_interface.h"  // CV2-KEYFRAME — video_sender_
@@ -152,6 +153,7 @@ struct NativeSessionConfig {
 class CloudBrowserBrowserMainParts
     : public content::BrowserMainParts,
       public cloud_browser::signaling::SignalingClientObserver,
+      public cloud_browser::signaling::ReconnectingClientObserver,  // CV2-REDIAL
       public cloud_browser::signaling::OffererDriverObserver {
  public:
   CloudBrowserBrowserMainParts();
@@ -175,10 +177,15 @@ class CloudBrowserBrowserMainParts
   // driver. OnEnvelope + OnClosed(uint16_t,string_view) are pure-
   // virtual on the base. OnConnected + OnError have default no-op;
   // we override for diagnostic LOGs.
+  // CV2-REDIAL: the same four names exist on ReconnectingClientObserver
+  // (the R7 wrapper's consumer interface). `override` covers both bases;
+  // the wrapper is what actually calls them now, the inner SignalingWsClient
+  // reports to the wrapper. OnGaveUp is the wrapper's own.
   void OnConnected() override;
   void OnEnvelope(const cloud_browser::signaling::Envelope& envelope) override;
   void OnClosed(uint16_t code, std::string_view reason) override;  // ws path
   void OnError(std::string_view reason) override;
+  void OnGaveUp(uint32_t attempts_made) override;
 
   // signaling::OffererDriverObserver (CV2-69) — telemetry-only LOG
   // forwards. Production-grade lifecycle relay (M5.5 R5 audio chain,
@@ -603,7 +610,18 @@ class CloudBrowserBrowserMainParts
   //   * offerer_driver_.reset() (drops PC; libwebrtc handles teardown)
   //   * ws_client_->Disconnect() (graceful close)
   //   * ws_client_.reset()
-  std::unique_ptr<cloud_browser::signaling::SignalingWsClient> ws_client_;
+  //
+  // CV2-REDIAL (2026-09-08): ws_client_ is now the R7 reconnect wrapper, not
+  // the bare R2 client. The wrapper owns and REPLACES an inner
+  // SignalingWsClient on every drop (exponential backoff, 1 s → 32 s, ten
+  // attempts), and IS-A SignalingTransport so the driver's raw transport
+  // pointer stays valid across redials. Before this the socket was dialled
+  // exactly once per process: every broker rollout dropped it with 1006,
+  // nothing redialed, and the liveness probe in stack.yaml killed the
+  // container ~70 s later — measured three times on 2026-09-07
+  // (docs/findings/worker-signaling-no-redial.md). On reconnect see
+  // OnConnected: a driver with no live session re-offers to the new broker.
+  std::unique_ptr<cloud_browser::signaling::CbSignalingReconnect> ws_client_;
   std::unique_ptr<audio::CbAudioLifecycle> audio_lifecycle_;
   // CbOffererDriver is plain unique_ptr-owned by the embedder. It
   // inherits only the two NON-refcounted observer interfaces
@@ -627,6 +645,14 @@ class CloudBrowserBrowserMainParts
   // double bring-up (env boot then a stray Cb.startNativeSession, or two CDP
   // calls). Checked-and-set within one UI-thread task, so no lock is needed.
   bool native_session_started_ = false;
+  // CV2-REDIAL: distinguishes the FIRST OnConnected (the boot dial — the
+  // driver's own offer is about to go out) from a redial after the broker
+  // dropped us. See OnConnected.
+  bool signaling_connected_once_ = false;
+  // CV2-REDIAL: the last ICE state the driver reported, so OnConnected can
+  // tell "viewer still attached" from "nobody here".
+  webrtc::PeerConnectionInterface::IceConnectionState last_ice_state_ =
+      webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionNew;
 
   // CV2-REARM: the config the session was brought up with, kept so
   // RearmSession() can rebuild the PC with the SAME ICE servers and

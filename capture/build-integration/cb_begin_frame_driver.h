@@ -282,6 +282,63 @@ class CbBeginFrameDriver {
   // call before or after Start(). Does NOT affect frame production.
   void SetPermanentDeathCallback(base::RepeatingClosure on_permanent_death);
 
+  // CV2-RESIZE: the Display is about to be (or has just been) reconfigured —
+  // a viewport resize (CbViewportController::Apply) or anything else that
+  // reaches viz::Display::Resize. Call BEFORE the reconfigure.
+  //
+  // Why this exists. A resize drops the BeginFrame that is in flight: viz's
+  // DisplayScheduler withholds the deadline while
+  // `expecting_root_surface_damage_because_of_resize` is set
+  // (display_scheduler.cc DesiredBeginFrameDeadlineMode → kLate), so the
+  // pending ExternalBeginFrame callback is never run and our ack never
+  // arrives. That is the same mechanism as the 2026-06-16 capture-start
+  // Show() reconfigure this file already documents. The stall watchdog then
+  // counted 14 fires and RE-ISSUED — and a re-issue while viz still holds the
+  // old pending callback is the double-issue that aborts the GPU process on
+  // viz_main_impl.cc:342 `!has_created_frame_sink_manager_`. Measured live
+  // 2026-09-07, three fresh processes: resize at t+0, watchdog fires 1..14,
+  // re-issue at t+15 s, viz FATAL 28 ms later, browser recycled at t+50 s
+  // (docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md).
+  //
+  // What it does: WAITS. It stops the stall watchdog and sets a flag that
+  // suppresses every re-issue until the outstanding ack arrives. It does not
+  // abandon the frame, does not bump the epoch, and does not issue a new one
+  // — because viz still holds `pending_frame_callback_` for the pre-resize
+  // frame, and ANY fresh issue before that callback runs is the double-issue
+  // that aborts the GPU process. That is not a theory: the first version of
+  // this method re-issued after a 100 ms "settle" delay, and the abort simply
+  // moved 15 s earlier (measured 2026-09-08: reconfigure at 08:54:15.945,
+  // FATAL at 08:54:16.053, 108 ms later — exactly the settle timer).
+  //
+  // Waiting is safe because the ack DOES come. `Display::Resize` sets
+  // `expecting_root_surface_damage_because_of_resize`, which makes
+  // `DisplayScheduler` pick a LATE deadline rather than no deadline; once the
+  // renderer paints the new geometry the deadline fires,
+  // `OnDisplayDidFinishFrame` runs the pending callback, our ack lands, and
+  // the normal cadence resumes from there. This is the same "wait, do not
+  // re-issue" conclusion the stall watchdog already reaches for the cold-boot
+  // and warm-restore cases (see kWatchdogFiresBeforeReissue); a resize is a
+  // third instance of it, and the only one where the driver could not tell.
+  //
+  // Waiting alone is not enough, though — measured 2026-09-08 on the build
+  // that only waited: no GPU abort (the wait works), but the ack never came
+  // either, so the picture froze until CV2-GPU-DEATH recycled the guest 30 s
+  // later. The reason is in viz: `MaybeProduceFrameCallback` only dispatches
+  // the pending callback when the Display is actually going to draw, and a
+  // resized Display with no fresh root-surface damage is not. So while
+  // waiting the driver NUDGES the compositor once per second with
+  // `ScheduleFullRedraw()` — which damages the viewport and commits, WITHOUT
+  // issuing a BeginFrame. That is the whole point: it produces the damage the
+  // scheduler needs to reach its deadline and run the pending callback, and
+  // it cannot double-issue, because it never issues.
+  //
+  // If the ack still never comes, the driver does NOT re-issue its way out:
+  // CV2-GPU-DEATH fires after 30 s of zero captured frames and recycles the
+  // guest, which is the honest answer to a pipeline that is genuinely dead.
+  // Idempotent; a second resize while waiting just restarts the nudge.
+  // No-op when not running.
+  void NotifyDisplayReconfigured(std::string_view reason);
+
  private:
   // Issue exactly one external BeginFrame (force=true) with the next
   // monotonically-increasing sequence number, binding OnBeginFrameAck as the
@@ -397,6 +454,18 @@ class CbBeginFrameDriver {
   // overlap. A legitimate frame never takes 1s (force=true acks a static frame
   // in one composite), so the watchdog never fires in steady state.
   base::OneShotTimer stall_watchdog_timer_;
+  // CV2-RESIZE: nudges the compositor into producing root-surface damage
+  // while awaiting_reconfigure_ack_, so viz's pending callback can be
+  // dispatched. Never issues a BeginFrame. See NotifyDisplayReconfigured.
+  void OnReconfigureNudge();
+
+  // CV2-RESIZE: true from NotifyDisplayReconfigured until the next ack.
+  // While set, the stall watchdog never re-issues — viz still holds the
+  // pre-resize pending callback and a fresh issue would abort the GPU
+  // process. See NotifyDisplayReconfigured.
+  bool awaiting_reconfigure_ack_ = false;
+  base::RepeatingTimer reconfigure_nudge_timer_;
+  int reconfigure_nudges_ = 0;
 
   // --- diagnostic-only state (see ctor / SetDiagnosticSources) ---
 

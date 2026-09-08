@@ -95,6 +95,12 @@ void CbSignalingReconnect::Disconnect() {
   if (state_ == State::kClosed || state_ == State::kGaveUp) {
     return;
   }
+  // CV2-REDIAL: mark this close as OURS before anything can report it back.
+  // OnClosed treats every close it did not ask for as a broker-side drop to
+  // redial, so without this latch a consumer-driven Disconnect would be
+  // answered with a reconnect.
+  disconnect_requested_ = true;
+
   // Cancel pending reconnect / idle timers BEFORE telling the inner
   // client to close — otherwise an inner OnClosed could race with a
   // backoff fire and we'd re-dial after the consumer asked us to
@@ -165,8 +171,10 @@ void CbSignalingReconnect::OnClosed(uint16_t code, std::string_view reason) {
   idle_timer_.Stop();
 
   // Consumer-driven close OR graceful remote close → terminal.
-  if (state_ == State::kClosed ||
-      (code == kCloseCodeNormal && state_ != State::kReconnecting)) {
+  // CV2-REDIAL: terminal ONLY when we asked for it. A remote close — any
+  // code, including a tidy 1000 from a broker shutting down for a rollout —
+  // is a dead channel to redial. See disconnect_requested_.
+  if (state_ == State::kClosed || disconnect_requested_) {
     state_ = State::kClosed;
     if (observer_) {
       observer_->OnClosed(code, reason);

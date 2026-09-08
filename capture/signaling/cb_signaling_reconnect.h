@@ -104,6 +104,7 @@
 #include "base/timer/timer.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 
+#include "capture/signaling/cb_signaling_transport.h"  // CV2-REDIAL
 #include "capture/signaling/cb_signaling_ws_client.h"
 #include "capture/signaling/cb_wire_envelope.h"
 
@@ -219,7 +220,12 @@ class ReconnectingClientObserver {
 //   5. Destruct on the UI thread. Destruction at any state safely
 //      tears down the inner client, the backoff timer, and the idle
 //      timer without firing observer callbacks.
-class CbSignalingReconnect : public SignalingClientObserver {
+// CV2-REDIAL: also a SignalingTransport, so CbOffererDriver can hold the
+// WRAPPER as its transport and keep sending across redials — the inner
+// SignalingWsClient is replaced on every reconnect, so a raw pointer to it
+// would dangle after the first drop.
+class CbSignalingReconnect : public SignalingClientObserver,
+                             public SignalingTransport {
  public:
   CbSignalingReconnect(
       network::mojom::NetworkContext* network_context,
@@ -240,7 +246,7 @@ class CbSignalingReconnect : public SignalingClientObserver {
   // not currently connected (mid-backoff, mid-handshake, given up,
   // or never connected). The wrapper does NOT queue outbound — the
   // consumer is responsible for retrying after the next OnConnected.
-  bool Send(const Envelope& envelope);
+  bool Send(const Envelope& envelope) override;  // SignalingTransport
 
   // Clean shutdown. Cancels pending backoff, cancels idle timer,
   // tells the inner client to Disconnect(). Observer eventually
@@ -307,6 +313,14 @@ class CbSignalingReconnect : public SignalingClientObserver {
   raw_ptr<ReconnectingClientObserver> observer_;
 
   State state_ = State::kIdle;
+
+  // CV2-REDIAL: set by Disconnect(). A close arriving while this is false is
+  // the BROKER's doing, whatever its code, and must be redialed. Before this
+  // the wrapper treated ANY code-1000 close as "the consumer hung up" — so a
+  // broker closing cleanly on its own shutdown (a rollout) would have parked
+  // the worker in kClosed for good, which is precisely the outage this
+  // wrapper exists to end.
+  bool disconnect_requested_ = false;
 
   // Reconnect bookkeeping.
   uint32_t attempts_made_ = 0;

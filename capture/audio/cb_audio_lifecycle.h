@@ -149,6 +149,7 @@ namespace cloud_browser::audio {
 
 namespace webrtc {
 class AudioDeviceModule;
+class Thread;  // CV2-REARM-AUDIO — the ADM's worker thread, by pointer only
 }  // namespace webrtc
 
 namespace cloud_browser::audio {
@@ -300,6 +301,27 @@ class CbAudioLifecycle : public signaling::OffererDriverObserver {
   // running capture. Returns false (and logs) otherwise.
   bool Rearm();
 
+  // CV2-REARM-AUDIO: hand the lifecycle the libwebrtc worker thread the ADM
+  // lives on, so Rearm() can stop the PulseAudio record stream explicitly.
+  //
+  // Why. The ADM is created once per process and shared by every re-armed
+  // PeerConnection. StopInternal relies on libwebrtc's AudioState to stop
+  // recording "transitively" when the last send stream goes (audio_state.cc
+  // RemoveSendingStream → adm->StopRecording()). Measured 2026-09-07 on the
+  // live stack: for every session after the first, the NEXT session's
+  // StartRecording failed with audio_device_pulse_linux.cc:1084 "failed to
+  // activate recording" and the guest sent packets_sent=0 audio for the rest
+  // of the process (docs/findings/audio-dies-after-first-rearm.md). Whatever
+  // ordering leaves the pulse record stream half-connected across a re-arm,
+  // an explicit StopRecording on the ADM's own thread — which disconnects
+  // and unrefs the stream (audio_device_pulse_linux.cc StopRecording) and
+  // clears _recIsInitialized so the next InitRecording builds a fresh one —
+  // is the state InitRecording/StartRecording expect to start from.
+  //
+  // The ADM's methods are RTC_DCHECK(thread_checker_.IsCurrent()) on the
+  // worker thread, hence the BlockingCall. Not owning; the PCF owns both.
+  void SetAdmWorkerThread(webrtc::Thread* worker_thread);
+
   // State accessor for tests + the embedder's diagnostics path.
   AudioLifecycleState state() const;
 
@@ -347,6 +369,8 @@ class CbAudioLifecycle : public signaling::OffererDriverObserver {
   raw_ptr<AudioLifecycleObserver> observer_;
   scoped_refptr<base::SequencedTaskRunner> ui_runner_;
   raw_ptr<webrtc::AudioDeviceModule> adm_debug_;
+  // CV2-REARM-AUDIO: see SetAdmWorkerThread. nullptr until injected.
+  raw_ptr<webrtc::Thread> adm_worker_thread_ = nullptr;
 
   // Owned lifetimes — populated by AdoptBindings, released in
   // StopInternal. Ordering of declaration matches release order in

@@ -27,6 +27,10 @@
 
 #include "capture/audio/cb_audio_lifecycle.h"
 
+#include <tuple>
+
+#include "rtc_base/thread.h"  // CV2-REARM-AUDIO — webrtc::Thread::BlockingCall
+
 #include <utility>
 
 #include "absl/strings/str_cat.h"
@@ -166,6 +170,11 @@ void CbAudioLifecycle::PrepareForTeardown(std::string_view reason) {
 }
 
 // CV2-REARM: see the header for why the object must survive the session.
+void CbAudioLifecycle::SetAdmWorkerThread(webrtc::Thread* worker_thread) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  adm_worker_thread_ = worker_thread;
+}
+
 bool CbAudioLifecycle::Rearm() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
@@ -175,6 +184,67 @@ bool CbAudioLifecycle::Rearm() {
                  << "; only a STOPPED lifecycle may be re-armed (re-arming a "
                     "live one would abandon a running capture)";
     return false;
+  }
+
+  // CV2-REARM-AUDIO: PRE-ARM the shared ADM so the next session never runs
+  // libwebrtc's own start transition — which is the one that is broken here.
+  //
+  // What the first attempt at this assumed, and what the guest actually
+  // reported (measured 2026-09-08, image cr7727-071d0828f342):
+  //
+  //   CV2-REARM-AUDIO: ADM before re-arm: recording=0 rec_initialized=0;
+  //                    StopRecording() rc=0
+  //   ...4 ms later:   audio_device_pulse_linux.cc:1084 failed to activate
+  //                    recording
+  //
+  // So the ADM was ALREADY stopped — StopInternal's transitive stop does
+  // work — and an explicit StopRecording changes nothing. The 4 ms is the
+  // tell: `AudioDeviceLinuxPulse::StartRecording` waits up to TEN SECONDS on
+  // `_recStartEvent` for its record thread to connect the stream, so a
+  // failure 4 ms in means that wait returned immediately on an event left
+  // SET by the previous session and then found `_recording` still false.
+  // Nothing in the ADM clears that event between sessions, and `Terminate()`
+  // is not an escape either: it sets `quit_` and NOTHING ever clears it
+  // (audio_device_pulse_linux.cc — grep says one write, no reset), so a
+  // Terminate/Init cycle would kill the record thread for the life of the
+  // process.
+  //
+  // The way out is to not take that path. `AudioState::AddSendingStream`
+  // (audio/audio_state.cc) only calls InitRecording/StartRecording when
+  // `!adm->Recording()`. If the ADM is ALREADY recording when the next
+  // session's send stream is added, libwebrtc skips its start entirely and
+  // attaches to the running capture — exactly the state a first session
+  // leaves it in. So: stop, re-init, and start it ourselves here, on the
+  // ADM's own thread, and report what happened.
+  //
+  // A failure here is logged and NOT fatal: the session still gets video,
+  // and the next re-arm tries again.
+  if (adm_debug_ && adm_worker_thread_) {
+    webrtc::AudioDeviceModule* adm = adm_debug_.get();
+    const auto [was_recording, stop_rc, init_rc, start_rc, now_recording] =
+        adm_worker_thread_->BlockingCall([adm] {
+          const bool before = adm->Recording();
+          const int32_t stop = adm->StopRecording();
+          // InitRecording rebuilds the pulse record stream (the old one was
+          // unref'd by StopRecording); StartRecording then drives the record
+          // thread through the connect it failed to complete when libwebrtc
+          // called it on a stale event.
+          const int32_t init = adm->InitRecording();
+          const int32_t start = adm->StartRecording();
+          return std::make_tuple(before, stop, init, start, adm->Recording());
+        });
+    LOG(INFO) << "[m55-r5] CV2-REARM-AUDIO: pre-armed the shared ADM: "
+              << "was_recording=" << was_recording << " StopRecording=" << stop_rc
+              << " InitRecording=" << init_rc << " StartRecording=" << start_rc
+              << " now_recording=" << now_recording
+              << (now_recording
+                      ? " — AudioState will attach to this running capture "
+                        "instead of running its own start"
+                      : " — STILL NOT RECORDING: this session will have video "
+                        "but no audio (see the pulse ADM errors above)");
+  } else {
+    LOG(WARNING) << "[m55-r5] CV2-REARM-AUDIO: no ADM/worker thread injected; "
+                    "the next session will likely have video but no audio";
   }
 
   // Session-scoped only. The downstream_/observer_/task-runner/ADM handles are

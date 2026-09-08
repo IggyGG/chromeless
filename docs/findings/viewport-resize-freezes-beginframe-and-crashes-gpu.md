@@ -1,6 +1,10 @@
 # A viewport resize freezes the BeginFrame loop; 15 s later the watchdog crashes the GPU process
 
-**Status:** OPEN. Measured 2026-09-07 on the k8s standalone stack, worker
+**Status:** PARTLY FIXED (2026-09-08, guest `cr7727-0f336fbd1c7d`): the GPU
+abort is gone, the freeze is not. Two attempts and their measurements are at
+the bottom — read them before trying a third.
+
+**Was:** OPEN. Measured 2026-09-07 on the k8s standalone stack, worker
 `cr7727-c5f2eb91c6f0`, three fresh processes, three for three. Introduced as a
 *reachable* path by `feat(viewport)` (#96, the same day): before it nothing
 called `Cb.setViewport`. Lives in `capture/build-integration/` and needs a
@@ -125,3 +129,59 @@ fails at the frames check ~1 s after the first resize and at the pid check
 ~50 s later. `tests/interactive`'s video suite should additionally assert
 `frames_received` in the `[diag]` line is non-zero 20 s after connect, which
 is the only thing that would have caught this at 65/65.
+
+---
+
+## Two attempts, 2026-09-08
+
+**Attempt 1 — abandon the frame and re-issue after a 100 ms settle.** Made it
+worse in the most informative way: the abort simply moved earlier.
+
+```
+08:54:15.945  CV2-RESIZE display reconfigured (Cb.setViewport)
+08:54:16.053  FATAL viz_main_impl.cc:342 !has_created_frame_sink_manager_
+08:54:16.132  GPU process exited
+```
+
+108 ms — exactly the settle delay. Confirms the mechanism beyond doubt: ANY
+issue before viz runs its pending callback is the double-issue, whether it
+comes from the watchdog at 15 s or a settle timer at 100 ms.
+
+**Attempt 2 — wait for the ack, and nudge with a full redraw once a second.**
+`NotifyDisplayReconfigured` now stops the watchdog, sets
+`awaiting_reconfigure_ack_` (which suppresses every re-issue, like the
+pre-first-ack window), and calls `Compositor::ScheduleFullRedraw()` each
+second — damage plus commit, issuing no BeginFrame, on the theory that
+`MaybeProduceFrameCallback` only dispatches when the Display will draw.
+
+Result: **the GPU abort is gone** — 33 nudges, no FATAL, no
+`GPU process exited`. But the ack never arrived either, so the picture froze
+and `CV2-GPU-DEATH` recycled the guest after 30 s. Half the defect, traded for
+the other half.
+
+## Where a third attempt should start
+
+The nudge did not make the Display draw, so `ScheduleFullRedraw` is not
+reaching what `DisplayScheduler` is waiting on. The scheduler's own gate is
+`expecting_root_surface_damage_because_of_resize()` — it wants damage from the
+ROOT SURFACE (the renderer's compositor frame at the new size), and a
+browser-side redraw of the ui::Compositor layer tree may not be that. Next
+probes, cheapest first:
+
+1. Does the renderer ever submit a compositor frame at the new size? The
+   capturer's `frames_received` counter is already in the `[diag]` line; it
+   read 0 throughout. If the renderer is not painting, the resize is stuck
+   upstream of viz entirely and `RenderWidgetHostView::SetSize` is the place
+   to look.
+2. `Display::Resize` is reached via `Compositor::SetScaleAndSize`. Confirm the
+   order this code calls it in matches what upstream does — content_shell
+   resizes the WebContents view and the host in the opposite order.
+3. If the renderer IS painting and viz still holds the callback, the honest
+   answer may be to stop using an external BeginFrame source across a resize:
+   `CbBeginFrameDriver::Stop()` before the reconfigure and `Start()` after,
+   which the header's LIFECYCLE CONSTRAINT says is unsafe only while a frame
+   is in flight — which is exactly what the wait establishes.
+
+Until then the gateway kill switch (`CHROMELESS_VIEWPORT_FOLLOW=0`, default
+off in compose and `stack.yaml`) keeps the stack usable: no resize, no crash,
+the stream stays at the guest's 1280x720.

@@ -1571,3 +1571,146 @@ func TestWS_ByeEchoIsNotForwarded(t *testing.T) {
 	send(brw, "browser", `{"type":"bye","from":"browser"}`)
 	waitFor(cli4, "client-4", `"type":"bye"`)
 }
+
+// TestWS_ShutdownDoesNotSynthesiseByes pins the broker's own shutdown: when
+// the PROCESS is going away, the sessions on it are not.
+//
+// A bye means "this session is over". A broker rollout is not that: both
+// peers are still there, their media still flows over the PeerConnection
+// (which does not touch this socket), and they need signaling back only to
+// renegotiate later. Synthesising a bye per peer on the way out tells the
+// viewer its session ended, so the client tears down and the picture stops.
+//
+// Measured 2026-09-08 with a worker that redials correctly (back in 1 s, pid
+// unchanged): the attached viewer still lost video on every broker rollout,
+// because both sockets closing looked exactly like both peers leaving.
+//
+// Watched fail with hub.shuttingDown never set: the browser receives a bye.
+func TestWS_ShutdownDoesNotSynthesiseByes(t *testing.T) {
+	withAuthDisabled(t)
+
+	h := newHub(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/", h.wsHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/shutdown-no-bye"
+
+	type client struct {
+		conn   *websocket.Conn
+		frames chan string
+	}
+	dial := func(name string) *client {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		cl := &client{conn: c, frames: make(chan string, 64)}
+		go func() {
+			defer close(cl.frames)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				cl.frames <- string(raw)
+			}
+		}()
+		return cl
+	}
+	send := func(c *client, who, msg string) {
+		t.Helper()
+		if err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("%s write: %v", who, err)
+		}
+	}
+	collect := func(c *client) string {
+		t.Helper()
+		var sb strings.Builder
+		timeout := time.After(750 * time.Millisecond)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					return sb.String()
+				}
+				sb.WriteString(f)
+				sb.WriteByte('\n')
+			case <-timeout:
+				return sb.String()
+			}
+		}
+	}
+	waitFor := func(c *client, who, needle string) {
+		t.Helper()
+		timeout := time.After(2 * time.Second)
+		for {
+			select {
+			case f, ok := <-c.frames:
+				if !ok {
+					t.Fatalf("%s: socket closed while waiting for %q", who, needle)
+				}
+				if strings.Contains(f, needle) {
+					return
+				}
+			case <-timeout:
+				t.Fatalf("%s: no frame containing %q within 2s", who, needle)
+			}
+		}
+	}
+	waitRegistered := func(role peerRole) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess := h.getOrCreate(anonymousTenant, "shutdown-no-bye")
+			sess.mu.Lock()
+			_, ok := sess.peers[role]
+			sess.mu.Unlock()
+			if ok {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("peer %s never registered", role)
+	}
+
+	// A negotiated session: both peers present, SDP exchanged.
+	brw := dial("browser")
+	send(brw, "browser", `{"type":"offer","from":"browser","data":{"sdp":"v=0 live"}}`)
+	waitRegistered(roleBrowser)
+	cli := dial("client")
+	send(cli, "client", `{"type":"hello","from":"client"}`)
+	waitRegistered(roleClient)
+	waitFor(cli, "client", "v=0 live")
+	send(cli, "client", `{"type":"answer","from":"client","data":{"sdp":"v=0 answer"}}`)
+	waitFor(brw, "browser", "v=0 answer")
+
+	// The broker is going away. This is what main() does before
+	// http.Server.Shutdown closes every socket.
+	h.shuttingDown.Store(true)
+	_ = cli.conn.Close() // the shutdown closing the viewer's socket
+
+	// The bye (if any) is synthesised by unregister, which runs on the
+	// viewer's read pump AFTER its socket dies — so the assertion has to wait
+	// for that goroutine to finish, not just for a quiet window. Without this
+	// the test passes against a broker that does synthesise the bye, because
+	// collect()'s window closes before unregister runs. (Checked: it did.)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sess := h.getOrCreate(anonymousTenant, "shutdown-no-bye")
+		sess.mu.Lock()
+		_, still := sess.peers[roleClient]
+		sess.mu.Unlock()
+		if !still {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := collect(brw); strings.Contains(got, `"type":"bye"`) {
+		t.Fatalf("the browser was told its session ended because the BROKER "+
+			"restarted; it would tear down a live PeerConnection: %q", got)
+	}
+}

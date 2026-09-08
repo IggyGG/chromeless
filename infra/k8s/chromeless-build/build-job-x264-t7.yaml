@@ -391,12 +391,19 @@ spec:
               # change: the new assertions compiled and were never exercised.
               #
               # Adding the signaling one here because that is the contract this
-              # repo publishes to third parties. The remaining three (adm,
+              # repo publishes to third parties.
+              #
+              # 2026-09-08 (CV2-REDIAL): + cb_signaling_reconnect_unittests.
+              # The R7 wrapper's BUILD.gn had carried a TODO promising its
+              # tests "in a follow-up commit" since M3; the target compiled
+              # in every lane and nothing exercised it, and when the wrapper
+              # was finally constructed by the embedder its close rule was
+              # wrong for the broker-rollout case it existed to survive. The remaining three (adm,
               # input_dispatch, pointer_state) are a separate question — they
               # may have bitrotted over the 10 weeks nothing built them, and
               # finding that out belongs in its own change rather than riding
               # along with a codec fix.
-              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/signaling:cb_wire_envelope_unittests cloud-browser/capture/build-integration:cloud_browser_adm_unittests cloud-browser/capture/build-integration:cloud_browser_input_dispatch_unittests cloud-browser/capture/build-integration:cloud_browser_pointer_state_unittests cloud-browser/capture/config:cb_env_config_unittests"
+              value: "cloud-browser/capture/build-integration:cloud_browser_worker headless:resource_pack_data headless:resource_pack_strings cloud-browser/capture/build-integration:cloud_browser_encoder_unittests cloud-browser/capture/build-integration:cloud_browser_framesink_capturer_unittests cloud-browser/capture/signaling:cb_wire_envelope_unittests cloud-browser/capture/signaling:cb_signaling_reconnect_unittests cloud-browser/capture/build-integration:cloud_browser_adm_unittests cloud-browser/capture/build-integration:cloud_browser_input_dispatch_unittests cloud-browser/capture/build-integration:cloud_browser_pointer_state_unittests cloud-browser/capture/config:cb_env_config_unittests"
             - name: CHROMELESS_TESTS_SKIP_RUN
               # BUILT here, but not EXECUTED here. See STEP 7 in
               # build/chromeless-build.sh for the mechanism and its guards.

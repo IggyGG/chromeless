@@ -168,6 +168,8 @@ void CbBeginFrameDriver::Stop() {
   running_ = false;
   next_frame_timer_.Stop();
   stall_watchdog_timer_.Stop();
+  awaiting_reconfigure_ack_ = false;
+  reconfigure_nudge_timer_.Stop();
   diagnostic_timer_.Stop();
   // Drop any in-flight ack: an IssueExternalBeginFrame issued before Stop()
   // may still invoke its completion callback asynchronously. Invalidating the
@@ -189,6 +191,40 @@ void CbBeginFrameDriver::SetPermanentDeathCallback(
     base::RepeatingClosure on_permanent_death) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   on_permanent_death_ = std::move(on_permanent_death);
+}
+
+void CbBeginFrameDriver::NotifyDisplayReconfigured(std::string_view reason) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!running_) {
+    return;
+  }
+  if (awaiting_reconfigure_ack_) {
+    // A second resize while still waiting (the client sends two, ~700 ms
+    // apart, because applying the first changes its own layout by 2 px).
+    // Nothing to do: we are already not re-issuing.
+    VLOG(1) << "CbBeginFrameDriver: CV2-RESIZE another reconfigure (" << reason
+            << ") while already waiting for the outstanding ack";
+    return;
+  }
+  awaiting_reconfigure_ack_ = true;
+  reconfigure_nudges_ = 0;
+  // Stop the watchdog outright rather than letting it count toward a
+  // re-issue. The ack we are waiting for is the one viz still holds; when it
+  // lands, OnBeginFrameAck clears this flag and re-arms the normal cadence.
+  stall_watchdog_timer_.Stop();
+  watchdog_fires_without_ack_ = 0;
+  // ...and nudge, because waiting alone froze the picture until GPU-death.
+  reconfigure_nudge_timer_.Start(
+      FROM_HERE, base::Seconds(1),
+      base::BindRepeating(&CbBeginFrameDriver::OnReconfigureNudge,
+                          base::Unretained(this)));
+  LOG(INFO) << "CbBeginFrameDriver: CV2-RESIZE display reconfigured ("
+            << reason
+            << ") — holding the ack-chain until the pre-resize frame acks. "
+               "Re-issuing here is the double-issue that aborts the GPU "
+               "process on viz's !has_created_frame_sink_manager_ (measured "
+               "twice: at the watchdog's 15 s re-issue, and again at 108 ms "
+               "when this method used to 'settle' and re-issue).";
 }
 
 void CbBeginFrameDriver::IssueOneBeginFrame() {
@@ -278,6 +314,15 @@ void CbBeginFrameDriver::OnBeginFrameAck(uint64_t issue_epoch,
     return;
   }
   first_ack_received_ = true;
+  if (awaiting_reconfigure_ack_) {
+    // CV2-RESIZE: the pre-resize frame finished; viz has released its
+    // pending callback, so issuing again is safe from here.
+    awaiting_reconfigure_ack_ = false;
+    reconfigure_nudge_timer_.Stop();
+    LOG(INFO) << "CbBeginFrameDriver: CV2-RESIZE post-reconfigure ack "
+                 "received after " << reconfigure_nudges_
+              << " nudge(s) — resuming the normal cadence";
+  }
   // An ack means the controller is bound and the chain is live again, so any
   // prior unbound-window/freeze wait is over — clear the consecutive-fire
   // counter so the next stall starts a fresh wait-then-reissue cycle.
@@ -305,6 +350,22 @@ void CbBeginFrameDriver::OnBeginFrameAck(uint64_t issue_epoch,
   } else {
     IssueOneBeginFrame();
   }
+}
+
+void CbBeginFrameDriver::OnReconfigureNudge() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!running_ || !awaiting_reconfigure_ack_) {
+    reconfigure_nudge_timer_.Stop();
+    return;
+  }
+  ++reconfigure_nudges_;
+  // Damage the whole viewport and commit. This does NOT issue a BeginFrame —
+  // it gives the Display something to draw, so its scheduler reaches a
+  // deadline and viz runs the ExternalBeginFrame callback it is holding.
+  compositor_->ScheduleFullRedraw();
+  LOG(INFO) << "CbBeginFrameDriver: CV2-RESIZE nudge #" << reconfigure_nudges_
+            << " (full redraw, no BeginFrame issued) — waiting for the "
+               "post-reconfigure ack";
 }
 
 void CbBeginFrameDriver::OnStallWatchdog() {
@@ -357,7 +418,11 @@ void CbBeginFrameDriver::OnStallWatchdog() {
   const bool pre_first_ack = !first_ack_received_;
   const bool within_wait_window =
       watchdog_fires_without_ack_ < kWatchdogFiresBeforeReissue;
-  if (pre_first_ack || within_wait_window) {
+  // CV2-RESIZE: a reconfigure is in flight — viz holds the pending callback
+  // and a re-issue aborts the GPU process. Wait indefinitely, exactly as the
+  // pre-first-ack case does. If the ack truly never comes, CV2-GPU-DEATH
+  // recycles the guest after 30 s of zero captured frames.
+  if (awaiting_reconfigure_ack_ || pre_first_ack || within_wait_window) {
     LOG(WARNING) << "CbBeginFrameDriver: stall watchdog fired (no BeginFrame "
                     "ack in "
                  << kStallWatchdogTimeout.InMilliseconds()
@@ -365,9 +430,12 @@ void CbBeginFrameDriver::OnStallWatchdog() {
                  << watchdog_fires_without_ack_
                  << ", first_ack_received=" << first_ack_received_
                  << ") — controller "
-                 << (pre_first_ack ? "not yet bound (cold-boot window)"
-                                   : "may be re-establishing (warm-restore "
-                                     "GPU-channel window)")
+                 << (awaiting_reconfigure_ack_
+                         ? "reconfigured (viewport resize; viz still holds "
+                           "the pending callback)"
+                     : pre_first_ack ? "not yet bound (cold-boot window)"
+                                     : "may be re-establishing (warm-restore "
+                                       "GPU-channel window)")
                  << "; NOT re-issuing (a stashed frame replays on bind; "
                     "re-issuing here would double-issue and crash the GPU on "
                     "!has_created_frame_sink_manager_), re-arming watchdog"

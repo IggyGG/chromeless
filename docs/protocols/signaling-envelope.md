@@ -203,6 +203,17 @@ Three bookkeeping rules a broker must get right:
 Peers written against the old behaviour that *waited* for the broker to close
 them after a `bye` would now wait forever: close your own socket when leaving.
 
+**A broker that is itself shutting down must synthesise nothing.** Every
+socket closes at once during a rollout, which is indistinguishable from every
+peer leaving — but the sessions are not over: media rides the peer
+connections, which do not touch this socket, and the peers need signaling back
+only to renegotiate later. Measured 2026-09-08 with a worker that redialed
+correctly (back in 1 s, same process): the attached viewer still lost its
+video on every broker restart, because the broker told it the session had
+ended on the way out. `signaling/server.go` sets `hub.shuttingDown` before
+`http.Server.Shutdown`, and `unregister` skips the synthesised `bye` while it
+is set (`TestWS_ShutdownDoesNotSynthesiseByes`).
+
 `signaling/replay_test.go` `TestWS_ByeKeepsSenderConnected` and
 `TestWS_ByeEchoIsNotForwarded` pin this; each was watched fail against the
 behaviour it replaced.

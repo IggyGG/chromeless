@@ -87,6 +87,29 @@ test("cb_wire_envelope_unittests") {
 # deps. The :cb_include_paths config is propagated through the
 # :cb_wire_envelope public_configs above.
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# R7 unit tests — CV2-REDIAL (2026-09-08). The TODO above promised these
+# "in a follow-up commit" and none came for six months; the wrapper was
+# compiled by every lane and exercised by nothing, and when it was finally
+# wired into the embedder its close rule turned out to be wrong for the
+# rollout case it existed for. See the file header.
+#
+# No FakeNetworkContext: the tests drive the wrapper through its own
+# SignalingClientObserver face, which is exactly how the inner client
+# talks to it.
+test("cb_signaling_reconnect_unittests") {
+  sources = [ "cb_signaling_reconnect_test.cc" ]
+  deps = [
+    ":cb_signaling_reconnect",
+    ":cb_wire_envelope",
+    "//base/test:run_all_unittests",
+    "//base/test:test_support",
+    "//testing/gmock",
+    "//testing/gtest",
+  ]
+  configs += [ "//cloud-browser/capture/build-integration:cb_include_paths" ]
+}
+
 source_set("cb_signaling_ws_client") {
   sources = [
     "cb_signaling_ws_client.cc",

@@ -1,6 +1,9 @@
 # A broker restart restarts the worker: the signaling client never redials
 
-**Status:** OPEN. Measured 2026-09-07 on the k8s standalone stack, worker
+**Status:** FIXED and VERIFIED LIVE (2026-09-08, guest `cr7727-0f336fbd1c7d`
+plus broker `batchr-ff7e944`). Kept for the diagnosis; see the bottom.
+
+**Was:** OPEN. Measured 2026-09-07 on the k8s standalone stack, worker
 `cr7727-c5f2eb91c6f0` (image digest `5813600c…`), three broker rollouts in one
 afternoon. Lives in `capture/`, so it cannot be fixed from this repo without a
 lane build.
@@ -126,3 +129,41 @@ streaming, `kubectl rollout restart deploy/chromeless-standalone-signaling`
 the worker pid is unchanged, `cb_signaling: dialing` appears a second time in
 its log, and the viewer's `framesDecoded` keeps increasing. Today that scenario
 fails at the pid check every time.
+
+---
+
+## Fixed, 2026-09-08
+
+Two halves, because the first alone was not enough.
+
+**Guest (`CV2-REDIAL`).** `main_parts` now owns `CbSignalingReconnect` — the
+R7 wrapper that had been compiled by every lane and constructed by nothing —
+instead of the bare ws client. It IS-A `SignalingTransport`, so the driver's
+raw pointer survives a redial. Two bugs in the wrapper that six months of
+disuse had hidden: a clean 1000 close from a broker shutting down was treated
+as consumer-driven and went terminal (exactly the rollout case), and nothing
+distinguished our own `Disconnect`. Both fixed, and the tests the BUILD.gn
+TODO had promised since M3 now exist (`cb_signaling_reconnect_test.cc`, in the
+t7 lane).
+
+**Broker.** With the guest redialing correctly the attached viewer STILL lost
+video, because `unregister` synthesised a `bye` to every counterpart as the
+process shut down — every socket closing at once is indistinguishable from
+every peer leaving. `hub.shuttingDown` is set before `http.Server.Shutdown`
+and suppresses that (`TestWS_ShutdownDoesNotSynthesiseByes`, watched fail).
+
+Measured with a viewer attached across a broker rollout:
+
+```
+10:42:09  viewer attached, 14 frames
+10:42:09  kubectl rollout restart deploy/chromeless-standalone-signaling
+   +20s   framesDecoded=77        pid unchanged
+   +41s   framesDecoded=281
+  +103s   framesDecoded=893
+          dials 1 -> 3, two CV2-REDIAL lines, no liveness kill
+  +203s   pid unchanged, same pod; next viewer connected and got video
+```
+
+Before: the socket died at 1006, nothing redialed, and the liveness probe
+killed the container ~70 s later. The probe in `stack.yaml` can now be relaxed
+or dropped — it was standing in for this.

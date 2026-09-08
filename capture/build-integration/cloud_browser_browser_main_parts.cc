@@ -650,6 +650,13 @@ int CloudBrowserBrowserMainParts::PreMainMessageLoopRun() {
       aura_->host()->compositor(),
       /*target_frame_interval=*/base::Hertz(30));
   begin_frame_driver_->Start();
+  // CV2-RESIZE: the viewport controller was built before the driver existed
+  // (step 4 vs here); hand it the driver so Cb.setViewport can warn it before
+  // reconfiguring the Display. Unset again in PostMainMessageLoopRun BEFORE
+  // begin_frame_driver_.reset(), same as the diagnostic sources.
+  if (viewport_controller_) {
+    viewport_controller_->SetBeginFrameDriver(begin_frame_driver_.get());
+  }
 
   // BUGS-529 diagnostic — confirms the smoking-gun pattern is closed.
   // Pre-fix expectation: HasFocus=false, ViewBounds=0x0.
@@ -1074,8 +1081,14 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
   // CV2-WARM — config now comes from |cfg.ws| (boot path moved the env value
   // in; CDP path built it from params), not a moved-from env optional. Copy:
   // |cfg| is the caller's const&, and the struct is small.
-  ws_client_ = std::make_unique<cloud_browser::signaling::SignalingWsClient>(
-      network_context, cfg.ws,
+  //
+  // CV2-REDIAL: the R7 wrapper instead of the bare R2 client. See the member
+  // comment in the header. max_attempts=0 would disable redial entirely;
+  // the default schedule (1,2,4,8,16,32,32,... s, ten tries ≈ 3 min) covers
+  // a broker rollout (~30 s) with room, and OnGaveUp recycles the process
+  // for anything longer — the old behaviour, reached honestly.
+  ws_client_ = std::make_unique<cloud_browser::signaling::CbSignalingReconnect>(
+      network_context, cfg.ws, cloud_browser::signaling::ReconnectConfig{},
       /*observer=*/this);
 
   // F5 step 4 — ICE config from |cfg.ice| (CV2-WARM — was
@@ -1098,6 +1111,10 @@ webrtc::RTCError CloudBrowserBrowserMainParts::StartNativeSession(
       /*downstream=*/this,
       /*observer=*/nullptr, base::SequencedTaskRunner::GetCurrentDefault(),
       adm_for_audio_lifecycle_);
+  // CV2-REARM-AUDIO: the ADM lives on worker_thread_ (constructed there in
+  // PreMainMessageLoopRun); Rearm() needs it to stop the pulse record
+  // stream explicitly, or every session after the first is silent.
+  audio_lifecycle_->SetAdmWorkerThread(worker_thread_.get());
 
   // F5 step 5 — Construct R4 CbOffererDriver. observer is the M5.5
   // audio lifecycle, which forwards downstream to main_parts after it
@@ -1606,6 +1623,9 @@ webrtc::RTCError CloudBrowserBrowserMainParts::RearmSession(bool announce_bye) {
   rtp_stats_timer_.Stop();
   rtp_stats_timer_armed_ = false;
   ice_failed_teardown_timer_.Stop();
+  // CV2-REDIAL: the old PC's ICE state says nothing about the new one.
+  last_ice_state_ =
+      webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionNew;
 
   // 3b. Return the audio lifecycle to kIdle so it can adopt the NEXT
   //     session's bindings. Step 1 above drove it to kStopped, and
@@ -1833,6 +1853,11 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   // ticks into, or reports on, freed/half-torn state. (aura_ is intentionally
   // leaked at the bottom of this fn, but the driver must still stop ticking the
   // compositor before the WebContents frame-sink hierarchy it drives unwinds.)
+  // CV2-RESIZE: the viewport controller holds the driver by raw pointer;
+  // clear it before the driver goes (it is reset() below, after the driver).
+  if (viewport_controller_) {
+    viewport_controller_->SetBeginFrameDriver(nullptr);
+  }
   begin_frame_driver_.reset();
 
   // The viewport controller holds RAW pointers to screen_, aura_ and the
@@ -1944,6 +1969,69 @@ void CloudBrowserBrowserMainParts::OnConnected() {
     return;
   }
   offerer_driver_->OnConnected();
+
+  // CV2-REDIAL: is this the FIRST connect, or a redial after the broker went
+  // away? On a redial the new broker holds no offer for this session, and
+  // whatever the driver had in flight was addressed to a broker that no
+  // longer exists. Two cases:
+  //
+  //   * a viewer is still attached (ICE connected/completed): media rides the
+  //     PeerConnection, not the socket, so nothing was lost. Re-registering
+  //     is all the broker needed; the driver keeps its session.
+  //   * no live session (kAwaitingAnswer with an offer nobody will answer,
+  //     kIceInFlight after the viewer's ICE died, kClosed): re-arm WITHOUT a
+  //     bye — there is no session on this broker to end, and a bye would
+  //     reach a viewer that may be sitting there waiting for exactly the
+  //     offer this produces (the cold-arrival case Rearm(false) documents).
+  //     RearmSession rebuilds the PC and the fresh offer lands in the new
+  //     broker's replay buffer for whoever joins.
+  //
+  // Measured before this existed (2026-09-07): after a broker rollout the
+  // worker sat with a dead socket until the liveness probe killed the
+  // container ~70 s later, and the process that replaced it lost a SECOND
+  // life to a stale request_renegotiate racing the viewer's answer.
+  if (!signaling_connected_once_) {
+    signaling_connected_once_ = true;
+    return;
+  }
+  using S = cloud_browser::signaling::OffererState;
+  const S st = offerer_driver_->state();
+  const bool media_live =
+      st == S::kIceInFlight &&
+      (last_ice_state_ == webrtc::PeerConnectionInterface::IceConnectionState::
+                              kIceConnectionConnected ||
+       last_ice_state_ == webrtc::PeerConnectionInterface::IceConnectionState::
+                              kIceConnectionCompleted);
+  if (media_live) {
+    LOG(INFO) << "CV2-REDIAL: signaling reconnected with a viewer still "
+                 "attached; media is unaffected, keeping the session";
+    return;
+  }
+  if (st == S::kFailed || tearing_down_ || rearming_) {
+    return;  // RearmOrShutdown has its own answer for these.
+  }
+  LOG(INFO) << "CV2-REDIAL: signaling reconnected with no live session "
+               "(driver state="
+            << static_cast<int>(st)
+            << ") — re-arming so the new broker holds a fresh offer";
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&CloudBrowserBrowserMainParts::RearmOrShutdown,
+                     base::Unretained(this), /*announce_bye=*/false));
+}
+
+void CloudBrowserBrowserMainParts::OnGaveUp(uint32_t attempts_made) {
+  // CV2-REDIAL: the wrapper exhausted its schedule (~3 min with no broker).
+  // A worker nobody can reach is not serving anyone; take the same path the
+  // pre-redial worker took on its FIRST drop — just later, and on purpose.
+  LOG(ERROR) << "CV2-REDIAL: gave up redialing signaling after "
+             << attempts_made
+             << " attempts — recycling this guest so supervisord starts one "
+                "that can reach a broker";
+  if (tearing_down_) {
+    return;
+  }
+  Shutdown();
 }
 
 void CloudBrowserBrowserMainParts::OnEnvelope(
@@ -1967,15 +2055,17 @@ void CloudBrowserBrowserMainParts::OnEnvelope(
 
 void CloudBrowserBrowserMainParts::OnClosed(uint16_t code,
                                             std::string_view reason) {
-  // SignalingClientObserver path: WS close (RFC 6455 code + reason).
+  // CV2-REDIAL: the wrapper only reports OnClosed for a close WE asked for
+  // (Disconnect() at teardown). A remote drop never reaches here — the
+  // wrapper swallows it and redials; we hear about it as OnConnected, or as
+  // OnGaveUp if the broker never comes back.
   LOG(INFO) << "CV2-69 ws_client: closed code=" << code << " reason=" << reason;
 }
 
 void CloudBrowserBrowserMainParts::OnError(std::string_view reason) {
-  LOG(ERROR) << "CV2-69 ws_client: transport/handshake/codec error: " << reason
-             << " — client is half-broken; offerer driver should "
-                "Close() and a follow-up R# should add R7 reconnect "
-                "supervision.";
+  // CV2-REDIAL: not called by the wrapper (an inner error becomes a redial).
+  // Kept for the SignalingClientObserver contract.
+  LOG(ERROR) << "CV2-69 ws_client: transport/handshake/codec error: " << reason;
 }
 
 // signaling::OffererDriverObserver — telemetry-only LOGs for the
@@ -1996,6 +2086,7 @@ void CloudBrowserBrowserMainParts::OnIceConnectionStateChanged(
     webrtc::PeerConnectionInterface::IceConnectionState state) {
   LOG(INFO) << "CV2-69 offerer_driver: ICE connection state -> "
             << static_cast<int>(state);
+  last_ice_state_ = state;  // CV2-REDIAL: read by OnConnected
 
   // CV2 Gate 6 media-RTP diagnosis: once ICE connects, start polling the
   // outbound-rtp stats so the serial log shows whether the guest encoder

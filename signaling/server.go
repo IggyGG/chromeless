@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -335,6 +336,23 @@ type hub struct {
 	mu       sync.Mutex
 	sessions map[sessionKey]*session
 	log      *slog.Logger
+	// shuttingDown is set once, before http.Server.Shutdown closes every
+	// socket. While set, unregister does NOT synthesise a `bye`.
+	//
+	// A bye means "the session is over". When the BROKER goes away — a
+	// rollout, a restart — the session is not over: both peers are still
+	// there, media is still flowing over their PeerConnection, and they only
+	// need signaling back to renegotiate later. Synthesising a bye per peer
+	// on the way out tells the viewer its session ended, so the client tears
+	// down and the picture stops even though the browser is fine.
+	//
+	// Measured 2026-09-08: with the worker redialing correctly (it was back
+	// in 1 s and kept its pid), a broker rollout still killed the attached
+	// viewer's video, because both sockets closing looked exactly like both
+	// peers leaving. The worker then saw ICE fail, waited out its grace and
+	// re-armed — a viewer-visible outage caused entirely by the broker's own
+	// shutdown.
+	shuttingDown atomic.Bool
 }
 
 func newHub(log *slog.Logger) *hub {
@@ -941,7 +959,12 @@ func (h *hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	// same echo rule as readPump: the worker announced the session over, the
 	// client's socket then dropped, and a synthesised bye would close the
 	// session the worker has since rebuilt).
-	if negotiated && !ended && !sess.didSayBye(p) {
+	// ...and not while the BROKER itself is shutting down: every socket is
+	// closing at once, which is not either peer leaving. See hub.shuttingDown.
+	if h.shuttingDown.Load() {
+		p.log.Info("broker shutting down; not synthesising a bye " +
+			"(the session outlives this process)")
+	} else if negotiated && !ended && !sess.didSayBye(p) {
 		if raw, err := json.Marshal(Envelope{Type: "bye", From: p.role}); err == nil {
 			if sess.forward(p.role.other(), "bye", raw) {
 				p.log.Info("synthesised bye to counterpart (peer left without one)",
@@ -1169,6 +1192,10 @@ func main() {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
+
+	// Before any socket closes: tell unregister that the closes about to
+	// happen are OURS, not peers leaving. See hub.shuttingDown.
+	h.shuttingDown.Store(true)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

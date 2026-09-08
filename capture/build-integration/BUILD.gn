@@ -1308,6 +1308,9 @@ source_set("embedder") {
     ":cursor_client",
     "//cloud-browser/capture/signaling:cb_ice_config",
     "//cloud-browser/capture/signaling:cb_offerer_driver",
+    # CV2-REDIAL — main_parts owns the R7 reconnect wrapper (it replaces the
+    # bare ws client, so a broker rollout no longer strands the worker).
+    "//cloud-browser/capture/signaling:cb_signaling_reconnect",
     "//cloud-browser/capture/signaling:cb_signaling_ws_client",
     "//cloud-browser/capture/signaling:cb_wire_envelope",
     # CV2-75 (M4/M5/M6 runtime-wire) — main_parts owns the unique_ptrs

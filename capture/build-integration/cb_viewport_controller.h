@@ -120,6 +120,8 @@ struct CbViewportSpec {
   float device_scale_factor = 1.0f;
 };
 
+class CbBeginFrameDriver;
+
 class CbViewportController {
  public:
   // Every pointer must outlive this object. |track_source| may be null
@@ -136,6 +138,13 @@ class CbViewportController {
   // The capture pipeline is built after the viewport controller, so the
   // track source is injected once it exists. nullptr on teardown.
   void SetTrackSource(CloudBrowserFrameSinkVideoTrackSource* track_source);
+
+  // CV2-RESIZE: the BeginFrame driver to warn before every Display
+  // reconfigure. Constructed after this controller (main_parts builds the
+  // driver once the aura host's compositor exists), so injected. nullptr on
+  // teardown. See CbBeginFrameDriver::NotifyDisplayReconfigured for why a
+  // resize without this warning ends in a GPU-process abort.
+  void SetBeginFrameDriver(CbBeginFrameDriver* driver);
 
   // The WebContents whose view follows the viewport. Re-pointed when the
   // active tab changes (SetActiveCapture). nullptr clears it.
@@ -162,6 +171,7 @@ class CbViewportController {
   raw_ptr<CbHeadlessScreen> screen_;
   raw_ptr<CbAuraPlatformData> aura_;
   raw_ptr<CloudBrowserFrameSinkVideoTrackSource> track_source_;
+  raw_ptr<CbBeginFrameDriver> begin_frame_driver_ = nullptr;
   raw_ptr<content::WebContents> web_contents_ = nullptr;
 
   CbViewportSpec current_;
