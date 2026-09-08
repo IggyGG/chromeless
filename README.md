@@ -17,7 +17,7 @@ uploads, cursor updates, and audio round-trip through the same peer connection.
 Useful for browser isolation, agent tooling, embedded co-browsing, and anywhere
 you need a real Chromium you don't want to run locally.
 
-**Status: source-available, in production.** This is not a packaged product.
+**Status: Apache-2.0 open source, in production.** This is not a packaged product.
 There are no published container images, no npm package, and no release tags —
 you build it yourself. See [Building](#building) for what that costs.
 [`docs/roadmap-ga.md`](./docs/roadmap-ga.md) is the plan of record for closing

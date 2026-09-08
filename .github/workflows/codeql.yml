@@ -45,7 +45,7 @@ jobs:
     # the run on Forgejo. (Verified against this Forgejo instance, where
     # conditional jobs record status=skipped rather than failure.)
     if: github.server_url == 'https://github.com'
-    # STOPGAP (2026-08-20): `priority`, not `ubuntu-latest`.
+    # GitHub-hosted runner; this whole job is skipped on Forgejo.
     #
     # `docker` and `ubuntu-latest` are served by the SAME 10 general runners, and
     # tf-multiverse saturated them: measured 470 queued `docker` jobs against 19
