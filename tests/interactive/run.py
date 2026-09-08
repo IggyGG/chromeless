@@ -1238,6 +1238,59 @@ def suite_stats(client, worker):
         print("  SKIP  the stats counter is still moving   "
               "session already ended (one session per worker process)")
 
+    # ---- AUDIO: received, and audible ---------------------------------
+    #
+    # The guest has sent an audio track since the first session. Nothing
+    # checked it, and the client's <video> was hard-muted with no control —
+    # so every byte was decoded and discarded, and the product had "audio"
+    # in the sense that the SDP mentioned it.
+    #
+    # Two separate facts, because they fail separately: bytes ARRIVING is
+    # the transport (the ADM, the encoder, the transceiver), and the element
+    # being UNMUTED is whether a human hears anything. A stack that gets the
+    # first right and the second wrong is silent, which is what shipped.
+    audio_bytes = client.cdp.eval("""(async () => {
+        const pc = window.__cbwrtc_pc; if (!pc) return -1;
+        const s = await pc.getStats(); let b = 0;
+        s.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio')
+            b = Math.max(b, r.bytesReceived || 0); });
+        return b; })()""")
+    check("inbound AUDIO bytes reach the client",
+          audio_bytes is not None and audio_bytes > 0,
+          f"inbound-rtp audio bytesReceived={audio_bytes} — the guest offers "
+          f"an audio track; zero bytes means the send side is silent "
+          f"(see docs/findings/audio-dies-after-first-rearm.md)",
+          pass_detail=f"{audio_bytes} bytes")
+
+    # The unmute control. Clicked, not just present: a button that exists
+    # and does nothing is exactly the state this replaced.
+    muted_before = client.cdp.eval(
+        "String(document.getElementById('remote').muted)")
+    check("the stream starts muted (autoplay policy requires it)",
+          muted_before == "true",
+          f"video.muted={muted_before!r} — an unmuted autoplay is refused "
+          f"by the browser and stalls the whole stream, not just audio")
+    client.cdp.eval("""(() => {
+        const b = document.getElementById('audio-toggle');
+        if (b && !b.disabled) b.dispatchEvent(
+            new MouseEvent('click', {bubbles: true, cancelable: true}));
+        return 1; })()""")
+    ok_unmuted, state = _poll(
+        lambda: client.cdp.eval(
+            "document.getElementById('remote').muted ? 'muted' : 'audible'"),
+        lambda v: v == "audible", timeout=10)
+    check("the Unmute button actually unmutes the stream", ok_unmuted,
+          f"video.muted is still true after the click (state={state!r}) — "
+          f"either the button is absent from the served bundle (stale "
+          f"gateway) or play() was refused")
+    if ok_unmuted:
+        label = client.cdp.eval(
+            "document.getElementById('audio-toggle').textContent") or ""
+        check("the button relabels itself to Mute", "Mute" in label,
+              f"label is {label.strip()!r} — a control that lies about its "
+              f"own state is worse than none",
+              pass_detail=label.strip())
+
     bytes_recv = client.cdp.eval("""(async () => {
         const pc = window.__cbwrtc_pc; if (!pc) return -1;
         const s = await pc.getStats(); let n = 0;

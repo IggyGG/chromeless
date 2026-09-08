@@ -71,6 +71,10 @@ const els = {
   dc: $<HTMLElement>("state-dc"),
   // T81: webcam/mic passthrough toggle. Disabled until a pc is up.
   passthrough: $<HTMLButtonElement>("passthrough-toggle"),
+  // Unmute. The guest sends audio from the first session; until this
+  // existed the <video> was hard-muted with no control, so it was decoded
+  // and discarded.
+  audio: $<HTMLButtonElement>("audio-toggle"),
   // Address bar. Navigation goes over HTTP to the gateway, not over the peer
   // connection — see src/navigate.ts.
   addressBar: $<HTMLFormElement>("addressbar"),
@@ -191,6 +195,10 @@ function dropAttachments(): void {
   attach = emptyAttachments();
   els.dc.textContent = "—";
   setPassthroughButtonState("off", true);
+  // Nothing to hear between sessions. The MUTE STATE is left alone on
+  // purpose — a reconnect must not silently re-mute a user who unmuted, so
+  // only the control is disabled, not the preference behind it.
+  els.audio.disabled = true;
 }
 
 function wireDataChannel(dc: RTCDataChannel): void {
@@ -455,6 +463,11 @@ function connect(sessionId: string): void {
       const enabled = attach.passthrough?.getState().enabled ?? false;
       setPassthroughButtonState(enabled ? "on" : "off", false);
       setNavEnabled(true);
+      // Only offer sound once there is a session to hear. The mute state
+      // itself is deliberately NOT reset on reconnect: a user who unmuted
+      // should not be re-muted by a broker blip.
+      els.audio.disabled = false;
+      syncAudioButton();
       // The button reads "Disconnect" from the moment connect() ran, but it
       // was left DISABLED until `closed` — so it could never be pressed while
       // a session existed, and the `if (session)` branch of its click handler
@@ -469,6 +482,7 @@ function connect(sessionId: string): void {
     } else if (st === "failed") {
       setPassthroughButtonState("off", true);
       setNavEnabled(false);
+      els.audio.disabled = true;
       // A failed connect used to leave a disabled "Disconnect" and no way
       // back but a reload. Let the user end it and try again.
       els.connect.disabled = false;
@@ -591,6 +605,46 @@ function setPassthroughButtonState(state: "off" | "pending" | "on", disabled: bo
     : state === "pending" ? "Requesting…"
     :                     "Share camera/mic";
 }
+
+/**
+ * Mute state lives on the <video>, not in a variable — the element is the
+ * single source of truth, and a user who mutes via the browser's own media
+ * controls must not leave the button lying.
+ */
+function syncAudioButton(): void {
+  const muted = els.video.muted || els.video.volume === 0;
+  els.audio.dataset["state"] = muted ? "muted" : "on";
+  els.audio.textContent = muted ? "🔇 Unmute" : "🔊 Mute";
+  els.audio.title = muted
+    ? "Unmute the cloud browser's audio"
+    : "Mute the cloud browser's audio";
+}
+
+els.audio.addEventListener("click", () => {
+  const v = els.video;
+  const unmuting = v.muted || v.volume === 0;
+  v.muted = !unmuting;
+  if (unmuting && v.volume === 0) v.volume = 1;
+  syncAudioButton();
+  // Unmuting can require a fresh play(): a stream that began muted may be
+  // paused by the autoplay policy the instant it gains an audible track.
+  // This click IS the user gesture that makes the retry allowed, so it has
+  // to happen here and not on a later tick.
+  if (unmuting) {
+    void v.play().catch((err: unknown) => {
+      log("warn", "audio: the browser refused to play with sound", String(err));
+      // Leave the button honest rather than claiming sound the user
+      // cannot hear.
+      v.muted = true;
+      syncAudioButton();
+    });
+  }
+  log("info", `audio: ${unmuting ? "unmuted" : "muted"}`);
+});
+
+// The element can be muted from outside our button (the browser's own
+// media controls, or another script). Keep the label truthful.
+els.video.addEventListener("volumechange", syncAudioButton);
 
 els.passthrough.addEventListener("click", async () => {
   const pc = session?.getPeerConnection();

@@ -321,6 +321,18 @@
               title="Share your camera + microphone with the cloud browser">
         Share camera/mic
       </button>
+      <!-- The guest has always SENT an audio track; the <video> below was
+           hard-muted with no way to unmute, so every byte of it was
+           decoded and thrown away. Muted is still the startup state — a
+           page that autoplays with sound is refused by Chrome's autoplay
+           policy and the whole stream stalls, not just the audio — but it
+           is now a state the user can leave. -->
+      <button id="audio-toggle"
+              data-state="muted"
+              disabled
+              title="Unmute the cloud browser's audio">
+        🔇 Unmute
+      </button>
     </header>
     <!--
       Address bar. Navigation does NOT ride the peer connection: this posts to
@@ -345,6 +357,12 @@
     </form>
     <main>
       <div class="stage" id="stage">
+        <!-- `muted` is REQUIRED here, not a preference: autoplay with
+             sound is blocked by every browser's autoplay policy, and the
+             failure is not "no audio" but a play() rejection that leaves
+             the whole video stalled. The Unmute button above clears it
+             from a real user gesture, which is exactly what the policy
+             asks for. -->
         <video id="remote" autoplay playsinline muted></video>
       </div>
       <aside>
