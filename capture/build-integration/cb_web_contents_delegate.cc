@@ -8,11 +8,15 @@
 #include <tuple>
 #include <utility>
 
+// base::BindOnce for the file-chooser control request's reply callback.
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/values.h"
 #include "base/no_destructor.h"
 #include "base/strings/utf_string_conversions.h"
 #include "capture/build-integration/cb_control_channel.h"
+// CV2-UPLOAD: RunFileChooser parks the listener on the receiver.
+#include "capture/build-integration/cb_file_upload_receiver.h"
 #include "capture/build-integration/cb_javascript_dialog_manager.h"
 #include "content/public/browser/devtools_agent_host.h"
 // MediaResponseCallback + the blink mediastream types it names
@@ -113,6 +117,87 @@ void CbWebContentsDelegate::SendTabEvent(const char* kind,
   payload.Set("url", wc->GetLastCommittedURL().possibly_invalid_spec());
   payload.Set("title", base::UTF16ToUTF8(wc->GetTitle()));
   control_channel_->SendEvent(kind, std::move(payload));
+}
+
+void CbWebContentsDelegate::SetFileUploadReceiver(
+    CbFileUploadReceiver* receiver) {
+  file_upload_receiver_ = receiver;
+}
+
+void CbWebContentsDelegate::RunFileChooser(
+    content::RenderFrameHost* render_frame_host,
+    scoped_refptr<content::FileSelectListener> listener,
+    const blink::mojom::FileChooserParams& params) {
+  // The listener MUST be resolved exactly once before it is released
+  // (api-pins: content::FileSelectListener), so every branch below ends in
+  // FileSelected or FileSelectionCanceled — including the ones where there
+  // is nobody to ask.
+  if (!file_upload_receiver_) {
+    LOG(WARNING) << "CV2-UPLOAD: file chooser with no receiver wired; "
+                    "cancelling (the page sees 'no file selected')";
+    listener->FileSelectionCanceled();
+    return;
+  }
+  // Directory and "save as" modes have no upload path: the client sends one
+  // file's bytes, which cannot express either. Cancelling is the honest
+  // answer — the page gets what it would get from a human who closed the
+  // dialog, rather than a file it did not ask for.
+  if (params.mode != blink::mojom::FileChooserParams::Mode::kOpen &&
+      params.mode != blink::mojom::FileChooserParams::Mode::kOpenMultiple) {
+    LOG(INFO) << "CV2-UPLOAD: file chooser mode "
+              << static_cast<int>(params.mode)
+              << " is not supported over the wire; cancelling";
+    listener->FileSelectionCanceled();
+    return;
+  }
+
+  file_upload_receiver_->BeginChooser(std::move(listener), params.mode);
+
+  if (!control_channel_) {
+    // The receiver holds the listener; without a control channel the viewer
+    // is never asked, so nothing will ever arrive. Resolve it now rather
+    // than leaving the page's <input> hanging for the chooser deadline.
+    LOG(WARNING) << "CV2-UPLOAD: no control channel; cancelling the chooser";
+    file_upload_receiver_->CancelChooser();
+    return;
+  }
+
+  // Tell the viewer what the page asked for. `accept` is advisory — the
+  // client uses it to filter its own picker; nothing here enforces it,
+  // because the page's own validation is what matters and a guest-side
+  // filter would only disagree with it.
+  base::DictValue payload;
+  base::ListValue accept;
+  for (const auto& type : params.accept_types) {
+    accept.Append(base::UTF16ToUTF8(type));
+  }
+  payload.Set("accept", std::move(accept));
+  payload.Set("multiple",
+              params.mode ==
+                  blink::mojom::FileChooserParams::Mode::kOpenMultiple);
+  payload.Set("title", base::UTF16ToUTF8(params.title));
+  control_channel_->SendRequest(
+      "file_chooser", std::move(payload), kFileChooserDeadline,
+      base::BindOnce(
+          [](base::WeakPtr<CbFileUploadReceiver> receiver,
+             base::DictValue response) {
+            // `accept` is the field name every other control kind uses
+            // (client/src/control.ts ControlResponseData, and the dialog
+            // manager's FindBool("accept")). accept=true means "an upload is
+            // coming" — do nothing and let it resolve the chooser. Anything
+            // else, including the empty dict the channel synthesises on a
+            // closed channel or a timeout, means nobody is sending a file.
+            //
+            // This is NOT the only thing that bounds the wait: the receiver
+            // runs its own deadline, because a client that answers
+            // accept=true and then fails mid-upload would otherwise leave the
+            // listener parked with nothing left to resolve it.
+            const std::optional<bool> accept = response.FindBool("accept");
+            if (receiver && !accept.value_or(false)) {
+              receiver->CancelChooser();
+            }
+          },
+          file_upload_receiver_->AsWeakPtr()));
 }
 
 void CbWebContentsDelegate::CloseContents(content::WebContents* source) {

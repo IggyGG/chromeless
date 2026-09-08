@@ -18,7 +18,11 @@
 import { InputChannel } from "./src/input.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
-import { attachControlChannel, type ControlChannelHandle } from "./src/control.js";
+import {
+  attachControlChannel,
+  type ControlChannelHandle,
+  type FileChooserRequest,
+} from "./src/control.js";
 import { ClipboardChannel } from "./src/clipboard.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { resolveSignalingUrl } from "./src/config.js";
@@ -246,10 +250,89 @@ function wireCursorChannel(dc: RTCDataChannel): void {
  */
 function wireControlChannel(dc: RTCDataChannel): void {
   attach.control?.dispose();
-  attach.control = attachControlChannel(dc, { log });
+  attach.control = attachControlChannel(dc, { log, onFileChooser: pickAndUpload });
   dc.addEventListener("close", () => {
     try { attach.control?.dispose(); } catch { /* ignore */ }
     attach.control = null;
+  });
+}
+
+/**
+ * The streamed page opened <input type=file>. Show the viewer a real file
+ * picker, then send the chosen file over the "files" channel — the guest
+ * hands it to the page's own input.
+ *
+ * Returns true once the upload has STARTED, which is the answer the guest
+ * needs: "a file is coming, keep the chooser parked". We do not wait for the
+ * upload to finish, because a 100 MB file over a slow link would otherwise
+ * hold the control request open past its deadline and the guest would cancel
+ * a chooser that was about to be satisfied.
+ *
+ * Why a click-triggered <input> and not a drop zone: browsers only open a
+ * file dialog from a user gesture, and this call arrives from the network.
+ * So we show our own button and let the viewer's click be the gesture.
+ */
+async function pickAndUpload(req: FileChooserRequest): Promise<boolean> {
+  const fc = attach.fileUpload;
+  if (!fc) {
+    log("warn", "file_chooser: no files channel — declining");
+    return false;
+  }
+  const file = await promptForFile(req);
+  if (!file) {
+    log("info", "file_chooser: viewer chose nothing");
+    return false;
+  }
+  log("info", "→ file_upload start (page chooser)", { name: file.name, size: file.size });
+  const handle = fc.uploadFile(file);
+  // Report the outcome, but do not make the guest wait for it.
+  void handle.done.then(
+    (r) => log("ok", "← file_upload_complete", r),
+    (err) => log("err", "file_upload failed", err instanceof FileUploadError
+      ? `code=${err.code} ${err.message}` : String(err)),
+  );
+  return true;
+}
+
+/**
+ * Mount a one-shot "the page wants a file" bar and resolve with what the
+ * viewer picks, or null if they dismiss it.
+ *
+ * ALWAYS resolves. A bar that could resolve zero times would leave the page
+ * blocked until the guest's five-minute deadline, with nothing on screen to
+ * explain it.
+ */
+function promptForFile(req: FileChooserRequest): Promise<File | null> {
+  return new Promise((resolve) => {
+    const bar = document.createElement("div");
+    bar.className = "cb-filepick";
+    const label = document.createElement("span");
+    label.className = "cb-filepick-label";
+    label.textContent = req.title || "The page is asking for a file";
+    const input = document.createElement("input");
+    input.type = "file";
+    input.className = "cb-filepick-input";
+    if (req.accept.length > 0) input.accept = req.accept.join(",");
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cb-filepick-cancel";
+    cancel.textContent = "Cancel";
+
+    let settled = false;
+    const finish = (f: File | null): void => {
+      if (settled) return;
+      settled = true;
+      try { bar.remove(); } catch { /* ignore */ }
+      resolve(f);
+    };
+    input.addEventListener("change", () => finish(input.files?.[0] ?? null));
+    cancel.addEventListener("click", () => finish(null));
+
+    bar.append(label, input, cancel);
+    document.body.appendChild(bar);
+    // Chrome will not open the dialog without a gesture, so this is an
+    // affordance the viewer clicks, not an input we can click for them.
+    input.focus();
   });
 }
 

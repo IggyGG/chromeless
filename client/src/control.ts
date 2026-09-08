@@ -47,6 +47,15 @@ export interface ControlRequestData {
   default_prompt?: string;
   origin?: string;
   is_reload?: boolean;
+  // file_chooser payload — present when kind === "file_chooser". The page
+  // clicked <input type=file>; the guest has parked chromium's
+  // FileSelectListener and is waiting for us to send bytes on the "files"
+  // channel. `accept` mirrors the input's accept attribute and is advisory:
+  // the page's own validation is what decides, so filtering here could only
+  // disagree with it.
+  accept?: string[];
+  multiple?: boolean;
+  title?: string;
 }
 
 export interface ControlRequestEnvelope {
@@ -59,6 +68,10 @@ export interface ControlRequestEnvelope {
 
 export interface ControlResponseData {
   id: string;
+  // For js_dialog: the user pressed OK. For file_chooser: a file is on its
+  // way over the "files" channel. In BOTH cases `false` or an absent field
+  // means "resolve with your default" — for the chooser that is the page
+  // seeing "no file selected", exactly as if a human had closed the picker.
   accept?: boolean;
   prompt_text?: string;
 }
@@ -144,11 +157,28 @@ export interface ControlChannelHandle {
   handleFrameForTesting(raw: string): void;
 }
 
+// What the guest told us about the file input the page opened.
+export interface FileChooserRequest {
+  id: string;
+  // MIME types / extensions from the input's accept attribute. Advisory.
+  accept: string[];
+  multiple: boolean;
+  title: string;
+}
+
 export interface AttachControlOptions {
   // Where to mount the prompt. Defaults to document.body.
   mount?: HTMLElement;
   // Injectable for tests; defaults to the DOM renderer below.
   present?: (prompt: ControlPrompt, respond: (r: ControlResponseData) => void) => () => void;
+  // Called when the streamed page opens a file picker. Return true if a
+  // file is being sent on the "files" channel, false to decline — the
+  // page then sees "no file selected".
+  //
+  // Absent, every chooser is declined. That is the honest default: without
+  // a picker on this side there is no file to send, and leaving the guest
+  // to wait out its five-minute deadline would look like a frozen page.
+  onFileChooser?: (req: FileChooserRequest) => Promise<boolean> | boolean;
   log?: (level: SessionLogLevel, msg: string, extra?: unknown) => void;
 }
 
@@ -304,6 +334,7 @@ export function attachControlChannel(
   opts: AttachControlOptions = {},
 ): ControlChannelHandle {
   const log = opts.log ?? (() => {});
+  const onFileChooser = opts.onFileChooser;
   const mount = opts.mount ?? (typeof document !== "undefined" ? document.body : null);
   const present =
     opts.present ??
@@ -372,10 +403,41 @@ export function attachControlChannel(
 
     const d = parsed.data;
 
-    // Only js_dialog has a producer today. An unknown kind is DECLINED
-    // explicitly rather than ignored: the guest is blocking on it, and an
-    // empty-dict response makes it apply its safe default immediately
-    // instead of waiting out the full deadline.
+    // The page opened <input type=file>. The guest is holding chromium's
+    // FileSelectListener and will not let the page proceed until we answer.
+    if (d.kind === "file_chooser") {
+      const req: FileChooserRequest = {
+        id: d.id,
+        accept: Array.isArray(d.accept)
+          ? d.accept.filter((a): a is string => typeof a === "string")
+          : [],
+        multiple: d.multiple === true,
+        title: clampText(d.title),
+      };
+      if (!onFileChooser) {
+        log("warn", "control: file_chooser with no handler — declining");
+        send({ id: d.id, accept: false });
+        return;
+      }
+      // Resolve the promise into a single response. A handler that throws
+      // must still produce an answer, or the page waits out the guest's
+      // deadline staring at a picker that already closed.
+      void (async () => {
+        let accepted = false;
+        try {
+          accepted = (await onFileChooser(req)) === true;
+        } catch (err) {
+          log("err", `control: file_chooser handler threw: ${String(err)}`);
+        }
+        send({ id: d.id, accept: accepted });
+      })();
+      return;
+    }
+
+    // Only js_dialog and file_chooser have producers today. An unknown kind
+    // is DECLINED explicitly rather than ignored: the guest is blocking on
+    // it, and an empty-dict response makes it apply its safe default
+    // immediately instead of waiting out the full deadline.
     if (d.kind !== "js_dialog") {
       log("warn", `control: declining unsupported kind "${d.kind}"`);
       send({ id: d.id });

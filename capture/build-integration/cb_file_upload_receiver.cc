@@ -1,0 +1,511 @@
+// Copyright 2026 The Cloud Browser WebRTC Authors. All rights reserved.
+
+#include "capture/build-integration/cb_file_upload_receiver.h"
+
+#include <utility>
+
+#include "base/base64.h"
+// base::as_byte_span — the sha256 helper hashes a std::string as bytes.
+#include "base/containers/span.h"
+#include "base/files/file_util.h"
+#include "base/functional/bind.h"
+#include "base/json/json_reader.h"
+#include "base/json/json_writer.h"
+#include "base/location.h"
+#include "base/logging.h"
+#include "base/strings/string_number_conversions.h"
+// base::ToLowerASCII — the client's declared digest is normalised before
+// it is compared against ours.
+#include "base/strings/string_util.h"
+#include "base/strings/utf_string_conversions.h"
+#include "base/task/thread_pool.h"
+#include "crypto/hash.h"
+
+namespace cloud_browser {
+namespace {
+
+constexpr char kLog[] = "CV2-UPLOAD: ";
+constexpr int kProtocolVersion = 1;
+
+// Everything the client can put in `name` becomes one path component, and
+// nothing in it can escape the directory. Not a "sanitiser" in the sense of
+// trying to preserve intent — a deliberate reduction to [A-Za-z0-9._-].
+std::string SafeComponent(std::string_view raw) {
+  std::string out;
+  out.reserve(raw.size());
+  for (const char c : raw) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    out.push_back(ok ? c : '_');
+  }
+  if (out.empty() || out == "." || out == "..") {
+    out = "upload";
+  }
+  if (out.size() > 128) {
+    out.resize(128);
+  }
+  return out;
+}
+
+// The upload_id is used as a directory-name prefix, so it gets the same
+// treatment. The client generates a UUID; a peer that does not is still
+// harmless.
+std::string SafeId(std::string_view raw) {
+  std::string out = SafeComponent(raw);
+  if (out.size() > 64) {
+    out.resize(64);
+  }
+  return out;
+}
+
+// Blocking. Appends |bytes| to |path|, creating it on the first chunk.
+bool AppendChunk(const base::FilePath& path, const std::string& bytes) {
+  if (!base::CreateDirectory(path.DirName())) {
+    return false;
+  }
+  return base::AppendToFile(path, bytes);
+}
+
+// Blocking. Reads the finished file back and returns its SHA-256 as
+// lowercase hex, plus its size. Reading it back (rather than hashing the
+// chunks as they arrive) is deliberate: it verifies what is ON DISK, which
+// is what will be handed to the page.
+std::string HashFile(const base::FilePath& path, int64_t* size_out) {
+  std::string contents;
+  if (!base::ReadFileToString(path, &contents)) {
+    return std::string();
+  }
+  *size_out = static_cast<int64_t>(contents.size());
+  const auto digest = crypto::hash::Sha256(base::as_byte_span(contents));
+  return base::ToLowerASCII(base::HexEncode(digest));
+}
+
+}  // namespace
+
+CbFileUploadReceiver::CbFileUploadReceiver(
+    signaling::CbDataChannelHost* dc_host,
+    base::FilePath profile_dir,
+    scoped_refptr<base::SequencedTaskRunner> ui_runner)
+    : dc_host_(dc_host),
+      uploads_dir_(profile_dir.Append(FILE_PATH_LITERAL("Uploads"))),
+      ui_runner_(std::move(ui_runner)),
+      io_runner_(base::ThreadPool::CreateSequencedTaskRunner(
+          {base::MayBlock(), base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN})) {
+  LOG(INFO) << kLog << "receiver bound — uploads land in "
+            << uploads_dir_.value() << " (max " << (kMaxUploadBytes >> 20)
+            << " MiB per file, " << (kMaxSessionUploadBytes >> 20)
+            << " MiB per session)";
+}
+
+CbFileUploadReceiver::~CbFileUploadReceiver() {
+  // The listener contract outlives us: a parked chooser MUST be resolved.
+  CancelChooser();
+}
+
+void CbFileUploadReceiver::BeginChooser(
+    scoped_refptr<content::FileSelectListener> listener,
+    blink::mojom::FileChooserParams::Mode mode) {
+  // A page that opens a second chooser has abandoned the first, and the
+  // first's listener still has to be resolved or chromium CHECKs on release.
+  CancelChooser();
+  pending_listener_ = std::move(listener);
+  pending_mode_ = mode;
+  // Bound the park HERE. The control-channel request the delegate sends has
+  // its own deadline, but it is cancelled as soon as the viewer answers — so
+  // a viewer who says "sending a file" and then closes the tab would leave
+  // this listener parked forever, and the page's <input type=file> would
+  // never fire change and never can. Unretained: the timer is a member and
+  // stops in the destructor.
+  chooser_deadline_.Start(
+      FROM_HERE, kFileChooserDeadline,
+      base::BindOnce(
+          [](CbFileUploadReceiver* self) {
+            LOG(WARNING) << kLog
+                         << "no upload arrived within the chooser deadline; "
+                            "cancelling so the page is not left waiting";
+            self->CancelChooser();
+          },
+          base::Unretained(this)));
+  LOG(INFO) << kLog << "file chooser parked; awaiting an upload from the "
+                       "viewer";
+}
+
+void CbFileUploadReceiver::CancelChooser() {
+  // Stop unconditionally: BeginChooser calls this to displace an earlier
+  // chooser, and a live timer from that one would otherwise fire against
+  // the NEW listener at the old deadline.
+  chooser_deadline_.Stop();
+  if (!pending_listener_) {
+    return;
+  }
+  scoped_refptr<content::FileSelectListener> listener =
+      std::move(pending_listener_);
+  pending_listener_ = nullptr;
+  listener->FileSelectionCanceled();
+  LOG(INFO) << kLog << "file chooser cancelled (no file selected)";
+}
+
+void CbFileUploadReceiver::ResetForNewSession() {
+  CancelChooser();
+  uploads_.clear();
+  session_bytes_ = 0;
+  // Fire-and-forget: the next session's writes create the directory again.
+  io_runner_->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](const base::FilePath& dir) {
+                       base::DeletePathRecursively(dir);
+                     },
+                     uploads_dir_));
+  LOG(INFO) << kLog << "Uploads/ wiped for the next viewer";
+}
+
+void CbFileUploadReceiver::OnMessage(const webrtc::DataBuffer& buffer) {
+  if (buffer.binary) {
+    LOG(WARNING) << kLog << "binary frame on the files channel — v1 is JSON "
+                            "text; dropped";
+    return;
+  }
+  std::string json(reinterpret_cast<const char*>(buffer.data.data()),
+                   buffer.data.size());
+  // Hop to the UI sequence: everything below touches uploads_, the listener,
+  // and chromium objects that are UI-thread-only.
+  ui_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&CbFileUploadReceiver::HandleEnvelope,
+                     weak_factory_.GetWeakPtr(), std::move(json)));
+}
+
+void CbFileUploadReceiver::OnEnvelopeForTesting(const std::string& json) {
+  HandleEnvelope(json);
+}
+
+void CbFileUploadReceiver::HandleEnvelope(const std::string& json) {
+  std::optional<base::DictValue> parsed = base::JSONReader::ReadDict(json);
+  if (!parsed) {
+    LOG(WARNING) << kLog << "inbound frame is not a JSON object — dropped";
+    return;
+  }
+  const std::optional<int> v = parsed->FindInt("v");
+  const std::string* type = parsed->FindString("type");
+  if (!v || *v != kProtocolVersion || !type) {
+    LOG(WARNING) << kLog << "envelope is not a v1 file_upload_* frame — "
+                            "dropped";
+    return;
+  }
+  if (*type == "file_upload_start") {
+    HandleStart(*parsed);
+  } else if (*type == "file_upload_chunk") {
+    HandleChunk(*parsed);
+  } else if (*type == "file_upload_end") {
+    HandleEnd(*parsed);
+  } else if (*type == "file_upload_cancel") {
+    HandleCancel(*parsed);
+  } else {
+    VLOG(1) << kLog << "ignoring inbound type " << *type;
+  }
+}
+
+void CbFileUploadReceiver::HandleStart(const base::DictValue& data) {
+  const std::string* id = data.FindString("upload_id");
+  const std::string* name = data.FindString("name");
+  const std::string* sha = data.FindString("sha256");
+  const std::optional<double> size = data.FindDouble("size");
+  if (!id || !name || !sha || !size) {
+    LOG(WARNING) << kLog << "file_upload_start missing a required field";
+    return;
+  }
+  const std::string upload_id = SafeId(*id);
+  const int64_t declared = static_cast<int64_t>(*size);
+
+  if (declared <= 0 || declared > kMaxUploadBytes) {
+    ReplyError(upload_id, "too_large",
+               "file is " + base::NumberToString(declared) +
+                   " bytes; the limit is " +
+                   base::NumberToString(kMaxUploadBytes));
+    return;
+  }
+  if (session_bytes_ + declared > kMaxSessionUploadBytes) {
+    ReplyError(upload_id, "session_quota",
+               "this session has already uploaded " +
+                   base::NumberToString(session_bytes_) +
+                   " bytes; the limit is " +
+                   base::NumberToString(kMaxSessionUploadBytes));
+    return;
+  }
+
+  Upload up;
+  up.name = SafeComponent(*name);
+  up.display_name = base::UTF8ToUTF16(*name);
+  up.sha256 = base::ToLowerASCII(*sha);
+  up.declared_size = declared;
+  // The ONLY place a path is built. upload_id and name are both reduced to a
+  // single safe component first; nothing from the wire reaches the
+  // filesystem verbatim.
+  up.path = uploads_dir_.AppendASCII(upload_id + "__" + up.name);
+  LOG(INFO) << kLog << "upload " << upload_id << " starting: " << up.name
+            << " (" << declared << " bytes) -> " << up.path.value();
+  uploads_[upload_id] = std::move(up);
+}
+
+void CbFileUploadReceiver::HandleChunk(const base::DictValue& data) {
+  const std::string* id = data.FindString("upload_id");
+  const std::string* b64 = data.FindString("data");
+  const std::optional<int> seq = data.FindInt("seq");
+  if (!id || !b64 || !seq) {
+    return;
+  }
+  const std::string upload_id = SafeId(*id);
+  auto it = uploads_.find(upload_id);
+  if (it == uploads_.end()) {
+    VLOG(1) << kLog << "chunk for unknown upload " << upload_id << " — the "
+            << "upload was cancelled or never started; dropped";
+    return;
+  }
+  Upload& up = it->second;
+  if (*seq != up.next_seq) {
+    // The data channel is ordered, so this means frames were lost or the
+    // client is buggy. Either way the file would be wrong; fail loudly
+    // rather than write corrupt bytes and fail the hash later.
+    AbandonUpload(it, "out_of_order",
+                  "expected seq " + base::NumberToString(up.next_seq) +
+                      ", got " + base::NumberToString(*seq));
+    return;
+  }
+  std::string bytes;
+  if (!base::Base64Decode(*b64, &bytes)) {
+    AbandonUpload(it, "bad_base64", "chunk did not decode");
+    return;
+  }
+  const int64_t chunk_bytes = static_cast<int64_t>(bytes.size());
+  if (up.received + chunk_bytes > up.declared_size) {
+    AbandonUpload(it, "too_large",
+                  "more bytes arrived than the declared size");
+    return;
+  }
+  ++up.next_seq;
+  // Count the chunk NOW, before the write is even queued. This is the
+  // running total the size guard above tests against and the number
+  // file_upload_progress reports, and it must be the DECODED length —
+  // counting the base64 (as an earlier draft did by passing b64->size()
+  // through to the reply) overstates every file by a third, and leaving it
+  // at zero (as the same draft did, by never incrementing it at all) makes
+  // the guard test 0 > declared_size on every chunk, i.e. never fire.
+  up.received += chunk_bytes;
+  const base::FilePath path = up.path;
+  io_runner_->PostTaskAndReplyWithResult(
+      FROM_HERE, base::BindOnce(&AppendChunk, path, std::move(bytes)),
+      base::BindOnce(&CbFileUploadReceiver::OnChunkWritten,
+                     weak_factory_.GetWeakPtr(), upload_id, chunk_bytes));
+}
+
+void CbFileUploadReceiver::AbandonUpload(
+    std::map<std::string, Upload>::iterator it,
+    const std::string& code,
+    const std::string& message) {
+  const std::string upload_id = it->first;
+  const base::FilePath path = it->second.path;
+  uploads_.erase(it);
+  io_runner_->PostTask(FROM_HERE, base::GetDeleteFileCallback(path));
+  ReplyError(upload_id, code, message);
+}
+
+void CbFileUploadReceiver::OnChunkWritten(std::string upload_id,
+                                          int64_t /*chunk_bytes*/,
+                                          bool ok) {
+  auto it = uploads_.find(upload_id);
+  if (it == uploads_.end()) {
+    return;
+  }
+  if (!ok) {
+    AbandonUpload(it, "write_failed",
+                  "could not write to " + it->second.path.value());
+    return;
+  }
+  // Progress is best-effort per the spec; the client falls back to its own
+  // bytes-sent count. Report what is actually on disk after each chunk.
+  ReplyProgress(upload_id, it->second.received, it->second.declared_size);
+}
+
+void CbFileUploadReceiver::HandleEnd(const base::DictValue& data) {
+  const std::string* id = data.FindString("upload_id");
+  if (!id) {
+    return;
+  }
+  const std::string upload_id = SafeId(*id);
+  auto it = uploads_.find(upload_id);
+  if (it == uploads_.end()) {
+    return;
+  }
+  const base::FilePath path = it->second.path;
+  io_runner_->PostTaskAndReplyWithResult(
+      FROM_HERE,
+      base::BindOnce(
+          [](const base::FilePath& p) {
+            int64_t size = 0;
+            std::string hash = HashFile(p, &size);
+            return std::make_pair(std::move(hash), size);
+          },
+          path),
+      base::BindOnce(
+          [](base::WeakPtr<CbFileUploadReceiver> self, std::string id,
+             base::FilePath p, std::pair<std::string, int64_t> result) {
+            if (!self) {
+              return;
+            }
+            self->OnFinalised(std::move(id), std::move(p),
+                              std::move(result.first), result.second,
+                              !result.first.empty());
+          },
+          weak_factory_.GetWeakPtr(), upload_id, path));
+}
+
+void CbFileUploadReceiver::OnFinalised(std::string upload_id,
+                                       base::FilePath path,
+                                       std::string actual_sha256,
+                                       int64_t total_bytes,
+                                       bool ok) {
+  auto it = uploads_.find(upload_id);
+  if (it == uploads_.end()) {
+    return;
+  }
+  const Upload up = it->second;
+
+  // Every rejection below leaves bytes on disk that nothing will ever read,
+  // so each goes through AbandonUpload (erase + delete + reply) rather than
+  // a bare ReplyError. An upload that fails its hash ten times must not cost
+  // ten files' worth of the guest's disk, and the session quota credited
+  // below only counts uploads that SUCCEEDED, so nothing else bounds a
+  // retry loop.
+  if (!ok) {
+    AbandonUpload(it, "write_failed", "could not read the file back");
+    return;
+  }
+  if (total_bytes != up.declared_size) {
+    AbandonUpload(it, "truncated",
+                  "expected " + base::NumberToString(up.declared_size) +
+                      " bytes, have " + base::NumberToString(total_bytes));
+    return;
+  }
+  if (!up.sha256.empty() && actual_sha256 != up.sha256) {
+    // The client hashes what it read off the disk; we hash what landed on
+    // ours. A mismatch means the bytes changed in transit, and handing a
+    // corrupt file to the page is worse than failing the upload.
+    AbandonUpload(it, "hash_mismatch",
+                  "expected " + up.sha256 + ", got " + actual_sha256);
+    return;
+  }
+  // Committed: past every rejection, so the entry can go and the bytes stay.
+  uploads_.erase(it);
+  session_bytes_ += total_bytes;
+
+  const bool attached = ResolveChooserWith(path, up.display_name);
+  LOG(INFO) << kLog << "upload " << upload_id << " complete: " << total_bytes
+            << " bytes, sha ok, "
+            << (attached ? "attached to the page's file chooser"
+                         : "stored (no chooser was waiting)");
+  ReplyComplete(upload_id, path, attached);
+}
+
+bool CbFileUploadReceiver::ResolveChooserWith(
+    const base::FilePath& path,
+    const std::u16string& display_name) {
+  if (!pending_listener_) {
+    return false;
+  }
+  // The park is over — stop the deadline before it can fire against a
+  // listener we have already resolved.
+  chooser_deadline_.Stop();
+  scoped_refptr<content::FileSelectListener> listener =
+      std::move(pending_listener_);
+  pending_listener_ = nullptr;
+
+  // display_name is what the page reads as File.name. Passing it empty makes
+  // blink fall back to the base of file_path, which here is our sanitised
+  // "<upload_id>__<name>" — so a site that echoes the filename, or validates
+  // its extension after our sanitiser mangled it, sees the wrong thing.
+  // Read from file_chooser.mojom:88 on the pinned tree.
+  auto info = blink::mojom::FileChooserFileInfo::NewNativeFile(
+      blink::mojom::NativeFileInfo::New(path, display_name,
+                                        std::vector<std::u16string>()));
+  std::vector<blink::mojom::FileChooserFileInfoPtr> files;
+  files.push_back(std::move(info));
+  // base_dir is EMPTY for everything except kUploadFolder — the listener
+  // header is explicit ("This is an empty FilePath otherwise",
+  // file_select_listener.h:24). We reject kUploadFolder in the delegate, so
+  // it is always empty here; passing uploads_dir_ would advertise an
+  // enumeration root that does not describe this selection.
+  listener->FileSelected(std::move(files), base::FilePath(), pending_mode_);
+  return true;
+}
+
+void CbFileUploadReceiver::HandleCancel(const base::DictValue& data) {
+  const std::string* id = data.FindString("upload_id");
+  if (!id) {
+    return;
+  }
+  const std::string upload_id = SafeId(*id);
+  // The chooser goes first either way: a cancel for an upload we never saw
+  // still means "the viewer is not sending a file", and the page must not be
+  // left waiting on a chooser nobody will satisfy.
+  CancelChooser();
+  auto it = uploads_.find(upload_id);
+  if (it != uploads_.end()) {
+    AbandonUpload(it, "cancelled", "the viewer cancelled the upload");
+    return;
+  }
+  ReplyError(upload_id, "cancelled", "the viewer cancelled the upload");
+}
+
+void CbFileUploadReceiver::ReplyProgress(const std::string& upload_id,
+                                         int64_t got, int64_t total) {
+  base::DictValue env;
+  env.Set("v", kProtocolVersion);
+  env.Set("type", "file_upload_progress");
+  env.Set("upload_id", upload_id);
+  env.Set("bytes_received", static_cast<double>(got));
+  env.Set("bytes_total", static_cast<double>(total));
+  Send(std::move(env));
+}
+
+void CbFileUploadReceiver::ReplyComplete(const std::string& upload_id,
+                                         const base::FilePath& path,
+                                         bool attached) {
+  base::DictValue env;
+  env.Set("v", kProtocolVersion);
+  env.Set("type", "file_upload_complete");
+  env.Set("upload_id", upload_id);
+  env.Set("server_path", path.value());
+  env.Set("attached_via", attached ? "fileChooser" : "none");
+  Send(std::move(env));
+}
+
+void CbFileUploadReceiver::ReplyError(const std::string& upload_id,
+                                      const std::string& code,
+                                      const std::string& message) {
+  LOG(WARNING) << kLog << "upload " << upload_id << " failed (" << code
+               << "): " << message;
+  base::DictValue env;
+  env.Set("v", kProtocolVersion);
+  env.Set("type", "file_upload_error");
+  env.Set("upload_id", upload_id);
+  env.Set("code", code);
+  env.Set("error", message);
+  Send(std::move(env));
+}
+
+void CbFileUploadReceiver::Send(base::DictValue envelope) {
+  std::string json;
+  if (!base::JSONWriter::Write(envelope, &json)) {
+    LOG(ERROR) << kLog << "failed to serialise a reply envelope";
+    return;
+  }
+  dc_host_->SendAsync(
+      signaling::CbDcLabel::kFiles, std::move(json), ui_runner_,
+      base::BindOnce([](bool ok, std::string message) {
+        if (!ok) {
+          LOG(WARNING) << kLog << "reply not delivered: " << message;
+        }
+      }));
+}
+
+}  // namespace cloud_browser

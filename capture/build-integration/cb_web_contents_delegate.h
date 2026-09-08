@@ -53,8 +53,13 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
+// CV2-UPLOAD: RunFileChooser takes a scoped_refptr<FileSelectListener> and a
+// FileChooserParams by const ref, so both are part of this header's
+// interface — a forward declaration is not enough to override the virtual.
+#include "content/public/browser/file_select_listener.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_delegate.h"
+#include "third_party/blink/public/mojom/choosers/file_chooser.mojom.h"
 
 namespace aura {
 class Window;
@@ -63,6 +68,7 @@ class Window;
 namespace cloud_browser {
 
 class CbControlChannel;
+class CbFileUploadReceiver;  // CV2-UPLOAD
 class CbJavaScriptDialogManager;
 
 class CbWebContentsDelegate : public content::WebContentsDelegate {
@@ -101,6 +107,21 @@ class CbWebContentsDelegate : public content::WebContentsDelegate {
   // destroy (main_parts owns it), so a page closing it is reported and
   // ignored, as Chrome does for the last tab of a window.
   void CloseContents(content::WebContents* source) override;
+
+  // CV2-UPLOAD: a page opened <input type=file>. The default is a no-op,
+  // which is why file inputs did nothing at all: chromium hands us a
+  // FileSelectListener and, with no override, nobody ever resolves it.
+  // We park the listener on the receiver, ask the viewer over the control
+  // channel, and the upload that comes back on the files channel resolves
+  // it. See cb_file_upload_receiver.h for the whole flow.
+  void RunFileChooser(content::RenderFrameHost* render_frame_host,
+                      scoped_refptr<content::FileSelectListener> listener,
+                      const blink::mojom::FileChooserParams& params) override;
+
+  // CV2-UPLOAD: the receiver and the control channel this delegate needs.
+  // Both are owned by main_parts and re-created on every re-arm, so they
+  // are injected (nullptr on teardown) rather than held from construction.
+  void SetFileUploadReceiver(CbFileUploadReceiver* receiver);
 
   // Renderer-initiated navigations that content will otherwise drop.
   content::WebContents* OpenURLFromTab(
@@ -165,6 +186,7 @@ class CbWebContentsDelegate : public content::WebContentsDelegate {
 
   raw_ptr<aura::Window> aura_context_ = nullptr;
   raw_ptr<CbControlChannel> control_channel_ = nullptr;
+  raw_ptr<CbFileUploadReceiver> file_upload_receiver_ = nullptr;  // CV2-UPLOAD
 
   // Non-null while a tab believes it is fullscreen.
   raw_ptr<content::WebContents> fullscreen_contents_ = nullptr;
