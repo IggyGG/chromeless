@@ -33,7 +33,7 @@ import {
   goBack,
   goForward,
   reload,
-  currentUrl,
+  currentPage,
 } from "./src/navigate.js";
 import {
   ChromelessSession,
@@ -620,11 +620,17 @@ function setNavEnabled(enabled: boolean): void {
 
 /** Show what the remote browser is actually on, unless the user is typing. */
 async function syncAddressBar(): Promise<void> {
+  const page = await currentPage();
+  // The document title follows the remote page, so the viewer's browser tab
+  // says what they are looking at instead of "chromeless — v0 client" for
+  // every session. Done even when the address bar is skipped below.
+  document.title = page.title
+    ? `${page.title} — chromeless`
+    : "chromeless";
   // Never clobber a half-typed URL. The portal hit this: an async refresh
   // overwriting the input mid-keystroke makes the bar feel broken.
   if (document.activeElement === els.navUrl) return;
-  const url = await currentUrl();
-  if (url && url !== "about:blank") els.navUrl.value = url;
+  if (page.url && page.url !== "about:blank") els.navUrl.value = page.url;
 }
 
 async function runNav(
