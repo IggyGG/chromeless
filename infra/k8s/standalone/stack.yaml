@@ -259,13 +259,20 @@ spec:
           # earlier — measured), and the shared pulse ADM is pre-armed on
           # re-arm so libwebrtc attaches to a running capture instead of
           # running its own broken start. Supersedes:
-          # 2b738a70 (tag cr7727-071d0828f342, built from batch R at 071d082):
-          # a viewport resize no longer freezes the BeginFrame loop and aborts
-          # the GPU process; audio survives a re-arm (the shared pulse ADM is
-          # stopped explicitly); the worker redials the broker instead of
-          # waiting for the liveness probe to kill it. All three were measured
-          # broken on 5813600c the day before — see docs/findings/.
-          image: registry.triform.cloud/chromeless/chromeless@sha256:4a0fafe13b01cd0e670c6a9706836b2bb646a182c3c402dda66bc0f46c6e99a2
+          # e6589bd4 (tag cr7727-e0e029b5c6ac, built from batch B at e0e029b):
+          # `<input type=file>` works. Both halves were missing and both are
+          # here — a RunFileChooser override (without it chromium auto-
+          # cancelled the chooser before anything could be asked) and
+          # CbFileUploadReceiver replacing a relay whose WebSocket backend was
+          # never built, so every frame on the "files" channel was dropped.
+          #
+          # Carries everything in the previous pin (batch R: the resize no
+          # longer aborts the GPU, the worker redials the broker) — batch B
+          # was branched from it and it is merged as 30178cd.
+          #
+          # Lane verdict for this exact source: 639 steps, 0 failed,
+          # cloud_browser_worker and all 8 test targets linked.
+          image: registry.triform.cloud/chromeless/chromeless@sha256:e6589bd4bf172640df09084378b6cb3a3e08564c3c7a5dac403392bbb9193555
           env:
             - name: SESSION_ID
               value: dev
