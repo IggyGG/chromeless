@@ -7,7 +7,7 @@ hostPath of whichever node ran the variant.
 
 The manifest is a **template** — four fields are envsubst placeholders
 (`${CHROMELESS_KANIKO_TAG}`, `${KANIKO_NODE}`, `${KANIKO_VARIANT_LABEL}`, `${KANIKO_JOB_NAME}`). The
-**canonical apply path** is the wrapper script:
+**canonical create/recovery path** is the wrapper script:
 
 ```bash
 ./infra/k8s/chromeless-build/chromeless-kaniko-push.sh triform-7
@@ -33,14 +33,13 @@ script deliberately does **not** push. The push is split out so:
 
 - Registry credentials live in a single `registry-pull` Secret
   consumed only by this Job — the build container never sees them.
-- The BUGS-513 registry replica scale-down (see below) can be
-  performed without touching the long-running build Pod.
+- Registry failures can be diagnosed independently of the long-running build Pod.
 - Variant builds can complete in parallel; the pushes serialize
   through this single Job at operator-controlled cadence.
 
 A future T112 wiring would re-merge the push into the build Job as a
 sidecar container, at which point this manifest is deletable. Until
-then it's the canonical push path and is re-applied after every
+then it's the canonical push path and creates a distinct Job after each
 build cycle.
 
 ## Why the BLOCKING tag fix (auditable unique tags)
@@ -90,9 +89,9 @@ silent overwrites are impossible.
    # Expect: cr7727-<chromeless-sha>
    ```
 
-3. **(If needed) apply the BUGS-513 registry scale-to-1 workaround.**
-   See § BUGS-513 below. Skippable on the first push attempt; required
-   only if kaniko reports a 5xx on manifest PUT.
+3. **Retain any previous failure evidence.**
+   Check the terminal Job condition and registry response before using a
+   subsequent attempt. Registry errors alone do not justify changing replicas.
 
 4. **Fire the push via the wrapper.**
    ```bash
@@ -115,15 +114,19 @@ silent overwrites are impossible.
    # Expect: 200
    ```
 
-6. **(If you scaled the registry down) restore replicas** — see
-   § BUGS-513 below.
+6. **Commit both generated release files.**
+   The wrapper writes `build/guest-release.json` and the immutable worker digest
+   in `infra/k8s/standalone/stack.yaml`. Both must pass `make verify`.
 
 ## Recovering a failed or interrupted push
 
 Use the wrapper for every attempt. It preserves existing Jobs and refuses to
 create over them. A completed matching Job can regenerate its release record
 without repushing; rerun the same command with the same attempt number. The full
-source commit and registry digest must resolve before either tracked pin changes.
+source commit, registry digest and completed Job timestamp must resolve before
+either tracked pin changes. The generator recognizes tag and digest-only worker
+references and writes an immutable digest. Missing or unrecognized worker pins
+fail generation; the deployment lint also rejects stale digests and mutable tags.
 
 After a confirmed terminal failure, request the next bounded attempt:
 
@@ -173,38 +176,14 @@ the per-variant fields into a kustomize overlay set:
 combo is simpler than wiring four overlays and never breaks because
 each variant push is a discrete operator action.
 
-## BUGS-513 — registry replica scale-down workaround
+## Historical BUGS-513 registry fault
 
-The `registry` Deployment runs 2 replicas behind a ClusterIP
-Service for HA. Without `REGISTRY_HTTP_SECRET` shared across
-replicas (BUGS-513), an HTTP/2-multiplexed kaniko upload that hops
-between replicas during a single upload session 5xxs because the
-upload-UUID is opaque per-replica. The portable fix is to teach
-the registry to share its session secret; until that ships,
-operators scale the registry to 1 replica around the push.
-
-```bash
-# Pre-push: scale to 1 replica.
-kubectl -n registry scale deployment registry --replicas=1
-kubectl -n registry rollout status deployment registry --timeout=60s
-
-# Apply the kaniko-push Job (via wrapper).
-./infra/k8s/chromeless-build/chromeless-kaniko-push.sh triform-7
-
-# Post-push: restore HA.
-kubectl -n registry scale deployment registry --replicas=2
-kubectl -n registry rollout status deployment registry --timeout=60s
-```
-
-This dance is intentionally **not** baked into the manifest as
-init / poststop hooks. Coupling kaniko-push to cluster-admin
-operations on a different namespace mixes blast radii: a kaniko
-exit code mid-push leaves the registry stuck at 1 replica, and the
-poststop hook running on Pod failure is unreliable.
-
-If the workaround proves durable (still needed > 1 round from now),
-the right next step is fixing `REGISTRY_HTTP_SECRET` in the
-registry chart, not adding init/poststop coupling here.
+A missing shared `REGISTRY_HTTP_SECRET` previously caused upload failures across
+registry replicas. The live registry inspected on 8 September 2026 already had
+that configuration, and a subsequent canonical push succeeded with two replicas.
+Do not infer that historical cause from a new timeout or upload error. Preserve
+the Job and relevant registry logs and establish the current cause before any
+operator-controlled registry change. The push wrapper never changes replicas.
 
 ## Future improvement — in-cluster crictl tag
 

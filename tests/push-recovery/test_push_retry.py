@@ -67,6 +67,10 @@ class Wrapper(unittest.TestCase):
         folder = self.root / 'infra/k8s/chromeless-build'; folder.mkdir(parents=True)
         for name in ('chromeless-kaniko-push.sh', 'chromeless-kaniko-push.yaml', 'check-push-retry.py'):
             shutil.copyfile(SCRIPT / name, folder / name)
+        (self.root / 'tools').mkdir()
+        shutil.copyfile(ROOT / 'tools/release_pins.py', self.root / 'tools/release_pins.py')
+        stack = self.root / 'infra/k8s/standalone/stack.yaml'; stack.parent.mkdir(parents=True)
+        stack.write_text('image: registry.triform.cloud/chromeless/chromeless@sha256:' + 'b' * 64 + '\n')
         self.script = folder / 'chromeless-kaniko-push.sh'
         self.bin = self.root / 'bin'; self.bin.mkdir()
         self.env = {**os.environ, 'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
@@ -83,6 +87,7 @@ if 'get' in a and 'job' in a:
    if existing:print(existing)
   else:print(os.environ['PUSH_TEST_JOB'])
   sys.exit(0)
+ if 'completionTime' in a[-1]:print('2026-09-08T21:13:13Z');sys.exit(0)
  terminal=os.environ['PUSH_TEST_TERMINAL']
  if 'range .status.conditions' in a[-1]:print(terminal+'=True')
  elif terminal in a[-1]:print('True')
@@ -186,15 +191,16 @@ raise SystemExit('unexpected git call')
 
     def test_successful_attempt_records_the_build_tag_and_updates_both_pins(self):
         self.env['PUSH_TEST_TERMINAL'] = 'Complete'
-        stack = self.root / 'infra/k8s/standalone/stack.yaml'; stack.parent.mkdir(parents=True)
+        stack = self.root / 'infra/k8s/standalone/stack.yaml'; stack.parent.mkdir(parents=True, exist_ok=True)
         stack.write_text('image: registry.triform.cloud/chromeless/chromeless:old\n')
         result = self.run_wrapper()
         self.assertEqual(result.returncode, 0, result.stderr)
         record = json.loads((self.root / 'build/guest-release.json').read_text())
         self.assertEqual(record['commit'], '30178cd4122ea445a2b928b187a4d759c46e1ffc')
         self.assertEqual(record['digest'], 'sha256:' + 'a' * 64)
+        self.assertEqual(record['built_at'], '2026-09-08T21:13:13Z')
         self.assertTrue(record['image'].endswith(':' + TAG))
-        self.assertIn(record['image'], stack.read_text())
+        self.assertIn(record['image'].rsplit(':', 1)[0] + '@' + record['digest'], stack.read_text())
 
     def test_staged_tag_guard_rejects_missing_and_different_builds(self):
         manifest = (SCRIPT / 'chromeless-kaniko-push.yaml').read_text()

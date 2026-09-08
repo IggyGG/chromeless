@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# chromeless-kaniko-push.sh — canonical apply wrapper for chromeless-kaniko-push.yaml
+# chromeless-kaniko-push.sh — canonical create/recovery wrapper for chromeless-kaniko-push.yaml
 #
-# Why this script exists: the YAML is a template with three envsubst
+# Why this script exists: the YAML is a template with four envsubst
 # placeholders (CHROMELESS_KANIKO_TAG, KANIKO_NODE, KANIKO_VARIANT_LABEL,
 # KANIKO_JOB_NAME).
 # Direct `kubectl apply -f` would push the literal placeholders to the
@@ -20,7 +20,7 @@
 #   ./infra/k8s/chromeless-build/chromeless-kaniko-push.sh triform-7 x264-t7
 #   ./infra/k8s/chromeless-build/chromeless-kaniko-push.sh triform-8 sw
 #
-# Override tag (skip IMAGE_TAG file read — emergency / repush scenario):
+# Explicit build tag (the staging guard still verifies IMAGE_TAG):
 #   CHROMELESS_KANIKO_TAG=cr7727-deadbeef \
 #     ./infra/k8s/chromeless-build/chromeless-kaniko-push.sh triform-7
 #
@@ -113,9 +113,9 @@ fi
 
 # Sanity-check tag shape: expect cr<digits>-<hex-sha> per chromeless-build.sh
 # Step 9 ("image_tag=cr${CHROMIUM_BRANCH_NUMBER}-${CHROMELESS_GIT_SHA}").
-if ! [[ "${CHROMELESS_KANIKO_TAG}" =~ ^cr[0-9]+-[A-Za-z0-9._-]+$ ]]; then
-  echo "WARN: CHROMELESS_KANIKO_TAG '${CHROMELESS_KANIKO_TAG}' does not match" >&2
-  echo "      expected pattern 'cr<branch>-<sha>'. Proceeding anyway." >&2
+if ! [[ "${CHROMELESS_KANIKO_TAG}" =~ ^cr[0-9]+-[0-9a-f]{7,40}$ ]]; then
+  echo "ERROR: CHROMELESS_KANIKO_TAG must identify a build commit: cr<branch>-<sha>" >&2
+  exit 2
 fi
 
 # Tag-suffixed Job name (matches metadata.name template in the YAML).
@@ -194,14 +194,8 @@ write_guest_release_record() {
   local image="registry.triform.cloud/chromeless/chromeless:${tag}"
   local short_sha full_sha digest built_at
 
-  # cr<branch>-<sha> -> <sha>. Anything else (an operator override like
-  # cr7727-hotfix) is not a commit and must not be recorded as one.
+  # The tag was validated before any cluster operation.
   short_sha="${tag#cr*-}"
-  if [[ "${short_sha}" == "${tag}" || ! "${short_sha}" =~ ^[0-9a-f]{7,40}$ ]]; then
-    echo "WARN: tag '${tag}' carries no commit-shaped SHA — NOT writing ${RELEASE_RECORD}." >&2
-    echo "      The provenance record is left untouched rather than filled with a guess." >&2
-    return 0
-  fi
 
   # Expand to the full SHA and verify it round-trips: if the object is
   # absent (operator's clone never fetched that branch) we must NOT
@@ -213,8 +207,8 @@ write_guest_release_record() {
   fi
 
   # Manifest digest — the immutable identity. A tag can be re-pushed to
-  # point somewhere else; a digest cannot. Best-effort: crane may not be
-  # installed, and a missing digest must not fail an otherwise-good push.
+  # point somewhere else; a digest cannot. Refuse to generate release files
+  # unless the registry confirms this immutable identity.
   digest=""
   if command -v crane >/dev/null 2>&1; then
     digest="$(crane digest "${image}" 2>/dev/null || true)"
@@ -224,63 +218,24 @@ write_guest_release_record() {
     return 1
   fi
 
-  built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  built_at="$(kubectl -n chromeless-build get job "${JOB_NAME}" -o 'jsonpath={.status.completionTime}')"
+  if [[ -z "${built_at}" ]]; then
+    echo "ERROR: completed push timestamp is unavailable; release record left untouched" >&2
+    return 1
+  fi
 
-  mkdir -p "$(dirname "${RELEASE_RECORD}")"
-  cat > "${RELEASE_RECORD}" <<EOF
-{
-  "schema": "chromeless.guest-release/v1",
-  "commit": "${full_sha}",
-  "image": "${image}",
-  "digest": "${digest}",
-  "dockerfile": "build/Dockerfile.runtime",
-  "built_at": "${built_at}",
-  "recorded_by": "chromeless-kaniko-push.sh"
-}
-EOF
+  python3 "${REPO_ROOT}/tools/release_pins.py" \
+    --record "${RELEASE_RECORD}" \
+    --manifest "${REPO_ROOT}/infra/k8s/standalone/stack.yaml" \
+    --commit "${full_sha}" --image "${image}" --digest "${digest}" --built-at "${built_at}"
 
   echo
-  echo "─── provenance record written ───"
+  echo "─── provenance record and immutable deployment pin written ───"
   echo "  ${RELEASE_RECORD}"
   echo "  commit : ${full_sha}"
   echo "  image  : ${image}"
-  echo "  digest : ${digest:-<unresolved>}"
+  echo "  digest : ${digest}"
   echo
-  # Rewrite the deploy manifest's pin IN THE SAME BREATH as the provenance
-  # record. Writing only guest-release.json is how the two drift apart, and
-  # that drift is not cosmetic: `deploy.sh` applies stack.yaml, so a stale pin
-  # there means every deploy silently ROLLS THE CLUSTER BACK to an older guest.
-  #
-  # Measured 2026-08-24: stack.yaml pinned an image 64 commits behind the fix
-  # under test, the worker Deployment reached revision 66 in a day as apply and
-  # `kubectl set image` fought each other, and a user lost the day to it —
-  # tests passing against an image they never saw. main has carried this same
-  # drift since 2026-08-11 (guest-release cr7727-44f2e20dece6 vs stack.yaml
-  # cr7727-6047599546e3).
-  #
-  # `make lint-deploy-pin` fails when they disagree; this keeps them agreeing
-  # in the first place, so the lint is a backstop rather than a chore.
-  STACK_MANIFEST="${REPO_ROOT}/infra/k8s/standalone/stack.yaml"
-  if [[ -f "${STACK_MANIFEST}" ]]; then
-    if python3 - "${STACK_MANIFEST}" "${image}" <<'PYEOF'; then
-import pathlib, re, sys
-path, image = pathlib.Path(sys.argv[1]), sys.argv[2]
-text = path.read_text()
-new, n = re.subn(
-    r'(?m)^(\s*image:\s*)registry\.[\w.]+/chromeless/chromeless:\S+',
-    lambda m: m.group(1) + image, text)
-if n:
-    path.write_text(new)
-sys.exit(0 if n else 1)
-PYEOF
-      echo "  updated stack.yaml pin -> ${tag}"
-    else
-      echo "  ⚠ could not update the worker pin in stack.yaml — do it by hand," >&2
-      echo "    or the next deploy.sh rolls the cluster back. See" >&2
-      echo "    make lint-deploy-pin." >&2
-    fi
-  fi
-
   echo "  ACTION REQUIRED — this script does not commit. Run:"
   echo "    git -C ${REPO_ROOT} add build/guest-release.json infra/k8s/standalone/stack.yaml && \\"
   echo "      git -C ${REPO_ROOT} commit -m 'chore(cv2-build): record guest release ${tag}'"
