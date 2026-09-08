@@ -331,7 +331,7 @@ jobs:
       # ci.yml and codeql.yml already resolve it from the mirror.
       - name: Set up Go
         if: steps.probe.outputs.present == 'true' && steps.fsprobe.outputs.shared == 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.22"
           cache-dependency-path: infra/gateway/go.sum
