@@ -61,9 +61,10 @@ jobs:
     # (Chromium + 1GB shm + three small services) is expected to fit, but this
     # is the one difference between the pools that could bite. An OOM in
     # `compose up` here is THIS, not a product defect.
-    runs-on: priority
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
       - uses: actions/checkout@v4
+      - run: ./scripts/check-public-ownership
 
       # Dockerfile lint.
       #
@@ -292,7 +293,7 @@ jobs:
 
   smoke:
     name: Container smoke test
-    runs-on: priority
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -439,7 +440,7 @@ jobs:
 
   docs:
     name: Docs link check
-    runs-on: priority
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
       - uses: actions/checkout@v4
 

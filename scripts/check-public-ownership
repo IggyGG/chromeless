@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly new_repo='https://github.com/IggyGG/chromeless'
+
+for path in README.md CONTRIBUTING.md; do
+  git grep -qF "$new_repo" -- "$path" \
+    || { echo "public ownership check failed: $path lacks the canonical IggyGG repository URL" >&2; exit 1; }
+done
+test -f SECURITY.md \
+  || { echo "public ownership check failed: SECURITY.md is missing" >&2; exit 1; }
+
+echo "public ownership check passed for IggyGG/chromeless"

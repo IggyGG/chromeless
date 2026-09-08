@@ -1,0 +1,37 @@
+name: Public security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "29 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  ownership:
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-public-ownership
+
+  secrets:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan full history with Gitleaks 8.30.1
+        run: |
+          set -euo pipefail
+          archive="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$archive"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "${RUNNER_TEMP}"
+          "${RUNNER_TEMP}/gitleaks" git --redact --exit-code 1 --no-banner
