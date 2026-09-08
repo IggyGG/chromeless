@@ -13,7 +13,7 @@ def main() -> None:
     safe = f"""jobs:
   e2e:
     name: e2e
-    {PUBLIC_IMAGE_GUARD}
+    if: {PUBLIC_IMAGE_GUARD}
     runs-on: ubuntu-latest
 """
     assert findings_for(PATH, safe, ("e2e",)) == []
