@@ -184,6 +184,53 @@ const DEFAULT_BUFFERED_THRESHOLD = 64 * 1024;
 const DEFAULT_WHEEL_END_DELAY_MS = 150;
 const DEFAULT_WHEEL_MOMENTUM_GAP_MS = 100;
 
+/**
+ * The minimum an event target has to look like for `keyBelongsToClient`.
+ * Duck-typed rather than `HTMLElement` so the rule is testable without a
+ * DOM — this package's tests run in node, and a policy nobody can test is
+ * how the previous one (there wasn't one) survived.
+ */
+export interface KeyTargetLike {
+  tagName?: string;
+  isContentEditable?: boolean;
+  closest?: (selector: string) => unknown;
+}
+
+/** Client-owned regions: the control-channel prompt and the file picker. */
+const CLIENT_OWNED_SELECTORS = [".cb-control-overlay", ".cb-filepick"];
+
+/**
+ * Is this key the CLIENT's rather than the cloud browser's?
+ *
+ * Keys are listened for on the window — a <video> cannot hold focus in a
+ * way that delivers key events, so a target-scoped listener would receive
+ * nothing. Without a policy that means EVERY key reaches the guest,
+ * including the URL a user types into the client's own address bar, which
+ * was streamed keystroke by keystroke into whatever the remote page had
+ * focused. Browser shortcuts (Cmd/Ctrl+L, +T, +W, +R) fired in BOTH
+ * browsers at once.
+ *
+ * The rule is about WHERE FOCUS IS, not which key it is. Enumerating
+ * "browser shortcuts" would mean preventDefault on keys the viewer may
+ * genuinely want locally, and a stream that swallows Cmd+W is worse than
+ * one that merely does not forward it.
+ */
+export function keyBelongsToClient(target: KeyTargetLike | null | undefined): boolean {
+  if (!target) return false;
+  const tag = (target.tagName ?? "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+      tag === "BUTTON") {
+    return true;
+  }
+  if (target.isContentEditable === true) return true;
+  if (typeof target.closest === "function") {
+    for (const sel of CLIENT_OWNED_SELECTORS) {
+      if (target.closest(sel)) return true;
+    }
+  }
+  return false;
+}
+
 export class InputChannel {
   private readonly ch: SendableChannel;
   private readonly opts: Required<Pick<InputChannelOptions,
@@ -472,9 +519,23 @@ export class InputChannel {
     extra: {
       toContentCoords?: (clientX: number, clientY: number, rect: DOMRect) => { x: number; y: number };
       window?: Window;
+      // Should this keyboard event be forwarded to the guest at all?
+      //
+      // Keys are listened for on the WINDOW, not on `target`, and they have
+      // to be: a <video> cannot hold focus in a way that gives it key
+      // events, so a target-scoped listener would receive nothing. The
+      // consequence is that EVERY key in the page goes to the guest —
+      // including what the user types into the client's own address bar,
+      // and including Cmd/Ctrl+L, +T, +W and +R, which fire locally AND
+      // remotely at once.
+      //
+      // Absent, every key is forwarded, which is the historical behaviour
+      // and what the input tests assume. main.ts supplies the real policy.
+      shouldForwardKey?: (e: KeyboardEvent) => boolean;
     } = {},
   ): () => void {
     const win = extra.window ?? globalThis.window;
+    const shouldForwardKey = extra.shouldForwardKey ?? (() => true);
     const map = extra.toContentCoords ?? ((cx, cy, rect) => ({ x: cx - rect.left, y: cy - rect.top }));
 
     const onMouseMove = (e: MouseEvent) => {
@@ -512,6 +573,7 @@ export class InputChannel {
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isComposingKey(e)) return;
+      if (!shouldForwardKey(e)) return;
       // Special-case: Escape during composition is a CANCEL signal.
       // Some IMEs raise compositionend with an empty data string in
       // this path; others don't. We surface the cancel intent
@@ -524,6 +586,16 @@ export class InputChannel {
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (isComposingKey(e)) return;
+      // NOTE: the gate is applied to keyup too, and that is a deliberate
+      // risk. If focus moves between a key's down and its up, the guest
+      // sees a down with no up and treats the key as held. The alternative
+      // — always forwarding keyup — leaks every release of every key typed
+      // into the client's own UI, and the guest's dispatcher tracks held
+      // modifiers from these events. main.ts's policy therefore keeps the
+      // gate STABLE for the life of a keypress (it keys on where focus is,
+      // and focus does not move mid-keypress without a click or a Tab,
+      // both of which end the keypress anyway).
+      if (!shouldForwardKey(e)) return;
       this.sendKeyUp(e.code, e.key, modsFromEvent(e));
     };
 

@@ -13,6 +13,8 @@ import {
   MOD_SHIFT,
   modsFromEvent,
   extractDragItems,
+  keyBelongsToClient,
+  type KeyTargetLike,
 } from "./input.js";
 
 class FakeChannel {
@@ -482,6 +484,146 @@ describe("InputChannel wheel inertia (v1.1)", () => {
     sched.tick();
     expect(ch.sent.filter(e => e.type === "mouse_wheel")).toHaveLength(0);
     expect(t.pending).toBe(0);
+  });
+});
+
+// Which browser does a key belong to?
+//
+// Keys are listened for on the WINDOW (a <video> cannot hold focus in a way
+// that delivers key events), so without this rule every key reached the
+// guest — the URL typed into the client's own address bar was streamed
+// keystroke by keystroke into whatever the remote page had focused, and
+// Cmd/Ctrl+L / +T / +W / +R fired in both browsers at once.
+describe("keyBelongsToClient", () => {
+  const el = (over: Partial<KeyTargetLike> = {}): KeyTargetLike =>
+    ({ tagName: "DIV", closest: () => null, ...over });
+
+  it("claims text entry and controls the user can type into", () => {
+    for (const tag of ["INPUT", "TEXTAREA", "SELECT", "BUTTON"]) {
+      expect(keyBelongsToClient(el({ tagName: tag }))).toBe(true);
+    }
+  });
+
+  it("is case-insensitive about the tag name", () => {
+    // React/XHTML-ish DOMs and test doubles report lowercase.
+    expect(keyBelongsToClient(el({ tagName: "input" }))).toBe(true);
+  });
+
+  it("claims contenteditable", () => {
+    expect(keyBelongsToClient(el({ isContentEditable: true }))).toBe(true);
+  });
+
+  it("claims the control-channel overlay and the file picker", () => {
+    for (const sel of [".cb-control-overlay", ".cb-filepick"]) {
+      const t = el({ closest: (s: string) => (s === sel ? {} : null) });
+      expect(keyBelongsToClient(t)).toBe(true);
+    }
+  });
+
+  it("leaves an ordinary element to the cloud browser", () => {
+    expect(keyBelongsToClient(el())).toBe(false);
+    expect(keyBelongsToClient(el({ tagName: "VIDEO" }))).toBe(false);
+    // isContentEditable false, not merely absent.
+    expect(keyBelongsToClient(el({ isContentEditable: false }))).toBe(false);
+  });
+
+  it("forwards when there is no target at all", () => {
+    // A null target must not silently swallow input: the default has to be
+    // "the cloud browser gets it", or a DOM quirk turns into a dead keyboard.
+    expect(keyBelongsToClient(null)).toBe(false);
+    expect(keyBelongsToClient(undefined)).toBe(false);
+  });
+
+  it("survives a target with no closest()", () => {
+    // document, window, and various test doubles have no closest.
+    expect(keyBelongsToClient({ tagName: "DIV" })).toBe(false);
+  });
+});
+
+// The RULE above is pure and easy to test; the WIRING is what actually
+// stops a keystroke, and it is a separate thing that can rot on its own.
+// Verified by mutation: deleting the gate from attach() left every
+// keyBelongsToClient test green.
+describe("attach() key gating", () => {
+  /** Minimal window/target stand-ins — this package's tests run in node. */
+  function fakeDom() {
+    const listeners: Record<string, Array<(e: unknown) => void>> = {};
+    const win = {
+      addEventListener: (t: string, h: (e: unknown) => void) => {
+        (listeners[t] ??= []).push(h);
+      },
+      removeEventListener: (t: string, h: (e: unknown) => void) => {
+        listeners[t] = (listeners[t] ?? []).filter(x => x !== h);
+      },
+      getSelection: () => null,
+    };
+    const target = {
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+    };
+    const fire = (type: string, e: Record<string, unknown>) => {
+      for (const h of listeners[type] ?? []) h(e);
+    };
+    return { win, target, fire };
+  }
+
+  const keyEvent = (target: unknown) => ({
+    code: "KeyA", key: "a", target,
+    ctrlKey: false, shiftKey: false, altKey: false, metaKey: false,
+  });
+
+  it("does NOT forward a key typed into a client control", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+    const dom = fakeDom();
+
+    ic.attach(dom.target as unknown as HTMLElement, {
+      window: dom.win as unknown as Window,
+      shouldForwardKey: (e) => !keyBelongsToClient(e.target as KeyTargetLike),
+    });
+
+    dom.fire("keydown", keyEvent({ tagName: "INPUT", closest: () => null }));
+    dom.fire("keyup", keyEvent({ tagName: "INPUT", closest: () => null }));
+    sched.tick();
+
+    expect(ch.sent).toHaveLength(0);
+  });
+
+  it("DOES forward a key aimed at the stream", () => {
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+    const dom = fakeDom();
+
+    ic.attach(dom.target as unknown as HTMLElement, {
+      window: dom.win as unknown as Window,
+      shouldForwardKey: (e) => !keyBelongsToClient(e.target as KeyTargetLike),
+    });
+
+    dom.fire("keydown", keyEvent({ tagName: "DIV", closest: () => null }));
+    dom.fire("keyup", keyEvent({ tagName: "DIV", closest: () => null }));
+    sched.tick();
+
+    expect(ch.sent.map(e => e.type)).toEqual(["key_down", "key_up"]);
+  });
+
+  it("forwards everything when no policy is supplied", () => {
+    // The default must stay permissive: every existing caller and every
+    // other test in this file depends on it.
+    const ch = new FakeChannel();
+    const sched = manualRaf();
+    const ic = new InputChannel(ch, { raf: sched.raf, cancelRaf: sched.cancel });
+    const dom = fakeDom();
+
+    ic.attach(dom.target as unknown as HTMLElement,
+              { window: dom.win as unknown as Window });
+
+    dom.fire("keydown", keyEvent({ tagName: "INPUT", closest: () => null }));
+    sched.tick();
+
+    expect(ch.sent.map(e => e.type)).toEqual(["key_down"]);
   });
 });
 

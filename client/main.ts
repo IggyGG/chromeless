@@ -15,7 +15,7 @@
 //   session.on("dataChannel", (dc) => { /* input/cursor/files */ });
 //   await session.connect(sessionId);
 
-import { InputChannel } from "./src/input.js";
+import { InputChannel, keyBelongsToClient } from "./src/input.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
 import {
@@ -116,6 +116,12 @@ function escapeHtml(s: string): string {
 // Map page coords into the source video's intrinsic pixel space,
 // undoing object-fit:contain. The remote expects coords in the source
 // coordinate system.
+// Focus in one of our own controls means the key is ours, not the cloud
+// browser's. The rule itself lives in src/input.ts (pure, and tested).
+function shouldForwardKey(e: KeyboardEvent): boolean {
+  return !keyBelongsToClient(e.target as HTMLElement | null);
+}
+
 function videoContentMapper(cx: number, cy: number, rect: DOMRect): { x: number; y: number } {
   const v = els.video;
   const vw = v.videoWidth || rect.width;
@@ -432,7 +438,10 @@ function wireInputChannel(dc: RTCDataChannel): void {
   });
 
   const attachListeners = () => {
-    attach.detachInput = input.attach(els.video, { toContentCoords: videoContentMapper });
+    attach.detachInput = input.attach(els.video, {
+      toContentCoords: videoContentMapper,
+      shouldForwardKey,
+    });
   };
   if (dc.readyState === "open") attachListeners();
   else dc.addEventListener("open", attachListeners, { once: true });
