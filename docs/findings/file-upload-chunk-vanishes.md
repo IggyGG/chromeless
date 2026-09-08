@@ -78,6 +78,36 @@ guard*) reproduced by the person who had just re-read it. The lesson generalises
 past this defect: **on a component whose only feedback loop is a 20-minute
 build plus an image roll, a silent drop costs a full cycle every time.**
 
+## Narrowed, 2026-09-08 (guest `cr7727-eee0fae6f80f`)
+
+The diagnostics answered it in one line. The chunk **arrives and passes every
+guard**:
+
+```
+CV2-UPLOAD: <- file_upload_start (233 bytes)
+CV2-UPLOAD: upload <id> starting: chromeless-upload-probe.txt (27 bytes) -> .../Uploads/<id>__...
+CV2-UPLOAD: <- file_upload_chunk (139 bytes)      <-- arrives, no warning
+CV2-UPLOAD: <- file_upload_end (83 bytes)
+CV2-UPLOAD: upload <id> failed (write_failed): could not read the file back
+```
+
+No drop warning fired, so `HandleChunk` reached its `PostTaskAndReplyWithResult`.
+The file still never exists — re-watched at **10 ms** polling (the earlier
+200 ms watch could not have seen a ~15 ms window; this one could and saw
+nothing). The directory is writable: `mkdir` + `touch` as `cbuser` inside the
+running container both succeed.
+
+So the write task never ran. **The suspect is the task runner itself.** The
+receiver built its own `base::ThreadPool::CreateSequencedTaskRunner` in the
+constructor — and that call appears **nowhere else in `capture/`**. The
+download delegate writes files in this same process and works, using
+`base::ThreadPool::PostTask` with explicit traits; its own comment warns that
+"no in-tree precedent is a cost paid hours later in the build lane".
+
+`60e9c99` switches all five file operations to that shape. Whether it fixes
+this is what the next roll says — do not record it as fixed until the uploads
+suite passes.
+
 ## Next step
 
 `eee0fae` makes every path say why:
