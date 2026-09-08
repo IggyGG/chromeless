@@ -63,7 +63,7 @@ jobs:
     # `compose up` here is THIS, not a product defect.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: ./scripts/check-public-ownership
 
       # Dockerfile lint.
@@ -295,7 +295,7 @@ jobs:
     name: Container smoke test
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # OSS-W1: the smoke needs a real cloud_browser_worker image, and there
       # is no way to produce one here — the browser is a from-source Chromium
@@ -442,7 +442,7 @@ jobs:
     name: Docs link check
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # OSS-W2: run lychee from its container rather than
       # `uses: lycheeverse/lychee-action`, which 404s on Forgejo's action

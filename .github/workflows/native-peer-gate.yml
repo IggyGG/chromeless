@@ -74,7 +74,7 @@ jobs:
     # `compose up` here is THIS, not a product defect.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # OSS-W2: no `actions/setup-node@v4` — it installs a glibc node onto
       # this host's musl (Alpine) job container, poisoning PATH so every
@@ -185,7 +185,7 @@ jobs:
       (github.event_name == 'pull_request' && github.base_ref == 'main') ||
       (github.event_name == 'push' && github.ref == 'refs/heads/integration/native-peer')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # OSS-W2: see the scaffold job's identical step — setup-node ships a
       # glibc node this musl job container cannot exec.

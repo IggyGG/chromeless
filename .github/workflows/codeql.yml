@@ -81,7 +81,7 @@ jobs:
             build-mode: none
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go (for go modules)
         if: matrix.language == 'go'

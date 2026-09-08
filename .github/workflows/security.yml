@@ -15,14 +15,14 @@ jobs:
   ownership:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: ./scripts/check-public-ownership
 
   secrets:
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Scan full history with Gitleaks 8.30.1
