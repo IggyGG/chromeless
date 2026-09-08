@@ -5,8 +5,8 @@ This Job pushes the runtime image `chromeless:<tag>` to
 the build context staged by `chromeless-build.sh` Step 9 from the chromium-src
 hostPath of whichever node ran the variant.
 
-The manifest is a **template** — three fields are envsubst placeholders
-(`${CHROMELESS_KANIKO_TAG}`, `${KANIKO_NODE}`, `${KANIKO_VARIANT_LABEL}`). The
+The manifest is a **template** — four fields are envsubst placeholders
+(`${CHROMELESS_KANIKO_TAG}`, `${KANIKO_NODE}`, `${KANIKO_VARIANT_LABEL}`, `${KANIKO_JOB_NAME}`). The
 **canonical apply path** is the wrapper script:
 
 ```bash
@@ -15,7 +15,7 @@ The manifest is a **template** — three fields are envsubst placeholders
 
 The wrapper reads `IMAGE_TAG` over ssh from the build node's staged context
 (written by chromeless-build.sh Step 9), derives the `cr<branch>-<sha>` tag,
-substitutes the three placeholders, applies the Job, tails the kaniko logs
+substitutes the four placeholders, creates a new Job, tails the kaniko logs
 into `/tmp/kaniko-push-<tag>.log`, and reports PASS/FAIL.
 
 This Job is **not** part of the kustomize bundle (see `kustomization.yaml`);
@@ -118,29 +118,41 @@ silent overwrites are impossible.
 6. **(If you scaled the registry down) restore replicas** — see
    § BUGS-513 below.
 
-## Manual apply (fallback, without the wrapper)
+## Recovering a failed or interrupted push
 
-Useful for diagnostics or when ssh-to-node is unavailable. The operator
-provides all three placeholders by hand:
+Use the wrapper for every attempt. It preserves existing Jobs and refuses to
+create over them. A completed matching Job can regenerate its release record
+without repushing; rerun the same command with the same attempt number. The full
+source commit and registry digest must resolve before either tracked pin changes.
+
+After a confirmed terminal failure, request the next bounded attempt:
 
 ```bash
-# Pick the destination tag (read from IMAGE_TAG manually if you can).
-export CHROMELESS_KANIKO_TAG=cr7727-8367359   # MUST be unique per build
-export KANIKO_NODE=triform-7                  # triform-7 or triform-8 only
-export KANIKO_VARIANT_LABEL=x264-t7            # informational label
-
-envsubst '${CHROMELESS_KANIKO_TAG} ${KANIKO_NODE} ${KANIKO_VARIANT_LABEL}' \
-  < infra/k8s/chromeless-build/chromeless-kaniko-push.yaml \
-  | kubectl apply -f -
-
-kubectl -n chromeless-build logs -f \
-  job/chromeless-kaniko-push-${CHROMELESS_KANIKO_TAG}
+CHROMELESS_KANIKO_TAG=cr7727-30178cd4122e CHROMELESS_PUSH_ATTEMPT=2 \
+  ./infra/k8s/chromeless-build/chromeless-kaniko-push.sh triform-7 x264-t7
 ```
 
-The `envsubst '${...}'` allowlist form is **critical** — without it,
-envsubst would also strip `${VARIANT}` / `${CHROMELESS_WORK_ROOT}`
-mentions inside the manifest's header comments. The kaniko args use
-`$(VAR)` (K8s downward-API) and are never touched by envsubst.
+Attempt 1 retains the original tag-derived Job name. Attempts 2 and 3 append
+`-attempt2` and `-attempt3`. The immediately preceding attempt must be terminally
+failed and match the node, image tag, registry destination and read-only context.
+An active, completed, deleting or mismatched preceding Job is refused. Registry
+errors do not count as tag absence; only `MANIFEST_UNKNOWN` permits a new push.
+No existing image manifest is overwritten. There is no automatic retry loop.
+
+Every new Job checks the staged `IMAGE_TAG` before starting Kaniko. Keep that
+node's build context unchanged throughout the push; the tag guard is not an
+immutable filesystem snapshot. Resources, internal Kaniko retries and the
+five-minute Job deadline are unchanged. This recovery path does not repair an
+underlying registry upload fault or qualify runtime behavior.
+
+The observer checks both terminal conditions after its log stream ends. A
+confirmed failure is reported promptly, with no release-record update. If a
+successful push was observed but digest lookup failed, restore registry access
+and rerun that completed attempt to recover its record. Do not edit provenance
+fields by hand or replace the completed Job.
+
+Direct template application omits these identity and recovery checks and is not
+a supported entry point.
 
 ## Variant overrides
 

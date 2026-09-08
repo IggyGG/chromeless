@@ -231,7 +231,11 @@ test-all-nightly: test-all-ci test-harness-all test-e2e test-interactive
 # ---- unit ------------------------------------------------------------------
 
 test-unit: test-unit-signaling test-unit-go-modules test-unit-client test-unit-harness \
-           test-unit-encoder
+           test-unit-encoder test-unit-push-retry
+
+.PHONY: test-unit-push-retry
+test-unit-push-retry:
+	@python3 -m unittest discover -s tests/push-recovery -p 'test_push_retry.py' -v
 
 # Every OTHER Go module in the tree. `test-unit` used to run `signaling/` and
 # nothing else, so eight modules holding 13 _test.go files were gated by no make

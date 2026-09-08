@@ -2,7 +2,8 @@
 # chromeless-kaniko-push.sh — canonical apply wrapper for chromeless-kaniko-push.yaml
 #
 # Why this script exists: the YAML is a template with three envsubst
-# placeholders (CHROMELESS_KANIKO_TAG, KANIKO_NODE, KANIKO_VARIANT_LABEL).
+# placeholders (CHROMELESS_KANIKO_TAG, KANIKO_NODE, KANIKO_VARIANT_LABEL,
+# KANIKO_JOB_NAME).
 # Direct `kubectl apply -f` would push the literal placeholders to the
 # cluster. We derive CHROMELESS_KANIKO_TAG from the IMAGE_TAG file that
 # chromeless-build.sh Step 9 wrote on the build node, so every push gets
@@ -118,7 +119,16 @@ if ! [[ "${CHROMELESS_KANIKO_TAG}" =~ ^cr[0-9]+-[A-Za-z0-9._-]+$ ]]; then
 fi
 
 # Tag-suffixed Job name (matches metadata.name template in the YAML).
-JOB_NAME="chromeless-kaniko-push-${CHROMELESS_KANIKO_TAG}"
+PUSH_ATTEMPT="${CHROMELESS_PUSH_ATTEMPT:-1}"
+case "${PUSH_ATTEMPT}" in
+  1|2|3) ;;
+  *) echo "ERROR: CHROMELESS_PUSH_ATTEMPT must be 1, 2 or 3" >&2; exit 2 ;;
+esac
+BASE_JOB_NAME="chromeless-kaniko-push-${CHROMELESS_KANIKO_TAG}"
+JOB_NAME="${BASE_JOB_NAME}"
+if [[ "${PUSH_ATTEMPT}" != 1 ]]; then
+  JOB_NAME="${BASE_JOB_NAME}-attempt${PUSH_ATTEMPT}"
+fi
 
 cat <<EOF
 ─── chromeless kaniko push ───
@@ -133,6 +143,21 @@ EOF
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 TEMPLATE="${REPO_ROOT}/infra/k8s/chromeless-build/chromeless-kaniko-push.yaml"
 RELEASE_RECORD="${REPO_ROOT}/build/guest-release.json"
+
+# A retry is a distinct job. Preserve the failed attempt and refuse to overlap
+# an active push, overwrite a published tag, or switch the staged build source.
+if [[ "${PUSH_ATTEMPT}" != 1 ]]; then
+  if ! [[ "${CHROMELESS_KANIKO_TAG}" =~ ^cr[0-9]+-[0-9a-f]{7,40}$ ]]; then
+    echo "ERROR: retry requires a commit-shaped build tag" >&2
+    exit 1
+  fi
+  PREVIOUS_JOB="${BASE_JOB_NAME}"
+  if [[ "${PUSH_ATTEMPT}" == 3 ]]; then PREVIOUS_JOB="${BASE_JOB_NAME}-attempt2"; fi
+  PREVIOUS_JSON="$(kubectl -n chromeless-build get job "${PREVIOUS_JOB}" -o json)"
+  python3 "${REPO_ROOT}/infra/k8s/chromeless-build/check-push-retry.py" \
+    --name "${PREVIOUS_JOB}" --node "${NODE}" --tag "${CHROMELESS_KANIKO_TAG}" \
+    --context "${CONTEXT_PATH}" <<<"${PREVIOUS_JSON}"
+fi
 
 # ---------------------------------------------------------------------
 # write_guest_release_record — the producer's provenance statement.
@@ -182,10 +207,9 @@ write_guest_release_record() {
   # absent (operator's clone never fetched that branch) we must NOT
   # invent one. Record what we can verify, flag what we cannot.
   full_sha="$(git -C "${REPO_ROOT}" rev-parse --verify --quiet "${short_sha}^{commit}" 2>/dev/null || true)"
-  if [[ -z "${full_sha}" ]]; then
-    echo "WARN: commit ${short_sha} is not in the local object DB (git fetch --all?)." >&2
-    echo "      Recording the short SHA only — a checker will treat it as unresolvable." >&2
-    full_sha="${short_sha}"
+  if ! [[ "${full_sha}" =~ ^[0-9a-f]{40}$ && "${full_sha}" == "${short_sha}"* ]]; then
+    echo "ERROR: build commit cannot be resolved; fetch that exact source before recovering its record" >&2
+    return 1
   fi
 
   # Manifest digest — the immutable identity. A tag can be re-pushed to
@@ -195,9 +219,9 @@ write_guest_release_record() {
   if command -v crane >/dev/null 2>&1; then
     digest="$(crane digest "${image}" 2>/dev/null || true)"
   fi
-  if [[ -z "${digest}" ]]; then
-    echo "WARN: could not resolve manifest digest for ${image} (crane missing or registry auth)." >&2
-    echo "      Writing the record without a digest; re-run with crane available to fill it." >&2
+  if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "ERROR: could not resolve the published manifest digest; release record left untouched" >&2
+    return 1
   fi
 
   built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -275,18 +299,39 @@ if [[ ! -f "${TEMPLATE}" ]]; then
   exit 1
 fi
 
+command -v crane >/dev/null 2>&1 || { echo "ERROR: crane is required to verify image identity" >&2; exit 1; }
+EXISTING_JSON="$(kubectl -n chromeless-build get job "${JOB_NAME}" --ignore-not-found -o json)"
+if [[ -n "${EXISTING_JSON}" ]]; then
+  # Recover a lost local release record from a completed matching job. Never
+  # recreate it or repush its tag. Active/failed/mismatched jobs are refused.
+  python3 "${REPO_ROOT}/infra/k8s/chromeless-build/check-push-retry.py" \
+    --name "${JOB_NAME}" --node "${NODE}" --tag "${CHROMELESS_KANIKO_TAG}" \
+    --context "${CONTEXT_PATH}" --required-state Complete <<<"${EXISTING_JSON}"
+  write_guest_release_record
+  exit 0
+fi
+if DIGEST_PROBE="$(crane digest "registry.triform.cloud/chromeless/chromeless:${CHROMELESS_KANIKO_TAG}" 2>&1)"; then
+  echo "ERROR: this tag already has a manifest; refusing to overwrite it" >&2
+  exit 1
+fi
+case "${DIGEST_PROBE}" in
+  *MANIFEST_UNKNOWN*) ;;
+  *) echo "ERROR: could not prove the tag is absent; registry errors are not absence" >&2; exit 1 ;;
+esac
+
 # envsubst with explicit allowlist — leaves every other ${VAR} in the
 # YAML (e.g. ${VARIANT} in the header comments, ${CHROMELESS_WORK_ROOT}
 # in the hostPath comments) untouched. The kaniko $(VAR) args use K8s
 # downward-API syntax and are NEVER touched by envsubst regardless.
 RENDERED="$(CHROMELESS_KANIKO_TAG="${CHROMELESS_KANIKO_TAG}" \
+            KANIKO_JOB_NAME="${JOB_NAME}" \
             KANIKO_NODE="${NODE}" \
             KANIKO_VARIANT_LABEL="${VARIANT_LABEL}" \
-            envsubst '${CHROMELESS_KANIKO_TAG} ${KANIKO_NODE} ${KANIKO_VARIANT_LABEL}' \
+            envsubst '${CHROMELESS_KANIKO_TAG} ${KANIKO_NODE} ${KANIKO_VARIANT_LABEL} ${KANIKO_JOB_NAME}' \
             < "${TEMPLATE}")"
 
-echo "Applying rendered manifest..."
-echo "${RENDERED}" | kubectl apply -f -
+echo "Creating push attempt (existing jobs are preserved)..."
+echo "${RENDERED}" | kubectl create -f -
 
 echo "Streaming kaniko logs into /tmp/kaniko-push-${CHROMELESS_KANIKO_TAG}.log ..."
 # Wait briefly for the pod to be scheduled, then follow.
@@ -343,10 +388,16 @@ echo "Following pod ${POD}..."
 { kubectl -n chromeless-build logs -f "${POD}" 2>&1 || true; } \
   | tee "/tmp/kaniko-push-${CHROMELESS_KANIKO_TAG}.log"
 
-# Belt and braces: the follow can still return early on a transient. Wait for
-# the Job to actually reach a terminal condition before judging it.
-kubectl -n chromeless-build wait --for=condition=complete \
-  --timeout=600s "job/${JOB_NAME}" >/dev/null 2>&1 || true
+# The log observer can disconnect. Check BOTH terminal conditions: waiting only
+# for Complete delays a known failure by ten minutes and changes no evidence.
+for _ in $(seq 1 120); do
+  CONDITIONS="$(kubectl -n chromeless-build get job "${JOB_NAME}" \
+    -o 'jsonpath={range .status.conditions[*]}{.type}={.status}{"\n"}{end}' 2>/dev/null || true)"
+  case "${CONDITIONS}" in
+    *Complete=True*|*Failed=True*) break ;;
+  esac
+  sleep 2
+done
 
 # Surface final status so the operator can see PASS/FAIL at a glance.
 STATUS="$(kubectl -n chromeless-build get job "${JOB_NAME}" \
