@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { normalizeUrl, navigate, goBack, currentUrl } from "./navigate.js";
+import { normalizeUrl, navigate, goBack, currentUrl, currentPage } from "./navigate.js";
 
 describe("normalizeUrl", () => {
   it("passes through a full http(s) URL", () => {
@@ -110,5 +110,47 @@ describe("navigation requests", () => {
       new Response(JSON.stringify({ url: "https://example.com/" }), { status: 200 }),
     ));
     expect(await currentUrl()).toBe("https://example.com/");
+  });
+
+  // The gateway parsed the page title off DevTools /json and threw it away,
+  // so the client could show an address and nothing else — a URL bar with no
+  // page behind it. currentPage() carries both.
+  describe("currentPage", () => {
+    it("returns the url AND the page title", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () =>
+        new Response(JSON.stringify({
+          url: "https://example.com/", title: "Example Domain",
+        }), { status: 200 }),
+      ));
+      expect(await currentPage()).toEqual({
+        url: "https://example.com/", title: "Example Domain",
+      });
+    });
+
+    it("tolerates an OLDER gateway that omits title", async () => {
+      // Additive field: a client newer than its gateway must not break, and
+      // this stack is rolled in two pieces (the bundle is baked into the
+      // gateway image, the worker is separate), so version skew is normal.
+      vi.stubGlobal("fetch", vi.fn(async () =>
+        new Response(JSON.stringify({ url: "https://example.com/" }), { status: 200 }),
+      ));
+      expect(await currentPage()).toEqual({
+        url: "https://example.com/", title: "",
+      });
+    });
+
+    it("ignores a non-string title rather than rendering it", async () => {
+      // The body comes over the network; a number here would end up in
+      // document.title as "[object Object]" or similar.
+      vi.stubGlobal("fetch", vi.fn(async () =>
+        new Response(JSON.stringify({ url: "https://x/", title: 42 }), { status: 200 }),
+      ));
+      expect((await currentPage()).title).toBe("");
+    });
+
+    it("returns a null url and empty title when the endpoint fails", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 502 })));
+      expect(await currentPage()).toEqual({ url: null, title: "" });
+    });
   });
 });

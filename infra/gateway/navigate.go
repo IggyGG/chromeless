@@ -162,12 +162,14 @@ func (g *gateway) handleCurrentURL(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), navTimeout)
 	defer cancel()
 
-	url, err := g.cdp.currentURL(ctx)
+	url, title, err := g.cdp.currentPage(ctx)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"url": url})
+	// `title` is additive: an older client reading only `url` is unaffected,
+	// which is why this is not a version bump.
+	writeJSON(w, map[string]any{"url": url, "title": title})
 }
 
 // navigateAtStartup honours CHROMIUM_START_URL, which until now was a dead

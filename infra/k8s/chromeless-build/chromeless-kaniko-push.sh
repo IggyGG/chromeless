@@ -345,7 +345,14 @@ echo "Following pod ${POD}..."
 
 # The log observer can disconnect. Check BOTH terminal conditions: waiting only
 # for Complete delays a known failure by ten minutes and changes no evidence.
-for _ in $(seq 1 120); do
+#
+# The loop bound must EXCEED the Job's own activeDeadlineSeconds, or this
+# returns while the Job is still running and the status read below lands in
+# the "indeterminate" branch — which reads as a mystery rather than as "not
+# finished yet". activeDeadlineSeconds is 900s (raised from 300s on
+# 2026-09-08, when a 210 MB layer was severed mid-upload twice), so 480
+# iterations x 2s = 960s clears it.
+for _ in $(seq 1 480); do
   CONDITIONS="$(kubectl -n chromeless-build get job "${JOB_NAME}" \
     -o 'jsonpath={range .status.conditions[*]}{.type}={.status}{"\n"}{end}' 2>/dev/null || true)"
   case "${CONDITIONS}" in
@@ -369,6 +376,19 @@ fi
 if [[ "${FAILED}" == "True" ]]; then
   echo
   echo "✗ kaniko-push FAILED — see /tmp/kaniko-push-${CHROMELESS_KANIKO_TAG}.log" >&2
+  # Name the deadline case specifically. It presents as a push failure and
+  # sends you to the credentials or the Dockerfile, when in fact the upload
+  # was severed part-way: the log's last line is "Pushing image to ..." with
+  # NO error after it. Happened twice on 2026-09-08 with 82% of a 210 MB
+  # layer transferred.
+  REASON="$(kubectl -n chromeless-build get job "${JOB_NAME}" \
+    -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}' 2>/dev/null || true)"
+  if [[ "${REASON}" == "DeadlineExceeded" ]]; then
+    echo "   reason: DeadlineExceeded — the push ran past the Job's" >&2
+    echo "   activeDeadlineSeconds, it did NOT error. Check the registry's" >&2
+    echo "   own log for 'client disconnected during blob PATCH', and raise" >&2
+    echo "   activeDeadlineSeconds in chromeless-kaniko-push.yaml." >&2
+  fi
   exit 1
 fi
 echo

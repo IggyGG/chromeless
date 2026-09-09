@@ -98,12 +98,16 @@ class FakePC {
 }
 
 function makeSession(overrides?: {
-  fetchToken?: () => Promise<null>;
+  fetchToken?: () => Promise<unknown>;
+  tokenRefresher?: unknown;
 }) {
   const pcs: FakePC[] = [];
   const session = new ChromelessSession({
     signalingBase: "ws://test:8080/ws",
     socketCtor: FakeSocket as unknown as RWSocketCtor,
+    ...(overrides?.tokenRefresher
+      ? { tokenRefresher: overrides.tokenRefresher as never }
+      : {}),
     pcFactory: () => {
       const pc = new FakePC();
       pcs.push(pc);
@@ -364,6 +368,88 @@ describe("ChromelessSession", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  // The auth token expires in 5-15 minutes; the gateway's login cookie lasts
+  // 12 hours. A session that outlives one TTL and then redials was
+  // presenting an EXPIRED credential, because ReconnectingWebSocket froze
+  // the token into its URL at construction. The broker rejects that at the
+  // handshake, which looks exactly like "the broker is down" — and it gets
+  // more likely the longer a session runs.
+  describe("auth token refresh", () => {
+    /** Minimal stand-in for TokenRefresher; only what the session uses. */
+    function fakeRefresher(initial: string) {
+      let token = initial;
+      const state = {
+        adopted: 0,
+        scheduled: 0,
+        stopped: 0,
+        adopt: () => { state.adopted++; },
+        scheduleNext: () => { state.scheduled++; },
+        onRefresh: (_l: (t: unknown) => void) => () => {},
+        current: () => ({ token, exp: 0, sub: "" }),
+        stop: () => { state.stopped++; },
+        /** Simulate the timer firing. */
+        rotate: (next: string) => { token = next; },
+      };
+      return state;
+    }
+
+    const issued = async () => ({ token: "tok-1", exp: 9_999_999_999, sub: "t" });
+
+    it("adopts the token the session already fetched instead of fetching another", async () => {
+      const r = fakeRefresher("tok-1");
+      const { session } = makeSession({ fetchToken: issued, tokenRefresher: r });
+      await session.connect("dev-20");
+
+      expect(r.adopted).toBe(1);
+      expect(r.scheduled).toBe(1);
+      expect(lastSocket().url).toContain("token=tok-1");
+    });
+
+    it("REDIALS with the refreshed token, not the one from the first dial", async () => {
+      // THE regression this whole change exists for. Before it,
+      // ReconnectingWebSocket froze the URL — token and all — at
+      // construction, so this second dial presented tok-1 forever.
+      vi.useFakeTimers();
+      try {
+        const r = fakeRefresher("tok-1");
+        const { session } = makeSession({ fetchToken: issued, tokenRefresher: r });
+        await session.connect("dev-21");
+        const first = lastSocket();
+        first.triggerOpen();
+        expect(first.url).toContain("token=tok-1");
+
+        // The refresh timer fires, THEN the socket drops. Reconnect backs
+        // off (1s by default) before redialling, hence the timer advance.
+        r.rotate("tok-2");
+        first.close();
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        expect(openSockets.length).toBeGreaterThan(1);
+        expect(lastSocket().url).toContain("token=tok-2");
+        expect(lastSocket().url).not.toContain("tok-1");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("stops the refresher on disconnect", async () => {
+      const r = fakeRefresher("tok-1");
+      const { session } = makeSession({ fetchToken: issued, tokenRefresher: r });
+      await session.connect("dev-22");
+      session.disconnect("test");
+
+      // Its timer is minutes long: a live one after teardown keeps minting
+      // credentials for a session nobody holds, until the tab closes.
+      expect(r.stopped).toBeGreaterThan(0);
+    });
+
+    it("connects unauthenticated with no refresher when the issuer is down", async () => {
+      const { session } = makeSession();   // fetchToken returns null
+      await session.connect("dev-23");
+      expect(lastSocket().url).toBe("ws://test:8080/ws/dev-23");
     });
   });
 });

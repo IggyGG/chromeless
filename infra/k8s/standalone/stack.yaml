@@ -259,13 +259,27 @@ spec:
           # earlier — measured), and the shared pulse ADM is pre-armed on
           # re-arm so libwebrtc attaches to a running capture instead of
           # running its own broken start. Supersedes:
-          # 2b738a70 (tag cr7727-071d0828f342, built from batch R at 071d082):
-          # a viewport resize no longer freezes the BeginFrame loop and aborts
-          # the GPU process; audio survives a re-arm (the shared pulse ADM is
-          # stopped explicitly); the worker redials the broker instead of
-          # waiting for the liveness probe to kill it. All three were measured
-          # broken on 5813600c the day before — see docs/findings/.
-          image: registry.triform.cloud/chromeless/chromeless@sha256:0c62400d8481211252b068a0f8437210452ef7ea868337b78bcfb395ff3e6cd0
+          # 64521cd1 (tag cr7727-f9deaaa7efc6, batch B at f9deaaa):
+          # `<input type=file>` works END TO END — verified live, not just
+          # compiled: tests/interactive --only uploads is 9/9 on this exact
+          # image, the page receives a real File with the original filename
+          # and byte-identical contents.
+          #
+          # Getting there took five rolls, all on ONE feature, because three
+          # separate defects were silent paths rather than wrong answers:
+          # AppendToFile cannot create a file (no O_CREAT), two chunk-drop
+          # guards logged nothing, and finally a use-after-move computed the
+          # success flag from a moved-from string — so every SUCCESSFUL
+          # upload reported failure while the file sat correct on disk.
+          # docs/findings/file-upload-chunk-vanishes.md has the whole trail,
+          # including the two theories that were wrong.
+          #
+          # Carries batch R (merged as 30178cd): the resize no longer aborts
+          # the GPU, the worker redials the broker.
+          #
+          # Lane verdict for this source: 639 steps, 0 failed, 0 undefined
+          # symbols; worker + all 8 test targets linked.
+          image: registry.triform.cloud/chromeless/chromeless@sha256:64521cd1aa6dfcfcff38c6cffacea2d2451f9e4bebdcb6f22f585d19dd779950
           env:
             - name: SESSION_ID
               value: dev

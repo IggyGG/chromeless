@@ -717,8 +717,15 @@ source_set("web_contents_delegate") {
   deps = [
     "//base",
     ":control_channel",
+    # CV2-UPLOAD: RunFileChooser parks the page's FileSelectListener on the
+    # receiver, which then resolves it when the upload lands.
+    ":file_upload_receiver",
     ":javascript_dialog_manager",
     "//content/public/browser",
+    # blink::mojom::FileChooserParams::Mode — RunFileChooser's params, and
+    # the Mode this delegate rejects (kUploadFolder / kSave / kOpenDirectory
+    # have no representation on the upload wire).
+    "//third_party/blink/public/mojom:mojom_platform",
     # aura::Window — new WebContents must be parented to the embedder's
     # root or they fall outside the focus chain (BUGS-529).
     "//ui/aura",
@@ -763,62 +770,53 @@ source_set("clipboard_relay") {
 }
 
 # ---------------------------------------------------------------------
-# Native file-upload DC ↔ file-bridge WS relay (CV2-35, M6 R3).
+# Native file upload — the guest half of `<input type=file>` (CV2-UPLOAD).
 #
-# Bidirectional relay between the WebRTC "files" DataChannel and
-# the existing file-bridge sidecar (capture/file-bridge/). Replaces
-# streamer.js's file-upload wiring (deleted in M7).
+# Replaces :file_upload_relay, which forwarded every "files" DC frame to a
+# WebSocket bridge (capture/file-bridge/) over a client whose transport was
+# never implemented. It was constructed with url="off", so it sat in
+# `disabled()` mode and dropped every frame — for the same four months the
+# clipboard relay did, and for the same reason.
 #
-# Inbound (DC→bridge): CbFileUploadRelay is a DataChannelObserver
-# bound onto the kFiles channel via M3 R5's BindObserver. Each
-# DC text frame (file_upload_start / file_upload_chunk / file_upload
-# _end / file_upload_cancel — see docs/protocols/file-upload.md) is
-# forwarded verbatim to the bridge's WS endpoint (default
-# ws://127.0.0.1:9400/files).
+# The receiver terminates the protocol in the browser process instead: it
+# decodes file_upload_start / _chunk / _end / _cancel (docs/protocols/
+# file-upload.md), appends base64-decoded chunks to <profile>/Uploads on a
+# MayBlock sequence, verifies the declared sha256 by reading the file back,
+# and hands the result to the content::FileSelectListener that
+# CbWebContentsDelegate::RunFileChooser parked.
 #
-# Outbound (bridge→DC): the same CbFileUploadBridgeWsClient owns the
-# WS read-loop. Each reply frame from the bridge (file_upload_progress
-# / file_upload_complete / file_upload_error) is forwarded via
-# dc_host->Send(kFiles, text).
+# BOTH halves were missing before this. A working relay alone would still
+# have done nothing: with no RunFileChooser override, chromium's default
+# auto-cancels the chooser, so the page's <input> was resolved as "no file
+# selected" before the viewer could be asked for a byte.
 #
-# One duplex WS (not two unidirectional like clipboard) because the
-# file-bridge protocol is fundamentally request/response correlated
-# by upload_id, and the bridge speaks one socket per session. See
-# cb_file_upload_relay.h header for the full rationale.
-#
-# Standalone source_set so:
-#   * the unit test target (cb_file_upload_relay_test.cc, follow-up
-#     R) can link without dragging in the full embedder set
-#   * M3 R wiring can take a clean dep on us to instantiate the
-#     relay alongside CbStatsRelay + CbClipboardRelay
-#
-# Deps mirror :clipboard_relay; the WS-backend production wiring
-# (TODO in the .cc) will add either //services/network/public/cpp
-# or //net/websockets depending on the backend choice locked in for
-# R3's follow-up CL. The DRAFT compiles against the existing deps
-# because the WS hop is stubbed behind an interface for testability.
+# Standalone source_set so the receiver can be unit-tested without linking
+# the full embedder, matching :clipboard_relay and :control_channel.
 # ---------------------------------------------------------------------
-source_set("file_upload_relay") {
+source_set("file_upload_receiver") {
   sources = [
-    "cb_file_upload_relay.cc",
-    "cb_file_upload_relay.h",
+    "cb_file_upload_receiver.cc",
+    "cb_file_upload_receiver.h",
   ]
   deps = [
-    "//cloud-browser/capture/config:cb_env_config",
     "//cloud-browser/capture/signaling:cb_dc_host",
-    "//net/traffic_annotation",
-    "//services/network/public/cpp",
-    "//services/network/public/mojom",
-    "//url",
+    # crypto::hash::Sha256 — the upload is verified against the client's
+    # declared digest by hashing what actually landed on disk.
+    "//crypto",
     "//third_party/webrtc_overrides/cloud_browser:webrtc_api_passthrough",
   ]
 
-  # public_deps: this target's PUBLIC header includes "base/...", so //base
-  # is part of its interface — dependents need base's include dirs (which
-  # carry partition_alloc's generated headers) transitively. See the note
-  # on cb_wire_envelope in capture/signaling/BUILD.gn for the failure this
-  # produces when it is a private dep.
-  public_deps = [ "//base" ]
+  # public_deps: the PUBLIC header includes "base/...",
+  # "content/public/browser/file_select_listener.h" (the parked listener is
+  # a member) and the file-chooser mojom (the parked Mode is a member), so
+  # all three are part of this target's interface and dependents need their
+  # include dirs transitively. See the cb_wire_envelope note in
+  # capture/signaling/BUILD.gn for what a private dep produces here.
+  public_deps = [
+    "//base",
+    "//content/public/browser",
+    "//third_party/blink/public/mojom:mojom_platform",
+  ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
 }
@@ -1320,7 +1318,7 @@ source_set("embedder") {
     # dep needed for it. Stats relay (M6 R1) is deferred — needs a
     # 5th "stats" DC that doesn't exist in current F7-skinny.
     ":clipboard_relay",
-    ":file_upload_relay",
+    ":file_upload_receiver",
     ":input_dispatch",
     # Browser-fidelity wave 1 — the guest's ask-a-human path. main_parts
     # owns the CbControlChannel unique_ptr and binds it to the kControl DC

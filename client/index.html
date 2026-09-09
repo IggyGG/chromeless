@@ -255,6 +255,55 @@
         background: transparent;
         color: var(--fg);
       }
+
+      /* ── File picker bar (control channel, kind=file_chooser) ──────────
+         The streamed page clicked <input type=file>. The guest is holding
+         chromium's FileSelectListener open and the page cannot proceed
+         until we answer, so this bar must be findable and dismissable.
+
+         A BAR, not a modal like the dialog overlay above: a file dialog
+         only opens from a real user gesture, so the viewer has to click
+         the input themselves. Dimming the page would suggest the guest is
+         blocked on the whole document when it is blocked on one input. */
+      .cb-filepick {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        z-index: 1000;           /* same reason as .cb-control-overlay:
+                                    <video> makes its own stacking context */
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        max-width: calc(100% - 32px);
+        padding: 12px 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        box-shadow: 0 12px 40px rgb(0 0 0 / 55%);
+      }
+      .cb-filepick-label {
+        /* Page-controlled text (the input's title). Cap the width so a
+           hostile page cannot push the Cancel button off-screen. */
+        overflow-wrap: anywhere;
+        max-width: 40ch;
+      }
+      .cb-filepick-input { font: inherit; color: var(--fg); }
+      .cb-filepick-cancel {
+        background: transparent;
+        color: var(--fg);
+      }
+
+      /* HUD quality dot. Three states plus "don't know yet" — and the
+         unknown state is deliberately grey rather than green, because a
+         green dot before any sample has arrived is a claim we cannot
+         support. */
+      .hud .dot { display: inline-block; width: 8px; height: 8px;
+                  border-radius: 50%; margin-right: 4px; }
+      .hud .dot[data-q="good"]    { background: #3fb950; }
+      .hud .dot[data-q="fair"]    { background: #d29922; }
+      .hud .dot[data-q="poor"]    { background: #f85149; }
+      .hud .dot[data-q="unknown"] { background: var(--muted); }
     </style>
   </head>
   <body>
@@ -283,6 +332,29 @@
               title="Share your camera + microphone with the cloud browser">
         Share camera/mic
       </button>
+      <!-- The guest has always SENT an audio track; the <video> below was
+           hard-muted with no way to unmute, so every byte of it was
+           decoded and thrown away. Muted is still the startup state — a
+           page that autoplays with sound is refused by Chrome's autoplay
+           policy and the whole stream stalls, not just the audio — but it
+           is now a state the user can leave. -->
+      <button id="audio-toggle"
+              data-state="muted"
+              disabled
+              title="Unmute the cloud browser's audio">
+        🔇 Unmute
+      </button>
+      <!-- Fullscreen the STAGE, not the document: the panel and log stay
+           out of the way while the stream keeps its own aspect ratio. The
+           guest also emits `fullscreen_changed` when the streamed PAGE
+           calls requestFullscreen (a video player, a game), and the client
+           follows it — otherwise the page believes it is fullscreen while
+           the viewer still sees a 380px sidebar. -->
+      <button id="fullscreen-toggle"
+              disabled
+              title="Fill the window with the cloud browser">
+        ⛶ Fullscreen
+      </button>
     </header>
     <!--
       Address bar. Navigation does NOT ride the peer connection: this posts to
@@ -307,9 +379,29 @@
     </form>
     <main>
       <div class="stage" id="stage">
+        <!-- `muted` is REQUIRED here, not a preference: autoplay with
+             sound is blocked by every browser's autoplay policy, and the
+             failure is not "no audio" but a play() rejection that leaves
+             the whole video stalled. The Unmute button above clears it
+             from a real user gesture, which is exactly what the policy
+             asks for. -->
         <video id="remote" autoplay playsinline muted></video>
       </div>
       <aside>
+        <!-- HUD. The session has emitted a full StatsSample every second
+             since T82 and nothing subscribed to it, so a viewer watching a
+             stream degrade had no way to tell a slow network from a broken
+             guest — the panel said `connected` either way. -->
+        <h2>connection</h2>
+        <dl class="states hud">
+          <dt>quality</dt>     <dd><span id="hud-dot" class="dot" data-q="unknown"></span> <span id="hud-quality">—</span></dd>
+          <dt>fps</dt>         <dd id="hud-fps">—</dd>
+          <dt>bitrate</dt>     <dd id="hud-bitrate">—</dd>
+          <dt>rtt</dt>         <dd id="hud-rtt">—</dd>
+          <dt>loss</dt>        <dd id="hud-loss">—</dd>
+          <dt>resolution</dt>  <dd id="hud-res">—</dd>
+        </dl>
+
         <h2>peer connection</h2>
         <dl class="states">
           <dt>signaling</dt>   <dd id="state-sig">—</dd>

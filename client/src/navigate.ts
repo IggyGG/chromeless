@@ -98,17 +98,40 @@ export const goForward = (): Promise<NavigationResult> => post(ENDPOINTS.forward
 export const reload = (): Promise<NavigationResult> => post(ENDPOINTS.reload);
 export const stopLoading = (): Promise<NavigationResult> => post(ENDPOINTS.stop);
 
-/** What the remote browser is currently showing, or null if unavailable. */
-export async function currentUrl(): Promise<string | null> {
+/** What the remote browser is currently showing. */
+export interface CurrentPage {
+  url: string | null;
+  /** The page's own <title>. Empty string when the page has none. */
+  title: string;
+}
+
+/**
+ * The remote browser's current page.
+ *
+ * `title` was added to the gateway's /api/current-url response in 2026-09;
+ * it is read defensively so this client still works against an older
+ * gateway, which simply omits the field. The DevTools /json listing has
+ * always carried it — the gateway parsed it into cdpTarget.Title and threw
+ * it away, so the client had an address and nothing else to show.
+ */
+export async function currentPage(): Promise<CurrentPage> {
   try {
     const res = await fetch(ENDPOINTS.currentUrl, {
       credentials: "same-origin",
       cache: "no-store",
     });
-    if (!res.ok) return null;
-    const body = (await res.json()) as { url?: string };
-    return body.url ?? null;
+    if (!res.ok) return { url: null, title: "" };
+    const body = (await res.json()) as { url?: unknown; title?: unknown };
+    return {
+      url: typeof body.url === "string" ? body.url : null,
+      title: typeof body.title === "string" ? body.title : "",
+    };
   } catch {
-    return null;
+    return { url: null, title: "" };
   }
+}
+
+/** What the remote browser is currently showing, or null if unavailable. */
+export async function currentUrl(): Promise<string | null> {
+  return (await currentPage()).url;
 }

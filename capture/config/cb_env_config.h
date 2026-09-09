@@ -12,6 +12,8 @@
 //
 //   1. `EnvOrDefault()` is copy-pasted, byte-identical, into three files —
 //      cb_clipboard_relay.cc, cb_stats_relay.cc, cb_file_upload_relay.cc.
+//      (The last of those was deleted in 2026-09 along with the WebSocket
+//      file-bridge it dialled; the point stands for the other two.)
 //      Three copies of four lines is not a crisis, but it is three places
 //      to fix when the semantics need to change, and the semantics ARE
 //      subtle: empty-string must be treated as unset (see below).

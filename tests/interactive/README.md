@@ -70,9 +70,19 @@ kubectl rollout restart deploy/chromeless-standalone-worker -n chromeless
 
 ## Expected result
 
-**65 of 65** on the pinned guest (`infra/k8s/standalone/stack.yaml`,
-`cr7727-c5f2eb91c6f0` or later), with one check that reports a preflight
-rather than a product verdict:
+**65 of 65** was the score before 2026-09-08. The suite now carries **91
+check() sites** — `uploads` is new (12) and `stats` grew from 6 to 13 (audio
+reception, the unmute control, the HUD) — so the number a full run prints is
+higher and depends on which optional preflights fire.
+
+**Do not treat a bare total as the pass criterion.** The reliable statement is
+*zero FAILED lines*; the run prints `N/N checks passed` and names every
+failure. Suites skip whole blocks when a preflight says the guest or the
+gateway bundle predates a feature, and that is reported, not silently counted.
+
+On the pinned guest (`infra/k8s/standalone/stack.yaml`, `cr7727-c5f2eb91c6f0`
+or later), with these checks reporting a preflight rather than a product
+verdict:
 
 - the clipboard suite expects paste AND copy to round-trip on a guest built
   after 2026-09-05 (boot log `CV2-CLIPBOARD: relay bound`). An older guest logs
@@ -90,6 +100,21 @@ rather than a product verdict:
   `/home/cbuser/.config/chromium` (the guest honours `--user-data-dir` since
   the same image) and the older `/tmp/cloud_browser_profile_*` path, so it
   stays honest against an older guest.
+- the uploads suite (added 2026-09-08 with `CbFileUploadReceiver`) needs a
+  guest that opens BOTH the `files` and `control` channels. Its preflight
+  reports the two separately, because the two halves of `<input type=file>`
+  failed independently and for a while both were missing: no
+  `RunFileChooser` override meant chromium auto-cancelled the chooser before
+  anything was asked, and the `files` channel was bound to a relay whose
+  WebSocket backend was never built. Either alone looks like "the file input
+  does nothing".
+
+  Its oracle is the REMOTE PAGE's own `<input>`, not the guest's disk: bytes
+  landing in `Uploads/` prove only that the transport ran, while the defect
+  was that the page's `change` event never fired. It also asserts `File.name`
+  is the name the viewer picked — an empty `NativeFileInfo::display_name`
+  makes blink fall back to our sanitised on-disk spelling, which every other
+  check would pass right through.
 
 **Any failure is a regression.** Earlier images score lower for reasons
 recorded in `docs/findings/`; if the failures cluster in one suite, check the
@@ -123,8 +148,8 @@ compare.
 
 - `harness.py` — `CDP` (stdlib websocket), `WorkerOracle` (truth),
   `ClientDriver` (the user), fixture upload, login.
-- `run.py` — the suites: dialogs, downloads, clipboard, passthrough, stats, video,
-  navigation, mouse, scroll, keyboard, channels.
+- `run.py` — the suites: dialogs, uploads, downloads, clipboard, passthrough,
+  stats, video, navigation, mouse, scroll, keyboard, channels.
 
 Input is dispatched as genuine DOM events on the client's `<video>` element,
 never as synthetic CDP input at the client — that would bypass the very code

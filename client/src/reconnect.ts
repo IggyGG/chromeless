@@ -86,7 +86,16 @@ type Listener<T> = T extends (...args: infer A) => void ? (...args: A) => void :
  * as a raw WebSocket plus a coarser `stateChange` event for the UI.
  */
 export class ReconnectingWebSocket {
-  private readonly url: string;
+  // A SUPPLIER, not a string. The signaling URL carries a short-TTL auth
+  // token (`?token=…`, auth.ts), and a URL frozen at construction is frozen
+  // WITH that token: after a 15-minute TTL every redial presents an expired
+  // credential, which the broker rejects at the handshake. That is
+  // indistinguishable from "the broker is down" and gets worse the longer
+  // the session lives — precisely when reconnecting matters most.
+  //
+  // A plain string is still accepted and wrapped, so every existing caller
+  // and test is unchanged.
+  private readonly urlFor: () => string;
   private readonly opts: Required<Omit<ReconnectingWebSocketOptions, "webSocket" | "setTimeout" | "clearTimeout">> & {
     WebSocket: RWSocketCtor;
     setTimeout: (cb: () => void, ms: number) => number;
@@ -106,8 +115,9 @@ export class ReconnectingWebSocket {
   /** True after `close()` is invoked; suppresses further reconnects. */
   private permanentlyClosed = false;
 
-  constructor(url: string, options: ReconnectingWebSocketOptions = {}) {
-    this.url = url;
+  constructor(url: string | (() => string),
+              options: ReconnectingWebSocketOptions = {}) {
+    this.urlFor = typeof url === "function" ? url : () => url;
     const ws =
       options.webSocket ??
       (globalThis as unknown as { WebSocket?: RWSocketCtor }).WebSocket;
@@ -185,7 +195,9 @@ export class ReconnectingWebSocket {
   private openSocket(): void {
     let s: RWSocket;
     try {
-      s = new this.opts.WebSocket(this.url);
+      // Resolved per dial, so a token refreshed since the last attempt is
+      // the one presented.
+      s = new this.opts.WebSocket(this.urlFor());
     } catch (err) {
       // Synchronous failure (rare; mostly bad URL). Treat as a closed socket.
       this.scheduleRetry();

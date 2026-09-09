@@ -51,6 +51,21 @@ Consequences:
   `FROM_HERE` with neither header included. It is a lint, not a compiler:
   clean means "that specific mistake is absent", not "this builds".
 
+  **And a green lane means "this builds", not "this works".** The signature
+  can be right while the SEMANTICS are wrong, and then nothing short of a
+  live guest tells you. `base::AppendToFile` compiled, linted, and passed the
+  lane; it opens `O_WRONLY | O_APPEND` with no `O_CREAT`
+  (`file_util_posix.cc:1269`), so it cannot create the file it appends to,
+  and every upload died on its first chunk — four layers from the symptom
+  ("the page sees no file selected"). Its header says only "Appends |data| to
+  |filename|", which is true and reads as if it creates one.
+
+  So when reading a pinned header, read what it does NOT say. If the contract
+  is about a side effect — does it create, does it truncate, does it need the
+  parent to exist — the declaration will not tell you. Read the `_posix.cc`
+  implementation, or budget a live run to find out. Both are cheaper than the
+  cycle where the whole feature looks broken.
+
 When you finish C++ work, **say plainly that it is unverified.** Do not
 describe it as done or working.
 
@@ -474,6 +489,26 @@ Two specific forms worth memorising:
   (`sed -n '1000,1140p'`) goes stale as the file grows, and fails as a false
   ALARM — which trains everyone to ignore the check that would have caught the
   real thing. Anchor on structure.
+
+**In `capture/` this rule is worth a great deal more than elsewhere, because
+the feedback loop is 20 minutes plus an image roll.** `<input type=file>` took
+FIVE build-and-roll cycles on 2026-09-08, and all three real defects were
+silent paths rather than wrong computations:
+
+| defect | how it presented |
+| --- | --- |
+| `base::AppendToFile` has no `O_CREAT`, so it cannot create the file | `write_failed` from a different function, four steps later |
+| two chunk-drop guards: a bare `return`, and a `VLOG(1)` | nothing at all |
+| a reply handler returning silently when its map entry was already erased | nothing at all — it hid the write's outcome entirely |
+
+The last two hid each other: the write's own success or failure was never
+logged, so every theory was about *why the write failed* when the write had
+simply not run yet.
+
+**So: on a lane-bound component, log the wire before you theorise about it.**
+One `LOG(INFO)` per inbound frame answered in a single run what four cycles of
+static reasoning could not. Adding it was the fourth change; it should have
+been the first.
 
 ### Ask the repo how it lands changes before diagnosing why it didn't
 

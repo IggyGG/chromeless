@@ -81,9 +81,31 @@ spec:
   # failed. Retries are cheap here precisely because rejection is instant:
   # the expensive part only begins once a pod is admitted.
   backoffLimit: 5
-  # 5 min hard ceiling. Cold layer push is ~30-60s; this leaves
-  # generous headroom for registry flakes.
-  activeDeadlineSeconds: 300
+  # 15 min hard ceiling. 300s was the value until 2026-09-08, on the belief —
+  # written directly above it — that "cold layer push is ~30-60s".
+  #
+  # MEASURED that day, twice in a row: the worker layer is 210 MB, kaniko
+  # reached "Pushing image to ..." at 87s and 112s, and the job was killed at
+  # the 300s deadline with the registry logging
+  #
+  #   error msg="client disconnected during blob PATCH"
+  #     contentLength=210758335 copied=172730490 error="unexpected EOF"
+  #
+  # i.e. 82% of the layer uploaded, then DeadlineExceeded severed it. The
+  # eight successful pushes earlier the same day ran 109s-4m21s, so the
+  # headroom over a 300s ceiling was already thin and something (registry
+  # load, node egress) pushed it over.
+  #
+  # This reads as a push FAILURE and sends you to the credentials or the
+  # Dockerfile; the give-away is that the log's last line is always
+  # "Pushing image to" with no error after it, and the Job event says
+  # DeadlineExceeded rather than BackoffLimitExceeded.
+  #
+  # 900s is ~4x the slowest observed successful push. The deadline exists to
+  # stop a wedged job holding node capacity, and a push that is genuinely
+  # stuck still hits this — it is just no longer hit by a push that is
+  # merely slow.
+  activeDeadlineSeconds: 900
   # Keep the Pod around for a day so post-mortem logs are
   # available without resurrecting from k8s events.
   ttlSecondsAfterFinished: 86400

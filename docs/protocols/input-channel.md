@@ -298,9 +298,31 @@ non-empty `data` always emits `composition_end`.
 { "text": "hello world" }
 ```
 
-Sent when the local user pastes into the cloud browser. The server
-writes this into the remote clipboard and synthesizes a paste action.
-v1 supports text only; binary/HTML clipboard payloads are deferred.
+> ⚠️ **Specified, recognised, and handled by nothing. Do not use it.**
+> Use the clipboard channel's `clipboard_offer`
+> ([`clipboard-channel.md`](./clipboard-channel.md)) instead — that is the
+> path `CbClipboardRelay` implements, and the one that actually writes the
+> guest clipboard and synthesises Ctrl+V.
+>
+> The envelope is listed in the guest's `kKnownInputTypes`
+> (`cb_input_dispatch.cc`), so it is accepted and NOT reported through
+> `OnInputEventUnknownType` — it is simply dropped, silently.
+> `cb_input_dispatch_clipboard.h` says so on purpose: "Handling
+> clipboard_paste — that envelope IS on the v1 input spec but is owned by a
+> different M4 rank ... we leave the dispatch surface unclaimed here". The
+> rank that would own it never landed.
+>
+> Until 2026-09-08 `client/src/input.ts` wired the browser's `paste` event
+> to this envelope while `main.ts` separately sent `clipboard_offer` on the
+> clipboard channel, so every paste crossed the wire TWICE and took effect
+> ONCE. The client wiring is gone; the envelope stays specified because
+> removing a v1 type is a wire break, and because a future implementation
+> may still claim it.
+
+Sent when the local user pastes into the cloud browser. The intent was that
+the server write this into the remote clipboard and synthesise a paste
+action; no implementation does. v1 supports text only; binary/HTML clipboard
+payloads are deferred.
 
 ### `clipboard_copy_request`
 

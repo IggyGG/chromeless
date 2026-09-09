@@ -832,6 +832,212 @@ def suite_downloads(client, worker):
               f"Downloads/ still holds an intermediate: {listing!r}")
 
 
+_UPLOAD_FIXTURE = """<!doctype html><meta charset=utf-8>
+<title>upload fixture</title>
+<body style="font:16px system-ui;padding:40px">
+<h1>upload fixture</h1>
+<!-- A BIG target, for the same reason the download fixture's anchor is a
+     padded block and says so: the click is dispatched at the element's
+     centre in remote viewport fractions, and a bare `<input type=file>` is
+     a ~200x20 control whose centre lands on the "No file chosen" LABEL,
+     not the button — the click is delivered and the element never sees it.
+     Measured here on 2026-09-08: window.__clicks stayed 0 against a bare
+     input and the suite reported "no picker appeared", which reads as a
+     broken RunFileChooser override and is not one.
+     transform:scale makes the whole control a large hit area without
+     changing what it IS — still a real file input, still the real chooser
+     path. -->
+<div style="padding:40px;background:#eee;text-align:center">
+  <input id=f type=file accept=".txt,text/plain"
+         style="transform:scale(3);transform-origin:center">
+</div>
+<script>
+  // What the PAGE sees. This is the whole point of the test: the bytes
+  // landing in the guest's Uploads/ directory prove the transport worked,
+  // but only a File object reaching the page's own <input> proves the
+  // FileSelectListener was resolved — which is the half that was missing
+  // entirely (there was no RunFileChooser override at all).
+  window.__file = null;
+  document.getElementById('f').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    window.__file = f ? {name: f.name, size: f.size, type: f.type} : "EMPTY";
+  });
+  // Did the click even LAND on the input? Without this, "no picker
+  // appeared" is indistinguishable from "the mouse missed the element",
+  // and the failure message would send the reader to the wrong half of a
+  // feature whose two halves already failed independently once. The
+  // download suite learned the same lesson (window.__clicks).
+  window.__clicks = 0;
+  document.getElementById('f').addEventListener('click', () => {
+    window.__clicks++;
+  });
+</script>
+"""
+
+
+def suite_uploads(client, worker):
+    """`<input type=file>` on the remote page, satisfied from the viewer.
+
+    Both halves of this were missing until 2026-09-08 and BOTH are needed,
+    so the preflights below distinguish them: a guest with no
+    RunFileChooser override never sends a ui_request (the page is told "no
+    file selected" instantly), and a client bundle with no file_chooser
+    handler declines every request it does get. Those look identical from
+    the outside — a file input that does nothing — and reporting either as
+    "upload is broken" would send the next person to the wrong half.
+    """
+    print("\n[uploads]")
+
+    if not _session_alive(client):
+        check("the WebRTC session is still up (uploads need a live guest)",
+              False, "session already ended (one session per worker process)")
+        return
+
+    # PREFLIGHT 1: the guest must have opened a `files` channel at all.
+    # Same reasoning as suite_dialogs' control-channel probe, and the same
+    # known-positive discipline: `control` is checked alongside, because a
+    # probe that returns false for everything is broken, not informative.
+    log = client.cdp.eval("document.getElementById('log').innerText") or ""
+    has_files = 'wiring data channel "files"' in log
+    has_control = 'wiring data channel "control"' in log
+    if not has_files or not has_control:
+        check("the guest opened both the files and control channels",
+              False,
+              f'files={has_files} control={has_control} — a file upload '
+              f'needs BOTH (the ask goes out on control, the bytes come '
+              f'back on files). If control is present and files is not, '
+              f'the guest predates CbFileUploadReceiver.')
+        return
+
+    _arm_n[0] += 1
+    try:
+        H.navigate(H.fixture_url(_UPLOAD_FIXTURE) + f"?up={_arm_n[0]}")
+    except Exception as exc:
+        check("the gateway could navigate the guest", False,
+              f"{type(exc).__name__}: {exc}")
+        return
+    loaded, _ = worker.wait_for("document.getElementById('f') ? 1 : 0", 1,
+                                timeout=25)
+    check("the upload fixture loaded", loaded)
+    if not loaded:
+        return
+
+    # Write the file the viewer will "pick" onto the harness machine. It is
+    # the CLIENT's local filesystem that a real picker reads from, so this
+    # is the honest place for it.
+    payload = "chromeless-upload-probe-42\n"
+    local = "/tmp/chromeless-upload-probe.txt"
+    with open(local, "w") as fh:
+        fh.write(payload)
+
+    # Click the REMOTE page's file input with a real mouse event routed
+    # through the input channel — the same path a user's click takes, and
+    # the only thing that makes chromium call RunFileChooser.
+    box = worker.rect("f")
+    worker.eval("window.scrollTo(0,0); 1")
+    time.sleep(0.4)
+    client.click(box["x"], box["y"])
+
+    # Did the click reach the input? Nothing below can mean anything if it
+    # did not, and "no picker appeared" would blame the wrong half.
+    clicked, n = worker.wait_for("window.__clicks || 0",
+                                 lambda v: (v or 0) >= 1, timeout=15)
+    check("the click reached the file input", clicked,
+          f"the input saw {n} click(s) — the input path missed the target, "
+          f"so this is a MOUSE problem, not an upload one")
+    if not clicked:
+        return
+
+    # The client should now be showing its own picker bar. That bar is the
+    # observable proof the request crossed the wire.
+    appeared, geo = _poll(lambda: _overlay(client, ".cb-filepick"),
+                          lambda g: g is not None, timeout=20)
+    check("the page's file input raises a picker in the client", appeared,
+          "no .cb-filepick appeared — either the guest sent no "
+          "file_chooser ui_request (no RunFileChooser override) or the "
+          "served client bundle has no handler for the kind")
+    if not appeared:
+        return
+    check("the picker is actually on screen",
+          geo["w"] > 0 and geo["h"] > 0 and geo["top"] < geo["vh"],
+          f"geometry {geo!r} — present in the DOM but not visible, which "
+          f"a user cannot act on")
+
+    # Drive the client's <input type=file> the only way CDP can: a real
+    # file dialog cannot be scripted, so set the files directly on the
+    # element and dispatch the change the browser would have.
+    doc = client.cdp.call("DOM.getDocument", {"depth": -1})
+    node = client.cdp.call("DOM.querySelector",
+                           {"nodeId": doc["root"]["nodeId"],
+                            "selector": ".cb-filepick-input"})
+    client.cdp.call("DOM.setFileInputFiles",
+                    {"nodeId": node["nodeId"], "files": [local]})
+
+    # THE REAL ORACLE: what the REMOTE PAGE received.
+    #
+    # Bytes on the guest's disk would only prove the transport ran. The
+    # defect this suite exists for is that the page's own <input> never
+    # fired `change` — so that is what is asserted, and it is read from the
+    # page itself rather than from a log line.
+    got, val = worker.wait_for("JSON.stringify(window.__file)",
+                               lambda v: v not in (None, "null", ""),
+                               timeout=45)
+    # The CLIENT's own log says which half failed, and without it this
+    # check can only report the symptom. FileUploadChannel logs
+    # file_upload_complete / file_upload_error with the guest's code, so a
+    # transport failure (write_failed, hash_mismatch) is distinguishable
+    # from "the bytes arrived and the listener was never resolved" — which
+    # are different bugs in different files.
+    upl = [ln for ln in (client.cdp.eval(
+               "document.getElementById('log').innerText") or "").splitlines()
+           if "file_upload" in ln]
+    check("the file reached the page's own <input>", got,
+          "window.__file never populated. Client log said: "
+          + (" | ".join(l.strip()[:120] for l in upl[-3:]) or
+             "NOTHING about file_upload at all — the client never started "
+             "one, so look at the picker, not the guest"))
+    if not got:
+        return
+
+    info = json.loads(val) if val and val != "EMPTY" else None
+    check("the page got a File, not an empty selection", info is not None,
+          f"change fired with no file: {val!r}")
+    if info is None:
+        return
+
+    # The name matters on its own: an empty NativeFileInfo::display_name
+    # makes blink fall back to the base of the on-disk path, which is our
+    # sanitised "<upload_id>__<name>". A site that echoes the filename, or
+    # validates its extension, would see the wrong thing — and the upload
+    # would still "work" by every other measure.
+    check("the page sees the ORIGINAL filename", 
+          info["name"] == "chromeless-upload-probe.txt",
+          f"File.name is {info['name']!r} — expected the name the viewer "
+          f"picked, not the guest's on-disk spelling",
+          pass_detail=info["name"])
+    check("the file is the right size", info["size"] == len(payload),
+          f"File.size is {info['size']}, expected {len(payload)}",
+          pass_detail=f"{info['size']} bytes")
+
+    # And the bytes themselves, read by the page. A correct name and size
+    # with wrong contents is exactly what a base64 or chunking bug looks
+    # like, and neither check above would catch it.
+    read, text = worker.wait_for(
+        """(() => {
+             const i = document.getElementById('f');
+             if (!i.files[0]) return "";
+             if (!window.__text) {
+               window.__text = "READING";
+               i.files[0].text().then(t => { window.__text = t; });
+             }
+             return window.__text;
+           })()""",
+        lambda v: bool(v) and v != "READING", timeout=25)
+    check("the page can read the file's contents", read and text == payload,
+          f"read {text!r}, expected {payload!r}",
+          pass_detail="contents match byte for byte")
+
+
 def suite_clipboard(client, worker):
     print("\n[clipboard]")
 
@@ -1075,6 +1281,97 @@ def suite_stats(client, worker):
         print("  SKIP  the stats counter is still moving   "
               "session already ended (one session per worker process)")
 
+    # ---- HUD: the stats the client renders ----------------------------
+    #
+    # The session has emitted a StatsSample every second since T82 and
+    # nothing subscribed to it, so these fields are the difference between
+    # a viewer who can see a connection degrading and one who cannot. Read
+    # what is ON SCREEN rather than what getStats returns: the point is
+    # that the numbers reach a person.
+    hud = json.loads(client.cdp.eval(
+        "JSON.stringify({"
+        "  fps: (document.getElementById('hud-fps')||{}).textContent,"
+        "  bitrate: (document.getElementById('hud-bitrate')||{}).textContent,"
+        "  res: (document.getElementById('hud-res')||{}).textContent,"
+        "  q: (document.getElementById('hud-dot')||{dataset:{}}).dataset.q"
+        "})") or "{}")
+    check("the HUD is present in the served bundle", hud.get("fps") is not None,
+          "no #hud-fps element — a stale gateway bundle, not a product fault")
+    if hud.get("fps") is not None:
+        # A dash means "no sample yet", which after several seconds of video
+        # means the subscriber is not wired.
+        check("the HUD shows a real frame rate",
+              hud["fps"] not in ("\u2014", "", None),
+              "fps reads %r — the stats event has had a subscriber only "
+              "since 2026-09-08; before that it read the em-dash forever"
+              % hud["fps"], pass_detail=hud["fps"])
+        check("the HUD shows a real bitrate",
+              hud["bitrate"] not in ("\u2014", "", None),
+              "bitrate reads %r" % hud["bitrate"], pass_detail=hud["bitrate"])
+        check("the HUD shows the stream resolution",
+              hud["res"] not in ("\u2014", "", None, "0x0"),
+              "resolution reads %r — read off the <video>'s "
+              "videoWidth/Height, so 0x0 means no frame is painted"
+              % hud["res"], pass_detail=hud["res"])
+        check("the HUD reaches a quality verdict",
+              hud.get("q") in ("good", "fair", "poor"),
+              "quality dot is %r — 'unknown' after seconds of video means "
+              "no sample reached the summariser" % hud.get("q"),
+              pass_detail=hud.get("q"))
+
+    # ---- AUDIO: received, and audible ---------------------------------
+    #
+    # The guest has sent an audio track since the first session. Nothing
+    # checked it, and the client's <video> was hard-muted with no control —
+    # so every byte was decoded and discarded, and the product had "audio"
+    # in the sense that the SDP mentioned it.
+    #
+    # Two separate facts, because they fail separately: bytes ARRIVING is
+    # the transport (the ADM, the encoder, the transceiver), and the element
+    # being UNMUTED is whether a human hears anything. A stack that gets the
+    # first right and the second wrong is silent, which is what shipped.
+    audio_bytes = client.cdp.eval("""(async () => {
+        const pc = window.__cbwrtc_pc; if (!pc) return -1;
+        const s = await pc.getStats(); let b = 0;
+        s.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio')
+            b = Math.max(b, r.bytesReceived || 0); });
+        return b; })()""")
+    check("inbound AUDIO bytes reach the client",
+          audio_bytes is not None and audio_bytes > 0,
+          f"inbound-rtp audio bytesReceived={audio_bytes} — the guest offers "
+          f"an audio track; zero bytes means the send side is silent "
+          f"(see docs/findings/audio-dies-after-first-rearm.md)",
+          pass_detail=f"{audio_bytes} bytes")
+
+    # The unmute control. Clicked, not just present: a button that exists
+    # and does nothing is exactly the state this replaced.
+    muted_before = client.cdp.eval(
+        "String(document.getElementById('remote').muted)")
+    check("the stream starts muted (autoplay policy requires it)",
+          muted_before == "true",
+          f"video.muted={muted_before!r} — an unmuted autoplay is refused "
+          f"by the browser and stalls the whole stream, not just audio")
+    client.cdp.eval("""(() => {
+        const b = document.getElementById('audio-toggle');
+        if (b && !b.disabled) b.dispatchEvent(
+            new MouseEvent('click', {bubbles: true, cancelable: true}));
+        return 1; })()""")
+    ok_unmuted, state = _poll(
+        lambda: client.cdp.eval(
+            "document.getElementById('remote').muted ? 'muted' : 'audible'"),
+        lambda v: v == "audible", timeout=10)
+    check("the Unmute button actually unmutes the stream", ok_unmuted,
+          f"video.muted is still true after the click (state={state!r}) — "
+          f"either the button is absent from the served bundle (stale "
+          f"gateway) or play() was refused")
+    if ok_unmuted:
+        label = client.cdp.eval(
+            "document.getElementById('audio-toggle').textContent") or ""
+        check("the button relabels itself to Mute", "Mute" in label,
+              f"label is {label.strip()!r} — a control that lies about its "
+              f"own state is worse than none",
+              pass_detail=label.strip())
+
     bytes_recv = client.cdp.eval("""(async () => {
         const pc = window.__cbwrtc_pc; if (!pc) return -1;
         const s = await pc.getStats(); let n = 0;
@@ -1231,7 +1528,12 @@ def main():
         #
         # `channels` runs early for a related reason: it reads the client's
         # log for the one-time wiring lines emitted at connect.
-        suites = {"dialogs": suite_dialogs, "downloads": suite_downloads,
+        # `uploads` sits with dialogs near the front for the same reason:
+        # it needs the guest to send TO the client (a file_chooser
+        # ui_request), so it is one of the few suites that notices a dead
+        # session rather than silently doing nothing.
+        suites = {"dialogs": suite_dialogs, "uploads": suite_uploads,
+                  "downloads": suite_downloads,
                   "channels": suite_channels,
                   "video": suite_video, "navigation": suite_navigation,
                   "mouse": suite_mouse, "scroll": suite_scroll,

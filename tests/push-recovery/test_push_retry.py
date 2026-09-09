@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import pathlib
 import os
 from pathlib import Path
 import shutil
@@ -124,7 +125,21 @@ raise SystemExit('unexpected git call')
         self.assertEqual(result.returncode, 73, result.stderr)
         manifest = (self.root / 'manifest').read_text()
         self.assertIn('name: ' + JOB + '-attempt2', manifest)
-        self.assertIn('activeDeadlineSeconds: 300', manifest)
+        # The test's NAME is "preserves deadline", and that is the contract:
+        # the retry manifest must carry the deadline from the template, NOT a
+        # weakened one. Asserting the literal 300 also asserted a value that
+        # is not this test's business — it broke when the template moved to
+        # 900s on 2026-09-08 (a 210 MB layer was being severed mid-upload at
+        # 300s; see the comment on activeDeadlineSeconds in the yaml).
+        #
+        # Compare against the template instead, so this keeps testing
+        # preservation and stops testing a number someone else owns.
+        template = (pathlib.Path(__file__).resolve().parents[2] /
+                    'infra/k8s/chromeless-build/chromeless-kaniko-push.yaml').read_text()
+        expected = [ln.strip() for ln in template.splitlines()
+                    if ln.strip().startswith('activeDeadlineSeconds:')]
+        self.assertEqual(len(expected), 1, 'template lost its deadline')
+        self.assertIn(expected[0], manifest)
         self.assertIn('name: verify-build-tag', manifest)
         self.assertIn('$(CHROMELESS_KANIKO_TAG)', manifest)
         calls = [json.loads(l) for l in (self.root / 'calls').read_text().splitlines()]

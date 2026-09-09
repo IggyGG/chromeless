@@ -18,6 +18,7 @@ import {
   PROTOCOL_VERSION,
   type ControlPrompt,
   type ControlResponseData,
+  type FileChooserRequest,
 } from "./control.js";
 
 class FakeChannel {
@@ -220,18 +221,169 @@ describe("attachControlChannel", () => {
   // The guest BLOCKS on every request it sends. Ignoring an unsupported
   // kind would make it wait out the full deadline; an empty-dict response
   // makes it apply its safe default immediately.
+  //
+  // `cert_error` is the example because it is genuinely unimplemented. This
+  // test used to use `file_chooser`, which now HAS a producer — if you are
+  // here because a kind you just implemented broke this test, that is the
+  // test doing its job: move it to another unimplemented kind.
   it("DECLINES an unsupported kind immediately instead of ignoring it", () => {
     const dc = new FakeChannel();
     const cap = capturing();
     const h = attachControlChannel(dc as unknown as RTCDataChannel, { present: cap.present });
 
-    dc.pushMessage(guestRequest({ kind: "file_chooser", id: "9" }));
+    dc.pushMessage(guestRequest({ kind: "cert_error", id: "9" }));
 
     expect(cap.seen).toHaveLength(0);
     expect(dc.sent).toHaveLength(1);
     const env = JSON.parse(dc.sent[0]!);
     expect(env.data).toEqual({ id: "9" }); // no `accept` => guest's default
     h.dispose();
+  });
+
+  // ui_event: fire-and-forget notices. fullscreen_changed is the one that
+  // matters — the guest has emitted it since it was written and nothing
+  // listened, so a page that went fullscreen did so inside a window that
+  // still showed the sidebar.
+  describe("ui_event", () => {
+    const guestEvent = (kind: string, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ v: 1, type: "ui_event", t: 1, seq: 1,
+                       data: { kind, ...extra } });
+
+    it("hands the kind and data to onEvent", () => {
+      const dc = new FakeChannel();
+      const seen: Array<[string, Record<string, unknown>]> = [];
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onEvent: (k, d) => { seen.push([k, d]); },
+      });
+
+      dc.pushMessage(guestEvent("fullscreen_changed", { fullscreen: true }));
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]![0]).toBe("fullscreen_changed");
+      expect(seen[0]![1]["fullscreen"]).toBe(true);
+      // An event is fire-and-forget: answering one would be a protocol error.
+      expect(dc.sent).toHaveLength(0);
+      h.dispose();
+    });
+
+    it("survives a handler that THROWS", () => {
+      const dc = new FakeChannel();
+      let requests = 0;
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onEvent: () => { throw new Error("handler exploded"); },
+        onFileChooser: () => { requests++; return false; },
+      });
+
+      dc.pushMessage(guestEvent("fullscreen_changed", { fullscreen: true }));
+      // The channel must still be alive: every later frame arrives through
+      // the same callback, INCLUDING the requests the guest blocks on.
+      dc.pushMessage(guestRequest({ kind: "file_chooser", id: "20" }));
+
+      expect(requests).toBe(1);
+      h.dispose();
+    });
+
+    it("does not invoke onEvent for a ui_request", () => {
+      const dc = new FakeChannel();
+      const seen: string[] = [];
+      const cap = capturing();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        present: cap.present,
+        onEvent: (k) => { seen.push(k); },
+      });
+
+      dc.pushMessage(guestRequest({ kind: "js_dialog", id: "21" }));
+
+      expect(seen).toEqual([]);
+      expect(cap.seen).toHaveLength(1);
+      h.dispose();
+    });
+  });
+
+  // file_chooser: the guest is holding chromium's FileSelectListener and the
+  // page cannot proceed until we answer. Every branch below must produce
+  // exactly one response.
+  describe("file_chooser", () => {
+    it("declines when no handler is wired, rather than leaving the page stuck", () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {});
+
+      dc.pushMessage(guestRequest({ kind: "file_chooser", id: "10" }));
+
+      expect(dc.sent).toHaveLength(1);
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "10", accept: false });
+      h.dispose();
+    });
+
+    it("passes accept/multiple/title to the handler and answers accept=true", async () => {
+      const dc = new FakeChannel();
+      const seen: FileChooserRequest[] = [];
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onFileChooser: (req) => { seen.push(req); return true; },
+      });
+
+      dc.pushMessage(guestRequest({
+        kind: "file_chooser", id: "11",
+        accept: [".pdf", "image/*"], multiple: true, title: "Pick a file",
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(seen).toEqual([
+        { id: "11", accept: [".pdf", "image/*"], multiple: true, title: "Pick a file" },
+      ]);
+      expect(dc.sent).toHaveLength(1);
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "11", accept: true });
+      h.dispose();
+    });
+
+    it("still answers when the handler THROWS", async () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onFileChooser: () => { throw new Error("picker exploded"); },
+      });
+
+      dc.pushMessage(guestRequest({ kind: "file_chooser", id: "12" }));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The page must not be left blocked because our picker failed.
+      expect(dc.sent).toHaveLength(1);
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "12", accept: false });
+      h.dispose();
+    });
+
+    it("does not present a dialog — a chooser is not a js_dialog", () => {
+      const dc = new FakeChannel();
+      const cap = capturing();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        present: cap.present,
+        onFileChooser: () => true,
+      });
+
+      dc.pushMessage(guestRequest({ kind: "file_chooser", id: "13" }));
+
+      expect(cap.seen).toHaveLength(0);
+      h.dispose();
+    });
+
+    it("drops a non-string entry in accept rather than passing it through", async () => {
+      const dc = new FakeChannel();
+      const seen: FileChooserRequest[] = [];
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onFileChooser: (req) => { seen.push(req); return false; },
+      });
+
+      // The guest is a remote peer; `accept` is whatever arrived on the wire.
+      dc.pushMessage(guestRequest({
+        kind: "file_chooser", id: "14", accept: [".pdf", 7, null],
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(seen[0]!.accept).toEqual([".pdf"]);
+      h.dispose();
+    });
   });
 
   it("answers a superseded prompt with the default rather than orphaning it", () => {

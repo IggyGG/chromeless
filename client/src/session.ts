@@ -49,7 +49,12 @@ export interface SignalingRetryInfo {
   nextDelayMs: number;
 }
 import { StatsSampler, type StatsSample, STATS_PROTOCOL_VERSION } from "./stats.js";
-import { fetchSessionToken, withToken, type IssuedToken } from "./auth.js";
+import {
+  fetchSessionToken,
+  withToken,
+  TokenRefresher,
+  type IssuedToken,
+} from "./auth.js";
 import { classifyNegotiation, describeOutcome, type NegotiationResult } from "./codec-negotiate.js";
 import { estimateConnectionQuality, type ProbeResult } from "./probe.js";
 
@@ -124,6 +129,8 @@ export interface ChromelessSessionOptions {
   pcFactory?: (config: RTCConfiguration) => RTCPeerConnection;
   /** Token fetcher. Default: auth.ts fetchSessionToken. */
   fetchToken?: typeof fetchSessionToken;
+  /** Token refresher. Injected in tests; defaults to a real one. */
+  tokenRefresher?: TokenRefresher;
   /** ICE/TURN config fetcher. Default: turn.ts fetchTurnConfig. */
   fetchIce?: typeof fetchTurnConfig;
   /** Pre-call probe. Default: probe.ts estimateConnectionQuality. */
@@ -258,6 +265,13 @@ export class ChromelessSession {
     return this.sessionId;
   }
 
+  /**
+   * Keeps the session's auth token fresh. Null when the issuer was
+   * unavailable at connect (we are then unauthenticated and there is
+   * nothing to refresh).
+   */
+  private refresher: TokenRefresher | null = null;
+
   /** Tenant id from the verified token's `sub`; "" if anonymous. */
   getTenantId(): string {
     return this.tenantId;
@@ -313,6 +327,29 @@ export class ChromelessSession {
       this.log("info", "auth token", { exp: issued.exp, sub: issued.sub });
       wsUrl = withToken(wsUrl, issued.token);
       this.tenantId = issued.sub ?? "";
+
+      // Keep it fresh for the LIFE of the session, not just for this dial.
+      //
+      // Tokens are issued with a 5-15 minute TTL (auth.ts) while the
+      // gateway's login cookie lasts 12 hours, so any session that outlives
+      // one TTL and then has to redial presents an expired credential. The
+      // broker rejects it at the handshake, which looks exactly like "the
+      // broker is down" — and it gets MORE likely the longer a session runs,
+      // i.e. precisely when a reconnect matters.
+      //
+      // TokenRefresher has existed, implemented and unit-tested, with no
+      // caller anywhere in the client. This is that caller. The refreshed
+      // token reaches the socket through the URL supplier below rather than
+      // by mutating anything: v1 attaches the token only at connect time, so
+      // a fresh one matters exactly at the next dial.
+      const refresher = this.opts.tokenRefresher ??
+        new TokenRefresher(sessionId, "client", { signalingBase: base });
+      this.refresher = refresher;
+      refresher.adopt(issued);
+      refresher.onRefresh((t: IssuedToken) => {
+        this.log("info", "auth token refreshed", { exp: t.exp });
+      });
+      refresher.scheduleNext();
     } else {
       this.log("info", "no auth token (issuer unavailable; connecting unauthenticated)");
       this.tenantId = "";
@@ -334,9 +371,17 @@ export class ChromelessSession {
       ...(issued?.token ? { authToken: issued.token } : {}),
     }).catch(() => null);
 
+    // A supplier, not a fixed string: every redial re-reads the current
+    // token, so a session that outlives its token's TTL reconnects with a
+    // valid one instead of a stale one.
+    const urlFor = (): string => {
+      const t = this.refresher?.current();
+      return t ? withToken(`${base}/${encodeURIComponent(sessionId)}`, t.token)
+               : wsUrl;
+    };
     const rws = this.opts.socketCtor
-      ? new ReconnectingWebSocket(wsUrl, { webSocket: this.opts.socketCtor })
-      : new ReconnectingWebSocket(wsUrl);
+      ? new ReconnectingWebSocket(urlFor, { webSocket: this.opts.socketCtor })
+      : new ReconnectingWebSocket(urlFor);
     this.rws = rws;
     this.hasOpenedOnce = false;
 
@@ -629,6 +674,11 @@ export class ChromelessSession {
     // Before anything else: a surviving watchdog would fire after teardown and
     // emit a "failed" status onto a session the caller has already closed.
     this.clearOfferWatchdog();
+    // Same reasoning for the token refresher: its timer is minutes long, so
+    // a live one after teardown keeps minting credentials for a session
+    // nobody is holding — every 15 minutes, until the tab is closed.
+    try { this.refresher?.stop(); } catch { /* ignore */ }
+    this.refresher = null;
     try { this.detachStats?.(); } catch { /* ignore */ }
     try { this.stats?.stop(); } catch { /* ignore */ }
     try { this.statsDc?.close(); } catch { /* ignore */ }

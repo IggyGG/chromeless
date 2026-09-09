@@ -15,10 +15,15 @@
 //   session.on("dataChannel", (dc) => { /* input/cursor/files */ });
 //   await session.connect(sessionId);
 
-import { InputChannel } from "./src/input.js";
+import { InputChannel, keyBelongsToClient } from "./src/input.js";
+import { summarise, formatResolution } from "./src/hud.js";
 import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
-import { attachControlChannel, type ControlChannelHandle } from "./src/control.js";
+import {
+  attachControlChannel,
+  type ControlChannelHandle,
+  type FileChooserRequest,
+} from "./src/control.js";
 import { ClipboardChannel } from "./src/clipboard.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
 import { resolveSignalingUrl } from "./src/config.js";
@@ -28,7 +33,7 @@ import {
   goBack,
   goForward,
   reload,
-  currentUrl,
+  currentPage,
 } from "./src/navigate.js";
 import {
   ChromelessSession,
@@ -67,6 +72,18 @@ const els = {
   dc: $<HTMLElement>("state-dc"),
   // T81: webcam/mic passthrough toggle. Disabled until a pc is up.
   passthrough: $<HTMLButtonElement>("passthrough-toggle"),
+  // Unmute. The guest sends audio from the first session; until this
+  // existed the <video> was hard-muted with no control, so it was decoded
+  // and discarded.
+  audio: $<HTMLButtonElement>("audio-toggle"),
+  fullscreen: $<HTMLButtonElement>("fullscreen-toggle"),
+  hudDot: $<HTMLElement>("hud-dot"),
+  hudQuality: $<HTMLElement>("hud-quality"),
+  hudFps: $<HTMLElement>("hud-fps"),
+  hudBitrate: $<HTMLElement>("hud-bitrate"),
+  hudRtt: $<HTMLElement>("hud-rtt"),
+  hudLoss: $<HTMLElement>("hud-loss"),
+  hudRes: $<HTMLElement>("hud-res"),
   // Address bar. Navigation goes over HTTP to the gateway, not over the peer
   // connection — see src/navigate.ts.
   addressBar: $<HTMLFormElement>("addressbar"),
@@ -107,6 +124,12 @@ function escapeHtml(s: string): string {
 // Map page coords into the source video's intrinsic pixel space,
 // undoing object-fit:contain. The remote expects coords in the source
 // coordinate system.
+// Focus in one of our own controls means the key is ours, not the cloud
+// browser's. The rule itself lives in src/input.ts (pure, and tested).
+function shouldForwardKey(e: KeyboardEvent): boolean {
+  return !keyBelongsToClient(e.target as HTMLElement | null);
+}
+
 function videoContentMapper(cx: number, cy: number, rect: DOMRect): { x: number; y: number } {
   const v = els.video;
   const vw = v.videoWidth || rect.width;
@@ -187,6 +210,11 @@ function dropAttachments(): void {
   attach = emptyAttachments();
   els.dc.textContent = "—";
   setPassthroughButtonState("off", true);
+  // Nothing to hear between sessions. The MUTE STATE is left alone on
+  // purpose — a reconnect must not silently re-mute a user who unmuted, so
+  // only the control is disabled, not the preference behind it.
+  els.audio.disabled = true;
+  els.fullscreen.disabled = true;
 }
 
 function wireDataChannel(dc: RTCDataChannel): void {
@@ -246,10 +274,117 @@ function wireCursorChannel(dc: RTCDataChannel): void {
  */
 function wireControlChannel(dc: RTCDataChannel): void {
   attach.control?.dispose();
-  attach.control = attachControlChannel(dc, { log });
+  attach.control = attachControlChannel(dc, {
+    log,
+    onFileChooser: pickAndUpload,
+    onEvent: onGuestEvent,
+  });
   dc.addEventListener("close", () => {
     try { attach.control?.dispose(); } catch { /* ignore */ }
     attach.control = null;
+  });
+}
+
+/**
+ * A fire-and-forget notice from the guest.
+ *
+ * `fullscreen_changed` is the load-bearing one: the streamed PAGE called
+ * requestFullscreen (a video player, a game) and chromium granted it, so
+ * the page's :fullscreen CSS applies and its layout has already changed.
+ * If the viewer's chrome does not follow, the page is fullscreen inside a
+ * window that still shows a 380px sidebar — the guest emitted this event
+ * from the day it was written and nothing ever listened.
+ *
+ * Requesting fullscreen here can be refused: the browser wants a user
+ * gesture and a network event is not one. setFullscreen() logs the refusal
+ * rather than pretending, and the page is no worse off than before.
+ */
+function onGuestEvent(kind: string, data: Record<string, unknown>): void {
+  if (kind === "fullscreen_changed") {
+    void setFullscreen(data["fullscreen"] === true);
+    return;
+  }
+  // tab_opened / tab_closed are advisory; the gateway's /json list is the
+  // source of truth and the tab strip is not built yet. Logged by
+  // control.ts already, so nothing to add here.
+}
+
+/**
+ * The streamed page opened <input type=file>. Show the viewer a real file
+ * picker, then send the chosen file over the "files" channel — the guest
+ * hands it to the page's own input.
+ *
+ * Returns true once the upload has STARTED, which is the answer the guest
+ * needs: "a file is coming, keep the chooser parked". We do not wait for the
+ * upload to finish, because a 100 MB file over a slow link would otherwise
+ * hold the control request open past its deadline and the guest would cancel
+ * a chooser that was about to be satisfied.
+ *
+ * Why a click-triggered <input> and not a drop zone: browsers only open a
+ * file dialog from a user gesture, and this call arrives from the network.
+ * So we show our own button and let the viewer's click be the gesture.
+ */
+async function pickAndUpload(req: FileChooserRequest): Promise<boolean> {
+  const fc = attach.fileUpload;
+  if (!fc) {
+    log("warn", "file_chooser: no files channel — declining");
+    return false;
+  }
+  const file = await promptForFile(req);
+  if (!file) {
+    log("info", "file_chooser: viewer chose nothing");
+    return false;
+  }
+  log("info", "→ file_upload start (page chooser)", { name: file.name, size: file.size });
+  const handle = fc.uploadFile(file);
+  // Report the outcome, but do not make the guest wait for it.
+  void handle.done.then(
+    (r) => log("ok", "← file_upload_complete", r),
+    (err) => log("err", "file_upload failed", err instanceof FileUploadError
+      ? `code=${err.code} ${err.message}` : String(err)),
+  );
+  return true;
+}
+
+/**
+ * Mount a one-shot "the page wants a file" bar and resolve with what the
+ * viewer picks, or null if they dismiss it.
+ *
+ * ALWAYS resolves. A bar that could resolve zero times would leave the page
+ * blocked until the guest's five-minute deadline, with nothing on screen to
+ * explain it.
+ */
+function promptForFile(req: FileChooserRequest): Promise<File | null> {
+  return new Promise((resolve) => {
+    const bar = document.createElement("div");
+    bar.className = "cb-filepick";
+    const label = document.createElement("span");
+    label.className = "cb-filepick-label";
+    label.textContent = req.title || "The page is asking for a file";
+    const input = document.createElement("input");
+    input.type = "file";
+    input.className = "cb-filepick-input";
+    if (req.accept.length > 0) input.accept = req.accept.join(",");
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cb-filepick-cancel";
+    cancel.textContent = "Cancel";
+
+    let settled = false;
+    const finish = (f: File | null): void => {
+      if (settled) return;
+      settled = true;
+      try { bar.remove(); } catch { /* ignore */ }
+      resolve(f);
+    };
+    input.addEventListener("change", () => finish(input.files?.[0] ?? null));
+    cancel.addEventListener("click", () => finish(null));
+
+    bar.append(label, input, cancel);
+    document.body.appendChild(bar);
+    // Chrome will not open the dialog without a gesture, so this is an
+    // affordance the viewer clicks, not an input we can click for them.
+    input.focus();
   });
 }
 
@@ -311,7 +446,10 @@ function wireInputChannel(dc: RTCDataChannel): void {
   });
 
   const attachListeners = () => {
-    attach.detachInput = input.attach(els.video, { toContentCoords: videoContentMapper });
+    attach.detachInput = input.attach(els.video, {
+      toContentCoords: videoContentMapper,
+      shouldForwardKey,
+    });
   };
   if (dc.readyState === "open") attachListeners();
   else dc.addEventListener("open", attachListeners, { once: true });
@@ -372,6 +510,13 @@ function connect(sessionId: string): void {
       const enabled = attach.passthrough?.getState().enabled ?? false;
       setPassthroughButtonState(enabled ? "on" : "off", false);
       setNavEnabled(true);
+      // Only offer sound once there is a session to hear. The mute state
+      // itself is deliberately NOT reset on reconnect: a user who unmuted
+      // should not be re-muted by a broker blip.
+      els.audio.disabled = false;
+      syncAudioButton();
+      els.fullscreen.disabled = false;
+      syncFullscreenButton();
       // The button reads "Disconnect" from the moment connect() ran, but it
       // was left DISABLED until `closed` — so it could never be pressed while
       // a session existed, and the `if (session)` branch of its click handler
@@ -386,6 +531,7 @@ function connect(sessionId: string): void {
     } else if (st === "failed") {
       setPassthroughButtonState("off", true);
       setNavEnabled(false);
+      els.audio.disabled = true;
       // A failed connect used to leave a disabled "Disconnect" and no way
       // back but a reload. Let the user end it and try again.
       els.connect.disabled = false;
@@ -395,6 +541,26 @@ function connect(sessionId: string): void {
   s.on("signalingState", (st) => { els.sig.textContent = st; });
   s.on("iceConnectionState", (st) => { els.ice.textContent = st; });
   s.on("iceGatheringState", (st) => { els.iceg.textContent = st; });
+  // The `stats` event has fired once a second since T82 with NOBODY
+  // listening — the sample was assembled, shipped to the broker over the
+  // stats channel, and dropped locally. src/hud.ts turns it into five
+  // numbers; this renders them.
+  s.on("stats", (sample, prev) => {
+    const h = summarise(sample, prev);
+    els.hudFps.textContent = h.fps;
+    els.hudBitrate.textContent = h.bitrate;
+    els.hudRtt.textContent = h.rtt;
+    els.hudLoss.textContent = h.loss;
+    els.hudQuality.textContent = h.quality;
+    els.hudDot.dataset["q"] = h.quality;
+    // Resolution comes off the <video>, not getStats: videoWidth/Height is
+    // what is actually being PAINTED, which is the number a user can check
+    // against their own window. getStats reports the decoder's frame size,
+    // which can differ mid-renegotiation.
+    els.hudRes.textContent =
+      formatResolution(els.video.videoWidth, els.video.videoHeight);
+  });
+
   s.on("track", (_track, stream) => {
     if (els.video.srcObject !== stream) els.video.srcObject = stream;
   });
@@ -454,11 +620,17 @@ function setNavEnabled(enabled: boolean): void {
 
 /** Show what the remote browser is actually on, unless the user is typing. */
 async function syncAddressBar(): Promise<void> {
+  const page = await currentPage();
+  // The document title follows the remote page, so the viewer's browser tab
+  // says what they are looking at instead of "chromeless — v0 client" for
+  // every session. Done even when the address bar is skipped below.
+  document.title = page.title
+    ? `${page.title} — chromeless`
+    : "chromeless";
   // Never clobber a half-typed URL. The portal hit this: an async refresh
   // overwriting the input mid-keystroke makes the bar feel broken.
   if (document.activeElement === els.navUrl) return;
-  const url = await currentUrl();
-  if (url && url !== "about:blank") els.navUrl.value = url;
+  if (page.url && page.url !== "about:blank") els.navUrl.value = page.url;
 }
 
 async function runNav(
@@ -508,6 +680,83 @@ function setPassthroughButtonState(state: "off" | "pending" | "on", disabled: bo
     : state === "pending" ? "Requesting…"
     :                     "Share camera/mic";
 }
+
+/**
+ * Mute state lives on the <video>, not in a variable — the element is the
+ * single source of truth, and a user who mutes via the browser's own media
+ * controls must not leave the button lying.
+ */
+function syncAudioButton(): void {
+  const muted = els.video.muted || els.video.volume === 0;
+  els.audio.dataset["state"] = muted ? "muted" : "on";
+  els.audio.textContent = muted ? "🔇 Unmute" : "🔊 Mute";
+  els.audio.title = muted
+    ? "Unmute the cloud browser's audio"
+    : "Mute the cloud browser's audio";
+}
+
+els.audio.addEventListener("click", () => {
+  const v = els.video;
+  const unmuting = v.muted || v.volume === 0;
+  v.muted = !unmuting;
+  if (unmuting && v.volume === 0) v.volume = 1;
+  syncAudioButton();
+  // Unmuting can require a fresh play(): a stream that began muted may be
+  // paused by the autoplay policy the instant it gains an audible track.
+  // This click IS the user gesture that makes the retry allowed, so it has
+  // to happen here and not on a later tick.
+  if (unmuting) {
+    void v.play().catch((err: unknown) => {
+      log("warn", "audio: the browser refused to play with sound", String(err));
+      // Leave the button honest rather than claiming sound the user
+      // cannot hear.
+      v.muted = true;
+      syncAudioButton();
+    });
+  }
+  log("info", `audio: ${unmuting ? "unmuted" : "muted"}`);
+});
+
+// The element can be muted from outside our button (the browser's own
+// media controls, or another script). Keep the label truthful.
+els.video.addEventListener("volumechange", syncAudioButton);
+
+/**
+ * Fullscreen the stage. The label follows the DOCUMENT's state rather than
+ * our own flag, because the user can leave fullscreen with Escape or the
+ * browser's own control and never touch this button.
+ */
+function syncFullscreenButton(): void {
+  const on = document.fullscreenElement === els.stage;
+  els.fullscreen.dataset["state"] = on ? "on" : "off";
+  els.fullscreen.textContent = on ? "⛶ Exit fullscreen" : "⛶ Fullscreen";
+}
+
+async function setFullscreen(want: boolean): Promise<void> {
+  try {
+    if (want && document.fullscreenElement !== els.stage) {
+      await els.stage.requestFullscreen();
+    } else if (!want && document.fullscreenElement) {
+      await document.exitFullscreen();
+    }
+  } catch (err) {
+    // Refused (no gesture, an iframe without allowfullscreen, a platform
+    // that does not do it). Say so — silence here looks like a dead button.
+    log("warn", "fullscreen: the browser refused", String(err));
+  }
+  // Whatever happened, the label must match reality.
+  syncFullscreenButton();
+  // The stage just changed size; the remote should follow it.
+  viewport.sync();
+}
+
+els.fullscreen.addEventListener("click", () => {
+  void setFullscreen(document.fullscreenElement !== els.stage);
+});
+document.addEventListener("fullscreenchange", () => {
+  syncFullscreenButton();
+  viewport.sync();
+});
 
 els.passthrough.addEventListener("click", async () => {
   const pc = session?.getPeerConnection();

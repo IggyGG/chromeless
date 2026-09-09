@@ -10,7 +10,22 @@ client** to the **cloud Chromium**, carried over a dedicated
 > [`clipboard-channel.md`](./clipboard-channel.md).
 >
 > **Companion implementation:** [`client/src/file-upload.ts`](../../client/src/file-upload.ts)
-> + [`capture/file-bridge/`](../../capture/file-bridge/).
+> + [`capture/build-integration/cb_file_upload_receiver.{h,cc}`](../../capture/build-integration/cb_file_upload_receiver.h).
+>
+> **The server side moved (2026-09).** This protocol was originally
+> terminated by `capture/file-bridge/`, a Go sidecar reached over a
+> localhost WebSocket, with `CbFileUploadRelay` forwarding DC frames to it.
+> That relay was constructed with `url="off"` and therefore dropped every
+> frame — file upload was inert on the wire for the whole time the sidecar
+> existed, and the sidecar itself is deployed by nothing today
+> (`infra/k8s/cloud-browser-session.yaml` still names it; the compose stack
+> and the standalone image do not).
+>
+> `CbFileUploadReceiver` now terminates the protocol **in the browser
+> process**. The wire format below is unchanged; what changed is who reads
+> it and how a completed file reaches the page. Two differences follow, both
+> marked inline: `target_selector` is ignored, and `attached_via` can no
+> longer be `"domSetFileInputFiles"`.
 
 The drag-drop **events** documented in `input-channel.md` v1.1
 forward `DataTransfer.types` only (file content is dropped per the
@@ -69,7 +84,7 @@ The `t` and `seq` fields used by other channels are omitted —
 | `mime_type`      | string | yes      | client-asserted MIME; server may re-sniff and reject        |
 | `size`           | int    | yes      | total content length in bytes; ≤ size cap (default 100 MB) |
 | `sha256`         | string | yes      | hex-lowercase SHA-256 of the full content; server verifies |
-| `target_selector`| string | no       | CSS selector for `<input type=file>` to attach to on completion. If omitted, the bridge waits for a `Page.fileChooserOpened` event and attaches to that. |
+| `target_selector`| string | no       | **Ignored since 2026-09.** The old sidecar used it to drive `DOM.setFileInputFiles` over CDP. The in-process receiver instead resolves the `content::FileSelectListener` that chromium itself handed to `RunFileChooser`, so the file goes to the input the page actually opened — no selector, and no way for the client to nominate a different one. Still accepted on the wire so an older client does not break. |
 
 #### `file_upload_chunk`
 
@@ -136,7 +151,7 @@ counters).
 | field         | type   | notes                                                           |
 |---------------|--------|-----------------------------------------------------------------|
 | `server_path` | string | absolute path inside the chromium container                     |
-| `attached_via`| string | `"domSetFileInputFiles"` (selector path) \| `"fileChooser"` \| `"none"` (file written to disk but not attached to any input) |
+| `attached_via`| string | `"fileChooser"` (the page had a chooser open and the file was given to it) \| `"none"` (written to disk, no chooser was waiting). `"domSetFileInputFiles"` was the sidecar's selector path and is **no longer produced** — the receiver has no CDP client and never drives the DOM. |
 
 #### `file_upload_error`
 
@@ -147,18 +162,30 @@ counters).
   "error": "expected 9f8e…d3, got a1b2…cd" }
 ```
 
-| `code` value             | meaning                                                                |
-|--------------------------|------------------------------------------------------------------------|
-| `size_limit_exceeded`    | `size` > tenant cap (default 100 MB)                                   |
-| `chunk_too_large`        | a single chunk exceeds the chunk-size cap (default 1 MB raw)           |
-| `mime_not_allowlisted`   | server-side MIME allowlist rejected `mime_type` and/or sniffed type    |
-| `sha256_mismatch`        | hash of received bytes ≠ asserted `sha256`                              |
-| `out_of_order_chunk`     | a chunk's `seq` was lower or duplicate vs the last accepted            |
-| `truncated`              | `file_upload_end` arrived but received bytes < `size`                   |
-| `virus_detected`         | virus-scan stub rejected the file (Phase 4 ClamAV integration)         |
-| `cancelled`              | client sent `file_upload_cancel`                                       |
-| `attach_failed`          | file written successfully but CDP attach failed                        |
-| `internal_error`         | catch-all for unexpected server failure; log + retry                   |
+Codes emitted by `CbFileUploadReceiver`. The client treats every code the
+same way (it rejects the upload's promise), so a code it does not know is
+not an error — but a receiver that invents one is invisible in the UI, which
+is why this list is exhaustive rather than illustrative.
+
+| `code` value      | meaning                                                        |
+|-------------------|----------------------------------------------------------------|
+| `too_large`       | declared `size` > 100 MiB, or the received bytes exceeded it mid-stream |
+| `session_quota`   | this session has already written 512 MiB                        |
+| `out_of_order`    | a chunk's `seq` was not the next expected one                   |
+| `bad_base64`      | a chunk's `data` did not decode                                 |
+| `write_failed`    | the disk write itself failed                                    |
+| `hash_failed`     | the file could not be hashed. Until 2026-09-08 this case was also reported as `write_failed` with the text "could not read the file back", which named a read failure that had not happened — the guest log now says whether the read failed |
+| `truncated`       | `file_upload_end` arrived but bytes on disk ≠ declared `size`    |
+| `hash_mismatch`   | sha256 of what landed ≠ the client's declared `sha256`          |
+| `cancelled`       | the client sent `file_upload_cancel`                            |
+
+**Codes the sidecar defined and the receiver does NOT emit**, because the
+control behind each is gone with it — do not write client code that waits
+for one: `size_limit_exceeded` (now `too_large`), `chunk_too_large` (folded
+into `too_large`), `mime_not_allowlisted` (no sniffing — see Security §3),
+`sha256_mismatch` (now `hash_mismatch`), `out_of_order_chunk` (now
+`out_of_order`), `virus_detected` (no scan — see Security §7),
+`attach_failed` (there is no CDP attach step to fail), `internal_error`.
 
 ---
 
@@ -201,11 +228,18 @@ single most dangerous surface in the cloud-browser product.
    triggers are out of scope; the client SHOULD NOT expose
    `FileUploadChannel.uploadFile` to arbitrary page content.
 2. **Size cap.** Hard-rejected at start; no streaming over.
-3. **MIME allowlist.** Per-tenant configuration. Default
-   allowlist for v1: `application/pdf`, `image/png`, `image/jpeg`,
-   `image/gif`, `image/webp`, `text/plain`, `text/csv`. The bridge
-   re-sniffs the first 4 KB on disk via `http.DetectContentType`
-   and rejects on mismatch.
+3. **MIME allowlist.** ⚠️ **NOT IMPLEMENTED by the in-process
+   receiver.** The sidecar re-sniffed the first 4 KB via
+   `http.DetectContentType` and rejected on mismatch; that sidecar is
+   deployed by nothing. `CbFileUploadReceiver` does not sniff and does not
+   filter — the file goes to the page's own `<input>`, whose `accept`
+   attribute is enforced by blink as it is for a local file.
+
+   This is a deliberate narrowing of the old claim, not an oversight: a
+   guest-side allowlist would have to disagree with the page's own
+   validation to do anything, and the file never becomes executable or
+   reachable outside `<profile>/Uploads`. If a deployment needs one, it
+   belongs where the old one was — in front of the browser, not inside it.
 4. **SHA-256 verification.** Mandatory. Mismatch ⇒ file deleted
    from disk + `file_upload_error`.
 5. **Path traversal guard.** `name` is sanitised to remove path
@@ -214,20 +248,31 @@ single most dangerous surface in the cloud-browser product.
    client-side name don't collide and a maliciously crafted name
    cannot escape the per-session directory.
 6. **Per-session directory isolation.** Files land in
-   `/var/lib/chromeless-uploads/<session_id>/`; the session pod has no
-   write access outside its mount. Phase 3 sandboxing (T44)
-   applies on top.
-7. **Virus scan stub.** v1 logs a stub line per upload; Phase 4
-   wires in ClamAV's `clamd` over a Unix socket. The stub MUST
-   reject when the integration env var declares ClamAV is
-   unavailable but the tenant policy requires it.
+   `<profile>/Uploads/` (the profile is `--user-data-dir`, or a temp dir
+   when that is unset). The receiver **deletes the whole directory on
+   re-arm**, so one viewer's files are never visible to the next, and a
+   session byte quota (512 MiB) bounds total disk use on top of the 100 MiB
+   per-file cap. A rejected upload's partial bytes are deleted immediately —
+   without that, a client retrying a bad hash could fill the disk while
+   never incrementing the quota, which only counts successes.
+7. **Virus scan stub.** ⚠️ **NOT IMPLEMENTED by the in-process receiver.**
+   There is no scan and no stub. The sidecar's ClamAV plan died with the
+   sidecar. Do not read this section as describing a control that exists.
 8. **No retries on hash failure.** A failed SHA-256 is treated as
    tampering, not transient error. Client must explicitly start a
    new upload with a fresh `upload_id`.
 
 The signaling layer is responsible for authenticating the peer
-connection itself (Phase 3). The bridge trusts whatever speaks the
-relay's localhost WebSocket inside the container.
+connection itself (Phase 3). The receiver trusts whatever speaks the
+`files` DataChannel — i.e. the peer the broker paired this session with.
+
+**Paths never come from the wire.** `upload_id` and `name` are each reduced
+to a single `[A-Za-z0-9._-]` component before the on-disk name
+`<upload_id>__<name>` is built, so no separator, `..`, or absolute path can
+survive. The client's original filename is preserved separately and reaches
+the page as `File.name` via `NativeFileInfo::display_name` — the page sees
+what the user picked, while the filesystem only ever sees the sanitised
+form.
 
 ---
 

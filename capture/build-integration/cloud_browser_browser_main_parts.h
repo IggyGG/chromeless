@@ -71,7 +71,7 @@
 // main_parts plumbing.
 #include "capture/build-integration/cb_active_webcontents_resolver.h"
 #include "capture/build-integration/cb_clipboard_relay.h"
-#include "capture/build-integration/cb_file_upload_relay.h"
+#include "capture/build-integration/cb_file_upload_receiver.h"
 #include "capture/build-integration/cb_input_dispatch.h"
 #include "capture/build-integration/cb_input_dispatch_composite.h"
 #include "capture/build-integration/cb_viewport_controller.h"  // CbViewportSpec (by value)
@@ -698,7 +698,7 @@ class CloudBrowserBrowserMainParts
   //   * CbInputDispatch        → kInput     (M4 R1, CV2-41)
   //   * CbCursorDcEmitter      → kCursor    (M5 R6, CV2-24)
   //   * CbClipboardRelay       → kClipboard (M6 R2, CV2-34)
-  //   * CbFileUploadRelay      → kFiles     (M6 R3, CV2-35)
+  //   * CbFileUploadReceiver   → kFiles     (CV2-UPLOAD, 2026-09)
   //
   // Deferred to follow-up: CbStatsRelay (M6 R1, CV2-33). The "stats"
   // channel may open, but without a relay its inbound frames are
@@ -722,11 +722,15 @@ class CloudBrowserBrowserMainParts
   //     arms a window in which the next clipboard change is forwarded. The
   //     WebSocket bridge relay it replaced never had a backend (url="off")
   //     and dropped every paste for four months.
-  //   * CbFileUploadBridgeWsClient still takes a `label`/`url` +
-  //     io_task_runner and is passed url="off", which keeps it in
-  //     `disabled()` mode — its WS backend is a TODO(M6-R3-ws-backend) and
-  //     file transfer on the "files" DC is INERT until Batch B replaces it
-  //     the same way.
+  //   * CbFileUploadReceiver (CV2-UPLOAD, 2026-09) writes uploaded bytes
+  //     into <profile>/Uploads and hands the finished file to the
+  //     FileSelectListener that RunFileChooser parked — so `<input
+  //     type=file>` works. It replaced CbFileUploadRelay +
+  //     CbFileUploadBridgeWsClient, which were constructed with url="off",
+  //     hence permanently `disabled()`, hence dropped every frame. Note
+  //     BOTH halves were missing: even a working relay would have done
+  //     nothing, because with no RunFileChooser override chromium
+  //     auto-cancelled the chooser before a byte could be asked for.
   //
   // Teardown ordering: explicit LIFO in PostMainMessageLoopRun
   // BEFORE the DataChannel host drops its DC refs. Unbind each
@@ -750,8 +754,12 @@ class CloudBrowserBrowserMainParts
   std::unique_ptr<cursor::EnvelopeAssembler> cursor_envelope_assembler_;
   std::unique_ptr<cursor::CbCursorDcEmitter> cursor_dc_emitter_;
   std::unique_ptr<CbClipboardRelay> clipboard_relay_;
-  std::unique_ptr<CbFileUploadBridgeWsClient> file_upload_ws_;
-  std::unique_ptr<CbFileUploadRelay> file_upload_relay_;
+  // CV2-UPLOAD: replaces CbFileUploadRelay + CbFileUploadBridgeWsClient,
+  // which routed the files channel to a WebSocket bridge nobody built.
+  // Session-lifetime like every other channel consumer, but it also holds
+  // the page's parked FileSelectListener — see the re-arm path, which must
+  // resolve it before this pointer is destroyed.
+  std::unique_ptr<CbFileUploadReceiver> file_upload_receiver_;
   // ============== END CV2-75 ==============
 
   // Browser-fidelity wave 1 — the ask-a-human channel (kControl DC).

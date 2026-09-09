@@ -1260,21 +1260,21 @@ void CloudBrowserBrowserMainParts::RebuildNativeDataChannels() {
                  "(paste -> guest clipboard + Ctrl+V; copy forwarded within "
                  "the gesture window)";
 
-    file_upload_ws_ = std::make_unique<CbFileUploadBridgeWsClient>(
-        /*url=*/"off", content::GetIOThreadTaskRunner({}));
-    file_upload_relay_ = std::make_unique<CbFileUploadRelay>(
-        std::move(file_upload_ws_), dc_host_.get());
+    // CV2-UPLOAD: the receiver replaces CbFileUploadRelay, which forwarded
+    // every frame to a WebSocket bridge that was never implemented — it was
+    // constructed with url="off", so it was permanently disabled() and
+    // inbound frames were dropped before reaching it. `<input type=file>`
+    // did nothing at all as a result, because there was also no
+    // RunFileChooser override to ask the viewer in the first place. Both
+    // halves land together; one without the other is still inert.
+    file_upload_receiver_ = std::make_unique<CbFileUploadReceiver>(
+        dc_host_.get(), browser_context_->GetPath(),
+        content::GetUIThreadTaskRunner({}));
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
-                           file_upload_relay_.get());
-    // Honesty fix: this used to claim "outbound dc_host enabled", which
-    // read as working. It is not — CbFileUploadRelay's WS backend is a
-    // stub (TODO(M6-R3-ws-backend)) and it is constructed with url="off",
-    // so the relay is permanently disabled() and inbound frames are
-    // dropped before they reach it. Say so, so nobody debugs a file
-    // upload against a log line that implies the path is live.
-    LOG(WARNING) << "CV2-75: \"files\" DC observer = CbFileUploadRelay, but "
-                    "its WS backend is NOT implemented (url=off) — file "
-                    "transfer is INERT on this channel";
+                           file_upload_receiver_.get());
+    LOG(INFO) << "CV2-UPLOAD: \"files\" DC observer = CbFileUploadReceiver "
+                 "(uploads land under the profile's Uploads/ and resolve the "
+                 "page's file chooser)";
 
     // Browser-fidelity wave 1 — the ask-a-human channel. Must be bound
     // before any WebContents can run script, since the very first thing a
@@ -1290,6 +1290,13 @@ void CloudBrowserBrowserMainParts::RebuildNativeDataChannels() {
     // than owned over there. Re-uses the aura context set at boot.
     GetCloudBrowserWebContentsDelegate()->SetSessionContext(
         aura_root_window(), control_channel_.get());
+    // CV2-UPLOAD: same shape as the control channel — the delegate outlives
+    // the session, the receiver does not, so it is injected per session and
+    // cleared on teardown. RunFileChooser cancels the chooser outright when
+    // this is null, so a chooser opened in the gap resolves rather than
+    // wedging the page.
+    GetCloudBrowserWebContentsDelegate()->SetFileUploadReceiver(
+        file_upload_receiver_.get());
     LOG(INFO) << "CV2-fidelity: \"control\" DC observer = CbControlChannel "
                  "(JS dialogs routed to the viewer)";
   }
@@ -1609,10 +1616,28 @@ webrtc::RTCError CloudBrowserBrowserMainParts::RearmSession(bool announce_bye) {
   }
   control_channel_.reset();
 
+  // CV2-UPLOAD: exactly the wedge above, in the other channel. A page
+  // sitting in RunFileChooser holds a FileSelectListener that chromium will
+  // not release unresolved; if the viewer leaves mid-pick, the next viewer
+  // inherits an <input type=file> that never fires change and never can.
+  // Unpublish first so no chooser can be parked on a receiver we are about
+  // to destroy, THEN cancel the one already parked.
+  GetCloudBrowserWebContentsDelegate()->SetFileUploadReceiver(nullptr);
+  if (file_upload_receiver_) {
+    file_upload_receiver_->CancelChooser();
+    // The new viewer must not see the last one's files. This is also the
+    // only thing that bounds disk use across many sessions.
+    file_upload_receiver_->ResetForNewSession();
+  }
+  if (dc_host_) {
+    dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
+                           nullptr);
+  }
+
   cursor_dc_emitter_.reset();
   cursor_xy_join_.reset();
   clipboard_relay_.reset();
-  file_upload_relay_.reset();
+  file_upload_receiver_.reset();
   input_dispatch_.reset();
   input_delegate_.reset();
   dc_host_.reset();
@@ -1780,12 +1805,19 @@ void CloudBrowserBrowserMainParts::PostMainMessageLoopRun() {
   }
   control_channel_.reset();
 
+  // CV2-UPLOAD: same order as the re-arm path — unpublish, resolve the
+  // parked listener, unbind, destroy. Skipping the cancel here would leave
+  // a page blocked in RunFileChooser while the process shuts down around
+  // it, which is a CHECK on the listener's release.
+  GetCloudBrowserWebContentsDelegate()->SetFileUploadReceiver(nullptr);
+  if (file_upload_receiver_) {
+    file_upload_receiver_->CancelChooser();
+  }
   if (dc_host_) {
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kFiles,
                            nullptr);
   }
-  file_upload_relay_.reset();
-  file_upload_ws_.reset();
+  file_upload_receiver_.reset();
   if (dc_host_) {
     dc_host_->BindObserver(cloud_browser::signaling::CbDcLabel::kClipboard,
                            nullptr);
