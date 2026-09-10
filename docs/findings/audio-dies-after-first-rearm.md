@@ -129,10 +129,33 @@ string as the timeout path, which is what made the two indistinguishable.
    at `:1685`) — but REFUTED by the log ordering above: the failure is
    already inside the pre-arm, before the teardown runs.
 
+### The lifecycle code had already found this — and routed around it
+
+`capture/audio/cb_audio_lifecycle.cc:206-210` says, in a comment written
+before any of this:
+
+> `Terminate()` is not an escape either: it sets `quit_` and NOTHING ever
+> clears it (audio_device_pulse_linux.cc — grep says one write, no reset),
+> so a Terminate/Init cycle would kill the record thread for the life of the
+> process.
+
+That is this defect, named exactly, in the tree, before the symptom was
+diagnosed. The author reached the right conclusion and chose to avoid the
+path ("the way out is to not take that path") — a reasonable call when the
+alternative is patching libwebrtc. It also means the pre-arm's stop /
+re-init / start sequence was designed specifically NOT to call `Terminate()`
+— so whoever does call it is outside that design, which sharpens the open
+question below rather than answering it.
+
+The comment is worth reading as a warning that was already paid for: the
+next person to consider a Terminate/Init cycle here has the answer in
+advance.
+
 ### What is still open
 
-**Who calls `Terminate()`?** Nothing in `capture/` does — the only mention is
-a comment. `AudioDeviceLinuxPulse::~AudioDeviceLinuxPulse` calls it (`:109`),
+**Who calls `Terminate()`?** Still unanswered, and still worth answering —
+`patches/0006` makes `Init()` survive it, which is not the same as knowing
+why it runs. Nothing in `capture/` calls it; the only mention is a comment. `AudioDeviceLinuxPulse::~AudioDeviceLinuxPulse` calls it (`:109`),
 so the likeliest answer is that the ADM is being DESTROYED and something is
 holding a stale pointer, or a second ADM instance exists. The PCF is built
 once (`cloud_browser_browser_main_parts.cc:790`) and holds the ADM by
@@ -149,10 +172,20 @@ Next probe, in order:
    not available, but `quit_` is only set there, so a log line in our own
    `Rearm()` reporting `RecordingIsInitialized()` immediately BEFORE the
    pre-arm brackets it to a specific session boundary.
-3. The fix shape depends on the answer and is NOT knowable yet. If
-   `Terminate()` is genuinely being called on a shared ADM, the options are
-   an upstream patch (`patches/` already carries five) or not sharing the
-   ADM across sessions.
+3. ~~The fix shape depends on the answer and is NOT knowable yet.~~
+   **It did not.** Reading the pinned source settled it without finding the
+   caller: `Terminate()` clears `_initialized` and sets `quit_`; `Init()`
+   passes its `_initialized` early-out, spawns both threads, and never
+   resets `quit_`. So `Init()` is not idempotent after a `Terminate()` —
+   for ANY caller. Fixing that is correct whoever calls it, and does not
+   wait on the answer.
+
+   `patches/0006` adds the reset, placed AFTER the `_initialized`
+   early-out (so an already-initialised `Init()` cannot clear the latch out
+   from under a shutdown in progress) and before the thread spawn.
+
+   Finding the caller is still worth doing — see below — but it is now a
+   question about our own lifecycle, not a blocker on the fix.
 
 ## The next probe (do this before writing any more code)
 
