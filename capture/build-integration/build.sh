@@ -233,6 +233,65 @@ cmd_apply_patches() {
         # patch N+1. Same pattern, idempotent.
         rm -rf "${target_repo}/.git/rebase-apply"
 
+        # A SUB-REPO NEEDS ITS OWN RESET, and this is not a retry-only
+        # nicety — apply-patches runs on EVERY lane fire, and the
+        # chromium tree is a hostPath that outlives the Job. The upfront
+        # recovery above resets ${CHROMIUM_SRC} to the LKGM base; it
+        # does nothing to third_party/webrtc, whose HEAD keeps whatever
+        # the last successful run committed. So the run AFTER the one
+        # that first lands a sub-repo patch re-applies it onto itself
+        # and dies with
+        #
+        #   error: sha1 information is lacking or useless (<path>)
+        #   error: could not build fake ancestor
+        #
+        # — the SAME two lines as the wrong-repo failure this routing
+        # was written to fix, from an unrelated cause. Measured in a
+        # local fixture, not predicted: round 1 applies (rc=0), round 2
+        # on the same tree fails (rc=128) and leaves .git/rebase-apply
+        # behind for round 3.
+        #
+        # Reset by authorship rather than to a pinned sha: walking HEAD
+        # down to the first commit that is NOT ours lands exactly on the
+        # DEPS-pinned revision, whatever gclient chose for this roll — no
+        # second sha to keep in sync with DEPS. A tree with none of our
+        # commits resets to HEAD, i.e. a no-op.
+        #
+        # CB_PATCH_AUTHORS must list every address a patch's `From:` line
+        # uses, or the walk treats one of our own commits as upstream and
+        # resets to a tree that still has that patch applied — landing
+        # back on the exact failure this block exists to prevent. Today
+        # 0006 is `platform@triform.dev` and 0002/0003/0005 are
+        # `iggy@triform.ai`; only sub-repo patches reach here, so just
+        # 0006 matters right now, but a future sub-repo patch authored
+        # the other way would silently skip its reset.
+        if [[ -n "${strip_prefix}" ]]; then
+            local sub_base
+            sub_base="$(cd "${target_repo}" && git log --format='%H %ae' 2>/dev/null \
+                | awk -v ours="platform@triform.dev,iggy@triform.ai,cb-build@triform.ai" '
+                    BEGIN { n = split(ours, a, ","); for (i = 1; i <= n; i++) mine[a[i]] = 1 }
+                    !($2 in mine) { print $1; exit }')"
+            if [[ -n "${sub_base}" ]]; then
+                (cd "${target_repo}" && git am --abort) >/dev/null 2>&1 || true
+                rm -f "${target_repo}/.git/index.lock"
+                if (cd "${target_repo}" && git \
+                        -c user.email=cb-build@triform.ai \
+                        -c user.name='cb-build' \
+                        reset --hard "${sub_base}") >/dev/null 2>&1; then
+                    log "     (reset ${strip_prefix%/} -> ${sub_base:0:12})"
+                else
+                    log "WARN: reset of ${strip_prefix%/} to ${sub_base} failed; continuing"
+                fi
+            else
+                # Every commit in the sub-repo looked like ours. Either
+                # CB_PATCH_AUTHORS is out of date or this is not the repo
+                # we think it is. Continuing would apply a patch onto
+                # itself; fail loudly instead of burning a ~30 min cycle
+                # to reach the confusing "fake ancestor" error.
+                die "no upstream commit found in ${strip_prefix%/} — every commit is authored by us. Update the author list in cmd_apply_patches."
+            fi
+        fi
+
         # A sub-repo patch carries paths relative to src/, so strip the
         # sub-repo prefix on the way in rather than rewriting the patch file
         # — the patch stays readable against the chromium tree it documents.

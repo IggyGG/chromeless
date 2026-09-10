@@ -31,6 +31,15 @@ patch series."* — that's this directory.
   tree they document. 0002/0003/0005 never hit this because they touch
   `content/` and `third_party/webrtc_overrides/`, which ARE in the src
   repo; 0006 is the first sub-repo patch and cost two lane cycles.
+- **A sub-repo patch must reset its own checkout, every run.**
+  `apply-patches` resets `src/` to the LKGM base on every fire, and the
+  chromium tree is a hostPath that outlives the Job — but nothing reset
+  `third_party/webrtc`, so the run AFTER the one that first landed 0006
+  would re-apply it onto itself and die with the same two lines as the
+  wrong-repo failure, from an unrelated cause. `apply-patches` now walks
+  the sub-repo's history down to the first commit not authored by us and
+  resets there — no second sha to keep in sync with DEPS. Add any new
+  patch-author address to that list, or its reset is silently skipped.
 - **Verify with `git am --3way` from the RIGHT repo, not `git apply`.**
   `git apply --check` passes on patches `git am` rejects, and applying
   from `src/` fails on patches that apply fine from `third_party/webrtc`.
