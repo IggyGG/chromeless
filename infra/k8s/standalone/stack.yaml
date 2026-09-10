@@ -465,6 +465,24 @@ spec:
           # stall-watchdog fires, worker pid unchanged, framesDecoded 4 -> 740
           # over 75 s. On the previous gateway the same connect restarted the
           # browser ~50 s in.
+          #
+          # DRIFT, UNRESOLVED (2026-09-10): the live gateway is
+          # sha256:63d6cfa7, pushed 2026-09-09T23:08Z, and this pin is three
+          # hand-rolls behind it. The two are genuinely different images (13
+          # layers each, 5654728 vs 5609791 bytes, different top layer), so
+          # applying this file WOULD change the running gateway.
+          #
+          # It is not pinned here because it CANNOT be identified: no tag in
+          # the registry points at that digest and no commit records it. A pin
+          # is a provenance claim, and writing one for an image whose source
+          # nobody can name would make this file look authoritative while
+          # being unverifiable — the failure this comment block exists to
+          # prevent.
+          #
+          # To resolve: whoever pushed it re-tags it and records the commit,
+          # or the gateway is rebuilt from a known commit and re-pinned here.
+          # Until then `deploy.sh` refuses to roll the gateway backwards, and
+          # a bare `kubectl apply -f stack.yaml` WILL downgrade it.
           image: registry.triform.cloud/chromeless/chromeless-gateway@sha256:9ef7f4db32c86dcb34274814855a0bb77c8953f12e5d4673bfc7f85bb6cfbdcd
           env:
             - name: CHROMELESS_USER

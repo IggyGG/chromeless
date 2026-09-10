@@ -60,6 +60,101 @@ if [[ "${1:-}" == "--teardown" ]]; then
     exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# THE IMAGE GUARDS RUN FIRST, BEFORE ANYTHING MUTATES THE CLUSTER.
+#
+# They used to sit after the secrets step, and an aborted run was therefore
+# not a no-op: `keygen` had already rotated the Ed25519 keypair and
+# `openssl rand` the login password, both written to the Secret. The worker
+# then held a token signed by a key the broker no longer knew and hammered
+# the broker with `auth rejected` about once a second; the gateway pod kept
+# the OLD password in its environment (secretKeyRef is injected at pod start,
+# not re-read), so the new password did not work either — and the old one
+# existed nowhere, because the line that records it to .standalone-creds is
+# at the END of this script and never ran.
+#
+# Recovery was: read the Secret, write .standalone-creds by hand, restart the
+# gateway and broker to pick up the new material, then restart the worker.
+# Observed 2026-09-10, caused by the gateway guard added the same day doing
+# exactly its job.
+#
+# A guard that fires must leave the cluster as it found it.
+# ---------------------------------------------------------------------------
+# Refuse to roll the cluster BACKWARDS.
+#
+# `kubectl apply -f stack.yaml` below sets the worker image to whatever this
+# file pins. On 2026-08-24 that pin was 64 commits behind the fix under test,
+# so every run of this script silently reverted a running fix — and every
+# `kubectl set image` reverted it back. The worker Deployment reached revision
+# 66 in a day with nobody reverting anything on purpose; kubectl showed two
+# field managers (`kubectl-client-side-apply` and `kubectl-set`) both owning
+# spec.containers[].image, each pulling toward its own answer.
+#
+# The user lost a day to it: tests passed against an image they never saw, and
+# they hit a bug those tests had "proved" fixed.
+#
+# So: if the live worker is running something NEWER than this file pins, stop
+# and say so rather than quietly downgrading it. `make lint-deploy-pin` keeps
+# stack.yaml and build/guest-release.json in agreement; this is the runtime
+# half, for the case where the cluster has moved and the tree has not.
+#
+# CHROMELESS_ALLOW_ROLLBACK=1 proceeds anyway — deliberate downgrades are
+# legitimate, they just should not be silent.
+#
+# MATCH THE DIGEST FORM, and fail loudly if neither form is found.
+#
+# This guard was written against `chromeless/chromeless:<tag>` and stack.yaml
+# now pins `chromeless/chromeless@sha256:<digest>`. So the grep returned
+# nothing, pinned_worker was empty, and the `[ -n "$pinned_worker" ]` test
+# below skipped the whole check — silently. A guard written after a day-long
+# incident had not fired once since digest pinning landed, and nothing said
+# so. Verified dead on 2026-09-10.
+pinned_worker="$(grep -oE 'chromeless/chromeless[@:][^ ]+' "$HERE/stack.yaml" \
+    | head -1 | sed 's|.*[@:]||')"
+live_worker="$(kubectl get deploy chromeless-standalone-worker -n "$NS" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's|.*[@:]||' || true)"
+if [ -z "$pinned_worker" ]; then
+    echo "ERROR: no worker image pin found in stack.yaml." >&2
+    echo "  The rollback guard cannot run, so this apply could silently" >&2
+    echo "  change the running worker. Fix the pin before deploying." >&2
+    exit 1
+fi
+if [ -n "$live_worker" ] && [ -n "$pinned_worker" ] && [ "$live_worker" != "$pinned_worker" ]; then
+    echo "ERROR: applying stack.yaml would CHANGE the running worker image." >&2
+    echo "         live:   $live_worker" >&2
+    echo "         pinned: $pinned_worker   (infra/k8s/standalone/stack.yaml)" >&2
+    echo "" >&2
+    echo "  If the live image is the newer one, this apply is a ROLLBACK and is" >&2
+    echo "  almost certainly not what you want. Update the pin in stack.yaml and" >&2
+    echo "  build/guest-release.json together, then re-run." >&2
+    echo "  To proceed anyway: CHROMELESS_ALLOW_ROLLBACK=1 $0 $*" >&2
+    [ "${CHROMELESS_ALLOW_ROLLBACK:-}" = "1" ] || exit 1
+    echo "  CHROMELESS_ALLOW_ROLLBACK=1 set — proceeding." >&2
+fi
+
+# The gateway needs the same guard, and has drifted the same way: on
+# 2026-09-10 the live gateway was sha256:63d6cfa7 while stack.yaml pinned
+# 9ef7f4db, three hand-rolls behind. Nothing checked it, so an apply would
+# have downgraded the component that serves the client bundle — silently, and
+# with the symptom landing on whoever next ran the tests.
+pinned_gw="$(grep -oE 'chromeless-gateway[@:][^ ]+' "$HERE/stack.yaml" \
+    | head -1 | sed 's|.*[@:]||')"
+live_gw="$(kubectl get deploy chromeless-standalone-gateway -n "$NS" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's|.*[@:]||' || true)"
+if [ -n "$live_gw" ] && [ -n "$pinned_gw" ] && [ "$live_gw" != "$pinned_gw" ]; then
+    echo "ERROR: applying stack.yaml would CHANGE the running gateway image." >&2
+    echo "         live:   ${live_gw}" >&2
+    echo "         pinned: ${pinned_gw}   (infra/k8s/standalone/stack.yaml)" >&2
+    echo "" >&2
+    echo "  The gateway serves the client bundle, so a silent downgrade here" >&2
+    echo "  changes what every viewer runs. If the live image is newer, find" >&2
+    echo "  what it is and pin it — see the DRIFT note beside the gateway" >&2
+    echo "  image in stack.yaml." >&2
+    echo "  To proceed anyway: CHROMELESS_ALLOW_ROLLBACK=1 $0 $*" >&2
+    [ "${CHROMELESS_ALLOW_ROLLBACK:-}" = "1" ] || exit 1
+    echo "  CHROMELESS_ALLOW_ROLLBACK=1 set — proceeding." >&2
+fi
+
 echo ">>> secrets"
 # The gateway signs session tokens; the broker verifies them. Both halves come
 # from one keygen run — the broker needs the public key at ITS startup, before
@@ -197,48 +292,58 @@ print(json.dumps([
    'username':'$TURN_USER','credential':'$TURN_CRED'},
   {'urls':['stun:$TURN_IP:3478']}]))")"
 
-# ---------------------------------------------------------------------------
-# Refuse to roll the cluster BACKWARDS.
-#
-# `kubectl apply -f stack.yaml` below sets the worker image to whatever this
-# file pins. On 2026-08-24 that pin was 64 commits behind the fix under test,
-# so every run of this script silently reverted a running fix — and every
-# `kubectl set image` reverted it back. The worker Deployment reached revision
-# 66 in a day with nobody reverting anything on purpose; kubectl showed two
-# field managers (`kubectl-client-side-apply` and `kubectl-set`) both owning
-# spec.containers[].image, each pulling toward its own answer.
-#
-# The user lost a day to it: tests passed against an image they never saw, and
-# they hit a bug those tests had "proved" fixed.
-#
-# So: if the live worker is running something NEWER than this file pins, stop
-# and say so rather than quietly downgrading it. `make lint-deploy-pin` keeps
-# stack.yaml and build/guest-release.json in agreement; this is the runtime
-# half, for the case where the cluster has moved and the tree has not.
-#
-# CHROMELESS_ALLOW_ROLLBACK=1 proceeds anyway — deliberate downgrades are
-# legitimate, they just should not be silent.
-pinned_worker="$(grep -oE 'chromeless/chromeless:[^ ]+' "$HERE/stack.yaml" | head -1 | sed 's|.*:||')"
-live_worker="$(kubectl get deploy chromeless-standalone-worker -n "$NS" \
-    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's|.*:||' || true)"
-if [ -n "$live_worker" ] && [ -n "$pinned_worker" ] && [ "$live_worker" != "$pinned_worker" ]; then
-    echo "ERROR: applying stack.yaml would CHANGE the running worker image." >&2
-    echo "         live:   $live_worker" >&2
-    echo "         pinned: $pinned_worker   (infra/k8s/standalone/stack.yaml)" >&2
-    echo "" >&2
-    echo "  If the live image is the newer one, this apply is a ROLLBACK and is" >&2
-    echo "  almost certainly not what you want. Update the pin in stack.yaml and" >&2
-    echo "  build/guest-release.json together, then re-run." >&2
-    echo "  To proceed anyway: CHROMELESS_ALLOW_ROLLBACK=1 $0 $*" >&2
-    [ "${CHROMELESS_ALLOW_ROLLBACK:-}" = "1" ] || exit 1
-    echo "  CHROMELESS_ALLOW_ROLLBACK=1 set — proceeding." >&2
-fi
 
 echo ">>> network policy + stack"
 # Not optional: the namespace carries chromeless-default-deny with
 # podSelector:{}, so new pods get nothing. The symptom is a TIMEOUT rather than
 # a refusal, which reads as "the other service is down".
 kubectl apply -f "$HERE/networkpolicy.yaml" >/dev/null
+# ---------------------------------------------------------------------------
+# Warn about env vars the apply is about to DROP.
+#
+# stack.yaml does not declare the TURN settings — this script sets them with
+# `kubectl set env` further down, which is fine WHEN THIS SCRIPT RUNS. The
+# trap is the other path: a bare `kubectl apply -f stack.yaml`, which is what
+# you reach for to change an image pin, can REMOVE them from a working
+# deployment, leaving a stack that connects, negotiates SDP, and shows no
+# video. The guest falls back to stun.l.google.com, the client gathers one
+# .local candidate, and tests/interactive reports "the worker already served
+# a session" — which is not what happened. Cost two verification runs on
+# 2026-09-10.
+#
+# The MECHANISM is three-way merge against
+# kubectl.kubernetes.io/last-applied-configuration, and it matters because it
+# decides what the fix can be. Measured on a scratch Deployment:
+#
+#   apply(declares X) -> set env X=live -> apply(omits X)   => X is DELETED
+#   apply(omits X)    -> set env X=live -> apply(omits X)   => X SURVIVES
+#
+# So apply does not prune everything it fails to mention; it prunes what a
+# PREVIOUS apply claimed. An older stack.yaml declared the TURN vars, so they
+# were in last-applied, so omitting them now deletes them.
+#
+# Which rules out the obvious repair: declaring them here with placeholder
+# values makes apply OVERWRITE what this script set (measured: the placeholder
+# wins), trading a silent drop for a silent wrong value — worse, because the
+# stack then looks configured. The credential is HMAC-derived and expires
+# every 24h, so it cannot live in a static manifest at all. `kubectl set env`
+# has to stay the owner; what was missing was anyone SAYING so.
+#
+# Reporting it here does not fix the bare-apply path, but it makes the
+# mechanism visible from the script that owns it, and names what to restore.
+for _d in worker signaling gateway; do
+    _live="$(kubectl get deploy "chromeless-standalone-${_d}" -n "$NS" \
+        -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}{"\n"}{end}' \
+        2>/dev/null || true)"
+    for _v in ${_live}; do
+        [ -n "${_v}" ] || continue
+        grep -qE "^[[:space:]]*- name: ${_v}[[:space:]]*$" "$HERE/stack.yaml" && continue
+        echo ">>> note: ${_d} carries ${_v}, which stack.yaml does not declare."
+    done
+done
+echo ">>> (this script re-sets the TURN vars below; a bare \`kubectl apply -f"
+echo ">>>  stack.yaml\` would NOT, and that is how a working stack loses TURN.)"
+
 kubectl apply -f "$HERE/stack.yaml" >/dev/null
 
 kubectl set env deploy/chromeless-standalone-worker -n "$NS" \
