@@ -15,20 +15,27 @@ patch series."* — that's this directory.
 - **`git format-patch` shape.** Patches carry a from-author /
   subject / commit-message header; the message is the source of
   truth for *why* the patch exists.
-- **NO `index <sha>..<sha>` line.** `git diff` emits one naming blob
-  hashes from the repo the diff was generated in. Those hashes do not
-  exist in the Chromium tree, so `git am` tries to "build a fake
-  ancestor" from them and fails with
+- **`src/` is not one git repository.** DEPS clones sub-repos into it,
+  each with its own `.git`: `third_party/webrtc` (DEPS:3012), `v8`,
+  `third_party/angle`. A patch touching one of those CANNOT be applied
+  from `src/` — `git am` finds no blob for a path the src index does
+  not track, and `--3way` fails with
 
       error: sha1 information is lacking or useless (<file>).
       error: could not build fake ancestor
 
-  which reads as a corrupt patch and is not one — the diff itself is
-  fine. Strip the line. None of 0002/0003/0005 carry one; 0006 did on
-  its first try and cost a lane cycle.
-- **Verify with `git am`, not `git apply`.** `build.sh apply-patches`
-  uses `git am --keep-non-patch`, and `git apply --check` passes on a
-  patch that `git am` rejects for exactly the reason above.
+  which reads as a malformed patch and is not one. `build.sh
+  apply-patches` now reads the target path out of each patch and
+  applies it from the checkout that owns it, stripping the sub-repo
+  prefix on the way in — so patches stay readable against the chromium
+  tree they document. 0002/0003/0005 never hit this because they touch
+  `content/` and `third_party/webrtc_overrides/`, which ARE in the src
+  repo; 0006 is the first sub-repo patch and cost two lane cycles.
+- **Verify with `git am --3way` from the RIGHT repo, not `git apply`.**
+  `git apply --check` passes on patches `git am` rejects, and applying
+  from `src/` fails on patches that apply fine from `third_party/webrtc`.
+  Reproduce the layout locally (two nested git repos) before trusting a
+  local pass.
 - **Upstream-quality commit messages.** "Why this patch exists,"
   "Why not avoid the patch," and (where applicable) "Upstream
   considerations" so the next reviewer doesn't have to re-derive the

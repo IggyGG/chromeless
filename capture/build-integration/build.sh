@@ -192,16 +192,65 @@ cmd_apply_patches() {
     local p
     for p in "${patches[@]}"; do
         log "  -> $(basename "${p}")"
+
+        # WHICH REPO does this patch belong to?
+        #
+        # `src/` is not one checkout. DEPS clones several sub-repos INTO it,
+        # each with its own .git — third_party/webrtc is one (DEPS:3012).
+        # A patch touching one of those cannot be applied from src/: `git am`
+        # finds no blob for a path its index does not track, and
+        # `--3way` then fails with
+        #
+        #   error: sha1 information is lacking or useless (<path>)
+        #   error: could not build fake ancestor
+        #
+        # which reads as a malformed patch and is not one. Patches 0002/0003/
+        # 0005 never hit it because they touch content/ and
+        # third_party/webrtc_overrides/, both of which ARE in the src repo.
+        # 0006 (the pulse ADM fix) is the first to touch third_party/webrtc.
+        #
+        # So: read the target path out of the patch and apply from whichever
+        # checkout actually owns it.
+        local target_repo="${CHROMIUM_SRC}"
+        local strip_prefix=""
+        local first_path
+        first_path="$(sed -n 's|^+++ b/||p' "${p}" | head -1)"
+        local sub
+        for sub in third_party/webrtc third_party/angle v8; do
+            case "${first_path}" in
+                "${sub}"/*)
+                    if [[ -d "${CHROMIUM_SRC}/${sub}/.git" ]]; then
+                        target_repo="${CHROMIUM_SRC}/${sub}"
+                        strip_prefix="${sub}/"
+                        log "     (sub-repo: ${sub})"
+                    fi
+                    ;;
+            esac
+        done
+
         # Per-patch defensive: even after the upfront recovery above,
         # a failure mid-loop on patch N would leave state behind for
         # patch N+1. Same pattern, idempotent.
-        rm -rf "${CHROMIUM_SRC}/.git/rebase-apply"
-        if ! (cd "${CHROMIUM_SRC}" && git \
+        rm -rf "${target_repo}/.git/rebase-apply"
+
+        # A sub-repo patch carries paths relative to src/, so strip the
+        # sub-repo prefix on the way in rather than rewriting the patch file
+        # — the patch stays readable against the chromium tree it documents.
+        local am_input="${p}"
+        if [[ -n "${strip_prefix}" ]]; then
+            am_input="$(mktemp)"
+            sed "s|^--- a/${strip_prefix}|--- a/|; s|^+++ b/${strip_prefix}|+++ b/|; s|^diff --git a/${strip_prefix}|diff --git a/|; s| b/${strip_prefix}| b/|" \
+                "${p}" > "${am_input}"
+        fi
+
+        if ! (cd "${target_repo}" && git \
                 -c user.email=iggy@triform.ai \
                 -c user.name="Iggy" \
-                am --3way --keep-non-patch "${p}"); then
-            die "patch failed to apply: ${p}"
+                am --3way --keep-non-patch "${am_input}"); then
+            [[ -n "${strip_prefix}" ]] && rm -f "${am_input}"
+            die "patch failed to apply: ${p} (repo: ${target_repo})"
         fi
+        [[ -n "${strip_prefix}" ]] && rm -f "${am_input}"
     done
     log "All patches applied."
 }
