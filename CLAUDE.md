@@ -326,7 +326,7 @@ then returns nothing and the ~30 min cycle bought you no information. Watch
   | --- | --- | --- |
   | 1 | success | |
   | 2 | failure | |
-  | 3 | cancelled | |
+  | 3 | cancelled | the commit-status API reports it as **`failure`**. Your own push cancels the in-flight run, so a "CI failed" alert seconds after you push is usually that. 811 jobs here are cancelled vs 223 truly failed — check the DB status and whether the run's commit is still the branch head before debugging. In the log: `Job failed` preceded by `context canceled`, with no failing step |
   | 4 | **skipped** | reads as `pending` forever in the commit-status API |
   | 5 | **WAITING** | *not* running — misreading 5 as "in flight" turned a normal queue into a phantom "311 jobs claimed but never started" (2026-08-19) |
   | 6 | running | |
