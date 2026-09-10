@@ -263,7 +263,30 @@ three different pids is what that looks like.
 
 ## Verifying a fix
 
-`tests/e2e/05-audio-receives.spec.ts` with `CHROMELESS_E2E_DEVTOOLS_URL` set,
-run **twice against the same worker process** — the second run is the test.
-The scratch driver used for all three attempts blocks `*/api/viewport` in the
-test browser so the resize path cannot confound the result.
+**Two runs against ONE worker process. The second run is the test** — the
+first viewer on a fresh worker has always had audio, so a single green run
+proves nothing. Either driver works:
+
+- `tests/interactive/run-against-cluster.sh` (no `--restart` between runs);
+  the check is "inbound AUDIO bytes reach the client".
+- `tests/e2e/05-audio-receives.spec.ts` with `CHROMELESS_E2E_DEVTOOLS_URL`
+  set.
+
+Block `*/api/viewport` in the test browser either way, so the unrelated
+resize/GPU-crash defect cannot confound the result.
+
+**Check the process identity, not just the score.** The worker serves one
+session and supervisord respawns it in ~15 s, so run 2 can land on a NEW
+browser process and pass as a first viewer while looking like a re-arm.
+Compare the browser pid across both runs; if it changed, the result is void.
+That check is the whole reason the thread count above matters — read it
+before and after:
+
+| `webrtc_audio_mo` threads | meaning |
+| --- | --- |
+| 2 after run 2 | `Init()` re-spawned both; the fix works |
+| 1 after run 2 | the `quit_` latch is still set; the fix did not work |
+| 2 with no audio bytes | a DIFFERENT bug — do not blame this finding |
+
+A fresh boot reads 2 on the patched and unpatched image alike, so a
+boot-time reading is a sanity check, never the verification.
