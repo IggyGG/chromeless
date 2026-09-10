@@ -237,14 +237,20 @@ BPID=$(kubectl exec -n chromeless $POD -- sh -c '
     basename $p; return
   done')
 kubectl exec -n chromeless $POD -- sh -c \
-  "grep -h . /proc/$BPID/task/*/comm | grep -c audio"
+  "grep -hx webrtc_audio_mo /proc/$BPID/task/*/comm | wc -l"
 ```
 
 `Init()` spawns **two** audio-module threads (rec `:180`, play `:188`), both
-truncated by the kernel to `webrtc_audio_mo`. **2 is healthy; 1 is this
-defect.** Measured 1 on the live worker (pid 23, 9 h uptime, unpatched
+truncated by the kernel to exactly `webrtc_audio_mo`. **2 is healthy; 1 is
+this defect.** Measured 1 on the live worker (pid 23, 9 h uptime, unpatched
 image) on 2026-09-10 — independent of any session, any viewer, and any
 `bytesReceived` reading.
+
+Match the name **exactly** (`grep -hx`). The browser also carries
+`AudioEncoderQue` and `AudioDeviceBuff`, so `grep -ci audio` reads 3 here and
+would still read 3 after the fix. A case-SENSITIVE `grep -c audio` does give
+the right answer, 1 — but only by accidentally excluding two capitalised
+names, so it would start lying the moment a lowercase audio thread appears.
 
 That makes it a better oracle than the interactive suite's audio check,
 which goes red for a silent ADM *and* for every unrelated transport fault.
