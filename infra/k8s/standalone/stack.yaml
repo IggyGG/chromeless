@@ -466,24 +466,21 @@ spec:
           # over 75 s. On the previous gateway the same connect restarted the
           # browser ~50 s in.
           #
-          # DRIFT, UNRESOLVED (2026-09-10): the live gateway is
-          # sha256:63d6cfa7, pushed 2026-09-09T23:08Z, and this pin is three
-          # hand-rolls behind it. The two are genuinely different images (13
-          # layers each, 5654728 vs 5609791 bytes, different top layer), so
-          # applying this file WOULD change the running gateway.
+          # 676186a3 = commit c9e35d78, tag g-c9e35d78a4f0, built by
+          # infra/k8s/standalone/build-images.yaml on 2026-09-10.
           #
-          # It is not pinned here because it CANNOT be identified: no tag in
-          # the registry points at that digest and no commit records it. A pin
-          # is a provenance claim, and writing one for an image whose source
-          # nobody can name would make this file look authoritative while
-          # being unverifiable — the failure this comment block exists to
-          # prevent.
+          # This replaces sha256:63d6cfa7, which ran here with NO tag pointing
+          # at it and no commit naming it — pushed untagged, so it could not be
+          # pinned honestly and could not be reproduced. That is why the build
+          # Job now clones a full sha, tags by it, and stamps
+          # org.opencontainers.image.revision as a label: a tag can be moved,
+          # a label cannot, so `crane config <ref>` answers "what is this?"
+          # for any image here, tagged or not.
           #
-          # To resolve: whoever pushed it re-tags it and records the commit,
-          # or the gateway is rebuilt from a known commit and re-pinned here.
-          # Until then `deploy.sh` refuses to roll the gateway backwards, and
-          # a bare `kubectl apply -f stack.yaml` WILL downgrade it.
-          image: registry.triform.cloud/chromeless/chromeless-gateway@sha256:9ef7f4db32c86dcb34274814855a0bb77c8953f12e5d4673bfc7f85bb6cfbdcd
+          # Supersedes rather than reproduces 63d6cfa7: main carries batches B
+          # and C (#109, #112), so this is newer than what was running, not a
+          # rebuild of it.
+          image: registry.triform.cloud/chromeless/chromeless-gateway@sha256:676186a352418bbe86893e726b1b3f5cee2bcf3d95061eaac435b256195c5d1b
           env:
             - name: CHROMELESS_USER
               valueFrom:

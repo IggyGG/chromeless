@@ -57,16 +57,26 @@ spec:
             - -c
             - |
               set -eu
-              git clone --depth 1 --branch "$BRANCH" "$REPO" /workspace
-              echo "built from $(git -C /workspace rev-parse --short HEAD)"
+              # Clone the COMMIT, not the branch tip.
+              #
+              # `--depth 1 --branch main` builds whatever main happened to be
+              # when the Job started, and the destination tag was a fixed
+              # string — so the image recorded neither. On 2026-09-10 the live
+              # gateway was sha256:63d6cfa7 with NO tag pointing at it and no
+              # commit naming it: unreproducible, and impossible to pin
+              # honestly in stack.yaml. This is how that happens.
+              git clone --no-checkout "$REPO" /workspace
+              git -C /workspace checkout --detach "$COMMIT"
+              echo "built from $(git -C /workspace rev-parse HEAD)"
           env:
             - name: REPO
               value: https://forgejo.triform.dev/triform/chromeless.git
-            - name: BRANCH
-              # main, not feat/standalone-mode. That branch is behind main and
+            - name: COMMIT
+              # A FULL SHA, not a branch name — see the clone script above.
+              # main, not feat/standalone-mode: that branch is behind main and
               # does not contain client/src/control.ts, so a rebuild from it
               # would faithfully reproduce the bug it was meant to fix.
-              value: main
+              value: c9e35d78a4f0897e70fdbaf8ed8619ef36aa58cf
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
           securityContext:
@@ -86,7 +96,18 @@ spec:
             # listening. Bump this tag whenever client/ changes: the bundle is
             # baked in at image build time, so a client fix does not reach a
             # browser until the gateway image is rebuilt AND rolled.
-            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:standalone-v13
+            # TAG NAMES THE COMMIT. `standalone-v13` and friends are opaque:
+            # nothing about the name says what is inside, so the only way to
+            # answer "what is running?" was to remember. Tagging by sha makes
+            # the registry self-describing and makes a rebuild of the same
+            # commit idempotent instead of silently replacing a tag.
+            - --destination=registry.triform.cloud/chromeless/chromeless-gateway:g-c9e35d78a4f0
+            # And as a LABEL, because a tag can be moved and a label cannot.
+            # `crane config <ref>` then answers the provenance question for any
+            # image, tagged or not — which is exactly what could NOT be
+            # answered for the gateway running on 2026-09-10.
+            - --label=org.opencontainers.image.revision=c9e35d78a4f0897e70fdbaf8ed8619ef36aa58cf
+            - --label=org.opencontainers.image.source=https://forgejo.triform.dev/triform/chromeless
             - --single-snapshot          # one layer; these images are small
             - --push-retry=3             # the registry 500s intermittently (BUGS-511/513)
           env:
@@ -137,18 +158,21 @@ spec:
             - -c
             - |
               set -eu
-              git clone --depth 1 --branch "$BRANCH" "$REPO" /workspace
-              echo "built from $(git -C /workspace rev-parse --short HEAD)"
+              # Clone the COMMIT, not the branch tip — see the gateway Job
+              # above for what an unpinned build cost.
+              git clone --no-checkout "$REPO" /workspace
+              git -C /workspace checkout --detach "$COMMIT"
+              echo "built from $(git -C /workspace rev-parse HEAD)"
           env:
             - name: REPO
               value: https://forgejo.triform.dev/triform/chromeless.git
-            - name: BRANCH
-              # main, not a feature branch. A build job that lives on main
-              # and clones something else produces an image whose tag says
-              # one thing and whose contents say another — which is how a
+            - name: COMMIT
+              # A FULL SHA. main, not a feature branch: a build job that lives
+              # on main and clones something else produces an image whose tag
+              # says one thing and whose contents say another — which is how a
               # gateway rebuilt from a stale branch came to serve a bundle
               # with no control-channel consumer while the tag looked right.
-              value: main
+              value: c9e35d78a4f0897e70fdbaf8ed8619ef36aa58cf
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
           securityContext:
@@ -162,7 +186,9 @@ spec:
             # directory, so the context is signaling/, not the repo root.
             - --dockerfile=/workspace/signaling/Dockerfile
             - --context=/workspace/signaling
-            - --destination=registry.triform.cloud/chromeless/signaling:standalone-v8
+            - --destination=registry.triform.cloud/chromeless/signaling:s-c9e35d78a4f0
+            - --label=org.opencontainers.image.revision=c9e35d78a4f0897e70fdbaf8ed8619ef36aa58cf
+            - --label=org.opencontainers.image.source=https://forgejo.triform.dev/triform/chromeless
             - --single-snapshot
             - --push-retry=3
           env:

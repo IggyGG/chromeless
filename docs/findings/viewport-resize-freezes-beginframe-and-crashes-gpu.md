@@ -4,6 +4,14 @@
 abort is gone, the freeze is not. Two attempts and their measurements are at
 the bottom — read them before trying a third.
 
+**2026-09-10:** probe 1 answered, and it invalidates all three of the "third
+attempt" steps this file proposed. The renderer DOES paint after the resize —
+one frame, then silence — and the in-flight BeginFrame's ack is simply lost
+(`issued=136 acked=135`, then nothing for 31 s). Every proposed next step
+assumed that frame would eventually complete. See "Probe 1, answered" below
+before doing anything here; the section after it is kept only as the record of
+what was ruled out.
+
 **Was:** OPEN. Measured 2026-09-07 on the k8s standalone stack, worker
 `cr7727-c5f2eb91c6f0`, three fresh processes, three for three. Introduced as a
 *reachable* path by `feat(viewport)` (#96, the same day): before it nothing
@@ -158,6 +166,77 @@ Result: **the GPU abort is gone** — 33 nudges, no FATAL, no
 `GPU process exited`. But the ack never arrived either, so the picture froze
 and `CV2-GPU-DEATH` recycled the guest after 30 s. Half the defect, traded for
 the other half.
+
+## Probe 1, answered (2026-09-10, guest `cr7727-92539396945c`)
+
+The finding's own cheapest next step: **does the renderer ever submit a
+compositor frame at the new size?** It does — exactly one, and then nothing.
+
+Driven over CDP against a fresh worker with a live viewer, `Cb.setViewport`
+854x590. `Cb.getCaptureStats().framesReceived`:
+
+```
+before   600
+t+5s     601      <- ONE frame after the resize
+t+10s    601
+...      601      (frozen for the full 30 s)
+t+30s    601      permanentDeathSignaled: True
+```
+
+The `[diag]` line pins it further. Every tick before the resize is balanced —
+`issued=147 acked=147`, `issued=148 acked=148`, six in a row. The tick
+spanning the resize reads:
+
+```
+issued=136 (27.2 fps) acked=135 | ... | frames_received +45, total=601
+```
+
+**One BeginFrame issued and never acked.** Then 31 nudges over 31 s, a
+watchdog fire every second, and no ack ever.
+
+So the renderer is NOT stuck upstream of viz: a frame gets through. What dies
+is that single in-flight ack, dropped when the Display was reconfigured
+underneath it.
+
+### What this rules out
+
+- **Probe 1's own hypothesis** ("if the renderer is not painting, look at
+  `RenderWidgetHostView::SetSize`"). It paints. That is not where the bug is.
+- **Waiting longer.** `awaiting_reconfigure_ack_` waits for "the ack viz still
+  holds" — the comment in `NotifyDisplayReconfigured` says so explicitly. That
+  ack does not exist any more. The wait cannot terminate, which is why
+  attempt 2 traded a crash for a freeze rather than fixing anything.
+- **Probe 3 as written** (`Stop()` before the reconfigure, `Start()` after).
+  The header's LIFECYCLE CONSTRAINT permits that only once the in-flight frame
+  is "known-drained", and viz clears `pending_frame_callback_` only when the
+  Display *finishes* the frame. It never finishes. Stop/Start therefore lands
+  in exactly the window the constraint forbids, and the DCHECK it names —
+  `Got overlapping IssueExternalBeginFrame` — is the same double-issue that
+  aborted the GPU process in attempt 1.
+
+All three documented next steps assumed the pre-resize frame would eventually
+complete. It does not.
+
+### Where a fourth attempt should start
+
+The question is no longer "how do we wait for the ack" but **"how does viz get
+told the frame it is holding is never going to finish"** — i.e. the reconfigure
+needs to cancel or complete the outstanding external BeginFrame, not outlive
+it. Worth checking, in order:
+
+1. What upstream does with `pending_frame_callback_` across a
+   `Display::Resize`. If viz has a path that completes or discards it, the
+   embedder's job is to take that path rather than to wait.
+2. Whether the reconfigure can be ordered to happen BETWEEN frames — issue no
+   BeginFrame, wait for the current ack, THEN reconfigure, then resume. That
+   inverts attempt 2: hold the resize for the ack instead of holding the
+   ack-chain for the resize. It costs one frame of latency and needs no viz
+   internals.
+3. Only if neither works: the epoch counter the LIFECYCLE CONSTRAINT already
+   sketches, which makes Stop/Start safe by letting the stale ack land first.
+
+(2) is the cheapest and does not depend on unknown viz behaviour; it is where
+I would start.
 
 ## Where a third attempt should start
 
