@@ -15,6 +15,20 @@ patch series."* — that's this directory.
 - **`git format-patch` shape.** Patches carry a from-author /
   subject / commit-message header; the message is the source of
   truth for *why* the patch exists.
+- **NO `index <sha>..<sha>` line.** `git diff` emits one naming blob
+  hashes from the repo the diff was generated in. Those hashes do not
+  exist in the Chromium tree, so `git am` tries to "build a fake
+  ancestor" from them and fails with
+
+      error: sha1 information is lacking or useless (<file>).
+      error: could not build fake ancestor
+
+  which reads as a corrupt patch and is not one — the diff itself is
+  fine. Strip the line. None of 0002/0003/0005 carry one; 0006 did on
+  its first try and cost a lane cycle.
+- **Verify with `git am`, not `git apply`.** `build.sh apply-patches`
+  uses `git am --keep-non-patch`, and `git apply --check` passes on a
+  patch that `git am` rejects for exactly the reason above.
 - **Upstream-quality commit messages.** "Why this patch exists,"
   "Why not avoid the patch," and (where applicable) "Upstream
   considerations" so the next reviewer doesn't have to re-derive the

@@ -66,7 +66,6 @@ Touched files:
   third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
 ---
 diff --git a/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc b/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
-index f1121c1..5d075b6 100644
 --- a/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
 +++ b/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
 @@ -156,6 +156,19 @@ AudioDeviceGeneric::InitStatus AudioDeviceLinuxPulse::Init() {
