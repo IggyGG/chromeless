@@ -1,5 +1,16 @@
 # Audio works for the first viewer only; every re-armed session is silent
 
+> **FIXED AND VERIFIED — 2026-09-10, image `cr7727-92539396945c`.**
+> Cause: an upstream libwebrtc bug, not anything in `capture/`.
+> `AudioDeviceLinuxPulse::Terminate()` sets `quit_`; `Init()` never clears it,
+> so a re-initialised module spawns two threads that exit on their first
+> wakeup. `patches/0006` clears it. Verified on one browser process (pid 23):
+> **6 re-arms, 6 successful pre-arms, 0 failures**, and three consecutive
+> viewer sessions each receiving ~22 kB of audio where every previous second
+> session received zero. Both `webrtc_audio_mo` threads alive throughout.
+> Kept in full — the wrong turns below are the useful part.
+
+
 **Status:** OPEN, but SUBSTANTIALLY narrowed on 2026-09-10 — the record
 thread has exited, `quit_` is latched, and this document's own record of
 theory 3 ("the pre-arm SUCCEEDED") is WRONG: the guest reports
