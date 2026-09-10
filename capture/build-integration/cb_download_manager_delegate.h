@@ -60,11 +60,16 @@
 
 #include <stdint.h>
 
+#include <set>
+
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/download/public/common/download_item.h"
 #include "components/download/public/common/download_target_info.h"
+// CV2-DOWNLOAD: this class is now also a DownloadManager::Observer, so the
+// manager header is part of its interface rather than a forward decl.
+#include "content/public/browser/download_manager.h"
 #include "content/public/browser/download_manager_delegate.h"
 
 namespace content {
@@ -73,7 +78,21 @@ class DownloadManager;
 
 namespace cloud_browser {
 
-class CbDownloadManagerDelegate : public content::DownloadManagerDelegate {
+// CV2-DOWNLOAD: also a DownloadManager::Observer and a DownloadItem::Observer.
+//
+// The delegate already decides WHERE a download lands; observing lets it say
+// that a download is HAPPENING. Before this, a file appeared in the guest's
+// profile and the viewer was told nothing at all — the interactive suite had
+// to read the guest's filesystem over kubectl exec to prove downloads worked,
+// because there was no other evidence anywhere.
+//
+// Both observer faces on one class rather than a separate object: the
+// delegate already outlives every item (the BrowserContext owns it), already
+// holds the download directory, and adding a second lifetime here would be
+// two things to get wrong instead of one.
+class CbDownloadManagerDelegate : public content::DownloadManagerDelegate,
+                                  public content::DownloadManager::Observer,
+                                  public download::DownloadItem::Observer {
  public:
   CbDownloadManagerDelegate();
 
@@ -103,6 +122,15 @@ class CbDownloadManagerDelegate : public content::DownloadManagerDelegate {
   // production path derives it from the BrowserContext.
   void SetDownloadDirForTesting(const base::FilePath& dir);
 
+  // content::DownloadManager::Observer:
+  void OnDownloadCreated(content::DownloadManager* manager,
+                         download::DownloadItem* item) override;
+  void ManagerGoingDown(content::DownloadManager* manager) override;
+
+  // download::DownloadItem::Observer:
+  void OnDownloadUpdated(download::DownloadItem* item) override;
+  void OnDownloadDestroyed(download::DownloadItem* item) override;
+
  private:
   // Runs on a MayBlock() ThreadPool sequence: it touches the filesystem to
   // avoid clobbering an existing file, which must not happen on the UI
@@ -118,7 +146,15 @@ class CbDownloadManagerDelegate : public content::DownloadManagerDelegate {
   void OnDownloadPathGenerated(download::DownloadTargetCallback callback,
                                const base::FilePath& suggested_path);
 
+  // Tell the viewer where this download has got to. No-op with no control
+  // channel, which is the between-sessions case.
+  void EmitDownloadEvent(download::DownloadItem* item, const char* phase);
+
   raw_ptr<content::DownloadManager> download_manager_ = nullptr;
+  // Items we have added ourselves as an observer to, so teardown removes
+  // exactly those. A DownloadItem outlives its download (it stays in
+  // history), and observing one twice would double every event.
+  std::set<raw_ptr<download::DownloadItem>> observed_items_;
   base::FilePath download_dir_;
   uint32_t next_download_id_ = download::DownloadItem::kInvalidId + 1;
 

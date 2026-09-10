@@ -384,10 +384,16 @@ if [[ "${FAILED}" == "True" ]]; then
   REASON="$(kubectl -n chromeless-build get job "${JOB_NAME}" \
     -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}' 2>/dev/null || true)"
   if [[ "${REASON}" == "DeadlineExceeded" ]]; then
-    echo "   reason: DeadlineExceeded — the push ran past the Job's" >&2
-    echo "   activeDeadlineSeconds, it did NOT error. Check the registry's" >&2
-    echo "   own log for 'client disconnected during blob PATCH', and raise" >&2
-    echo "   activeDeadlineSeconds in chromeless-kaniko-push.yaml." >&2
+    echo "   reason: DeadlineExceeded — the push did NOT error, it ran past" >&2
+    echo "   the Job's activeDeadlineSeconds. Usually the registry's S3" >&2
+    echo "   backend stalled a multipart upload, NOT a slow push:" >&2
+    echo >&2
+    echo "     kubectl logs -n registry <pod> --since=30m | grep RequestError" >&2
+    echo >&2
+    echo "   Check BOTH registry replicas — the push lands on one and the" >&2
+    echo "   other's log is silent, which reads as 'no errors'. A stalled" >&2
+    echo "   part shows as a failed Put with partNumber=N. A plain RETRY" >&2
+    echo "   fixes that; raising the deadline does not." >&2
   fi
   exit 1
 fi

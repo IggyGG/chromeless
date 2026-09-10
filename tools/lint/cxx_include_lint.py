@@ -102,6 +102,29 @@ RULES: list[tuple[str, str, str]] = [
     # and this header is not implied by the content headers it neighbours.
     (r"\bcontent::GetUIThreadTaskRunner\b", "content/public/browser/browser_thread.h", "content::GetUIThreadTaskRunner"),
     (r"\bcontent::GetIOThreadTaskRunner\b", "content/public/browser/browser_thread.h", "content::GetIOThreadTaskRunner"),
+    # Types that //content FORWARD-DECLARES in a header you are already
+    # including, so NAMING them compiles and READING A FIELD does not.
+    #
+    # This class cost a lane cycle on 2026-09-09: HandleContextMenu takes
+    # `const ContextMenuParams&`, web_contents_delegate.h forward-declares it
+    # at :117, and eight `member access into incomplete type` errors came
+    # back ~14 minutes later. The lint was clean throughout, because every
+    # symbol it knew about WAS included.
+    #
+    # The pattern must match MEMBER ACCESS, not the type name. A header that
+    # only names the type in an override signature is CORRECT with just the
+    # forward declaration, and a rule keyed on the name alone flags it — the
+    # first version of this rule did exactly that on two files, both fine.
+    #
+    # Keyed on the conventional parameter name for each, which is what these
+    # are called at every call site in this tree. Narrow on purpose: a false
+    # positive costs more trust than a missed defect costs time.
+    (r"\bparams\.(link_url|link_text|src_url|selection_text|media_type|is_editable|unfiltered_link_url)\b",
+     "content/public/browser/context_menu_params.h", "content::ContextMenuParams member access"),
+    (r"\bssl_info\.(cert|cert_status|is_issued_by_known_root)\b",
+     "net/ssl/ssl_info.h", "net::SSLInfo member access"),
+    (r"\bauth_info\.(realm|scheme|is_proxy|challenger)\b",
+     "net/base/auth.h", "net::AuthChallengeInfo member access"),
 ]
 
 COMPILED = [(re.compile(pat), hdr, sym) for pat, hdr, sym in RULES]

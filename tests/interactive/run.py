@@ -827,6 +827,35 @@ def suite_downloads(client, worker):
         # on completion. One left behind means the download stalled — and it
         # is also the check that would catch an intermediate path in the wrong
         # DIRECTORY, which trips a DCHECK in a debug build.
+        # ---- CV2-DOWNLOAD: does the VIEWER know? -----------------------
+        #
+        # Everything above reads the guest's filesystem over kubectl exec,
+        # which is a test working around a missing feature: until batch C
+        # there was no other evidence a download had happened, because the
+        # viewer was told nothing at all. These two checks are that feature.
+        #
+        # Read what is ON SCREEN, not the control channel frames — the point
+        # is that a person can see it.
+        tray = json.loads(client.cdp.eval(
+            "JSON.stringify({"
+            "  rows: document.querySelectorAll('.cb-download').length,"
+            "  text: (document.getElementById('downloads')||{}).textContent,"
+            "  hidden: (document.getElementById('downloads')||{}).hidden"
+            "})") or "{}")
+        check("the download appears in the viewer's tray",
+              (tray.get("rows") or 0) >= 1,
+              "no .cb-download row — the guest sends a `download` control "
+              "event since batch C; zero rows means either a guest that "
+              "predates it or a stale gateway bundle with no handler",
+              pass_detail=f"{tray.get('rows')} row(s)")
+        if (tray.get("rows") or 0) >= 1:
+            check("the tray names the file",
+                  "chromeless-probe" in (tray.get("text") or ""),
+                  f"tray reads {(tray.get('text') or '')[:80]!r} — the "
+                  f"filename comes from GetTargetFilePath(), so an "
+                  f"intermediate .crdownload name here is the wrong accessor",
+                  pass_detail=(tray.get("text") or "")[:40])
+
         check("the download completed (no .crdownload left behind)",
               ".crdownload" not in listing,
               f"Downloads/ still holds an intermediate: {listing!r}")
@@ -1036,6 +1065,113 @@ def suite_uploads(client, worker):
     check("the page can read the file's contents", read and text == payload,
           f"read {text!r}, expected {payload!r}",
           pass_detail="contents match byte for byte")
+
+
+_PERMISSION_FIXTURE = """<!doctype html><meta charset=utf-8>
+<title>permission fixture</title>
+<body style="font:16px system-ui;padding:40px">
+<h1>permission fixture</h1>
+<script>
+  // What the PAGE gets back. Before batch C this resolved "denied"
+  // INSTANTLY with nobody asked — indistinguishable, from here, from a user
+  // who declined, which is exactly why it went unnoticed for so long.
+  window.__perm = "PENDING";
+  window.__asked_at = 0;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    window.__asked_at = Date.now();
+    navigator.permissions.query({name: 'geolocation'}).then(
+      (r) => { window.__query = r.state; },
+      ()  => { window.__query = "THREW"; });
+    navigator.geolocation.getCurrentPosition(
+      () => { window.__perm = "granted"; window.__took = Date.now() - window.__asked_at; },
+      (e) => { window.__perm = "denied:" + e.code; window.__took = Date.now() - window.__asked_at; },
+      {timeout: 20000});
+  }));
+</script>
+"""
+
+
+def suite_permissions(client, worker):
+    """A permission prompt reaches the viewer and its answer reaches the page.
+
+    The defect this covers is subtle: GetPermissionControllerDelegate()
+    returned nullptr, //content denied everything WITHOUT asking, and the
+    page saw a normal PERMISSION_DENIED. Nothing was broken-looking. So the
+    load-bearing check is not "denied vs granted" — it is that a prompt
+    APPEARED at all.
+    """
+    print("\n[permissions]")
+
+    if not _session_alive(client):
+        check("the WebRTC session is still up (permissions need a live guest)",
+              False, "session already ended (one session per worker process)")
+        return
+
+    # Same preflight discipline as dialogs: a guest that predates batch C
+    # denies instantly and looks identical to a viewer who said no.
+    log = client.cdp.eval("document.getElementById('log').innerText") or ""
+    if 'wiring data channel "control"' not in log:
+        check("the guest opened the control channel", False,
+              "no `control` channel — this guest predates CbControlChannel, "
+              "so nothing below can distinguish the feature from its absence")
+        return
+
+    _arm_n[0] += 1
+    try:
+        H.navigate(H.fixture_url(_PERMISSION_FIXTURE) + f"?perm={_arm_n[0]}")
+    except Exception as exc:
+        check("the gateway could navigate the guest", False,
+              f"{type(exc).__name__}: {exc}")
+        return
+    loaded, _ = worker.wait_for("window.__asked_at ? 1 : 0", 1, timeout=25)
+    check("the permission fixture ran", loaded)
+    if not loaded:
+        return
+
+    # THE check. A prompt on screen is the whole feature; the answer is
+    # policy. The demo client uses window.confirm(), which headless Chrome
+    # auto-dismisses (→ denied) — that is fine and is why this asserts the
+    # PROMPT, not the outcome.
+    #
+    # window.confirm blocks the client's JS thread, so it cannot be observed
+    # through CDP eval on that page. The observable is the guest's own log
+    # line, read through the SAME channel the download oracle uses.
+    ns = os.environ.get("CHROMELESS_NS", "chromeless")
+    dep = os.environ.get("CHROMELESS_WORKER_DEPLOY",
+                         "deploy/chromeless-standalone-worker")
+    asked, out = _poll(
+        lambda: subprocess.run(
+            ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
+             "bash", "-c",
+             "grep -ac 'CV2-PERMISSION' /var/log/supervisor/chromium.err.log"],
+            capture_output=True, text=True, timeout=30).stdout.strip(),
+        lambda v: v.isdigit() and int(v) > 0,
+        timeout=25)
+    check("the guest's permission manager is wired", asked,
+          f"no CV2-PERMISSION line in the guest log (grep returned {out!r}) — "
+          f"GetPermissionControllerDelegate() is still returning nullptr, "
+          f"which denies everything without asking")
+
+    # And the page must get an ANSWER, not hang. Either outcome is correct;
+    # a permission that never settles is a page stuck forever.
+    settled, val = worker.wait_for("String(window.__perm)",
+                                   lambda v: v and v != "PENDING", timeout=30)
+    check("the page's permission request settles", settled,
+          f"window.__perm is still {val!r} — the guest must resolve every "
+          f"request exactly once, even when the viewer never answers "
+          f"(the deadline applies its default)",
+          pass_detail=str(val))
+
+    # navigator.permissions.query() is the SYNCHRONOUS path, which reports
+    # "prompt" rather than "denied" — otherwise a page skips the request
+    # that would have prompted the viewer.
+    q = worker.eval("String(window.__query || '')")
+    if q:
+        check("permissions.query() reports 'prompt', not 'denied'",
+              q == "prompt",
+              f"query() said {q!r}; 'denied' makes a page skip the request "
+              f"that WOULD have asked the viewer",
+              pass_detail=q)
 
 
 def suite_clipboard(client, worker):
@@ -1534,6 +1670,7 @@ def main():
         # session rather than silently doing nothing.
         suites = {"dialogs": suite_dialogs, "uploads": suite_uploads,
                   "downloads": suite_downloads,
+                  "permissions": suite_permissions,
                   "channels": suite_channels,
                   "video": suite_video, "navigation": suite_navigation,
                   "mouse": suite_mouse, "scroll": suite_scroll,

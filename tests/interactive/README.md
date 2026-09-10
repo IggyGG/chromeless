@@ -100,6 +100,20 @@ verdict:
   `/home/cbuser/.config/chromium` (the guest honours `--user-data-dir` since
   the same image) and the older `/tmp/cloud_browser_profile_*` path, so it
   stays honest against an older guest.
+- the permissions suite (added 2026-09-10 with batch C) asserts that a
+  prompt REACHED the viewer, not that it was granted. The demo client uses
+  `window.confirm()`, which headless Chrome auto-dismisses, so the outcome is
+  always "denied" and says nothing. The load-bearing fact is that a prompt
+  happened at all: before batch C, `GetPermissionControllerDelegate()`
+  returned nullptr and //content denied everything WITHOUT asking, which the
+  page saw as an ordinary `PERMISSION_DENIED`. Nothing looked broken, which
+  is why it survived.
+
+  Because `window.confirm()` blocks the client's JS thread, the prompt cannot
+  be observed by CDP eval on that page; the oracle is the guest's own
+  `CV2-PERMISSION` log line, read the same way the download oracle reads the
+  filesystem.
+
 - the uploads suite (added 2026-09-08 with `CbFileUploadReceiver`) needs a
   guest that opens BOTH the `files` and `control` channels. Its preflight
   reports the two separately, because the two halves of `<input type=file>`
@@ -148,8 +162,8 @@ compare.
 
 - `harness.py` — `CDP` (stdlib websocket), `WorkerOracle` (truth),
   `ClientDriver` (the user), fixture upload, login.
-- `run.py` — the suites: dialogs, uploads, downloads, clipboard, passthrough,
-  stats, video, navigation, mouse, scroll, keyboard, channels.
+- `run.py` — the suites: dialogs, uploads, downloads, permissions, clipboard,
+  passthrough, stats, video, navigation, mouse, scroll, keyboard, channels.
 
 Input is dispatched as genuine DOM events on the client's `<video>` element,
 never as synthetic CDP input at the client — that would bypass the very code

@@ -19,6 +19,9 @@ import {
   type ControlPrompt,
   type ControlResponseData,
   type FileChooserRequest,
+  type PermissionRequest,
+  type LoginRequest,
+  certErrorText,
 } from "./control.js";
 
 class FakeChannel {
@@ -222,16 +225,21 @@ describe("attachControlChannel", () => {
   // kind would make it wait out the full deadline; an empty-dict response
   // makes it apply its safe default immediately.
   //
-  // `cert_error` is the example because it is genuinely unimplemented. This
-  // test used to use `file_chooser`, which now HAS a producer — if you are
-  // here because a kind you just implemented broke this test, that is the
-  // test doing its job: move it to another unimplemented kind.
+  // The example has moved twice now, which is the test working: it was
+  // `file_chooser` until batch B implemented it, then `cert_error` until
+  // batch C did. Batch C implemented every kind the protocol documents, so
+  // the example is now a deliberately INVENTED kind — the guest treats kind
+  // as a free-form string (cb_control_channel.h SendRequest), so an unknown
+  // one is a real case the client must decline rather than ignore, not a
+  // placeholder waiting to be implemented.
+  //
+  // If you add a kind called "not_a_real_kind", you have earned this.
   it("DECLINES an unsupported kind immediately instead of ignoring it", () => {
     const dc = new FakeChannel();
     const cap = capturing();
     const h = attachControlChannel(dc as unknown as RTCDataChannel, { present: cap.present });
 
-    dc.pushMessage(guestRequest({ kind: "cert_error", id: "9" }));
+    dc.pushMessage(guestRequest({ kind: "not_a_real_kind", id: "9" }));
 
     expect(cap.seen).toHaveLength(0);
     expect(dc.sent).toHaveLength(1);
@@ -297,6 +305,158 @@ describe("attachControlChannel", () => {
       expect(seen).toEqual([]);
       expect(cap.seen).toHaveLength(1);
       h.dispose();
+    });
+  });
+
+  // Batch C's three blocking kinds. Each holds a chromium callback on the
+  // guest side whose contract says it MUST run, so the property under test
+  // is the same for all three: exactly one answer, always, and a safe one
+  // when anything goes wrong.
+  describe("permission", () => {
+    it("grants only on an explicit true", async () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onPermission: () => true,
+      });
+      dc.pushMessage(guestRequest({
+        kind: "permission", id: "30",
+        permissions: ["geolocation"], origin: "https://example.com",
+      }));
+      await Promise.resolve(); await Promise.resolve();
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "30", granted: true });
+      h.dispose();
+    });
+
+    it("DENIES with no handler — the pre-batch-C behaviour, not a regression", () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {});
+      dc.pushMessage(guestRequest({ kind: "permission", id: "31" }));
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "31", granted: false });
+      h.dispose();
+    });
+
+    it("DENIES when the handler throws", async () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onPermission: () => { throw new Error("boom"); },
+      });
+      dc.pushMessage(guestRequest({ kind: "permission", id: "32" }));
+      await Promise.resolve(); await Promise.resolve();
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "32", granted: false });
+      h.dispose();
+    });
+
+    it("drops a non-string permission name rather than passing it through", async () => {
+      const dc = new FakeChannel();
+      const seen: PermissionRequest[] = [];
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onPermission: (r) => { seen.push(r); return false; },
+      });
+      dc.pushMessage(guestRequest({
+        kind: "permission", id: "33", permissions: ["geolocation", 7, null],
+      }));
+      await Promise.resolve(); await Promise.resolve();
+      expect(seen[0]!.permissions).toEqual(["geolocation"]);
+      h.dispose();
+    });
+  });
+
+  describe("cert_error", () => {
+    it("proceeds only on an explicit true", async () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onCertError: () => true,
+      });
+      dc.pushMessage(guestRequest({
+        kind: "cert_error", id: "40", url: "https://bad.example",
+        cert_error: -202, subject: "bad.example", issuer: "Nobody",
+      }));
+      await Promise.resolve(); await Promise.resolve();
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "40", proceed: true });
+      h.dispose();
+    });
+
+    it("CANCELS with no handler — chromium's own default", () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {});
+      dc.pushMessage(guestRequest({ kind: "cert_error", id: "41" }));
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "41", proceed: false });
+      h.dispose();
+    });
+  });
+
+  describe("login", () => {
+    it("sends both credentials when the handler supplies them", async () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onLogin: () => ({ username: "u", password: "p" }),
+      });
+      dc.pushMessage(guestRequest({
+        kind: "login", id: "50", url: "https://intranet/",
+        realm: "Staff", scheme: "basic",
+      }));
+      await Promise.resolve(); await Promise.resolve();
+      expect(JSON.parse(dc.sent[0]!).data)
+        .toEqual({ id: "50", username: "u", password: "p" });
+      h.dispose();
+    });
+
+    it("cancels on null — the guest turns that back into the 401", async () => {
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onLogin: () => null,
+      });
+      dc.pushMessage(guestRequest({ kind: "login", id: "51" }));
+      await Promise.resolve(); await Promise.resolve();
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "51" });
+      h.dispose();
+    });
+
+    it("sends NEITHER credential when only one is supplied", async () => {
+      // Half a credential reads as a bug rather than a decision, and the
+      // guest treats a partial answer as cancelled anyway.
+      const dc = new FakeChannel();
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onLogin: () => ({ username: "u" } as unknown as
+                        { username: string; password: string }),
+      });
+      dc.pushMessage(guestRequest({ kind: "login", id: "52" }));
+      await Promise.resolve(); await Promise.resolve();
+      expect(JSON.parse(dc.sent[0]!).data).toEqual({ id: "52" });
+      h.dispose();
+    });
+
+    it("reports a retry as first_attempt=false", async () => {
+      const dc = new FakeChannel();
+      const seen: LoginRequest[] = [];
+      const h = attachControlChannel(dc as unknown as RTCDataChannel, {
+        onLogin: (r) => { seen.push(r); return null; },
+      });
+      dc.pushMessage(guestRequest({
+        kind: "login", id: "53", first_attempt: false,
+      }));
+      await Promise.resolve(); await Promise.resolve();
+      // Without this the second prompt is indistinguishable from the first
+      // and the user retypes the same rejected password.
+      expect(seen[0]!.firstAttempt).toBe(false);
+      h.dispose();
+    });
+  });
+
+  describe("certErrorText", () => {
+    // These were WRONG in a first draft — -200 and -202 were swapped, and
+    // REVOKED/WEAK were at -207/-211 instead of -206/-208. A prompt naming
+    // the wrong reason invites a decision on false grounds, so the numbers
+    // are pinned here against net/base/net_error_list.h.
+    it("names the errors at the codes chromium actually uses", () => {
+      expect(certErrorText(-200)).toContain("name");
+      expect(certErrorText(-201)).toContain("expired");
+      expect(certErrorText(-202)).toContain("unknown authority");
+      expect(certErrorText(-206)).toContain("revoked");
+      expect(certErrorText(-208)).toContain("weakly signed");
+    });
+    it("falls back to the number for anything unrecognised", () => {
+      expect(certErrorText(-999)).toBe("certificate error -999");
     });
   });
 

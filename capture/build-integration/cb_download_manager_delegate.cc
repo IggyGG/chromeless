@@ -13,6 +13,9 @@
 #include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/task/thread_pool.h"
+#include "base/values.h"
+#include "capture/build-integration/cb_control_channel.h"
+#include "capture/build-integration/cb_web_contents_delegate.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -28,7 +31,102 @@ CbDownloadManagerDelegate::~CbDownloadManagerDelegate() = default;
 
 void CbDownloadManagerDelegate::SetDownloadManager(
     content::DownloadManager* manager) {
+  // Drop the old manager's observation before taking a new one. In practice
+  // this is called once, but a stale registration on a destroyed manager is
+  // a use-after-free rather than a leak, so it is worth the two lines.
+  if (download_manager_ && download_manager_ != manager) {
+    download_manager_->RemoveObserver(this);
+  }
   download_manager_ = manager;
+  if (download_manager_) {
+    download_manager_->AddObserver(this);
+  }
+}
+
+// CV2-DOWNLOAD ---------------------------------------------------------------
+//
+// Before this, a download landed in the guest's profile and the viewer was
+// told nothing: tests/interactive had to read the guest's filesystem over
+// `kubectl exec` to prove downloads worked at all, because no other evidence
+// existed. These four methods are that evidence.
+
+void CbDownloadManagerDelegate::OnDownloadCreated(
+    content::DownloadManager* /*manager*/,
+    download::DownloadItem* item) {
+  if (!item) {
+    return;
+  }
+  // The header warns this can fire "an arbitrary number of times, e.g. when
+  // loading history on startup", so observing twice is a real possibility
+  // and would double every event the viewer sees.
+  if (observed_items_.insert(item).second) {
+    item->AddObserver(this);
+  }
+  EmitDownloadEvent(item, "started");
+}
+
+void CbDownloadManagerDelegate::ManagerGoingDown(
+    content::DownloadManager* manager) {
+  // "Called when the DownloadManager is being destroyed to prevent Observers
+  // from calling back to a stale pointer" — so drop everything, including the
+  // item observations, whose items go down with it.
+  for (download::DownloadItem* item : observed_items_) {
+    item->RemoveObserver(this);
+  }
+  observed_items_.clear();
+  if (manager) {
+    manager->RemoveObserver(this);
+  }
+  if (download_manager_ == manager) {
+    download_manager_ = nullptr;
+  }
+}
+
+void CbDownloadManagerDelegate::OnDownloadUpdated(
+    download::DownloadItem* item) {
+  if (!item) {
+    return;
+  }
+  EmitDownloadEvent(item, item->IsDone() ? "complete" : "progress");
+}
+
+void CbDownloadManagerDelegate::OnDownloadDestroyed(
+    download::DownloadItem* item) {
+  // The item is going away; stop observing it and forget it. NOT an event —
+  // destruction is bookkeeping, and a viewer that saw "complete" already has
+  // the outcome.
+  if (observed_items_.erase(item) > 0) {
+    item->RemoveObserver(this);
+  }
+}
+
+void CbDownloadManagerDelegate::EmitDownloadEvent(download::DownloadItem* item,
+                                                  const char* phase) {
+  CbControlChannel* channel =
+      GetCloudBrowserWebContentsDelegate()->control_channel();
+  if (!channel) {
+    return;
+  }
+  base::DictValue payload;
+  payload.Set("phase", phase);
+  payload.Set("id", static_cast<int>(item->GetId()));
+  // GetTargetFilePath, NOT GetFullPath: the latter names the intermediate
+  // (.crdownload) file, which "may be renamed or disappear" while the
+  // download runs (download_item.h:370). A tray showing that name would show
+  // a file that then stops existing.
+  payload.Set("filename",
+              item->GetTargetFilePath().BaseName().AsUTF8Unsafe());
+  payload.Set("url", item->GetURL().possibly_invalid_spec());
+  payload.Set("mime_type", item->GetMimeType());
+  // Doubles, not ints: a download can exceed 2 GiB and base::Value has no
+  // 64-bit integer type.
+  payload.Set("received_bytes",
+              static_cast<double>(item->GetReceivedBytes()));
+  // -1 when the server sent no Content-Length. The client renders that as an
+  // indeterminate bar rather than "0 bytes", which reads as a failure.
+  payload.Set("total_bytes", static_cast<double>(item->GetTotalBytes()));
+  payload.Set("state", static_cast<int>(item->GetState()));
+  channel->SendEvent("download", std::move(payload));
 }
 
 void CbDownloadManagerDelegate::Shutdown() {

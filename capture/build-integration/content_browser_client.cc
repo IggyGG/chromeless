@@ -16,6 +16,21 @@
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_main_parts.h"
 #include "content/public/browser/devtools_manager_delegate.h"
+// CV2-CERT: the ask-a-human path for a TLS error.
+#include "base/strings/string_number_conversions.h"
+#include "base/values.h"
+#include "capture/build-integration/cb_control_channel.h"
+#include "capture/build-integration/cb_login_delegate.h"
+#include "capture/build-integration/cb_web_contents_delegate.h"
+// CERTIFICATE_REQUEST_RESULT_TYPE_* — its own header, not pulled in by
+// content_browser_client.h (verified in the tree, 2026-09-09).
+#include "content/public/browser/certificate_request_result_type.h"
+// net::SSLInfo::cert is a scoped_refptr<X509Certificate>; subject()/issuer()
+// return CertPrincipal, whose GetDisplayName() is in x509_cert_types.h.
+#include "net/cert/x509_certificate.h"
+#include "net/cert/x509_cert_types.h"
+#include "net/ssl/ssl_info.h"
+#include "url/gurl.h"
 
 namespace cloud_browser {
 
@@ -132,6 +147,85 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
       std::move(start_native_session_callback),
       std::move(set_viewport_callback), std::move(session_health_getter),
       std::move(shutdown_callback));
+}
+
+// CV2-CERT — a TLS error, put to the viewer instead of silently cancelled.
+//
+// chromium's default cancels and the page shows a bare network error, which
+// for an unattended worker is correct: nobody is there to judge a
+// certificate. For a person driving a browser it is not — a real browser
+// offers an interstitial and a choice, and this is the only place the
+// embedder can offer one.
+//
+// CANCEL remains the default on EVERY path that is not an explicit yes: no
+// control channel, a closed one, a timeout, a malformed answer, or a viewer
+// who declines. Proceeding is opt-in, once, per error.
+void CloudBrowserContentBrowserClient::AllowCertificateError(
+    content::WebContents* web_contents,
+    int cert_error,
+    const net::SSLInfo& ssl_info,
+    const GURL& request_url,
+    bool is_primary_main_frame_request,
+    bool strict_enforcement,
+    base::OnceCallback<void(content::CertificateRequestResultType)> callback) {
+  CbControlChannel* channel =
+      GetCloudBrowserWebContentsDelegate()->control_channel();
+
+  // strict_enforcement is HSTS and friends: the site itself has said its
+  // certificate must be valid, so there is no legitimate "proceed anyway".
+  // Offering the choice would be offering the user a way to be wrong.
+  if (!channel || strict_enforcement) {
+    std::move(callback).Run(content::CERTIFICATE_REQUEST_RESULT_TYPE_CANCEL);
+    return;
+  }
+
+  base::DictValue payload;
+  payload.Set("url", request_url.possibly_invalid_spec());
+  payload.Set("cert_error", cert_error);
+  // net error codes are negative ints; the client maps the common ones to
+  // readable text and falls back to the number, which is still greppable.
+  payload.Set("is_main_frame", is_primary_main_frame_request);
+  if (ssl_info.cert) {
+    payload.Set("subject", ssl_info.cert->subject().GetDisplayName());
+    payload.Set("issuer", ssl_info.cert->issuer().GetDisplayName());
+  }
+  channel->SendRequest(
+      "cert_error", std::move(payload), base::Minutes(2),
+      base::BindOnce(
+          [](base::OnceCallback<void(content::CertificateRequestResultType)> cb,
+             base::DictValue response) {
+            // An empty dict is the channel's "no answer" — a closed channel,
+            // a timeout, or teardown. Everything but an explicit true
+            // cancels.
+            const std::optional<bool> proceed = response.FindBool("proceed");
+            std::move(cb).Run(
+                proceed.value_or(false)
+                    ? content::CERTIFICATE_REQUEST_RESULT_TYPE_CONTINUE
+                    : content::CERTIFICATE_REQUEST_RESULT_TYPE_CANCEL);
+          },
+          std::move(callback)));
+}
+
+// CV2-LOGIN — hand the 401 to the viewer instead of cancelling it.
+//
+// Everything this needs is in the delegate; the factory's only job is to
+// build one and hand ownership to //content, whose destruction of it IS the
+// cancellation signal (see cb_login_delegate.h).
+std::unique_ptr<content::LoginDelegate>
+CloudBrowserContentBrowserClient::CreateLoginDelegate(
+    const net::AuthChallengeInfo& auth_info,
+    content::WebContents* /*web_contents*/,
+    content::BrowserContext* /*browser_context*/,
+    const content::GlobalRequestID& /*request_id*/,
+    bool /*is_request_for_primary_main_frame_navigation*/,
+    bool /*is_request_for_navigation*/,
+    const GURL& url,
+    scoped_refptr<net::HttpResponseHeaders> /*response_headers*/,
+    bool first_auth_attempt,
+    content::GuestPageHolder* /*guest_page_holder*/,
+    content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
+  return std::make_unique<CbLoginDelegate>(
+      auth_info, url, first_auth_attempt, std::move(auth_required_callback));
 }
 
 }  // namespace cloud_browser

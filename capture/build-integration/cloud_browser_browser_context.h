@@ -43,6 +43,7 @@
 #include "content/public/browser/browser_context.h"
 
 #include "cloud-browser/capture/build-integration/cb_download_manager_delegate.h"
+#include "cloud-browser/capture/build-integration/cb_permission_manager.h"
 
 class SimpleFactoryKey;
 
@@ -117,6 +118,8 @@ class CloudBrowserBrowserContext final : public content::BrowserContext {
   // outlives every DownloadManager query and is destroyed with the
   // context — //content holds the returned pointer raw.
   std::unique_ptr<CbDownloadManagerDelegate> download_manager_delegate_;
+  // CV2-PERMISSION: built on first use — most sessions never ask.
+  std::unique_ptr<CbPermissionManager> permission_manager_;
 };
 
 }  // namespace cloud_browser

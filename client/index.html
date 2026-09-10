@@ -304,6 +304,15 @@
       .hud .dot[data-q="fair"]    { background: #d29922; }
       .hud .dot[data-q="poor"]    { background: #f85149; }
       .hud .dot[data-q="unknown"] { background: var(--muted); }
+
+      /* Download rows. Deliberately plain text rather than a progress bar:
+         total_bytes is -1 when the server sends no Content-Length, and a
+         bar that cannot fill is worse than a number that keeps climbing. */
+      .downloads { display: flex; flex-direction: column; gap: 4px;
+                   margin-bottom: 12px; }
+      .cb-download { font-size: 12px; color: var(--fg);
+                     overflow-wrap: anywhere; }
+      .cb-download[data-phase="complete"] { color: #3fb950; }
     </style>
   </head>
   <body>
@@ -401,6 +410,13 @@
           <dt>loss</dt>        <dd id="hud-loss">—</dd>
           <dt>resolution</dt>  <dd id="hud-res">—</dd>
         </dl>
+
+        <!-- Downloads. Hidden until one starts: an always-visible empty
+             tray is a permanent reminder of a feature you are not using.
+             Before batch C a download landed in the guest's profile and the
+             viewer was told nothing at all. -->
+        <h2 id="downloads-heading" hidden>downloads</h2>
+        <div id="downloads" class="downloads" hidden></div>
 
         <h2>peer connection</h2>
         <dl class="states">

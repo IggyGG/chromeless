@@ -21,8 +21,12 @@ import { FileUploadChannel, FileUploadError } from "./src/file-upload.js";
 import { attachCursorChannel } from "./src/cursor.js";
 import {
   attachControlChannel,
+  certErrorText,
+  type CertErrorRequest,
   type ControlChannelHandle,
   type FileChooserRequest,
+  type LoginRequest,
+  type PermissionRequest,
 } from "./src/control.js";
 import { ClipboardChannel } from "./src/clipboard.js";
 import { CameraPassthrough, PassthroughError } from "./src/passthrough.js";
@@ -84,6 +88,9 @@ const els = {
   hudRtt: $<HTMLElement>("hud-rtt"),
   hudLoss: $<HTMLElement>("hud-loss"),
   hudRes: $<HTMLElement>("hud-res"),
+  // CV2-DOWNLOAD: one row per download, hidden until the first one starts.
+  downloads: $<HTMLElement>("downloads"),
+  downloadsHeading: $<HTMLElement>("downloads-heading"),
   // Address bar. Navigation goes over HTTP to the gateway, not over the peer
   // connection — see src/navigate.ts.
   addressBar: $<HTMLFormElement>("addressbar"),
@@ -278,6 +285,9 @@ function wireControlChannel(dc: RTCDataChannel): void {
     log,
     onFileChooser: pickAndUpload,
     onEvent: onGuestEvent,
+    onPermission: askPermission,
+    onCertError: askCertError,
+    onLogin: askLogin,
   });
   dc.addEventListener("close", () => {
     try { attach.control?.dispose(); } catch { /* ignore */ }
@@ -304,9 +314,68 @@ function onGuestEvent(kind: string, data: Record<string, unknown>): void {
     void setFullscreen(data["fullscreen"] === true);
     return;
   }
+  if (kind === "download") {
+    showDownload(data);
+    return;
+  }
+  if (kind === "context_menu") {
+    // Not rendered yet: a menu is only useful once its ACTIONS exist (open
+    // in new tab needs the tab strip, save-image needs a download path from
+    // the client side). Logged with what was clicked so the event is
+    // visibly arriving rather than silently dropped — the state this
+    // replaced was a right-click that vanished with no trace at all.
+    const link = typeof data["link_url"] === "string" ? data["link_url"] : "";
+    const sel = typeof data["selection_text"] === "string"
+      ? data["selection_text"] : "";
+    log("info", "context menu", link || sel || "(page)");
+    return;
+  }
   // tab_opened / tab_closed are advisory; the gateway's /json list is the
   // source of truth and the tab strip is not built yet. Logged by
   // control.ts already, so nothing to add here.
+}
+
+/**
+ * Render a download's progress in the tray.
+ *
+ * Keyed by the guest's item id so the three phases (started / progress /
+ * complete) update ONE row rather than appending three. total_bytes is -1
+ * when the server sent no Content-Length, which is rendered as bytes-so-far
+ * rather than a percentage — "0%" for a download that is actually running
+ * reads as a stall.
+ */
+function showDownload(data: Record<string, unknown>): void {
+  const id = String(data["id"] ?? "");
+  const name = typeof data["filename"] === "string" && data["filename"]
+    ? data["filename"] : "(unnamed)";
+  const phase = String(data["phase"] ?? "");
+  const got = Number(data["received_bytes"] ?? 0);
+  const total = Number(data["total_bytes"] ?? -1);
+
+  let row = document.getElementById(`dl-${id}`);
+  if (!row) {
+    row = document.createElement("div");
+    row.id = `dl-${id}`;
+    row.className = "cb-download";
+    els.downloads.appendChild(row);
+    // Both, or the tray appears under no heading. `hidden` rather than a
+    // class because index.html's reset carries [hidden]{display:none}.
+    els.downloads.hidden = false;
+    els.downloadsHeading.hidden = false;
+  }
+  const size = total > 0
+    ? `${Math.round((got / total) * 100)}%`
+    : `${Math.round(got / 1024)} KB`;
+  row.textContent = phase === "complete"
+    ? `\u2713 ${name}`
+    : `\u2193 ${name} — ${size}`;
+  row.dataset["phase"] = phase;
+
+  if (phase === "complete") {
+    log("ok", "download complete", name);
+    // The row stays: a tray that erases itself the moment a download
+    // finishes is a tray that never shows a completed download.
+  }
 }
 
 /**
@@ -344,6 +413,69 @@ async function pickAndUpload(req: FileChooserRequest): Promise<boolean> {
       ? `code=${err.code} ${err.message}` : String(err)),
   );
   return true;
+}
+
+/**
+ * The page asked for a permission. One prompt, one answer.
+ *
+ * `confirm()` deliberately: this is the demo client, the prompt must be
+ * unmissable and unambiguous, and a bespoke overlay here would be a second
+ * dialog implementation to keep correct alongside control.ts's. An
+ * integrator replaces this with their own UI — that is what the handler
+ * option is for.
+ */
+async function askPermission(req: PermissionRequest): Promise<boolean> {
+  const what = req.permissions.join(", ") || "an unnamed permission";
+  const site = req.origin || "This page";
+  const ok = window.confirm(`${site} is asking for: ${what}\n\nAllow?`);
+  log(ok ? "ok" : "info", `permission ${ok ? "granted" : "denied"}`, what);
+  return ok;
+}
+
+/**
+ * A TLS error. Defaults to NOT proceeding — the button the user has to press
+ * is the dangerous one, which is the right way round.
+ */
+async function askCertError(req: CertErrorRequest): Promise<boolean> {
+  const reason = certErrorText(req.certError);
+  const ok = window.confirm(
+    `This site's certificate could not be trusted.\n\n` +
+    `${req.url}\n${reason}\n` +
+    (req.issuer ? `Issued by: ${req.issuer}\n` : "") +
+    `\nContinue anyway? Your connection may not be private.`);
+  log(ok ? "warn" : "info",
+      ok ? "proceeding past a certificate error" : "certificate error — cancelled",
+      req.url);
+  return ok;
+}
+
+/**
+ * HTTP 401/407. Returns null to cancel, which the guest turns back into the
+ * 401 the page would otherwise have shown.
+ *
+ * `prompt()` for the password is genuinely poor — it echoes in the clear —
+ * and it is the honest state of the demo client rather than a claim to have
+ * built a credential UI. An integrator supplies a real one; the handler
+ * signature is the seam.
+ */
+async function askLogin(
+  req: LoginRequest,
+): Promise<{ username: string; password: string } | null> {
+  const where = req.isProxy ? "a proxy" : req.url;
+  const retry = req.firstAttempt ? "" : "\n\nThe previous credentials were rejected.";
+  const username = window.prompt(
+    `${where} requires a sign-in.\nRealm: ${req.realm || "(none)"}${retry}\n\nUsername:`);
+  if (username === null) {
+    log("info", "sign-in cancelled", where);
+    return null;
+  }
+  const password = window.prompt("Password:");
+  if (password === null) {
+    log("info", "sign-in cancelled", where);
+    return null;
+  }
+  log("ok", "sign-in submitted", where);
+  return { username, password };
 }
 
 /**

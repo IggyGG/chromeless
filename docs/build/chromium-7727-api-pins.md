@@ -552,6 +552,82 @@ re-exports it (`third_party/blink/public/mojom/BUILD.gn:20-24`).
 
 ---
 
+## Batch C (2026-09-09): download, permission, login, cert_error, context_menu
+
+Read from the tree on the build node before any code was written — batch B
+established that a signature guessed wrong costs a ~20 min lane cycle, and one
+of these was wrong in the roadmap.
+
+⚠️ **`CreateLoginDelegate` takes ELEVEN parameters at 7727, including a
+`GuestPageHolder*` the roadmap did not anticipate.** It is on
+`ContentBrowserClient`, not `WebContentsDelegate` (the header says that is a
+known wart — crbug 456255).
+
+```cpp
+// content/public/browser/content_browser_client.h:2526
+virtual std::unique_ptr<LoginDelegate> CreateLoginDelegate(
+    const net::AuthChallengeInfo& auth_info,
+    WebContents* web_contents,
+    BrowserContext* browser_context,
+    const GlobalRequestID& request_id,
+    bool is_request_for_primary_main_frame_navigation,
+    bool is_request_for_navigation,
+    const GURL& url,
+    scoped_refptr<net::HttpResponseHeaders> response_headers,
+    bool first_auth_attempt,
+    GuestPageHolder* guest_page_holder,
+    LoginDelegate::LoginAuthRequiredCallback auth_required_callback);
+```
+
+`LoginDelegate` itself is nearly empty — a virtual dtor and one type alias
+(`login_delegate.h`). The CONTRACT is in the comment: the callback must run on
+the UI thread, must NOT be called reentrantly (post it to a later loop
+iteration if answering synchronously), and must not be called at all once the
+delegate is destroyed — destruction IS the cancellation.
+
+```cpp
+using LoginAuthRequiredCallback =
+    base::OnceCallback<void(const std::optional<net::AuthCredentials>&)>;
+```
+
+✅ **`download::DownloadItem::Observer`** — `download_item.h:129`, a
+`base::CheckedObserver`. All four virtuals have empty defaults, so an observer
+only overrides what it needs:
+
+```cpp
+virtual void OnDownloadUpdated(DownloadItem* download) {}
+virtual void OnDownloadOpened(DownloadItem* download) {}
+virtual void OnDownloadRemoved(DownloadItem* download) {}
+virtual void OnDownloadDestroyed(DownloadItem* download) {}
+```
+
+New items arrive via `DownloadManager::Observer::OnDownloadCreated(manager,
+item)` (`download_manager.h:92`); progress comes from `GetState()`,
+`IsDone()`, `GetReceivedBytes()`, `GetTotalBytes()`, and the name from
+**`GetTargetFilePath()`** — NOT `GetFullPath()`, which names the intermediate
+file and "may be renamed or disappear" mid-download (`download_item.h:370`).
+
+✅ **`WebContentsDelegate::HandleContextMenu`** — `web_contents_delegate.h:324`,
+unchanged from the earlier pin. **Returning true SUPPRESSES the default menu**,
+which is what the embedder already does today.
+
+Fields worth forwarding from `UntrustworthyContextMenuParams` (the name is a
+warning: it is renderer-supplied):
+`media_type` (:38), `link_url` (:47), `link_text` (:52),
+`unfiltered_link_url` (:60), `src_url` (:65), `selection_text` (:81),
+`is_editable` (:110).
+
+✅ **`ContentBrowserClient::AllowCertificateError`** — see the
+`content::ContentBrowserClient` section above; the parameter is
+`is_primary_main_frame_request`.
+
+✅ **`PermissionControllerDelegate`** — see its own section above, and heed the
+warning there: permissions are keyed on `blink::mojom::PermissionDescriptorPtr`,
+not the `blink::PermissionType` enum, and only `ResetPermission` still takes
+the enum.
+
+---
+
 ## Re-reading these pins
 
 ```bash

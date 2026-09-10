@@ -33,6 +33,20 @@
 
 #include <memory>
 
+#include "base/functional/callback.h"
+// CertificateRequestResultType appears in the AllowCertificateError
+// signature below, so it is part of this header's interface.
+#include "content/public/browser/certificate_request_result_type.h"
+// LoginDelegate::LoginAuthRequiredCallback is named in the signature below.
+#include "content/public/browser/login_delegate.h"
+// net::AuthChallengeInfo (by const ref) and HttpResponseHeaders (by
+// scoped_refptr) appear in CreateLoginDelegate. content_browser_client.h
+// includes neither — verified in the tree, it pulls only schemeful_site.h
+// and two cookie headers from net/. GuestPageHolder and GlobalRequestID DO
+// come from it as forward declarations (:255, :289), which is enough for a
+// pointer and a const ref.
+#include "net/base/auth.h"
+#include "net/http/http_response_headers.h"
 #include "base/memory/raw_ptr.h"
 #include "content/public/browser/content_browser_client.h"
 
@@ -84,6 +98,49 @@ class CloudBrowserContentBrowserClient : public content::ContentBrowserClient {
   // |main_parts_->browser_context()| from this hook is safe.
   std::unique_ptr<content::DevToolsManagerDelegate>
   CreateDevToolsManagerDelegate() override;
+
+  // CV2-CERT: a TLS error on a navigation.
+  //
+  // The base implementation runs the callback with CANCEL and the page dies
+  // with no explanation — which is the RIGHT default for an unattended
+  // worker and the wrong one for a person driving a browser, who in a real
+  // browser gets an interstitial and a choice.
+  //
+  // We ask the viewer over the control channel. The safe default is still
+  // CANCEL: it applies when there is no channel, when the request times out,
+  // and when the viewer declines. Proceeding requires an explicit answer.
+  void AllowCertificateError(
+      content::WebContents* web_contents,
+      int cert_error,
+      const net::SSLInfo& ssl_info,
+      const GURL& request_url,
+      bool is_primary_main_frame_request,
+      bool strict_enforcement,
+      base::OnceCallback<void(content::CertificateRequestResultType)> callback)
+      override;
+
+  // CV2-LOGIN: an HTTP 401/407 challenge.
+  //
+  // The base implementation returns nullptr, which //content reads as "the
+  // embedder will not handle this" and cancels — so a Basic-auth URL showed
+  // the server's error body with no way to supply credentials.
+  //
+  // ELEVEN parameters at 7727, including a GuestPageHolder* the roadmap did
+  // not anticipate. Read from the tree, not remembered:
+  // content_browser_client.h:2526.
+  std::unique_ptr<content::LoginDelegate> CreateLoginDelegate(
+      const net::AuthChallengeInfo& auth_info,
+      content::WebContents* web_contents,
+      content::BrowserContext* browser_context,
+      const content::GlobalRequestID& request_id,
+      bool is_request_for_primary_main_frame_navigation,
+      bool is_request_for_navigation,
+      const GURL& url,
+      scoped_refptr<net::HttpResponseHeaders> response_headers,
+      bool first_auth_attempt,
+      content::GuestPageHolder* guest_page_holder,
+      content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback)
+      override;
 
  private:
   // Stashed by CreateBrowserMainParts so CreateDevToolsManagerDelegate

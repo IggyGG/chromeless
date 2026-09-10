@@ -81,30 +81,42 @@ spec:
   # failed. Retries are cheap here precisely because rejection is instant:
   # the expensive part only begins once a pod is admitted.
   backoffLimit: 5
-  # 15 min hard ceiling. 300s was the value until 2026-09-08, on the belief —
-  # written directly above it — that "cold layer push is ~30-60s".
+  # 15 min hard ceiling, raised from 300s on 2026-09-08.
   #
-  # MEASURED that day, twice in a row: the worker layer is 210 MB, kaniko
-  # reached "Pushing image to ..." at 87s and 112s, and the job was killed at
-  # the 300s deadline with the registry logging
+  # ⚠️ READ THIS BEFORE RAISING IT AGAIN. The first version of this comment
+  # blamed a slow 210 MB layer, on the evidence that kaniko reached
+  # "Pushing image to ..." at ~90s and the registry logged
   #
   #   error msg="client disconnected during blob PATCH"
   #     contentLength=210758335 copied=172730490 error="unexpected EOF"
   #
-  # i.e. 82% of the layer uploaded, then DeadlineExceeded severed it. The
-  # eight successful pushes earlier the same day ran 109s-4m21s, so the
-  # headroom over a 300s ceiling was already thin and something (registry
-  # load, node egress) pushed it over.
+  # i.e. 82% copied, then severed. That reading was WRONG, and it was wrong
+  # in an instructive way: a stalled upload and a slow one produce the same
+  # "82% then EOF" line, and the deadline kills both.
   #
-  # This reads as a push FAILURE and sends you to the credentials or the
-  # Dockerfile; the give-away is that the log's last line is always
-  # "Pushing image to" with no error after it, and the Job event says
-  # DeadlineExceeded rather than BackoffLimitExceeded.
+  # The actual cause, found on 2026-09-09 when 900s failed the same way, is
+  # in the REGISTRY's log, not kaniko's:
   #
-  # 900s is ~4x the slowest observed successful push. The deadline exists to
-  # stop a wedged job holding node capacity, and a push that is genuinely
-  # stuck still hits this — it is just no longer hit by a push that is
-  # merely slow.
+  #   RequestError: send request failed
+  #   caused by: Put "https://hel1.your-objectstorage.com/...
+  #              /_uploads/<id>/data?partNumber=16&uploadId=..."
+  #
+  # The registry streams the layer to S3 in parts. One part fails, kaniko
+  # blocks on a PATCH that will never complete, and the deadline eventually
+  # reaps a job that was already stuck. A plain retry then succeeds — which
+  # is the tell, and which no amount of extra deadline would have produced.
+  #
+  # So: DeadlineExceeded here means "check the registry's S3 backend", not
+  # "the ceiling is too low". Diagnose with
+  #
+  #   kubectl logs -n registry <pod> --since=30m | grep RequestError
+  #
+  # on BOTH replicas — the push lands on one of them and the other's log is
+  # silent, which reads as "no errors" if you only check one.
+  #
+  # 900s stands anyway: it is ~4x the slowest observed SUCCESSFUL push
+  # (109s-4m21s), so a genuinely slow push has room, and a genuinely wedged
+  # one still gets reaped instead of holding node capacity.
   activeDeadlineSeconds: 900
   # Keep the Pod around for a day so post-mortem logs are
   # available without resurrecting from k8s events.

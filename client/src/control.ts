@@ -56,6 +56,27 @@ export interface ControlRequestData {
   accept?: string[];
   multiple?: boolean;
   title?: string;
+  // permission payload — kind === "permission". The guest sends readable
+  // names ("geolocation", "notifications"), already mapped from blink's
+  // PermissionDescriptor, so the client never sees a raw descriptor.
+  permissions?: string[];
+  // login payload — kind === "login". `realm` is SERVER-supplied text shown
+  // to someone deciding whether to type a password, so it is truncated and
+  // never rendered as markup. `first_attempt` is false on a retry, i.e. the
+  // last credentials were rejected — without saying so the second prompt
+  // looks identical to the first and the user retypes the same password.
+  realm?: string;
+  scheme?: string;
+  is_proxy?: boolean;
+  first_attempt?: boolean;
+  // cert_error payload — kind === "cert_error".
+  cert_error?: number;
+  subject?: string;
+  issuer?: string;
+  is_main_frame?: boolean;
+  // Shared by permission / cert_error / login. `origin` is already declared
+  // above for js_dialog and means the same thing here.
+  url?: string;
 }
 
 export interface ControlRequestEnvelope {
@@ -74,6 +95,14 @@ export interface ControlResponseData {
   // seeing "no file selected", exactly as if a human had closed the picker.
   accept?: boolean;
   prompt_text?: string;
+  // permission: an explicit true grants; anything else denies.
+  granted?: boolean;
+  // cert_error: an explicit true proceeds past the certificate.
+  proceed?: boolean;
+  // login: BOTH must be present or the guest treats it as cancelled, which
+  // //content turns back into the 401.
+  username?: string;
+  password?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +195,56 @@ export interface FileChooserRequest {
   title: string;
 }
 
+export interface PermissionRequest {
+  id: string;
+  /** Readable names, already mapped from blink's descriptors by the guest. */
+  permissions: string[];
+  /** The site asking. Empty only if the guest could not resolve a frame. */
+  origin: string;
+}
+
+export interface CertErrorRequest {
+  id: string;
+  url: string;
+  /** chromium's net error code, negative. Kept for the log; see certErrorText. */
+  certError: number;
+  subject: string;
+  issuer: string;
+  isMainFrame: boolean;
+}
+
+export interface LoginRequest {
+  id: string;
+  url: string;
+  /** Server-supplied. Truncated, and never rendered as markup. */
+  realm: string;
+  scheme: string;
+  isProxy: boolean;
+  /** False on a retry: the previous credentials were rejected. */
+  firstAttempt: boolean;
+}
+
+/**
+ * The handful of TLS errors worth naming. Everything else falls back to the
+ * number, which is still greppable against net_error_list.h — better than
+ * inventing prose for an error we have not thought about.
+ */
+export function certErrorText(code: number): string {
+  // Read from net/base/net_error_list.h on the pinned tree, NOT remembered:
+  // a first draft had -200 as "unknown authority" and -202 as "name
+  // mismatch", which are exactly swapped, plus REVOKED and WEAK at the
+  // wrong numbers. A prompt that names the wrong reason is worse than one
+  // that names none, because it invites a decision on false grounds.
+  switch (code) {
+    case -200: return "the certificate does not match this site's name";
+    case -201: return "the certificate has expired or is not yet valid";
+    case -202: return "the certificate is signed by an unknown authority";
+    case -206: return "the certificate has been revoked";
+    case -208: return "the certificate is weakly signed";
+    default:   return `certificate error ${code}`;
+  }
+}
+
 export interface AttachControlOptions {
   // Where to mount the prompt. Defaults to document.body.
   mount?: HTMLElement;
@@ -186,6 +265,25 @@ export interface AttachControlOptions {
   // the guest sent it, nothing listened, and the viewer's chrome stayed put
   // while the page believed it was fullscreen.
   onEvent?: (kind: string, data: Record<string, unknown>) => void;
+
+  // The streamed page asked for a permission (geolocation, notifications,
+  // camera...). Return true to grant. Absent, permissions are DENIED — which
+  // is what the guest did unconditionally before batch C, so an unhandled
+  // kind is no worse than the status quo and never accidentally permissive.
+  onPermission?: (req: PermissionRequest) => Promise<boolean> | boolean;
+
+  // A TLS error. Return true to proceed past it. Absent, the navigation is
+  // cancelled, which is chromium's own default.
+  //
+  // The guest never sends this when HSTS applies — the site has said its
+  // certificate must be valid, so there is no legitimate "proceed anyway".
+  onCertError?: (req: CertErrorRequest) => Promise<boolean> | boolean;
+
+  // HTTP 401/407. Return credentials, or null to cancel (the guest turns
+  // that back into the 401 the page would otherwise have shown).
+  onLogin?: (req: LoginRequest) =>
+    Promise<{ username: string; password: string } | null>
+    | { username: string; password: string } | null;
   log?: (level: SessionLogLevel, msg: string, extra?: unknown) => void;
 }
 
@@ -343,6 +441,41 @@ export function attachControlChannel(
   const log = opts.log ?? (() => {});
   const onFileChooser = opts.onFileChooser;
   const onEvent = opts.onEvent;
+  const onPermission = opts.onPermission;
+  const onCertError = opts.onCertError;
+  const onLogin = opts.onLogin;
+
+  /**
+   * Run a handler and answer the guest exactly once.
+   *
+   * Shared by all three of batch C's blocking kinds because the failure
+   * modes are identical and easy to get subtly different: no handler, a
+   * throwing handler, and a rejected promise must all produce the SAFE
+   * answer rather than silence. The guest is holding a chromium callback
+   * whose own contract says it must run.
+   */
+  function settleWith<Req, Res>(
+    id: string,
+    handler: ((req: Req) => Promise<Res> | Res) | undefined,
+    req: Req,
+    kindName: string,
+    toResponse: (result: Res | undefined) => ControlResponseData,
+  ): void {
+    if (!handler) {
+      log("warn", `control: ${kindName} with no handler — declining`);
+      send(toResponse(undefined));
+      return;
+    }
+    void (async () => {
+      let result: Res | undefined;
+      try {
+        result = await handler(req);
+      } catch (err) {
+        log("err", `control: ${kindName} handler threw: ${String(err)}`);
+      }
+      send(toResponse(result));
+    })();
+  }
   const mount = opts.mount ?? (typeof document !== "undefined" ? document.body : null);
   const present =
     opts.present ??
@@ -455,10 +588,70 @@ export function attachControlChannel(
       return;
     }
 
-    // Only js_dialog and file_chooser have producers today. An unknown kind
-    // is DECLINED explicitly rather than ignored: the guest is blocking on
-    // it, and an empty-dict response makes it apply its safe default
-    // immediately instead of waiting out the full deadline.
+    // Batch C's three blocking kinds. Each answers EXACTLY ONCE — the guest
+    // is holding a chromium callback that its own contract says must run,
+    // and a dropped answer is a page (or a network request) that hangs
+    // until the deadline.
+    //
+    // Every one of them denies by default: no handler, a handler that
+    // throws, or a handler that returns the wrong shape. That is the same
+    // outcome the guest produced before batch C existed, so an unhandled
+    // kind is never a regression and never accidentally permissive.
+    if (d.kind === "permission") {
+      const req: PermissionRequest = {
+        id: d.id,
+        permissions: Array.isArray(d.permissions)
+          ? d.permissions.filter((x): x is string => typeof x === "string")
+          : [],
+        origin: clampText(d.origin),
+      };
+      settleWith(d.id, onPermission, req, "permission",
+                 (ok) => ({ id: d.id, granted: ok === true }));
+      return;
+    }
+
+    if (d.kind === "cert_error") {
+      const req: CertErrorRequest = {
+        id: d.id,
+        url: clampText(d.url),
+        certError: typeof d.cert_error === "number" ? d.cert_error : 0,
+        subject: clampText(d.subject),
+        issuer: clampText(d.issuer),
+        isMainFrame: d.is_main_frame === true,
+      };
+      settleWith(d.id, onCertError, req, "cert_error",
+                 (ok) => ({ id: d.id, proceed: ok === true }));
+      return;
+    }
+
+    if (d.kind === "login") {
+      const req: LoginRequest = {
+        id: d.id,
+        url: clampText(d.url),
+        realm: clampText(d.realm),
+        scheme: clampText(d.scheme),
+        isProxy: d.is_proxy === true,
+        firstAttempt: d.first_attempt !== false,
+      };
+      settleWith(d.id, onLogin, req, "login", (creds) => {
+        // BOTH fields or neither: the guest treats a partial answer as
+        // cancelled, and sending half a credential would look like a bug
+        // rather than a decision.
+        if (creds && typeof creds === "object" &&
+            typeof creds.username === "string" &&
+            typeof creds.password === "string") {
+          return { id: d.id, username: creds.username,
+                   password: creds.password };
+        }
+        return { id: d.id };
+      });
+      return;
+    }
+
+    // Only js_dialog and file_chooser remain. An unknown kind is DECLINED
+    // explicitly rather than ignored: the guest is blocking on it, and an
+    // empty-dict response makes it apply its safe default immediately
+    // instead of waiting out the full deadline.
     if (d.kind !== "js_dialog") {
       log("warn", `control: declining unsupported kind "${d.kind}"`);
       send({ id: d.id });

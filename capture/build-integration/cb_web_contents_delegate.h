@@ -123,6 +123,14 @@ class CbWebContentsDelegate : public content::WebContentsDelegate {
   // are injected (nullptr on teardown) rather than held from construction.
   void SetFileUploadReceiver(CbFileUploadReceiver* receiver);
 
+  // CV2-CERT: the session's control channel, or nullptr between sessions.
+  //
+  // AllowCertificateError lives on ContentBrowserClient, not here, so it
+  // cannot reach the channel through the usual per-session injection. This
+  // delegate is the process-lifetime singleton that already holds it, which
+  // makes it the one honest place to read it from.
+  CbControlChannel* control_channel() const { return control_channel_; }
+
   // Renderer-initiated navigations that content will otherwise drop.
   content::WebContents* OpenURLFromTab(
       content::WebContents* source,

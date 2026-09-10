@@ -96,6 +96,28 @@ echo ">>> TURN credential"
 # It runs use-auth-secret (HMAC-REST), so the credential is time-limited.
 TURN_SECRET="$(kubectl get secret coturn-secrets -n triform-production \
     -o jsonpath='{.data.TURN_STATIC_AUTH_SECRET}' | base64 -d)"
+# ⚠️ HARDCODED, and it broke on 2026-09-09. coturn runs with hostNetwork in
+# triform-production, so its address is whatever NODE it lands on. It was
+# rescheduled off triform-1 (95.217.200.179) onto triform-7/8, and this IP
+# then had nothing listening on 3478.
+#
+# The symptom is NOT "TURN rejected us": it is `Connection with server failed
+# with error: 111` (ECONNREFUSED) in the guest log and a session that
+# negotiates, gathers candidates, and never decodes a frame — identical to an
+# expired credential, which is the wrong thing to go and fix first. Tell them
+# apart in one command from inside the worker pod:
+#
+#   timeout 4 bash -c '</dev/tcp/<ip>/3478' && echo open || echo refused
+#
+# refused = the relay moved (this); open + no video = check the credential.
+#
+# Find where it actually is:
+#   kubectl get pods -n triform-production -o wide | grep coturn
+#   kubectl get nodes -o wide          # map node -> INTERNAL-IP
+#
+# NOTE the worker ALSO carries its own copy in WEBRTC_ICE_SERVERS. Patching
+# the broker's TURN_URLS alone does not reach it, and the guest log keeps
+# printing the old address — which reads as the patch not applying.
 TURN_IP=95.217.200.179
 read -r TURN_USER TURN_CRED < <(python3 - "$TURN_SECRET" <<'PY'
 import base64, hashlib, hmac, sys, time

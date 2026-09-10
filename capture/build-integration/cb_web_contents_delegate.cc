@@ -18,6 +18,15 @@
 // CV2-UPLOAD: RunFileChooser parks the listener on the receiver.
 #include "capture/build-integration/cb_file_upload_receiver.h"
 #include "capture/build-integration/cb_javascript_dialog_manager.h"
+// CV2-CTXMENU: web_contents_delegate.h only FORWARD-DECLARES
+// ContextMenuParams (:117) — enough to name it in the override, not enough
+// to read a field. Cost one lane cycle: eight "member access into incomplete
+// type" errors, all from this one missing include.
+//
+// The definition lives here and derives from
+// blink::UntrustworthyContextMenuParams, which is where x/y/link_url/etc
+// actually come from.
+#include "content/public/browser/context_menu_params.h"
 #include "content/public/browser/devtools_agent_host.h"
 // MediaResponseCallback + the blink mediastream types it names
 // (StreamDevicesSet, MediaStreamRequestResult) — this header pulls in the
@@ -377,17 +386,40 @@ bool CbWebContentsDelegate::CheckMediaAccessPermission(
 
 bool CbWebContentsDelegate::HandleContextMenu(
     content::RenderFrameHost& /*render_frame_host*/,
-    const content::ContextMenuParams& /*params*/) {
+    const content::ContextMenuParams& params) {
   // Return true = "handled", which suppresses chromium's default path
   // (web_contents_impl.cc:8882 checks this before falling through to the
-  // view delegate at :8886).
+  // view delegate at :8886). We ALWAYS suppress: there is no native menu
+  // surface in a headless embedder, so the default renders nothing.
   //
-  // Suppressing is the honest state today: there is no native menu surface
-  // in a headless embedder, so the default would render nothing anyway.
-  // The difference is that this is now a deliberate, greppable decision
-  // with a hook to replace, rather than an unhandled event. Forwarding
-  // ContextMenuParams to the viewer for a portal-rendered menu plugs in
-  // exactly here.
+  // What changed (CV2-CTXMENU): the params are now forwarded to the viewer,
+  // which draws the menu itself. Before this the right-click was swallowed
+  // whole — a user got no menu and no indication that one was suppressed.
+  //
+  // A fire-and-forget EVENT, not a request. The menu's ACTIONS come back as
+  // ordinary input (a synthesised click, a clipboard write, a navigation),
+  // so there is nothing for the guest to wait on, and a viewer that ignores
+  // the event leaves the page exactly as it is today.
+  if (!control_channel_) {
+    return true;
+  }
+
+  base::DictValue payload;
+  // Renderer-supplied — the struct is literally named
+  // UntrustworthyContextMenuParams. These strings are echoed into the
+  // viewer's DOM, so the client truncates and escapes them; nothing here
+  // is a capability, only a description of what was clicked.
+  payload.Set("media_type", static_cast<int>(params.media_type));
+  payload.Set("link_url", params.link_url.possibly_invalid_spec());
+  payload.Set("link_text", base::UTF16ToUTF8(params.link_text));
+  payload.Set("src_url", params.src_url.possibly_invalid_spec());
+  payload.Set("selection_text", base::UTF16ToUTF8(params.selection_text));
+  payload.Set("is_editable", params.is_editable);
+  // Where to draw it. These are viewport coordinates in the guest's frame,
+  // which is the same space the client's input mapper already works in.
+  payload.Set("x", params.x);
+  payload.Set("y", params.y);
+  control_channel_->SendEvent("context_menu", std::move(payload));
   return true;
 }
 

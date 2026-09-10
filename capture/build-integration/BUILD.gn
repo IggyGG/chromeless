@@ -677,6 +677,81 @@ source_set("javascript_dialog_manager") {
 # to the viewer over kFiles is a separate change and needs the
 # GetBufferedAmount backpressure gate — see cb_dc_host.h:378.
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# HTTP auth (CV2-LOGIN).
+#
+# CreateLoginDelegate returned nullptr, which //content reads as "the
+# embedder will not handle this" and cancels the challenge — a Basic-auth URL
+# rendered the server's error body with no way to supply credentials.
+#
+# The factory's REAL contract is in the comment above it, not in the
+# (nearly empty) LoginDelegate interface: the callback runs on the UI thread,
+# must not be reentrant, and must not run at all once the delegate is
+# destroyed, because destruction IS the cancellation.
+# ---------------------------------------------------------------------
+source_set("login_delegate") {
+  sources = [
+    "cb_login_delegate.cc",
+    "cb_login_delegate.h",
+  ]
+  deps = [
+    ":control_channel",
+    ":web_contents_delegate",
+  ]
+
+  # public_deps: the PUBLIC header derives from content::LoginDelegate, names
+  # net::AuthChallengeInfo and base::DictValue in its own signatures, and
+  # holds a GURL — all four are part of its interface.
+  public_deps = [
+    "//base",
+    "//content/public/browser",
+    "//net",
+    "//url",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
+# ---------------------------------------------------------------------
+# Permission prompts (CV2-PERMISSION).
+#
+# BrowserContext::GetPermissionControllerDelegate() returned nullptr, and
+# //content's default then DENIES every permission without asking — so
+# getCurrentPosition() failed instantly and Notification.requestPermission()
+# resolved "denied", both indistinguishable from a user saying no.
+#
+# Highest-drift surface in the workstream: 13 virtuals, 8 of them pure, and
+# every accessor keyed on blink::mojom::PermissionDescriptorPtr rather than
+# the PermissionType enum (only ResetPermission still takes the enum). See
+# docs/build/chromium-7727-api-pins.md.
+# ---------------------------------------------------------------------
+source_set("permission_manager") {
+  sources = [
+    "cb_permission_manager.cc",
+    "cb_permission_manager.h",
+  ]
+  deps = [
+    # The ask-a-human path, reached through the process-lifetime delegate.
+    ":control_channel",
+    ":web_contents_delegate",
+    "//content/public/browser",
+    "//url",
+  ]
+
+  # public_deps: the PUBLIC header names PermissionControllerDelegate,
+  # PermissionResult, PermissionRequestDescription and the blink permission
+  # mojom in its own signatures, so they are part of this target's
+  # interface. //content/public/browser re-exports the content half; blink's
+  # permission_utils + mojom come from the blink targets directly.
+  public_deps = [
+    "//base",
+    "//third_party/blink/public/common",
+    "//third_party/blink/public/mojom:mojom_platform",
+  ]
+  configs += [ ":cb_include_paths" ]              # T17.
+  public_configs = [ ":cb_include_paths" ]
+}
+
 source_set("download_manager_delegate") {
   sources = [
     "cb_download_manager_delegate.cc",
@@ -688,6 +763,11 @@ source_set("download_manager_delegate") {
     "//content/public/browser",
     "//net",
     "//url",
+    # CV2-DOWNLOAD: the delegate now also observes downloads and reports
+    # them to the viewer, which means the control channel and the
+    # process-lifetime WebContentsDelegate that holds it.
+    ":control_channel",
+    ":web_contents_delegate",
   ]
   configs += [ ":cb_include_paths" ]              # T17.
   public_configs = [ ":cb_include_paths" ]
@@ -1338,6 +1418,8 @@ source_set("embedder") {
     # unique_ptr<CbDownloadManagerDelegate>, so this is where it first
     # gets compiled.
     ":download_manager_delegate",
+    ":login_delegate",
+    ":permission_manager",
     # CV2-81 — M4 typed-dispatcher composite delegate. Transitively
     # pulls all 6 typed dispatchers (R3 mouse / R4 keyboard / R5 IME /
     # R6 touch / R7 drag / R8 clipboard) + the M4 R2 active-WebContents

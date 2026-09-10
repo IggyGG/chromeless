@@ -167,10 +167,23 @@ CloudBrowserBrowserContext::GetSSLHostStateDelegate() {
 
 content::PermissionControllerDelegate*
 CloudBrowserBrowserContext::GetPermissionControllerDelegate() {
-  // Returning nullptr means the default PermissionController denies all
-  // permission prompts. The worker has no UI to surface a prompt
-  // anyway, so this is the right behaviour.
-  return nullptr;
+  // This returned nullptr, and the comment justifying it said "the worker
+  // has no UI to surface a prompt anyway". That was true when it was
+  // written and stopped being true when the control channel landed: there
+  // IS a UI now, it is just on the other end of a DataChannel.
+  //
+  // nullptr means //content's default denies every permission WITHOUT
+  // asking, so getCurrentPosition() returned PERMISSION_DENIED instantly
+  // and Notification.requestPermission() resolved "denied" — indis-
+  // tinguishable, from the page's side, from a user who said no. Which is
+  // why nobody noticed.
+  //
+  // Lazily constructed: most sessions never touch a permission, and the
+  // manager is pure overhead until one does.
+  if (!permission_manager_) {
+    permission_manager_ = std::make_unique<CbPermissionManager>();
+  }
+  return permission_manager_.get();
 }
 
 content::ReduceAcceptLanguageControllerDelegate*
