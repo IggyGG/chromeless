@@ -341,15 +341,40 @@ class ClientDriver:
             if isinstance(frames, (int, float)) and frames > 0:
                 return frames
             time.sleep(2)
+        # Before blaming any of the three, say what the GUEST thinks. It
+        # logs its own ICE configuration and its own session state, and one
+        # grep separates "no relay" from "session already used" — which the
+        # symptom alone cannot, because both end as zero frames after the
+        # full timeout.
         raise NoFrames(
-            "client never decoded a frame. Two causes account for almost every "
-            "occurrence, and NEITHER is a bug in what you are testing:\n"
-            "  1. The worker already served a session. It serves exactly ONE "
+            "client never decoded a frame. Read the guest's own log FIRST — "
+            "the three causes below are indistinguishable from the client "
+            "side, and two of them are not bugs in what you are testing:\n"
+            "       kubectl exec -n chromeless "
+            "deploy/chromeless-standalone-worker -c chromium -- \\\n"
+            "         grep -E 'CV2-ICE PC config|CV2-ICE   server urls|"
+            "CV2-REARM|session closed' \\\n"
+            "         /var/log/supervisor/chromium.err.log | tail -20\n"
+            "  1. NO TURN RELAY. If `server urls=` names only a public STUN "
+            "address (stun.l.google.com), the worker has no relay and the "
+            "pair cannot traverse; the client gives up ~35s in. The worker "
+            "carries its OWN copy in WEBRTC_ICE_SERVERS, and `kubectl apply "
+            "-f stack.yaml` does NOT set it — stack.yaml does not define it "
+            "and deploy.sh sets it afterwards, so applying the manifest alone "
+            "silently strips the relay. Check:\n"
+            "       kubectl get deploy -n chromeless "
+            "chromeless-standalone-worker \\\n"
+            "         -o jsonpath='{.spec.template.spec.containers[0].env[?"
+            "(@.name==\"WEBRTC_ICE_SERVERS\")].value}'\n"
+            "     Empty means this. A credential past its expiry looks the "
+            "same from here; deploy.sh re-mints one good for 24h.\n"
+            "  2. The worker already served a session. It serves exactly ONE "
             "per process (docs/findings/one-session-per-worker-process.md), so "
-            "a second run against the same pod always lands here. Fix:\n"
+            "a second run against the same pod always lands here. The guest "
+            "log says `session closed` if this is it. Fix:\n"
             "       kubectl rollout restart "
             "deploy/chromeless-standalone-worker -n chromeless\n"
-            "  2. A stray test chrome from an interrupted run still holds the "
+            "  3. A stray test chrome from an interrupted run still holds the "
             "session's single `client` slot. This harness now reaps those at "
             "startup, so it should not recur — verify with:\n"
             "       pgrep -fl chromeless-itest-profile")
