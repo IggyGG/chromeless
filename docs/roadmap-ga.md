@@ -197,19 +197,24 @@ map to open, open in new tab, copy link, copy, paste, save image).
 `CbInputDispatchCompositeDelegate::OnInputEvent`, unclamp `deviceScaleFactor`, have
 the client send `devicePixelRatio`; run the input suites at scale 1 and 2.
 
-Also: the audio `PrepareForTeardown` hook on an inbound bye; IME/dead-key and touch
-Also: the audio `PrepareForTeardown` hook on an inbound bye; IME/dead-key and touch
-checks added to `tests/interactive`; **wire the R7 reconnect supervisor**
-(`cb_signaling_reconnect`, built and never constructed) into `StartNativeSession`
-so a broker restart does not cost the worker its process
+Also: IME/dead-key and touch checks added to `tests/interactive`; **wire the R7
+reconnect supervisor** (`cb_signaling_reconnect`, built and never constructed) into
+`StartNativeSession` so a broker restart does not cost the worker its process
 (`docs/findings/worker-signaling-no-redial.md`) — then the liveness probe in
-`stack.yaml` that stands in for it can go; **the two re-arm/resize defects measured
-2026-09-07** — tear the pulse ADM down on re-arm so the second viewer gets audio
-(`docs/findings/audio-dies-after-first-rearm.md`), and make `CbViewportController`
-bracket its resize for the BeginFrame driver so a resize does not end in a GPU
-crash (`docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md`).
-Both are prerequisites for the M1 exit criteria "audio audible" and "resize
-follows".
+`stack.yaml` that stands in for it can go; and make `CbViewportController` bracket
+its resize for the BeginFrame driver so a resize does not end in a GPU crash
+(`docs/findings/viewport-resize-freezes-beginframe-and-crashes-gpu.md`). The resize
+defect is a prerequisite for the M1 exit criterion "resize follows".
+
+**Audio on re-arm is not a `capture/` change at all** — it is upstream, and this
+line used to prescribe the wrong fix. The roadmap said "tear the pulse ADM down on
+re-arm", and a teardown-and-reinit is *precisely* what triggers the bug:
+`Terminate()` sets libwebrtc's `quit_` and `Init()` never clears it, so the fresh
+record thread exits on its first wakeup and `StartRecording()` waits on a thread
+that does not exist. An `PrepareForTeardown` hook on the inbound bye — also once
+listed here — would have done the same thing on a different schedule. Fixed in
+`patches/0006` instead (PR #113); see the finding, which corrects its own earlier
+premise too.
 
 ### Track 3 — Downloads, tabs, session state
 

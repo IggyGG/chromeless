@@ -279,7 +279,7 @@ spec:
           #
           # Lane verdict for this source: 639 steps, 0 failed, 0 undefined
           # symbols; worker + all 8 test targets linked.
-          image: registry.triform.cloud/chromeless/chromeless@sha256:9e193d2cab84b76be48682efe91a9e5a838a5b47d679121fe0fae249401e3e12
+          image: registry.triform.cloud/chromeless/chromeless@sha256:c6603ff6dd65eb5d12f1eae20880a6a70d7c61b389da28dcb1c8a619fd6e76a9
           env:
             - name: SESSION_ID
               value: dev

@@ -1479,6 +1479,68 @@ def suite_stats(client, worker):
           f"(see docs/findings/audio-dies-after-first-rearm.md)",
           pass_detail=f"{audio_bytes} bytes")
 
+    # The SEND side, read off the guest rather than inferred from the receive
+    # side. `bytesReceived == 0` is a symptom shared by a silent ADM and by
+    # every transport fault there is, so on its own it cannot tell you which
+    # you have. This can.
+    #
+    # AudioDeviceLinuxPulse::Init() spawns exactly TWO threads (record at
+    # :180, playout at :188), both truncated by the kernel to the 15-char
+    # comm name "webrtc_audio_mo". A thread ends only by returning false, and
+    # RecThreadProcess/PlayThreadProcess return false in exactly one place:
+    # `if (quit_) return false;`. quit_ is set by Terminate() and — before
+    # patches/0006 — never cleared, so a Terminate/Init cycle left Init()
+    # reporting success with two threads that exited on their first wakeup.
+    #
+    # So ONE thread here is that defect, precisely, and TWO with no audio
+    # bytes is a different bug that should not be charged to this finding.
+    # This is the check that would have caught it: the live worker read 1 for
+    # weeks while every suite run was green about audio it had never asserted.
+    #
+    # Match the name EXACTLY. The browser also carries "AudioEncoderQue" and
+    # "AudioDeviceBuff", so a `grep -ci audio` reads 3 whatever the state.
+    #
+    # Selecting the browser process needs the same care: the binary is
+    # /usr/local/bin/chromeless (not "cb-chromium"), and a loose `pgrep -f`
+    # matches the shell doing the searching — which returns a plausible pid
+    # that changes on every call. Pick the `chromeless` process whose cmdline
+    # carries no --type= argument.
+    thread_cmd = (
+        'for p in /proc/[0-9]*; do '
+        '  exe=$(readlink $p/exe 2>/dev/null) || continue; '
+        '  case "$exe" in */chromeless) ;; *) continue ;; esac; '
+        '  child=0; '
+        '  for a in $(tr "\\0" "\\n" < $p/cmdline 2>/dev/null); do '
+        '    case "$a" in --type=*) child=1; break ;; esac; '
+        '  done; '
+        '  [ $child -eq 1 ] && continue; '
+        '  grep -hx webrtc_audio_mo $p/task/*/comm 2>/dev/null | wc -l; '
+        '  break; '
+        'done')
+    # ns/dep are locals of suite_downloads and suite_permissions, not module
+    # globals — this suite is suite_stats, where they do not exist. Read them
+    # here rather than reaching for a name that happens to be spelled the same
+    # two functions away.
+    ns = os.environ.get("CHROMELESS_NS", "chromeless")
+    dep = os.environ.get("CHROMELESS_WORKER_DEPLOY",
+                         "deploy/chromeless-standalone-worker")
+    try:
+        n_threads = subprocess.run(
+            ["kubectl", "exec", "-n", ns, dep, "-c", "chromium", "--",
+             "sh", "-c", thread_cmd],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception as exc:                       # noqa: BLE001
+        n_threads = f"<error: {exc}>"
+    check("the guest's audio module still has BOTH its threads",
+          n_threads == "2",
+          f"webrtc_audio_mo thread count is {n_threads!r}, expected '2'. "
+          f"1 means the quit_ latch is set and Init() spawned threads that "
+          f"exited immediately — the send side is silent no matter what the "
+          f"transport does (docs/findings/audio-dies-after-first-rearm.md). "
+          f"An empty result means the process probe failed, not that the "
+          f"threads are gone.",
+          pass_detail=f"{n_threads} threads")
+
     # The unmute control. Clicked, not just present: a button that exists
     # and does nothing is exactly the state this replaced.
     muted_before = client.cdp.eval(

@@ -15,6 +15,36 @@ patch series."* — that's this directory.
 - **`git format-patch` shape.** Patches carry a from-author /
   subject / commit-message header; the message is the source of
   truth for *why* the patch exists.
+- **`src/` is not one git repository.** DEPS clones sub-repos into it,
+  each with its own `.git`: `third_party/webrtc` (DEPS:3012), `v8`,
+  `third_party/angle`. A patch touching one of those CANNOT be applied
+  from `src/` — `git am` finds no blob for a path the src index does
+  not track, and `--3way` fails with
+
+      error: sha1 information is lacking or useless (<file>).
+      error: could not build fake ancestor
+
+  which reads as a malformed patch and is not one. `build.sh
+  apply-patches` now reads the target path out of each patch and
+  applies it from the checkout that owns it, stripping the sub-repo
+  prefix on the way in — so patches stay readable against the chromium
+  tree they document. 0002/0003/0005 never hit this because they touch
+  `content/` and `third_party/webrtc_overrides/`, which ARE in the src
+  repo; 0006 is the first sub-repo patch and cost two lane cycles.
+- **A sub-repo patch must reset its own checkout, every run.**
+  `apply-patches` resets `src/` to the LKGM base on every fire, and the
+  chromium tree is a hostPath that outlives the Job — but nothing reset
+  `third_party/webrtc`, so the run AFTER the one that first landed 0006
+  would re-apply it onto itself and die with the same two lines as the
+  wrong-repo failure, from an unrelated cause. `apply-patches` now walks
+  the sub-repo's history down to the first commit not authored by us and
+  resets there — no second sha to keep in sync with DEPS. Add any new
+  patch-author address to that list, or its reset is silently skipped.
+- **Verify with `git am --3way` from the RIGHT repo, not `git apply`.**
+  `git apply --check` passes on patches `git am` rejects, and applying
+  from `src/` fails on patches that apply fine from `third_party/webrtc`.
+  Reproduce the layout locally (two nested git repos) before trusting a
+  local pass.
 - **Upstream-quality commit messages.** "Why this patch exists,"
   "Why not avoid the patch," and (where applicable) "Upstream
   considerations" so the next reviewer doesn't have to re-derive the

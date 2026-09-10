@@ -1,6 +1,23 @@
 # Audio works for the first viewer only; every re-armed session is silent
 
-**Status:** OPEN, and THREE fixes have been tried and refuted by measurement.
+> **FIXED AND VERIFIED — 2026-09-10, image `cr7727-92539396945c`.**
+> Cause: an upstream libwebrtc bug, not anything in `capture/`.
+> `AudioDeviceLinuxPulse::Terminate()` sets `quit_`; `Init()` never clears it,
+> so a re-initialised module spawns two threads that exit on their first
+> wakeup. `patches/0006` clears it. Verified on one browser process (pid 23):
+> **6 re-arms, 6 successful pre-arms, 0 failures**, and three consecutive
+> viewer sessions each receiving ~22 kB of audio where every previous second
+> session received zero. Both `webrtc_audio_mo` threads alive throughout.
+> Kept in full — the wrong turns below are the useful part.
+
+
+**Status:** OPEN, but SUBSTANTIALLY narrowed on 2026-09-10 — the record
+thread has exited, `quit_` is latched, and this document's own record of
+theory 3 ("the pre-arm SUCCEEDED") is WRONG: the guest reports
+`StartRecording=-1`. See "2026-09-10" below before reading the older
+theories, two of which are now refuted by source rather than by opinion.
+
+THREE fixes have been tried and refuted by measurement.
 Read "What has been ruled out" before proposing a fourth. Measured across
 2026-09-07 and 2026-09-08 on the k8s standalone stack; the current guest
 (`cr7727-fbd8e55c948b`) still has it.
@@ -63,6 +80,124 @@ a wait returning immediately on an event left SET by a previous session, then
 finding `_recording` false. Nothing in the ADM clears that event between
 sessions.
 
+## 2026-09-10: the record THREAD is gone, and the finding's own premise was wrong
+
+Measured on the live guest (`cr7727-eb156dd5bf6a`), not reasoned about.
+
+### The pre-arm does NOT succeed
+
+This document says theory 3's pre-arm "SUCCEEDED — ... StartRecording=0
+now_recording=1 — and the session was still silent". The guest says
+otherwise, on all 231 occurrences:
+
+```
+CV2-REARM-AUDIO: pre-armed the shared ADM: was_recording=0 StopRecording=0
+                 InitRecording=0 StartRecording=-1 now_recording=0
+```
+
+`StartRecording=-1`, not 0. So theory 3 was never refuted by "the pre-arm
+worked and audio failed anyway" — **the pre-arm never worked**, and the
+question is why `StartRecording` fails when `InitRecording` just returned 0.
+
+Ordering, from the log: `failed to activate recording` is printed **40 µs
+BEFORE** our line, i.e. from inside the pre-arm's own `StartRecording` call.
+
+### The record thread has exited
+
+`AudioDeviceLinuxPulse::Init` spawns **two** threads (`:180` rec, `:188`
+play), both truncated by the kernel to `webrtc_audio_mo` in `/proc/<pid>/task/*/comm`.
+
+The live browser process has **one**:
+
+```
+tid=9474 comm=webrtc_audio_mo state=S      # and no second one
+```
+
+A thread ends only when its body returns false — `while (RecThreadProcess())`
+— and `RecThreadProcess` returns false at exactly one place: `if (quit_)
+return false;` (`:2175`).
+
+`quit_` is written in exactly one place, `Terminate()` (`:206`), and nothing
+in the file ever clears it. So **`Terminate()` ran on the shared ADM after
+the first session**, the record thread returned false and was joined, and
+every subsequent `StartRecording` sets `_timeEventRec` and waits for a signal
+from a thread that no longer exists.
+
+That also explains the 4 ms this document called its sharpest clue: the
+10-second `Wait` is not timing out. It returns, finds `_recording` still
+false, and takes the SECOND error path (`:1091-1093`) — which logs the same
+string as the timeout path, which is what made the two indistinguishable.
+
+### Two theories from this document are now refuted by source, not opinion
+
+1. **"A stale `_recStartEvent` left SET by a previous session."** No.
+   `Event()` delegates to `Event(false, false)` (`rtc_base/event.cc:39`) —
+   `manual_reset=false`, i.e. AUTO-RESET. A successful `Wait` consumes the
+   signal; it cannot survive into the next session.
+2. **"The pre-arm is undone by `RemoveSendingStream`'s `StopRecording`."**
+   Plausible from source (`audio/audio_state.cc:163-165` does exactly that,
+   and our `RearmSession` pre-arms at `:1662` before tearing the old PC down
+   at `:1685`) — but REFUTED by the log ordering above: the failure is
+   already inside the pre-arm, before the teardown runs.
+
+### The lifecycle code had already found this — and routed around it
+
+`capture/audio/cb_audio_lifecycle.cc:206-210` says, in a comment written
+before any of this:
+
+> `Terminate()` is not an escape either: it sets `quit_` and NOTHING ever
+> clears it (audio_device_pulse_linux.cc — grep says one write, no reset),
+> so a Terminate/Init cycle would kill the record thread for the life of the
+> process.
+
+That is this defect, named exactly, in the tree, before the symptom was
+diagnosed. The author reached the right conclusion and chose to avoid the
+path ("the way out is to not take that path") — a reasonable call when the
+alternative is patching libwebrtc. It also means the pre-arm's stop /
+re-init / start sequence was designed specifically NOT to call `Terminate()`
+— so whoever does call it is outside that design, which sharpens the open
+question below rather than answering it.
+
+The comment is worth reading as a warning that was already paid for: the
+next person to consider a Terminate/Init cycle here has the answer in
+advance.
+
+### What is still open
+
+**Who calls `Terminate()`?** Still unanswered, and still worth answering —
+`patches/0006` makes `Init()` survive it, which is not the same as knowing
+why it runs. Nothing in `capture/` calls it; the only mention is a comment. `AudioDeviceLinuxPulse::~AudioDeviceLinuxPulse` calls it (`:109`),
+so the likeliest answer is that the ADM is being DESTROYED and something is
+holding a stale pointer, or a second ADM instance exists. The PCF is built
+once (`cloud_browser_browser_main_parts.cc:790`) and holds the ADM by
+`scoped_refptr`, so a plain refcount drop should not happen — which makes
+this worth an actual answer rather than another guess.
+
+Next probe, in order:
+
+1. Log in `CbAudioLifecycle` whether `adm_debug_->RecordingIsInitialized()`
+   and the ADM POINTER VALUE are the same across sessions. A different
+   pointer means a second ADM; the same pointer with a dead thread means
+   `Terminate()` was called on the live one.
+2. If the pointer is stable, find the `Terminate()` caller — a breakpoint is
+   not available, but `quit_` is only set there, so a log line in our own
+   `Rearm()` reporting `RecordingIsInitialized()` immediately BEFORE the
+   pre-arm brackets it to a specific session boundary.
+3. ~~The fix shape depends on the answer and is NOT knowable yet.~~
+   **It did not.** Reading the pinned source settled it without finding the
+   caller: `Terminate()` clears `_initialized` and sets `quit_`; `Init()`
+   passes its `_initialized` early-out, spawns both threads, and never
+   resets `quit_`. So `Init()` is not idempotent after a `Terminate()` —
+   for ANY caller. Fixing that is correct whoever calls it, and does not
+   wait on the answer.
+
+   `patches/0006` adds the reset, placed AFTER the `_initialized`
+   early-out (so an already-initialised `Init()` cannot clear the latch out
+   from under a shutdown in progress) and before the thread spawn.
+
+   Finding the caller is still worth doing — see below — but it is now a
+   question about our own lifecycle, not a blocker on the fix.
+
 ## The next probe (do this before writing any more code)
 
 Stop instrumenting the ADM; instrument the layer above it. The question that
@@ -92,9 +227,83 @@ second session**, and every theory so far has guessed at it:
 - **It reads as flaky.** It is deterministic: first session on a process
   passes, every later one fails.
 
+## Reproducing it in ten seconds, with no session at all
+
+The thread count is the defect, and it is readable off a running pod:
+
+```sh
+POD=$(kubectl get pod -n chromeless \
+      -l app.kubernetes.io/name=chromeless-standalone-worker \
+      -o jsonpath='{.items[0].metadata.name}')
+# the browser is the `chromeless` process with no --type= argument
+BPID=$(kubectl exec -n chromeless $POD -- sh -c '
+  for p in /proc/[0-9]*; do
+    exe=$(readlink $p/exe 2>/dev/null) || continue
+    case "$exe" in */chromeless) ;; *) continue ;; esac
+    child=0
+    for a in $(tr "\0" "\n" < $p/cmdline 2>/dev/null); do
+      case "$a" in --type=*) child=1; break ;; esac
+    done
+    [ $child -eq 1 ] && continue
+    basename $p; return
+  done')
+kubectl exec -n chromeless $POD -- sh -c \
+  "grep -hx webrtc_audio_mo /proc/$BPID/task/*/comm | wc -l"
+```
+
+`Init()` spawns **two** audio-module threads (rec `:180`, play `:188`), both
+truncated by the kernel to exactly `webrtc_audio_mo`. **2 is healthy; 1 is
+this defect.** Measured 1 on the live worker (pid 23, 9 h uptime, unpatched
+image) on 2026-09-10 — independent of any session, any viewer, and any
+`bytesReceived` reading.
+
+Match the name **exactly** (`grep -hx`). The browser also carries
+`AudioEncoderQue` and `AudioDeviceBuff`, so `grep -ci audio` reads 3 here and
+would still read 3 after the fix. A case-SENSITIVE `grep -c audio` does give
+the right answer, 1 — but only by accidentally excluding two capitalised
+names, so it would start lying the moment a lowercase audio thread appears.
+
+That makes it a better oracle than the interactive suite's audio check,
+which goes red for a silent ADM *and* for every unrelated transport fault.
+Check the thread count first: 2 with no audio is a different bug.
+
+Do not select the process with `pgrep -f`. The binary is
+`/usr/local/bin/chromeless`, not `cb-chromium`, and a loose cmdline match
+finds the shell doing the searching — three consecutive calls returning
+three different pids is what that looks like.
+
 ## Verifying a fix
 
-`tests/e2e/05-audio-receives.spec.ts` with `CHROMELESS_E2E_DEVTOOLS_URL` set,
-run **twice against the same worker process** — the second run is the test.
-The scratch driver used for all three attempts blocks `*/api/viewport` in the
-test browser so the resize path cannot confound the result.
+**Two runs against ONE worker process. The second run is the test** — the
+first viewer on a fresh worker has always had audio, so a single green run
+proves nothing. Either driver works:
+
+- `tests/interactive/run-against-cluster.sh` (no `--restart` between runs);
+  the check is "inbound AUDIO bytes reach the client".
+- `tests/e2e/05-audio-receives.spec.ts` with `CHROMELESS_E2E_DEVTOOLS_URL`
+  set.
+
+The unrelated resize/GPU-crash defect must not confound the result. Two
+things already prevent it, so no manual blocking is needed on the cluster
+today: the interactive suite never calls `/api/viewport` (checked), and the
+deployed gateway runs `CHROMELESS_VIEWPORT_FOLLOW=0`, which answers that
+route 501. Confirm the env var before trusting a run — it is flipped back to
+`1` together with the worker pin once the resize fix lands. A hand-rolled
+driver that drives the client's own resize path still needs `*/api/viewport`
+blocked in the test browser.
+
+**Check the process identity, not just the score.** The worker serves one
+session and supervisord respawns it in ~15 s, so run 2 can land on a NEW
+browser process and pass as a first viewer while looking like a re-arm.
+Compare the browser pid across both runs; if it changed, the result is void.
+That check is the whole reason the thread count above matters — read it
+before and after:
+
+| `webrtc_audio_mo` threads | meaning |
+| --- | --- |
+| 2 after run 2 | `Init()` re-spawned both; the fix works |
+| 1 after run 2 | the `quit_` latch is still set; the fix did not work |
+| 2 with no audio bytes | a DIFFERENT bug — do not blame this finding |
+
+A fresh boot reads 2 on the patched and unpatched image alike, so a
+boot-time reading is a sanity check, never the verification.

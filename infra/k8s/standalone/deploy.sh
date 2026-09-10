@@ -118,7 +118,58 @@ TURN_SECRET="$(kubectl get secret coturn-secrets -n triform-production \
 # NOTE the worker ALSO carries its own copy in WEBRTC_ICE_SERVERS. Patching
 # the broker's TURN_URLS alone does not reach it, and the guest log keeps
 # printing the old address — which reads as the patch not applying.
-TURN_IP=95.217.200.179
+#
+# So: DISCOVER it rather than hardcode it. The hardcoded value here was
+# 95.217.200.179 and by 2026-09-10 that address refused 3478 outright —
+# coturn had moved to triform-7. A `deploy.sh` run on that day would have
+# deployed a dead relay and reported success, which is the failure the
+# comment above describes, embedded in the script that documents it.
+#
+# Ask the cluster where coturn is, then PROVE the answer by dialling it.
+# TURN_IP=<addr> overrides for an external relay.
+#
+# TURN_DEPLOY names WHICH coturn, because there is more than one: on
+# 2026-09-10 `coturn` sat on triform-7 and `coturn-2` on triform-8, both
+# answering 3478. Picking "the first Running coturn pod" is a coin flip, and
+# both halves of the flip pass a reachability test — so if the two ever hold
+# different static-auth secrets, the wrong pick yields a relay that refuses
+# every allocation while looking healthy, with no error anywhere. (Checked
+# on that date: both run `lt-cred-mech` + `use-auth-secret` with
+# realm=triform.cloud, so either would have worked. That is luck, not a
+# guarantee, and it is not visible from the pod list.)
+TURN_NS="${TURN_NS:-triform-production}"
+TURN_DEPLOY="${TURN_DEPLOY:-coturn}"
+if [[ -z "${TURN_IP:-}" ]]; then
+    # Select by the `app=` LABEL, not by a name prefix. "coturn-2" starts with
+    # "coturn-" and 2 is a hex digit, so every name-prefix pattern I tried —
+    # including ^coturn-[0-9a-f]+- — matched the WRONG deployment and returned
+    # a plausible node. The label is exact.
+    turn_node="$(kubectl get pods -n "${TURN_NS}" -l "app=${TURN_DEPLOY}" \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)"
+    if [[ -n "${turn_node}" ]]; then
+        TURN_IP="$(kubectl get node "${turn_node}" \
+            -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null)"
+        [[ -z "${TURN_IP}" ]] && TURN_IP="$(kubectl get node "${turn_node}" \
+            -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)"
+        [[ -n "${TURN_IP}" ]] && echo ">>> coturn: ${TURN_DEPLOY} on ${turn_node}"
+    fi
+fi
+if [[ -z "${TURN_IP:-}" ]]; then
+    echo "ERROR: could not find a running coturn pod, and TURN_IP is unset." >&2
+    echo "  kubectl get pods -A -o wide | grep coturn" >&2
+    echo "  then re-run with TURN_IP=<addr>" >&2
+    exit 1
+fi
+# Dial it. A relay that is merely NAMED is the exact failure mode above:
+# the stack comes up, negotiates, and shows no video.
+if ! timeout 5 bash -c "cat < /dev/null > /dev/tcp/${TURN_IP}/3478" 2>/dev/null; then
+    echo "ERROR: ${TURN_IP}:3478 refused the connection — that relay is not there." >&2
+    echo "  Deploying it would yield 'connects, negotiates, no video'." >&2
+    echo "  kubectl get pods -A -o wide | grep coturn   # where is it now?" >&2
+    exit 1
+fi
+echo ">>> TURN relay ${TURN_IP}:3478 (discovered, reachable)"
 read -r TURN_USER TURN_CRED < <(python3 - "$TURN_SECRET" <<'PY'
 import base64, hashlib, hmac, sys, time
 secret = sys.argv[1]
