@@ -1,6 +1,12 @@
 # Audio works for the first viewer only; every re-armed session is silent
 
-**Status:** OPEN, and THREE fixes have been tried and refuted by measurement.
+**Status:** OPEN, but SUBSTANTIALLY narrowed on 2026-09-10 — the record
+thread has exited, `quit_` is latched, and this document's own record of
+theory 3 ("the pre-arm SUCCEEDED") is WRONG: the guest reports
+`StartRecording=-1`. See "2026-09-10" below before reading the older
+theories, two of which are now refuted by source rather than by opinion.
+
+THREE fixes have been tried and refuted by measurement.
 Read "What has been ruled out" before proposing a fourth. Measured across
 2026-09-07 and 2026-09-08 on the k8s standalone stack; the current guest
 (`cr7727-fbd8e55c948b`) still has it.
@@ -62,6 +68,91 @@ record thread to connect the stream, and the failure arrives 4 ms in. That is
 a wait returning immediately on an event left SET by a previous session, then
 finding `_recording` false. Nothing in the ADM clears that event between
 sessions.
+
+## 2026-09-10: the record THREAD is gone, and the finding's own premise was wrong
+
+Measured on the live guest (`cr7727-eb156dd5bf6a`), not reasoned about.
+
+### The pre-arm does NOT succeed
+
+This document says theory 3's pre-arm "SUCCEEDED — ... StartRecording=0
+now_recording=1 — and the session was still silent". The guest says
+otherwise, on all 231 occurrences:
+
+```
+CV2-REARM-AUDIO: pre-armed the shared ADM: was_recording=0 StopRecording=0
+                 InitRecording=0 StartRecording=-1 now_recording=0
+```
+
+`StartRecording=-1`, not 0. So theory 3 was never refuted by "the pre-arm
+worked and audio failed anyway" — **the pre-arm never worked**, and the
+question is why `StartRecording` fails when `InitRecording` just returned 0.
+
+Ordering, from the log: `failed to activate recording` is printed **40 µs
+BEFORE** our line, i.e. from inside the pre-arm's own `StartRecording` call.
+
+### The record thread has exited
+
+`AudioDeviceLinuxPulse::Init` spawns **two** threads (`:180` rec, `:188`
+play), both truncated by the kernel to `webrtc_audio_mo` in `/proc/<pid>/task/*/comm`.
+
+The live browser process has **one**:
+
+```
+tid=9474 comm=webrtc_audio_mo state=S      # and no second one
+```
+
+A thread ends only when its body returns false — `while (RecThreadProcess())`
+— and `RecThreadProcess` returns false at exactly one place: `if (quit_)
+return false;` (`:2175`).
+
+`quit_` is written in exactly one place, `Terminate()` (`:206`), and nothing
+in the file ever clears it. So **`Terminate()` ran on the shared ADM after
+the first session**, the record thread returned false and was joined, and
+every subsequent `StartRecording` sets `_timeEventRec` and waits for a signal
+from a thread that no longer exists.
+
+That also explains the 4 ms this document called its sharpest clue: the
+10-second `Wait` is not timing out. It returns, finds `_recording` still
+false, and takes the SECOND error path (`:1091-1093`) — which logs the same
+string as the timeout path, which is what made the two indistinguishable.
+
+### Two theories from this document are now refuted by source, not opinion
+
+1. **"A stale `_recStartEvent` left SET by a previous session."** No.
+   `Event()` delegates to `Event(false, false)` (`rtc_base/event.cc:39`) —
+   `manual_reset=false`, i.e. AUTO-RESET. A successful `Wait` consumes the
+   signal; it cannot survive into the next session.
+2. **"The pre-arm is undone by `RemoveSendingStream`'s `StopRecording`."**
+   Plausible from source (`audio/audio_state.cc:163-165` does exactly that,
+   and our `RearmSession` pre-arms at `:1662` before tearing the old PC down
+   at `:1685`) — but REFUTED by the log ordering above: the failure is
+   already inside the pre-arm, before the teardown runs.
+
+### What is still open
+
+**Who calls `Terminate()`?** Nothing in `capture/` does — the only mention is
+a comment. `AudioDeviceLinuxPulse::~AudioDeviceLinuxPulse` calls it (`:109`),
+so the likeliest answer is that the ADM is being DESTROYED and something is
+holding a stale pointer, or a second ADM instance exists. The PCF is built
+once (`cloud_browser_browser_main_parts.cc:790`) and holds the ADM by
+`scoped_refptr`, so a plain refcount drop should not happen — which makes
+this worth an actual answer rather than another guess.
+
+Next probe, in order:
+
+1. Log in `CbAudioLifecycle` whether `adm_debug_->RecordingIsInitialized()`
+   and the ADM POINTER VALUE are the same across sessions. A different
+   pointer means a second ADM; the same pointer with a dead thread means
+   `Terminate()` was called on the live one.
+2. If the pointer is stable, find the `Terminate()` caller — a breakpoint is
+   not available, but `quit_` is only set there, so a log line in our own
+   `Rearm()` reporting `RecordingIsInitialized()` immediately BEFORE the
+   pre-arm brackets it to a specific session boundary.
+3. The fix shape depends on the answer and is NOT knowable yet. If
+   `Terminate()` is genuinely being called on a shared ADM, the options are
+   an upstream patch (`patches/` already carries five) or not sharing the
+   ADM across sessions.
 
 ## The next probe (do this before writing any more code)
 
