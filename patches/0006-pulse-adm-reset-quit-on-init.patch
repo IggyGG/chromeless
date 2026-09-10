@@ -1,0 +1,91 @@
+From: chromeless <platform@triform.dev>
+Date: Thu, 10 Sep 2026 06:00:00 +0000
+Subject: [PATCH] pulse ADM: reset quit_ in Init() so a re-initialised module
+ can record again
+
+AudioDeviceLinuxPulse::Terminate() sets quit_ = true and joins the
+record and playout threads. Init() spawns a fresh pair — and never
+resets quit_. Both new threads therefore evaluate
+
+    MutexLock lock(&mutex_);
+    if (quit_) {
+      return false;
+    }
+
+on their first wakeup, return false, and exit. The module reports a
+successful Init() with two threads that are already gone.
+
+Everything downstream then fails in a way that points somewhere else.
+StartRecording() sets _startRec, signals _timeEventRec, and waits on
+_recStartEvent for the record thread to connect the stream. Nobody is
+listening, so the wait returns without _recording ever being set and
+the call takes its second failure path:
+
+    modules/audio_device/linux/audio_device_pulse_linux.cc:1091
+    RTC_LOG(LS_ERROR) << "failed to activate recording";
+
+That is the SAME string the 10-second timeout path logs, which makes
+the two indistinguishable in a log — the give-away is that this one
+returns in microseconds rather than after ten seconds.
+
+Why this matters to us
+----------------------
+Our worker outlives its viewers: the browser process re-arms its
+PeerConnection for each new session rather than exiting (see
+cloud_browser_browser_main_parts.cc RearmSession). The shared
+AudioDeviceModule is Init()'d and Terminate()'d across that boundary,
+so the FIRST viewer on a process gets audio and every viewer after it
+gets video with silence, for the life of the process — days, in a
+standalone deployment.
+
+Measured on 2026-09-10 against a live worker: exactly one
+"webrtc_audio_mo" thread alive where Init() spawns two, and
+StartRecording returning -1 in microseconds with InitRecording having
+just returned 0.
+
+Why not avoid the patch
+-----------------------
+Four in-tree workarounds were tried and refuted by measurement (see
+docs/findings/audio-dies-after-first-rearm.md): explicitly stopping
+the ADM before re-arm, a full Terminate/Init cycle, pre-arming the ADM
+so AudioState skips its own start, and re-ordering the pre-arm against
+the PeerConnection teardown. None can work, because none of them can
+reach quit_ — it is private, it is only written by Terminate(), and no
+public API clears it.
+
+Upstream considerations
+-----------------------
+quit_ is a member of the Pulse ADM alone; the ALSA backend in the same
+directory has no equivalent latch. Resetting it in Init() restores the
+documented contract of Init()/Terminate() as a reusable pair, matches
+what a caller reasonably expects from a module that exposes both, and
+cannot regress the single-Init case because quit_ is already false
+there. Worth sending upstream.
+
+Touched files:
+  third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
+---
+diff --git a/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc b/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
+index f1121c1..5d075b6 100644
+--- a/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/third_party/webrtc/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -156,6 +156,19 @@ AudioDeviceGeneric::InitStatus AudioDeviceLinuxPulse::Init() {
+     return InitStatus::OK;
+   }
+ 
++  // Clear the terminate latch before spawning the threads below.
++  //
++  // Terminate() sets quit_ and joins both threads; without this reset the
++  // fresh pair spawned here evaluate `if (quit_) return false;` on their
++  // first wakeup and exit immediately. Init() then reports OK with no
++  // threads, and StartRecording() waits on _recStartEvent for a record
++  // thread that no longer exists — failing in microseconds with the same
++  // "failed to activate recording" message its 10-second timeout path logs.
++  {
++    MutexLock lock(&mutex_);
++    quit_ = false;
++  }
++
+   // Initialize PulseAudio
+   if (InitPulseAudio() < 0) {
+     RTC_LOG(LS_ERROR) << "failed to initialize PulseAudio";
