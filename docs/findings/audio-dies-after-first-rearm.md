@@ -272,8 +272,14 @@ proves nothing. Either driver works:
 - `tests/e2e/05-audio-receives.spec.ts` with `CHROMELESS_E2E_DEVTOOLS_URL`
   set.
 
-Block `*/api/viewport` in the test browser either way, so the unrelated
-resize/GPU-crash defect cannot confound the result.
+The unrelated resize/GPU-crash defect must not confound the result. Two
+things already prevent it, so no manual blocking is needed on the cluster
+today: the interactive suite never calls `/api/viewport` (checked), and the
+deployed gateway runs `CHROMELESS_VIEWPORT_FOLLOW=0`, which answers that
+route 501. Confirm the env var before trusting a run — it is flipped back to
+`1` together with the worker pin once the resize fix lands. A hand-rolled
+driver that drives the client's own resize path still needs `*/api/viewport`
+blocked in the test browser.
 
 **Check the process identity, not just the score.** The worker serves one
 session and supervisord respawns it in ~15 s, so run 2 can land on a NEW
