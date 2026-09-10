@@ -216,6 +216,45 @@ second session**, and every theory so far has guessed at it:
 - **It reads as flaky.** It is deterministic: first session on a process
   passes, every later one fails.
 
+## Reproducing it in ten seconds, with no session at all
+
+The thread count is the defect, and it is readable off a running pod:
+
+```sh
+POD=$(kubectl get pod -n chromeless \
+      -l app.kubernetes.io/name=chromeless-standalone-worker \
+      -o jsonpath='{.items[0].metadata.name}')
+# the browser is the `chromeless` process with no --type= argument
+BPID=$(kubectl exec -n chromeless $POD -- sh -c '
+  for p in /proc/[0-9]*; do
+    exe=$(readlink $p/exe 2>/dev/null) || continue
+    case "$exe" in */chromeless) ;; *) continue ;; esac
+    child=0
+    for a in $(tr "\0" "\n" < $p/cmdline 2>/dev/null); do
+      case "$a" in --type=*) child=1; break ;; esac
+    done
+    [ $child -eq 1 ] && continue
+    basename $p; return
+  done')
+kubectl exec -n chromeless $POD -- sh -c \
+  "grep -h . /proc/$BPID/task/*/comm | grep -c audio"
+```
+
+`Init()` spawns **two** audio-module threads (rec `:180`, play `:188`), both
+truncated by the kernel to `webrtc_audio_mo`. **2 is healthy; 1 is this
+defect.** Measured 1 on the live worker (pid 23, 9 h uptime, unpatched
+image) on 2026-09-10 — independent of any session, any viewer, and any
+`bytesReceived` reading.
+
+That makes it a better oracle than the interactive suite's audio check,
+which goes red for a silent ADM *and* for every unrelated transport fault.
+Check the thread count first: 2 with no audio is a different bug.
+
+Do not select the process with `pgrep -f`. The binary is
+`/usr/local/bin/chromeless`, not `cb-chromium`, and a loose cmdline match
+finds the shell doing the searching — three consecutive calls returning
+three different pids is what that looks like.
+
 ## Verifying a fix
 
 `tests/e2e/05-audio-receives.spec.ts` with `CHROMELESS_E2E_DEVTOOLS_URL` set,
