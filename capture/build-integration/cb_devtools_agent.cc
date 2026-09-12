@@ -125,6 +125,8 @@ constexpr char kSetViewportMethod[] = "Cb.setViewport";
 // WS closes with code 1000. SIGTERM skips all of that, leaving the broker and
 // the remote peer to infer the disconnect from a socket error.
 constexpr char kShutdownMethod[] = "Cb.shutdown";
+constexpr char kGetVideoSenderCapabilitiesMethod[] =
+    "Cb.getVideoSenderCapabilities";
 
 // Encodes {"started": true, "frameSinkId": "<n:m>"} as a CBOR map
 // inside a length-prefixed envelope. Matches the shape every
@@ -301,13 +303,16 @@ CbDevToolsManagerDelegate::CbDevToolsManagerDelegate(
         set_viewport_callback,
     base::RepeatingCallback<CbSessionHealth()>
         session_health_getter,
-    base::RepeatingCallback<bool()> shutdown_callback)
+    base::RepeatingCallback<bool()> shutdown_callback,
+    base::RepeatingCallback<std::vector<std::string>()>
+        video_sender_codecs_getter)
     : track_source_getter_(std::move(track_source_getter)),
       active_capture_callback_(std::move(active_capture_callback)),
       start_native_session_callback_(std::move(start_native_session_callback)),
       set_viewport_callback_(std::move(set_viewport_callback)),
       session_health_getter_(std::move(session_health_getter)),
       shutdown_callback_(std::move(shutdown_callback)),
+      video_sender_codecs_getter_(std::move(video_sender_codecs_getter)),
       default_browser_context_(default_browser_context),
       aura_context_window_(aura_context_window) {
   // NOTE: we deliberately do NOT Run() the getter here. CV2-69
@@ -389,8 +394,10 @@ void CbDevToolsManagerDelegate::HandleCommand(
       dispatchable.Method(), crdtp::SpanFrom(kSetViewportMethod));
   const bool is_shutdown = crdtp::SpanEquals(dispatchable.Method(),
                                              crdtp::SpanFrom(kShutdownMethod));
+  const bool is_video_sender_capabilities = crdtp::SpanEquals(
+      dispatchable.Method(), crdtp::SpanFrom(kGetVideoSenderCapabilitiesMethod));
   if (!is_frame_sink_capture && !is_native_session && !is_get_capture_stats &&
-      !is_set_viewport && !is_shutdown) {
+      !is_set_viewport && !is_shutdown && !is_video_sender_capabilities) {
     // Not ours — fall through to chromium's dispatcher.
     std::move(callback).Run(message);
     return;
@@ -409,6 +416,8 @@ void CbDevToolsManagerDelegate::HandleCommand(
     ok_payload = HandleSetViewport(dispatchable, &error);
   } else if (is_get_capture_stats) {
     ok_payload = HandleGetCaptureStats(channel, &error);
+  } else if (is_video_sender_capabilities) {
+    ok_payload = HandleGetVideoSenderCapabilities(&error);
   } else {  // is_shutdown
     ok_payload = HandleShutdown(&error);
   }
@@ -425,6 +434,42 @@ void CbDevToolsManagerDelegate::HandleCommand(
   // (HandleShutdown only posts the quit), so the caller reliably receives
   // {"shuttingDown":true} rather than racing the socket close.
   channel->DispatchProtocolMessageToClient(response->Serialize());
+}
+
+std::vector<uint8_t>
+CbDevToolsManagerDelegate::HandleGetVideoSenderCapabilities(
+    std::string* out_error) {
+  DCHECK(out_error);
+  if (!video_sender_codecs_getter_) {
+    *out_error = "Cb.getVideoSenderCapabilities: no native PCF getter wired";
+    return {};
+  }
+  const auto codecs = video_sender_codecs_getter_.Run();
+  if (codecs.empty()) {
+    *out_error = "Cb.getVideoSenderCapabilities: native PCF unavailable or "
+                 "has no video sender codecs";
+    return {};
+  }
+
+  // Report every advertised name, including repair codecs and VP8 if a
+  // regression introduces it. This observation must not enforce the policy
+  // itself: filtering would turn a wrong factory into a false green gate.
+  std::vector<uint8_t> out;
+  crdtp::cbor::EnvelopeEncoder envelope;
+  envelope.EncodeStart(&out);
+  out.push_back(crdtp::cbor::EncodeIndefiniteLengthMapStart());
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("source"), &out);
+  crdtp::cbor::EncodeString8(
+      crdtp::SpanFrom("native-peer-connection-factory"), &out);
+  crdtp::cbor::EncodeString8(crdtp::SpanFrom("codecs"), &out);
+  out.push_back(crdtp::cbor::EncodeIndefiniteLengthArrayStart());
+  for (const auto& codec : codecs) {
+    crdtp::cbor::EncodeString8(crdtp::SpanFrom(codec), &out);
+  }
+  out.push_back(crdtp::cbor::EncodeStop());
+  out.push_back(crdtp::cbor::EncodeStop());
+  envelope.EncodeStop(&out);
+  return out;
 }
 
 std::vector<uint8_t> CbDevToolsManagerDelegate::HandleStartFrameSinkCapture(

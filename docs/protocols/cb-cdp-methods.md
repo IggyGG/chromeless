@@ -103,6 +103,39 @@ with permanently-frozen video.
 
 ---
 
+## `Cb.getVideoSenderCapabilities`
+
+Read the video sender capabilities of the **installed browser-process
+PeerConnectionFactory** at dispatch time. This is the factory used by the
+native streaming peer. Renderer-side `RTCRtpSender.getCapabilities('video')`
+queries Chromium's separate factory and cannot qualify native streaming.
+
+**Params:** none. **Scope:** browser socket; no page attachment needed.
+
+**Returns:** `{"source":"native-peer-connection-factory","codecs":["VP9","H264","AV1"]}`
+
+The names in this example are illustrative. Every advertised codec name is
+returned in factory order, including duplicates, repair codecs, and VP8 if a
+regression introduces it. No policy filtering takes place in the guest. The
+query does not start capture, signaling, or a peer connection.
+
+Missing callback wiring, unavailable PCF, or an empty capability list returns
+an explicit CDP server error. A pre-method guest returns method-not-found.
+A qualification gate must treat either as **unqualified**, never substitute
+renderer JavaScript, a source constant, or a previous instance's log. To
+qualify the current custom encoder policy, require the source discriminator,
+a nonempty list of valid names, no VP8 (case-insensitive), and at least one
+of VP9, H264, or AV1. Associate the observation with the authenticated
+allocation and guest image provenance outside this response.
+
+Producer validation is `test_native_video_sender_capabilities` in
+`tests/cdp/test_create_browser_context.py`, part of the existing CDP suite.
+Passing source lint does not establish that this method compiles or runs.
+Build and qualify the producer before enforcing this method in consumers;
+this addition alone does not change the deployed isolation gate.
+
+---
+
 ## `Cb.setViewport`
 
 Resize the browser. Applies to the display, the aura host, the captured
@@ -200,7 +233,10 @@ grep -a CV2-CAPTURE-STATS <binary>   # Cb.getCaptureStats
 grep -a CV2-VIEWPORT     <binary>    # Cb.setViewport
 ```
 
-Callers should tolerate `-32601` (method not found) so that portal/physics
+Optional feature callers should tolerate `-32601` (method not found) so that portal/physics
 changes can ship ahead of a guest image roll. That tolerance is what makes
 the two repos independently deployable; see
 `isolator/src/vmm/pool.rs` for the established pattern.
+
+Qualification gates are different: an unavailable observation is unqualified,
+including `Cb.getVideoSenderCapabilities` on older guests.

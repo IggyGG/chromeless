@@ -2496,6 +2496,23 @@ void CloudBrowserBrowserMainParts::OnCapturedRendererGone() {
                              /*check_for_repost=*/false);
 }
 
+std::vector<std::string>
+CloudBrowserBrowserMainParts::GetVideoSenderCodecs() const {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!pcf_) {
+    return {};
+  }
+  // Like StartNativeSession, a CDP dispatch runs after the UI loop starts;
+  // the PCF proxy synchronously hops to the signaling thread.
+  base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync_primitives;
+  std::vector<std::string> names;
+  for (const auto& codec :
+       pcf_->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO).codecs) {
+    names.push_back(codec.name);
+  }
+  return names;
+}
+
 CbSessionHealth CloudBrowserBrowserMainParts::GetSessionHealth() const {
   CbSessionHealth h;
   h.renderer_crashes = renderer_crashes_total_;

@@ -170,7 +170,9 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
           set_viewport_callback = {},
       base::RepeatingCallback<CbSessionHealth()>
           session_health_getter = {},
-      base::RepeatingCallback<bool()> shutdown_callback = {});
+      base::RepeatingCallback<bool()> shutdown_callback = {},
+      base::RepeatingCallback<std::vector<std::string>()>
+          video_sender_codecs_getter = {});
 
   CbDevToolsManagerDelegate(const CbDevToolsManagerDelegate&) = delete;
   CbDevToolsManagerDelegate& operator=(const CbDevToolsManagerDelegate&) =
@@ -308,6 +310,11 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // CreateErrorResponse).
   std::vector<uint8_t> HandleShutdown(std::string* out_error);
 
+  // Reads the live browser-process PCF, never renderer JavaScript. Missing
+  // wiring or an unavailable factory returns a CDP error, not an empty pass.
+  std::vector<uint8_t> HandleGetVideoSenderCapabilities(
+      std::string* out_error);
+
   // Lazy resolver for the browser-process video track source
   // (ChromelessV2 M2 R3/R4). Run() at Cb.startFrameSinkCapture dispatch
   // time — NOT snapshotted at construction (see the ctor doc for the
@@ -357,6 +364,10 @@ class CbDevToolsManagerDelegate : public content::DevToolsManagerDelegate {
   // unavailable (loop not running, or shutdown already requested). Same
   // lifetime contract as track_source_getter_; null/empty → ServerError.
   base::RepeatingCallback<bool()> shutdown_callback_;
+
+  // Lazy for the same construction-order reason as track_source_getter_.
+  base::RepeatingCallback<std::vector<std::string>()>
+      video_sender_codecs_getter_;
 
   // Default context registered by main_parts. NOT owned — main_parts
   // owns the unique_ptr; we hold a raw_ptr for GetDefaultBrowser

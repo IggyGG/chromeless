@@ -320,3 +320,29 @@ async def test_repeated_context_target_navigate_survives(ws_url: str) -> None:
                 "Page.navigate returned no frameId on iteration "
                 f"{i}: {json.dumps(nav_response, indent=2)}"
             )
+
+
+@pytest.mark.asyncio
+async def test_native_video_sender_capabilities(ws_url: str) -> None:
+    """Qualify the installed native PCF on the browser socket, without a page."""
+    async with _open_ws(ws_url) as ws:
+        # Repeat to exercise read-only use: no native signaling or capture
+        # startup is necessary, and the query must remain available afterwards.
+        for call_id in (1, 2):
+            response = await asyncio.wait_for(
+                _send_and_wait(ws, {
+                    "id": call_id,
+                    "method": "Cb.getVideoSenderCapabilities",
+                }),
+                timeout=CDP_RECV_TIMEOUT_S,
+            )
+            _assert_no_cdp_error("Cb.getVideoSenderCapabilities", response)
+            assert "sessionId" not in response, response
+            caps = response.get("result", {})
+            assert caps.get("source") == "native-peer-connection-factory", caps
+            codecs = caps.get("codecs")
+            assert isinstance(codecs, list) and codecs, caps
+            assert all(isinstance(c, str) and c and c == c.strip() for c in codecs), caps
+            names = {c.upper() for c in codecs}
+            assert "VP8" not in names, caps
+            assert names & {"VP9", "H264", "AV1"}, caps

@@ -51,6 +51,8 @@
 #define CAPTURE_BUILD_INTEGRATION_CLOUD_BROWSER_BROWSER_MAIN_PARTS_H_
 
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "api/audio/audio_device.h"       // CV2-WARM — adm_for_audio_lifecycle_
 #include "api/peer_connection_interface.h"
@@ -472,6 +474,10 @@ class CloudBrowserBrowserMainParts
  public:
   // Health snapshot for Cb.getCaptureStats. Read-only; safe at any time.
   CbSessionHealth GetSessionHealth() const;
+
+  // Read the installed browser-process factory at CDP dispatch time. The
+  // renderer has its own default factory and cannot qualify this one.
+  std::vector<std::string> GetVideoSenderCodecs() const;
 
  private:
 

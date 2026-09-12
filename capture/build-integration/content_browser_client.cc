@@ -5,7 +5,9 @@
 #include "capture/build-integration/content_browser_client.h"
 
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
@@ -121,6 +123,8 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
   // OSS-W0 — graceful process exit at Cb.shutdown dispatch time. Same
   // Unretained(main_parts_) lifetime contract as the callbacks above.
   base::RepeatingCallback<bool()> shutdown_callback;
+  base::RepeatingCallback<std::vector<std::string>()>
+      video_sender_codecs_getter;
   if (main_parts_) {
     track_source_getter = base::BindRepeating(
         &CloudBrowserBrowserMainParts::cb_track_source,
@@ -137,6 +141,9 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
     session_health_getter = base::BindRepeating(
         &CloudBrowserBrowserMainParts::GetSessionHealth,
         base::Unretained(main_parts_));
+    video_sender_codecs_getter = base::BindRepeating(
+        &CloudBrowserBrowserMainParts::GetVideoSenderCodecs,
+        base::Unretained(main_parts_));
     shutdown_callback =
         base::BindRepeating(&CloudBrowserBrowserMainParts::Shutdown,
                             base::Unretained(main_parts_));
@@ -146,7 +153,7 @@ CloudBrowserContentBrowserClient::CreateDevToolsManagerDelegate() {
       std::move(active_capture_callback),
       std::move(start_native_session_callback),
       std::move(set_viewport_callback), std::move(session_health_getter),
-      std::move(shutdown_callback));
+      std::move(shutdown_callback), std::move(video_sender_codecs_getter));
 }
 
 // CV2-CERT — a TLS error, put to the viewer instead of silently cancelled.
