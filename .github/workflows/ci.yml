@@ -445,6 +445,10 @@ jobs:
           docker cp conformance/. "${runner}:/conf"
           docker start -a "${runner}"
 
+      - name: Native codec capabilities of the immutable release guest
+        if: steps.probe.outputs.present == 'true'
+        run: bash tests/smoke/native-codec-release.sh
+
   docs:
     name: Docs link check
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'priority' }}
