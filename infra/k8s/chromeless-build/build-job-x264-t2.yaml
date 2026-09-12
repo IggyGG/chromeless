@@ -97,6 +97,7 @@ spec:
               [ -x /workspace/build/chromeless-build.sh ] || {
                 echo "ERROR: /workspace/build/chromeless-build.sh missing"; exit 1; }
 
+              # END PRIVATE REPO CLONE
               # ---- Phase 3: depot_tools (idempotent) -------------
               if [ ! -x /work/depot_tools/gn ] && [ ! -d /work/depot_tools/.git ]; then
                 git clone --depth 200 \

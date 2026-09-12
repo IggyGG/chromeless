@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 python3 - <<'PY'
 import json, os, pathlib, subprocess, tempfile, textwrap
 
-paths = sorted(pathlib.Path('infra/k8s/chromeless-build').glob('build-job-*.yaml'))
+paths = sorted(pathlib.Path('infra/k8s').rglob('*.yaml'))
 password = 'synthetic-password-SENTINEL-09$`quote'
 username = 'synthetic-user-SENTINEL-09'
 covered = 0
@@ -15,9 +15,9 @@ for manifest in paths:
     assert 'AUTH_REPO' not in script, manifest
     # These manifests embed a literal shell block. Dedent the named clone
     # phase, omitting OS installs and Chromium workdirs, without executing YAML.
-    block = script.split('# ---- Phase 2:', 1)[1].split('# ---- Phase 3:', 1)[0]
-    block = textwrap.dedent(block.split('\n', 1)[1])
-    for mode in ('success', 'shallow-failure', 'failure'):
+    block = script.split('# BEGIN PRIVATE GIT AUTH\n', 1)[1].split('# END PRIVATE REPO CLONE', 1)[0]
+    block = textwrap.dedent(block)
+    for shell, mode in [(shell, mode) for shell in ('bash', 'sh') for mode in ('success', 'shallow-failure', 'failure')]:
         with tempfile.TemporaryDirectory() as tmp:
             d = pathlib.Path(tmp)
             shim = d / 'git'
@@ -53,7 +53,7 @@ if args[0] == 'clone':
                    'OUR_REPO': 'https://forgejo.example.invalid/fixture.git',
                    'OUR_REPO_REF': 'synthetic-sha', 'MOCK_ROOT': str(d),
                    'MOCK_MODE': mode, 'GIT_TRACE': '1', 'GIT_CURL_VERBOSE': '1'}
-            run = subprocess.run(['bash', '-euxc', block.replace('/workspace', str(d / 'workspace'))],
+            run = subprocess.run([shell, '-euxc', block.replace('/workspace', str(d / 'workspace'))],
                                  env=env, capture_output=True, text=True, timeout=10)
             output = run.stdout + run.stderr
             assert password not in output and username not in output, (manifest, mode, 'credential leaked')
@@ -63,6 +63,6 @@ if args[0] == 'clone':
             helper = pathlib.Path((d / 'askpass-path').read_text())
             assert not helper.exists(), (manifest, mode, 'askpass helper leaked')
         covered += 1
-assert covered == 15, covered
+assert covered == 54, covered
 print(f'build credential logging: {covered} traced success/fallback/failure cases pass; no credential in output')
 PY

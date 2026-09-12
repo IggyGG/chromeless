@@ -70,12 +70,29 @@ spec:
             - |
               # Forgejo REQUIRE_SIGNIN_VIEW=true → anon clones return 401
               # even on flagged-public repos. Same auth dance as
-              # chromeless-build/build-job.yaml: inline creds at clone, scrub
-              # them from the stored remote post-clone.
-              AUTH_REPO="${OUR_REPO%%://*}://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#*://}"
+              # chromeless-build/build-job.yaml: a private askpass helper
+              # supplies credentials without putting them in clone URLs.
+              # BEGIN PRIVATE GIT AUTH
+              set +x
+              unset GIT_TRACE GIT_TRACE_CURL GIT_CURL_VERBOSE
+              GIT_ASKPASS="$(mktemp)"
+              chmod 700 "$GIT_ASKPASS"
+              cat > "$GIT_ASKPASS" <<'ASKPASS'
+              #!/bin/sh
+              case "$1" in
+                *Username*) printf '%s\n' "$FORGEJO_USERNAME" ;;
+                *Password*) printf '%s\n' "$FORGEJO_PASSWORD" ;;
+                *) exit 1 ;;
+              esac
+              ASKPASS
+              export GIT_ASKPASS GIT_TERMINAL_PROMPT=0
+              trap 'rm -f "$GIT_ASKPASS"' EXIT
+              set -x
+              # END PRIVATE GIT AUTH
               git clone --depth 1 --branch "${OUR_REPO_REF}" \
-                "${AUTH_REPO}" /workspace
+                "${OUR_REPO}" /workspace
               git -C /workspace remote set-url origin "${OUR_REPO}"
+              # END PRIVATE REPO CLONE
               if [ ! -d /workspace/tests/cdp ]; then
                 echo "ERROR: /workspace/tests/cdp missing on ${OUR_REPO_REF};" >&2
                 echo "       cdp-test-author scaffolding (tests/cdp/{conftest.py,test_create_browser_context.py,requirements.txt}) hasn't landed yet." >&2
