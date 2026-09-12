@@ -66,10 +66,27 @@ spec:
                 bison flex
 
               # ---- Phase 2: clone chromeless to /workspace --------
-              AUTH_REPO="https://${FORGEJO_USERNAME}:${FORGEJO_PASSWORD}@${OUR_REPO#https://}"
+              # Keep credentials out of argv, remotes, and bash -x output.
+              # BEGIN PRIVATE GIT AUTH
+              set +x
+              unset GIT_TRACE GIT_TRACE_CURL GIT_CURL_VERBOSE
+              GIT_ASKPASS="$(mktemp)"
+              chmod 700 "$GIT_ASKPASS"
+              cat > "$GIT_ASKPASS" <<'ASKPASS'
+              #!/bin/sh
+              case "$1" in
+                *Username*) printf '%s\n' "$FORGEJO_USERNAME" ;;
+                *Password*) printf '%s\n' "$FORGEJO_PASSWORD" ;;
+                *) exit 1 ;;
+              esac
+              ASKPASS
+              export GIT_ASKPASS GIT_TERMINAL_PROMPT=0
+              trap 'rm -f "$GIT_ASKPASS"' EXIT
+              set -x
+              # END PRIVATE GIT AUTH
               if [ ! -d /workspace/.git ]; then
                 git clone --depth 1 --branch "${OUR_REPO_REF}" \
-                  "${AUTH_REPO}" /workspace
+                  "${OUR_REPO}" /workspace
                 git -C /workspace remote set-url origin "${OUR_REPO}"
               else
                 cd /workspace \
