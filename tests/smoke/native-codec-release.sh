@@ -37,7 +37,7 @@ fi
 # nothing when the runner uses sibling dind. DevTools stays inside its netns.
 runner=$(docker create --network "container:$worker" \
   -e CHROMELESS_URL=http://127.0.0.1:9222 python:3.11-slim \
-  sh -c 'pip install --quiet --no-cache-dir -r /tests/requirements.txt && python -m pytest -v /tests/test_create_browser_context.py::test_native_video_sender_capabilities')
+  sh -c 'pip install --quiet --no-cache-dir -r /tests/requirements.txt && python -m pytest -s -v /tests/test_create_browser_context.py::test_native_video_sender_capabilities')
 docker cp tests/cdp/. "$runner:/tests"
 docker start -a "$runner"
 status=$(docker inspect --format '{{.State.ExitCode}}' "$runner")

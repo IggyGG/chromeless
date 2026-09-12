@@ -346,3 +346,4 @@ async def test_native_video_sender_capabilities(ws_url: str) -> None:
             names = {c.upper() for c in codecs}
             assert "VP8" not in names, caps
             assert names & {"VP9", "H264", "AV1"}, caps
+            print("native video sender capabilities: " + json.dumps(caps, sort_keys=True))
